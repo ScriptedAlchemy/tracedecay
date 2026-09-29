@@ -356,24 +356,24 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::hook_row_to_analytics_event;
 
-    fn canonical_project_id(path: &Path) -> String {
-        std::fs::canonicalize(path)
-            .expect("fixture project root exists")
-            .to_string_lossy()
-            .into_owned()
-    }
-
-    #[test]
-    fn maps_hook_invoked_row_with_attribution() {
+    fn aliased_root() -> (tempfile::TempDir, String, std::path::PathBuf) {
         let root = tempfile::tempdir().expect("project root");
         let real = root.path().join("real");
         std::fs::create_dir(&real).expect("real root");
         let alias = root.path().join("link");
         std::os::unix::fs::symlink(&real, &alias).expect("alias root");
+        let canonical = std::fs::canonicalize(&real)
+            .expect("canonical root")
+            .to_string_lossy()
+            .into_owned();
+        (root, canonical, alias)
+    }
+
+    #[test]
+    fn maps_hook_invoked_row_with_attribution() {
+        let (_root, canonical, alias) = aliased_root();
         let line = serde_json::json!({
             "agent": "claude",
             "event": "hook_invoked",
@@ -392,22 +392,18 @@ mod tests {
         assert_eq!(event.tool_name.as_deref(), Some("Agent"));
         assert_eq!(event.outcome.as_deref(), Some("observed"));
         assert_eq!(event.timestamp, 1_783_000_000);
-        assert_eq!(event.project_id, canonical_project_id(&real));
+        assert_eq!(event.project_id, canonical);
         assert_ne!(event.project_id, alias.to_string_lossy());
     }
 
     #[test]
     fn unattributed_row_falls_back_to_default_project() {
-        let root = tempfile::tempdir().expect("project root");
-        let real = root.path().join("real");
-        std::fs::create_dir(&real).expect("real root");
-        let alias = root.path().join("link");
-        std::os::unix::fs::symlink(&real, &alias).expect("alias root");
+        let (_root, canonical, alias) = aliased_root();
         let line = r#"{"agent":"cursor","event":"hook_invoked","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
         let event = hook_row_to_analytics_event(line, Some(&alias)).expect("row should map");
         assert_eq!(event.provider, "hook_cursor");
         assert_eq!(event.hook_name.as_deref(), Some("postToolUse"));
-        assert_eq!(event.project_id, canonical_project_id(&real));
+        assert_eq!(event.project_id, canonical);
         let event = hook_row_to_analytics_event(line, None).expect("row should map");
         assert_eq!(event.project_id, "");
         assert_eq!(event.session_id, None);

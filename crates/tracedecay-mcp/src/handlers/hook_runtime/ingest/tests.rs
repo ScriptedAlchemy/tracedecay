@@ -1,7 +1,12 @@
 use super::super::*;
+use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
+use super::kernels::{TranscriptCaptureContext, transcript_capture_kernel};
 use crate::structured_hook_error_data;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_sessions::observation::ObservationCancellation;
 
 use super::*;
 
@@ -262,12 +267,6 @@ fn claude_postcompact_without_machine_provenance_is_read_only_unavailable() {
 
 #[tokio::test]
 async fn capture_registry_owns_every_supported_transcript_route() {
-    use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
-    use super::kernels::{TranscriptCaptureContext, transcript_capture_kernel};
-    use tracedecay_domain::errors::TraceDecayError;
-    use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-    use tracedecay_sessions::observation::ObservationCancellation;
-
     let request = HookIngestTranscriptRequestV1 {
         provider: "fixture".to_owned(),
         user_scope: false,
@@ -290,54 +289,22 @@ async fn capture_registry_owns_every_supported_transcript_route() {
         cancellation: &cancellation,
     };
 
+    let profile = "missing client profile";
+    let project = "project transcript ingest requires a project";
+    let session = "missing required parameter `session_id`";
     let registered = [
-        ("claude", true, SourceScan, "missing client profile"),
-        ("codex", true, SourceScan, "missing client profile"),
-        ("cursor", true, SourceScan, "missing client profile"),
-        ("hermes", true, SourceScan, "missing client profile"),
-        ("kiro", true, SourceScan, "missing client profile"),
-        (
-            "codex",
-            false,
-            SourceScan,
-            "project transcript ingest requires a project",
-        ),
-        (
-            "cursor",
-            false,
-            SourceScan,
-            "project transcript ingest requires a project",
-        ),
-        (
-            "hermes",
-            false,
-            SourceScan,
-            "project transcript ingest requires a project",
-        ),
-        (
-            "kiro",
-            false,
-            SourceScan,
-            "project transcript ingest requires a project",
-        ),
-        (
-            "pi",
-            false,
-            SourceScan,
-            "project transcript ingest requires a project",
-        ),
-        (
-            "hermes",
-            true,
-            InlineMessages,
-            "missing required parameter `session_id`",
-        ),
-        (
-            "hermes",
-            false,
-            InlineMessages,
-            "missing required parameter `session_id`",
-        ),
+        ("claude", true, SourceScan, profile),
+        ("codex", true, SourceScan, profile),
+        ("cursor", true, SourceScan, profile),
+        ("hermes", true, SourceScan, profile),
+        ("kiro", true, SourceScan, profile),
+        ("codex", false, SourceScan, project),
+        ("cursor", false, SourceScan, project),
+        ("hermes", false, SourceScan, project),
+        ("kiro", false, SourceScan, project),
+        ("pi", false, SourceScan, project),
+        ("hermes", true, InlineMessages, session),
+        ("hermes", false, InlineMessages, session),
     ];
     for (provider, user_scope, route, message) in registered {
         let kernel = transcript_capture_kernel(provider, user_scope, route).unwrap_or_else(|| {

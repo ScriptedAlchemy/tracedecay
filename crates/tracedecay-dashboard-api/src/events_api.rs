@@ -1092,7 +1092,6 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     use super::*;
-    use tracedecay_runtime_core::db::engine::QueryExecutor;
 
     async fn registered_database_for_test(
         path: &Path,
@@ -1502,12 +1501,21 @@ mod tests {
         // First poll primes the baselines and emits nothing.
         let primed = state.poll_sources(&dash, &scope).await;
         assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
+        let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
+            .await
+            .expect("graph page size")
+            * super::pragma_u64(&dash.graph_conn, "page_count")
+                .await
+                .expect("graph page count");
+        let memory_pages = super::pragma_u64(&dash.mem_db.read_connection(), "page_size")
+            .await
+            .expect("memory page size")
+            * super::pragma_u64(&dash.mem_db.read_connection(), "page_count")
+                .await
+                .expect("memory page count");
         assert_eq!(
             state.last_store_total_bytes,
-            Some(
-                sqlite_page_bytes(&dash.graph_conn).await
-                    + sqlite_page_bytes(&dash.mem_db.read_connection()).await
-            )
+            Some(graph_pages + memory_pages)
         );
         let mut hasher = DefaultHasher::new();
         0_u64.hash(&mut hasher);
@@ -1515,21 +1523,5 @@ mod tests {
             state.last_registry_digest.as_deref(),
             Some(format!("{:016x}", hasher.finish())).as_deref()
         );
-    }
-
-    async fn sqlite_page_bytes(conn: &(impl QueryExecutor + ?Sized)) -> u64 {
-        async fn pragma(conn: &(impl QueryExecutor + ?Sized), name: &str) -> u64 {
-            let mut rows = conn
-                .query(&format!("PRAGMA {name}"), ())
-                .await
-                .expect("pragma query");
-            let row = rows
-                .next()
-                .await
-                .expect("pragma row")
-                .expect("pragma value");
-            row.get::<i64>(0).expect("pragma integer").max(0) as u64
-        }
-        pragma(conn, "page_size").await * pragma(conn, "page_count").await
     }
 }
