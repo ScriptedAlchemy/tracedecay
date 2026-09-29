@@ -2637,7 +2637,9 @@ fn authority_routed_clients_name_a_held_managed_daemon() {
     );
     let held = format!(
         "TraceDecay daemon is not available: no authority record at '{record}'. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
-        home_path.join(".config/systemd/user/tracedecay.service").display()
+        home_path
+            .join(".config/systemd/user/tracedecay.service")
+            .display()
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let work_request_arg = work_request.to_string_lossy().to_string();

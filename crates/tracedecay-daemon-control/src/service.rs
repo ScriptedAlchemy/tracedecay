@@ -546,10 +546,7 @@ pub fn with_unavailable_daemon_advice(
             TraceDecayError::project_route(
                 code,
                 true,
-                format!(
-                    "{detail} {}",
-                    observed_service_unit(profile, socket_path)
-                ),
+                format!("{detail} {}", observed_service_unit(profile, socket_path)),
             )
         }
         _ => error,
