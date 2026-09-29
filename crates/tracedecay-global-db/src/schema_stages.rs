@@ -16,7 +16,7 @@ use tracedecay_runtime_core::{
     cancellation::CancellationToken,
     db::{
         Database, DatabaseWriteTransaction,
-        engine::{self, Executor, IntoParams, QueryExecutor, Rows, WriteStatement},
+        engine::{self, Executor, IntoParams, QueryExecutor, Rows},
     },
     ports::registered_schema::{
         RegisteredSchemaInstallationTransactionV1, RegisteredSchemaInstallationV1,
@@ -710,14 +710,6 @@ impl<T: Executor + Sync> Executor for CancellableSchemaExecutor<'_, T> {
     {
         self.checkpoint()?;
         self.inner.execute(sql, params).await
-    }
-
-    async fn execute_statements(
-        &self,
-        statements: Vec<WriteStatement>,
-    ) -> engine::Result<Vec<u64>> {
-        self.checkpoint()?;
-        self.inner.execute_statements(statements).await
     }
 
     async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
