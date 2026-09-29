@@ -107,13 +107,13 @@ The first trial used automatic admission. The second used manual dispatch and
 includes pending-job interference and recovery in its wall time. The timing
 origins differ; this is not a controlled percentage improvement in PR latency.
 Heavy runner allocation fell 12.3% with comparable job-start/end boundaries,
-but excludes enqueue, controller-only and native CI jobs. During the second
-trial window, 33 additional Hauler jobs consumed about 23 runner-minutes;
+but excludes enqueue, controller-only and native CI jobs. From 03:24:00 through
+04:14:30 UTC, 33 additional Hauler jobs consumed about 23 runner-minutes;
 that is an upper bound on avoidable overhead, not proof every job was empty.
 
 Each snapshot executed the same 13,762 unique Linux testcases with zero skips.
-The second trial reported 17 test failures per snapshot; all seven compile
-checks and both product tasks passed. No infrastructure error was reported.
+The second trial reported 17 test failures per snapshot; all seven check-lane
+tasks and both product tasks passed. No infrastructure error was reported.
 These results demonstrate warm reuse for unchanged build inputs, not the cost
 of recompiling a representative Rust change or a guarantee for a larger queue.
 
