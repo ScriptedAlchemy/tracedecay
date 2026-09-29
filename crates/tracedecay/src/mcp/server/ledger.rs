@@ -61,26 +61,6 @@ fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceD
     }
 }
 
-fn upload_enabled_from_desired_configuration(
-    desired: &tracedecay_domain::configuration::ConfigurationSnapshotV1,
-) -> Result<bool> {
-    use tracedecay_domain::configuration::{
-        ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
-    };
-
-    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
-        .map_err(configuration_authority_unavailable)?;
-    match desired.effective_values.get(&key) {
-        Some(ConfigurationValueV1::Boolean(enabled)) => Ok(*enabled),
-        Some(_) => Err(configuration_authority_unavailable(
-            "desired upload setting is not boolean",
-        )),
-        None => Err(configuration_authority_unavailable(
-            "desired upload setting is missing",
-        )),
-    }
-}
-
 // Global accounting (savings ledger + worldwide-counter flushes) is enabled
 // by default; see `tracedecay_global_db::global_accounting_mode` for the env
 // override precedence.
@@ -131,23 +111,35 @@ impl McpServer {
         matches!(self.ledger_sink(), LedgerSink::Mounted(_))
     }
 
-    /// Reads the upload policy from the daemon-retained desired configuration
-    /// snapshot. There is deliberately no `config.toml` fallback: without the
-    /// canonical authority, the upload decision is unavailable.
+    /// Reads the upload policy from the owning profile's configuration store.
+    /// There is deliberately no `config.toml` fallback: without the canonical
+    /// authority, the upload decision is unavailable.
     #[hotpath::measure(label = "mcp.ledger.read_upload_policy", future = true)]
     pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
-        let cg = self.cg_snapshot().await;
-        let desired = cg
-            .configuration_runtime()
-            .client()
-            .current()
-            .await
-            .map_err(|error| {
-                configuration_authority_unavailable(format!(
-                    "cannot read desired upload setting: {error}"
-                ))
-            })?;
-        upload_enabled_from_desired_configuration(desired.snapshot())
+        let (Some(database), Some(identity)) =
+            (self.profile_session_db.clone(), self.profile_identity())
+        else {
+            return Err(configuration_authority_unavailable(
+                "server has no registered profile configuration store",
+            ));
+        };
+        let profile = tracedecay_project::config::read_or_initialize_profile_configuration(
+            database,
+            identity.profile_id(),
+        )
+        .await
+        .map_err(|error| {
+            configuration_authority_unavailable(format!("cannot read upload setting: {error}"))
+        })?;
+        match profile.value(tracedecay_domain::configuration::USER_UPLOAD_ENABLED_SETTING_KEY) {
+            Ok(tracedecay_domain::configuration::ConfigurationValueV1::Boolean(enabled)) => {
+                Ok(*enabled)
+            }
+            Ok(_) => Err(configuration_authority_unavailable(
+                "upload setting is not boolean",
+            )),
+            Err(error) => Err(configuration_authority_unavailable(error)),
+        }
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -627,61 +619,7 @@ fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> 
 mod tests {
     use std::sync::atomic::AtomicU64;
 
-    use tracedecay_domain::configuration::{
-        ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
-    };
-
     use super::*;
-
-    fn desired_configuration() -> ConfigurationSnapshotV1 {
-        let registry = tracedecay_project::config::registry::ConfigurationRegistry::core()
-            .expect("configuration registry");
-        tracedecay_project::config::resolver::resolve_configuration(&registry, &[])
-            .expect("default desired configuration")
-            .snapshot
-    }
-
-    #[test]
-    fn upload_setting_comes_from_the_desired_configuration_snapshot() {
-        let mut desired = desired_configuration();
-        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
-        desired
-            .effective_values
-            .insert(key, ConfigurationValueV1::Boolean(true));
-
-        assert!(
-            upload_enabled_from_desired_configuration(&desired)
-                .expect("desired boolean setting must be readable")
-        );
-    }
-
-    #[test]
-    fn missing_desired_upload_setting_is_typed_unavailable() {
-        let mut desired = desired_configuration();
-        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
-        desired.effective_values.remove(&key);
-
-        assert!(matches!(
-            upload_enabled_from_desired_configuration(&desired),
-            Err(TraceDecayError::Config { message })
-                if message.starts_with("configuration authority unavailable")
-        ));
-    }
-
-    #[test]
-    fn non_boolean_desired_upload_setting_is_typed_unavailable() {
-        let mut desired = desired_configuration();
-        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
-        desired
-            .effective_values
-            .insert(key, ConfigurationValueV1::Unsigned(1));
-
-        assert!(matches!(
-            upload_enabled_from_desired_configuration(&desired),
-            Err(TraceDecayError::Config { message })
-                if message.starts_with("configuration authority unavailable")
-        ));
-    }
 
     #[test]
     fn concurrent_boundary_calls_claim_exactly_one_worldwide_flush() {
@@ -740,15 +678,7 @@ mod tests {
     async fn concurrent_response_boundary_admits_one_observed_background_flush() {
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
-        let database = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
-            "ledger-worldwide-single-flight",
-        )
-        .await;
-        let mut context = super::super::McpServerConstructionContext::direct(cg, None)
-            .with_direct_databases(Some(database.registered.clone()), None, None, None);
-        context.profile = Some(tracedecay_runtime_core::config::ProfileRoot::new(
-            authority.profile_root(),
-        ));
+        let context = super::super::writer_test_support::registered_context(cg, &authority);
         let server = super::super::McpServer::new_with_context(context).await;
         let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
         let last_flushed = server
