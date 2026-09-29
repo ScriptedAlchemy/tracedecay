@@ -159,8 +159,8 @@ mod mimalloc_v3 {
         const BLOCKS: usize = 16 * 1024;
         const BLOCK_BYTES: usize = 256;
 
-        fn blocks() -> Vec<Box<[u8; BLOCK_BYTES]>> {
-            (0..BLOCKS).map(|_| Box::new([7; BLOCK_BYTES])).collect()
+        fn blocks() -> Vec<Vec<u8>> {
+            (0..BLOCKS).map(|_| vec![7; BLOCK_BYTES]).collect()
         }
 
         /// An owner heap holds exactly what its scope allocated: its pages
