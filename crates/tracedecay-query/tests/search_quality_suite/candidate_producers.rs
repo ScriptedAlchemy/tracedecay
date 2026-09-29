@@ -47,7 +47,7 @@ use tracedecay_query::retrieval::exact::{
     ExactLaneRetriever, ExactLiteralV1,
 };
 use tracedecay_query::retrieval::lexical::{
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneFingerprintCancellationPointV1,
     CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
@@ -3383,7 +3383,10 @@ fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
             |row| row.get(0),
         )
         .expect("read v10 format revision");
-    assert_eq!(on_disk_revision, 10);
+    assert!(
+        on_disk_revision < i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
+        "the checked-in artifact must be behind the revision this build serves, got {on_disk_revision}"
+    );
 
     let directory = tempfile::tempdir().expect("private v10 reopen dir");
     let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
@@ -5094,11 +5097,11 @@ fn disk_artifact_controlled_reopen_cancels_receipt_scan_and_resumes() {
 }
 
 #[test]
-fn disk_artifact_revision_four_is_incompatible_before_new_index_queries() {
+fn disk_artifact_previous_revision_is_incompatible_before_resume() {
     let (fixture, pages, _) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("legacy-staging-schema.sqlite");
+    let artifact_path = directory.path().join("previous-revision.sqlite");
     let control = ArtifactControl { cancelled: false };
     let mut builder =
         CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
@@ -5107,27 +5110,41 @@ fn disk_artifact_revision_four_is_incompatible_before_new_index_queries() {
         .expect("stage current-format source page");
     drop(builder);
 
-    // Revision four predates the term-leading statistics index. The declared
-    // revision must reject it before resume or query code can require that
-    // index by name.
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open legacy mutation");
+    CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("the current revision opens");
+
+    let previous = i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1) - 1;
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open staged artifact");
     connection
         .execute(
-            "UPDATE artifact_state SET format_revision = 4 WHERE singleton = 1",
-            [],
+            "UPDATE artifact_state SET format_revision = ?1 WHERE singleton = 1",
+            [previous],
         )
-        .expect("write revision-four artifact state");
+        .expect("write the previous format revision");
     drop(connection);
 
-    assert!(matches!(
-        CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
-            &artifact_path,
-            metadata,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-            &control,
+    let opened = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    );
+    let Err(error) = opened else {
+        panic!("the previous revision is refused before resume");
+    };
+    assert!(
+        matches!(
+            error,
+            CodeLexicalArtifactErrorV1::Incompatible(ref message)
+                if message == &format!("format revision {previous} is unsupported")
         ),
-        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
-    ));
+        "previous revision reached the wrong rejection: {error}"
+    );
 }
 
 #[test]
