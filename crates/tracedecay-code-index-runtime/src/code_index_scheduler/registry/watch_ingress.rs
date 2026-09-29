@@ -11,6 +11,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::super::CodeIndexCadenceTriggerV1;
 use super::CodeIndexSchedulerRegistryV1;
+use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
 
 /// Result of routing one watcher frontier into a mounted scheduler.
 ///
@@ -101,15 +102,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 return GitStateChangeRequestV1::Busy;
             }
         };
-        if !scheduler.freshness_probe_requires_reconcile() {
+        let verdict = scheduler.freshness_probe_verdict();
+        if verdict == FreshnessProbeVerdictV1::Current {
             hotpath::gauge!("daemon.code_index.watch.ingress.quiet_total").inc(1_u64);
             return GitStateChangeRequestV1::Accepted;
         }
         hotpath::gauge!("daemon.code_index.watch.ingress.woke_total").inc(1_u64);
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::GitWatcher);
-        // The watcher reported a Git state change and the freshness ladder
-        // agreed, so this wake carries observed source movement.
-        scheduler.request_background_reconcile_for_observed_change();
+        // Only a ladder that proved movement carries observed source change.
+        // A mount no pass has verified yet has no baseline to move from: its
+        // pending pass verifies, and minting a change here reported that
+        // verification as a rebuild.
+        if verdict == FreshnessProbeVerdictV1::Moved {
+            scheduler.request_background_reconcile_for_observed_change();
+        }
         drop(scheduler);
         GitStateChangeRequestV1::Accepted
     }

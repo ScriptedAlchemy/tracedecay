@@ -1,27 +1,27 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::maintenance::ExclusiveMaintenancePermit;
 
-use super::driver::{CheckpointDriver, RusqliteCheckpointDriver};
+use super::driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
 use super::types::{
     CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointError,
-    CheckpointInterruption, CheckpointMode, CheckpointResult, WalPressure,
+    CheckpointInterruption, CheckpointMode, CheckpointReport, CheckpointResult, WalPressure,
 };
 
 /// Checkpoint policy state owned by the persistent writer.
-pub(crate) struct WriterCheckpointController<D> {
-    driver: D,
+pub(crate) struct WriterCheckpointController {
+    driver: RusqliteCheckpointDriver,
     config: CheckpointConfig,
     hard_drain_required: bool,
 }
 
-impl<D: CheckpointDriver> WriterCheckpointController<D> {
+impl WriterCheckpointController {
     /// Construct policy state and disable SQLite's connection-local automatic
     /// checkpointing. Startup fails closed when this cannot be established.
     pub(crate) fn new(
-        mut driver: D,
+        mut driver: RusqliteCheckpointDriver,
         config: CheckpointConfig,
-    ) -> Result<Self, CheckpointError<D::Error>> {
+    ) -> Result<Self, CheckpointError<RusqliteCheckpointError>> {
         let config = config.validate().map_err(CheckpointError::InvalidConfig)?;
         driver
             .disable_auto_checkpoint()
@@ -41,7 +41,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
     pub(crate) fn evaluate_scheduled(
         &mut self,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         self.evaluate_interruptible(snapshot_blockers, || None)
     }
 
@@ -49,7 +49,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         &mut self,
         permit: &ExclusiveMaintenancePermit,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         if !snapshot_blockers.is_clear() {
             return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
         }
@@ -62,7 +62,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         &mut self,
         permit: &ExclusiveMaintenancePermit,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         if !snapshot_blockers.is_clear() {
             return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
         }
@@ -75,7 +75,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         &mut self,
         snapshot_blockers: CheckpointBlockers,
         mut interruption: F,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>>
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>
     where
         F: FnMut() -> Option<CheckpointInterruption>,
     {
@@ -105,7 +105,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         &mut self,
         wal_bytes: u64,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         let pressure = self.pressure(wal_bytes);
         if pressure == WalPressure::BelowSoft && !self.hard_drain_required {
             return Ok(CheckpointDecision::BelowSoftLimit { wal_bytes });
@@ -126,7 +126,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         wal_bytes: u64,
         permit: &ExclusiveMaintenancePermit,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         self.run_exclusive(
             CheckpointMode::Restart,
             wal_bytes,
@@ -140,7 +140,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         wal_bytes: u64,
         permit: &ExclusiveMaintenancePermit,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         self.run_exclusive(
             CheckpointMode::Truncate,
             wal_bytes,
@@ -158,7 +158,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
     /// the checkpoint pending; the WAL then stays for the next open.
     pub(crate) fn truncate_at_shutdown(
         &mut self,
-    ) -> Result<CheckpointResult, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
         let decision = self.run_checkpoint(
             CheckpointMode::Truncate,
@@ -175,7 +175,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         wal_bytes: u64,
         _permit: &ExclusiveMaintenancePermit,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         if !snapshot_blockers.is_clear() {
             return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
         }
@@ -188,7 +188,7 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
         pressure: WalPressure,
         wal_bytes: u64,
         snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<D::Error>> {
+    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
         let started = Instant::now();
         let report = match self.driver.checkpoint(mode) {
             Ok(report) => report,
@@ -208,30 +208,17 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             wal_bytes,
             report.checkpointed_frames,
         );
-
-        if report.complete() {
-            self.hard_drain_required = false;
-            return Ok(CheckpointDecision::Complete {
-                mode,
-                pressure,
-                wal_bytes,
-                report,
-                elapsed,
-            });
-        }
-
-        if pressure == WalPressure::Hard || self.hard_drain_required {
-            self.hard_drain_required = true;
-        }
-        Ok(CheckpointDecision::Pending {
+        let (decision, hard_drain_required) = checkpoint_decision(
+            report,
             mode,
             pressure,
             wal_bytes,
-            report,
             snapshot_blockers,
-            hard_drain_required: self.hard_drain_required,
+            self.hard_drain_required,
             elapsed,
-        })
+        );
+        self.hard_drain_required = hard_drain_required;
+        Ok(decision)
     }
 
     fn pressure(&self, wal_bytes: u64) -> WalPressure {
@@ -243,6 +230,46 @@ impl<D: CheckpointDriver> WriterCheckpointController<D> {
             WalPressure::BelowSoft
         }
     }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut rusqlite::Connection {
+        self.driver.connection_mut()
+    }
+}
+
+pub(super) fn checkpoint_decision(
+    report: CheckpointReport,
+    mode: CheckpointMode,
+    pressure: WalPressure,
+    wal_bytes: u64,
+    snapshot_blockers: CheckpointBlockers,
+    hard_drain_required: bool,
+    elapsed: Duration,
+) -> (CheckpointDecision, bool) {
+    if report.complete() {
+        return (
+            CheckpointDecision::Complete {
+                mode,
+                pressure,
+                wal_bytes,
+                report,
+                elapsed,
+            },
+            false,
+        );
+    }
+    let hard_drain_required = pressure == WalPressure::Hard || hard_drain_required;
+    (
+        CheckpointDecision::Pending {
+            mode,
+            pressure,
+            wal_bytes,
+            report,
+            snapshot_blockers,
+            hard_drain_required,
+            elapsed,
+        },
+        hard_drain_required,
+    )
 }
 
 fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::CheckpointAttribution {
@@ -250,11 +277,5 @@ fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::Check
         CheckpointMode::Passive => crate::hotpath_observe::CheckpointAttribution::Passive,
         CheckpointMode::Restart => crate::hotpath_observe::CheckpointAttribution::Restart,
         CheckpointMode::Truncate => crate::hotpath_observe::CheckpointAttribution::Truncate,
-    }
-}
-
-impl WriterCheckpointController<RusqliteCheckpointDriver> {
-    pub(crate) fn connection_mut(&mut self) -> &mut rusqlite::Connection {
-        self.driver.connection_mut()
     }
 }

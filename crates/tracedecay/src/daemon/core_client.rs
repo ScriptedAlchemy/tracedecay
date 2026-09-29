@@ -678,6 +678,104 @@ pub fn tool_json_payload(
     Ok(payload)
 }
 
+/// The single JSON payload of a daemon tool reply, with a response-budget
+/// truncation envelope reassembled from its stored pages.
+///
+/// A JSON reply larger than one response frame arrives as a preview plus a
+/// retrieval handle; `tracedecay_retrieve` pages the stored body so every page
+/// fits the budget, and the pages are joined through `offset` / `next_offset`
+/// / `has_more` before parsing, exactly as an agent does. `deadline` bounds
+/// every page fetch when the caller owns one.
+pub async fn recover_truncated_tool_payload(
+    profile: &ProfileRoot,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    result: serde_json::Value,
+    deadline: Option<Instant>,
+) -> Result<serde_json::Value> {
+    let payload = tool_json_payload(&result, tool_name)?;
+    if !is_truncation_envelope(&payload) {
+        return Ok(payload);
+    }
+    let handle = payload
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned truncated JSON without a retrieval handle"
+            ),
+        })?;
+    let mut content = String::new();
+    let mut offset: u64 = 0;
+    loop {
+        let arguments = json!({ "handle": handle, "format": "json", "offset": offset });
+        let retrieved = match deadline {
+            Some(deadline) => {
+                hotpath::future!(
+                    call_default_tool_awaiting_project_open(
+                        profile,
+                        handshake,
+                        "tracedecay_retrieve",
+                        arguments,
+                        deadline,
+                    ),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+            None => {
+                hotpath::future!(
+                    call_default_tool(profile, handshake, "tracedecay_retrieve", arguments),
+                    label = "cli.daemon.recovery_fetch"
+                )
+                .await?
+            }
+        };
+        let page = tool_json_payload(&retrieved, "tracedecay_retrieve")?;
+        let page_content = page
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("daemon retrieval for {tool_name} omitted response content"),
+            })?;
+        content.push_str(page_content);
+        if page.get("has_more").and_then(serde_json::Value::as_bool) != Some(true) {
+            break;
+        }
+        let next_offset = page
+            .get("next_offset")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} reported more pages without a next offset"
+                ),
+            })?;
+        if next_offset <= offset {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon retrieval for {tool_name} did not advance past offset {offset}"
+                ),
+            });
+        }
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).map_err(Into::into)
+}
+
+/// Whether a tool payload is the response-budget truncation envelope rather
+/// than the tool's own result.
+pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
+    value.get("truncated").and_then(serde_json::Value::as_bool) == Some(true)
+        && value
+            .get("original_chars")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && value
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
