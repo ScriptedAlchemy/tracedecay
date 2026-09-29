@@ -110,25 +110,14 @@ async fn import_receipt(
     let SessionSyncOutcomeV1::Accepted(admission) = accepted else {
         panic!("import was not admitted: {accepted:?}");
     };
-    let started = tokio::time::Instant::now();
     let control = SessionSyncControlV1::new(scope, admission.idempotency_key);
-    // Well under the 60s request deadline the old waiter would have consumed,
-    // with room for a loaded runner: this bounds hand-off latency, not CPU.
-    let hand_off_bound = Duration::from_secs(10);
+    // No worker loop runs behind these states, so an import that waited for
+    // the pass it scheduled could only end at the request deadline as
+    // `timed_out`. The callers' literal terminations are the hand-off proof.
     loop {
         match SessionSyncServicePort::status(&service, control.clone()).await {
-            SessionSyncOutcomeV1::Complete(receipt) => {
-                assert!(
-                    started.elapsed() < hand_off_bound,
-                    "import consumed its observation bound instead of returning the settled catch-up"
-                );
-                return (receipt, project_state);
-            }
+            SessionSyncOutcomeV1::Complete(receipt) => return (receipt, project_state),
             SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
-                assert!(
-                    started.elapsed() < hand_off_bound,
-                    "import stayed pending while catch-up state was already known"
-                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             other => panic!("import ended without a coverage receipt: {other:?}"),
@@ -148,11 +137,12 @@ fn remaining_work(
 
 #[tokio::test]
 async fn import_reports_deferred_progress_while_historical_catch_up_is_still_pending() {
-    let (receipt, _) = import_receipt(CatchUp::Pending, "import-pending").await;
+    let (receipt, state) = import_receipt(CatchUp::Pending, "import-pending").await;
 
     assert_eq!(receipt.termination, OperationTermination::Partial);
     assert!(receipt.failure_codes.is_empty());
     assert_eq!(remaining_work(&receipt), 2);
+    assert!(state.take_historical_dirty());
 }
 
 #[tokio::test]
