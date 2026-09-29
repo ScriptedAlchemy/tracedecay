@@ -507,7 +507,12 @@ mod tests {
             available_scope,
             registry_mode,
         )?;
-        apply_context_description(&mut tools, &context_description_for(node_count, budget));
+        let description = context_description_for(node_count, budget);
+        for tool in &mut tools {
+            if tool.name == "tracedecay_context" {
+                tool.description.clone_from(&description);
+            }
+        }
         Ok(serde_json::json!({ "tools": tools }))
     }
 
