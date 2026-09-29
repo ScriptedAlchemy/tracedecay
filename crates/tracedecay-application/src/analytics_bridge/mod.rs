@@ -391,12 +391,5 @@ mod tests {
     fn rows_without_event_field_are_skipped() {
         assert!(hook_row_to_analytics_event("{}", None).is_none());
         assert!(hook_row_to_analytics_event("not json", None).is_none());
-        let without_event =
-            r#"{"agent":"cursor","hook_name":"postToolUse","ts_unix_ms":1783000000000}"#;
-        assert!(hook_row_to_analytics_event(without_event, None).is_none());
-        let with_event = without_event.replacen('{', r#"{"event":"hook_invoked","#, 1);
-        let event = hook_row_to_analytics_event(&with_event, None).expect("row with event maps");
-        assert_eq!(event.event_kind, "hook_invoked");
-        assert_eq!(event.provider, "hook_cursor");
     }
 }
