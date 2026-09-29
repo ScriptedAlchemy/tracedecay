@@ -1331,6 +1331,108 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     );
 }
 
+/// A crate of documented functions that call each other and structs with
+/// methods, so the graph carries symbol records, docstrings, and edges.
+fn accounting_source(functions: usize) -> String {
+    let mut source = String::new();
+    for ordinal in 0..functions {
+        let next = (ordinal + 1) % functions;
+        write!(
+            source,
+            "/// Transform the input for step {ordinal} and hand it to step {next}.\n\
+             pub fn transform_{ordinal}(input: &str, limit: usize) -> usize {{\n    \
+             let total = input.len().min(limit) * {ordinal};\n    \
+             if total > 7 {{ transform_{next}(input, limit - 1) }} else {{ total }}\n}}\n\n\
+             /// Holder for step {ordinal}.\npub struct Holder{ordinal} {{ value: u32 }}\n\n\
+             impl Holder{ordinal} {{\n    /// The held value, doubled.\n    \
+             pub fn doubled(&self) -> u32 {{ self.value * 2 + transform_{ordinal}(\"x\", 1) as u32 }}\n}}\n\n"
+        )
+        .expect("write source");
+    }
+    source
+}
+
+fn within_a_tenth(charged: u64, measured: isize) -> bool {
+    let measured = u64::try_from(measured).expect("an owner holds a positive byte count");
+    charged * 10 >= measured * 9 && charged * 10 <= measured * 11
+}
+
+/// What the resident-memory inventory charges the serving graph owners is
+/// what admission subtracts and what pressure release expects back, so each
+/// owner's charge must be the heap its release gives back, and together the
+/// engine's cold open and the catalog's build must leave nothing live that
+/// neither owner charges.
+///
+/// Fails if either owner reports a structural estimate that leaves out the
+/// maps, strings, and spare capacity it allocates, or if warming the graph
+/// retains heap that no owner charges or releases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serving_graph_owners_charge_the_heap_they_hold() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphProjectionStore,
+    };
+
+    let fixture =
+        sealed_generation_fixture("project.graph-owner-accounting", &accounting_source(600)).await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("seal the code graph");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    store.warm_serving_engine().expect("first warm");
+    assert!(matches!(
+        store.release_serving_engine().expect("release"),
+        CodeGraphEngineReleaseV1::Released { .. }
+    ));
+
+    let ((), warmed) = crate::thread_allocation::live_after(|| {
+        store.warm_serving_engine().expect("cold warm");
+        store
+            .warm_interactive_catalog_with_cancellation(Arc::new(
+                tracedecay_graph_db::NeverCancelled,
+            ))
+            .expect("catalog warm");
+    });
+    let catalog_charge = store
+        .interactive_catalog_bytes()
+        .expect("a warmed catalog reports its bytes");
+    let engine_charge = store
+        .serving_engine_bytes()
+        .expect("engine bytes")
+        .expect("a pinned engine reports its bytes");
+
+    let (catalog_release, catalog_freed) =
+        crate::thread_allocation::live_after(|| store.release_interactive_catalog());
+    assert_eq!(
+        catalog_release,
+        CodeGraphCatalogReleaseV1::Released {
+            bytes: catalog_charge
+        }
+    );
+    let (engine_release, engine_freed) = crate::thread_allocation::live_after(|| {
+        store.release_serving_engine().expect("engine release")
+    });
+    assert_eq!(
+        engine_release,
+        CodeGraphEngineReleaseV1::Released {
+            bytes: Some(engine_charge)
+        }
+    );
+
+    assert!(
+        within_a_tenth(catalog_charge, -catalog_freed)
+            && within_a_tenth(engine_charge, -engine_freed)
+            && within_a_tenth(catalog_charge + engine_charge, warmed),
+        "graph_catalog charges {catalog_charge} bytes and its release freed {}; \
+         graph_engine charges {engine_charge} bytes and its release freed {}; \
+         warming both left {warmed} bytes live",
+        -catalog_freed,
+        -engine_freed
+    );
+}
+
 /// A pending predecessor owns the projector revision its durable replay
 /// recorded, even after the current reader advanced. The provider rebuilds
 /// that exact historical generation's rows from the seal on disk, and the

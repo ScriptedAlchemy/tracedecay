@@ -5,10 +5,11 @@
 //! takes the database write lock bumps the epoch, so a cached hit is valid
 //! only for the exact store generation it was built against.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
+use grafeo_common::memory::heap::{arc_slice_bytes, std_hash_map_bytes, string_bytes, vec_bytes};
 use grafeo_core::graph::GraphStore;
 
 use crate::schema::label_keys;
@@ -27,8 +28,26 @@ struct LabelKeyEntries {
 }
 
 impl LabelKeyCache {
+    /// Marks every cached list stale and drops them; see
+    /// [`crate::projection_identity_index::IdentityIndexCache::invalidate`].
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.keys = HashMap::new();
+    }
+
+    /// Heap bytes the cached lists hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries
+            .keys
+            .iter()
+            .fold(std_hash_map_bytes(&entries.keys), |bytes, (label, keys)| {
+                bytes
+                    + string_bytes(label)
+                    + arc_slice_bytes::<String>(keys.len())
+                    + keys.iter().map(string_bytes).sum::<usize>()
+            })
     }
 
     /// The store keys that carry `label` at the current epoch, shared with
@@ -122,15 +141,31 @@ pub(crate) struct ProjectionApprovalCache {
     entries: RwLock<ApprovalEntries>,
 }
 
+/// A store holds a handful of projections, so the approvals are a list.
 #[derive(Default)]
 struct ApprovalEntries {
     epoch: u64,
-    approved: BTreeSet<(GraphNamespace, GraphProjectionId)>,
+    approved: Vec<(GraphNamespace, GraphProjectionId)>,
 }
 
 impl ProjectionApprovalCache {
+    /// Marks every approval stale and drops them; see
+    /// [`crate::projection_identity_index::IdentityIndexCache::invalidate`].
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.approved = Vec::new();
+    }
+
+    /// Heap bytes the approvals hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries.approved.iter().fold(
+            vec_bytes(&entries.approved),
+            |bytes, (namespace, projection)| {
+                bytes + namespace.as_str().len() + projection.as_str().len()
+            },
+        )
     }
 
     pub(crate) fn approve(
@@ -157,7 +192,9 @@ impl ProjectionApprovalCache {
             entries.approved.clear();
             entries.epoch = epoch;
         }
-        entries.approved.insert(key);
+        if !entries.approved.contains(&key) {
+            entries.approved.push(key);
+        }
         Ok(())
     }
 }

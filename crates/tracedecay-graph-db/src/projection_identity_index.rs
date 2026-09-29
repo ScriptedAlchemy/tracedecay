@@ -21,9 +21,11 @@
 //! read, so a writer cannot interleave between the epoch check and its use.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
+use grafeo_common::memory::heap::{arc_slice_bytes, std_hash_map_bytes, string_bytes};
 use grafeo_engine::GrafeoDB;
 
 use crate::projection::check_cancelled;
@@ -96,10 +98,34 @@ struct CacheEntries {
 }
 
 impl IdentityIndexCache {
-    /// Marks every cached index stale. Called from each site that takes the
-    /// database write lock.
+    /// Marks every cached index stale and drops them. Called from each site
+    /// that takes the database write lock and when the engine hibernates; a
+    /// stale index is never served again, so keeping it only holds memory.
     pub(crate) fn invalidate(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.indexes = HashMap::new();
+    }
+
+    /// Heap bytes the cached indexes hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        entries.indexes.iter().fold(
+            std_hash_map_bytes(&entries.indexes),
+            |bytes, (key, index)| {
+                bytes
+                    + string_bytes(&key.owner_label)
+                    + string_bytes(&key.record_label)
+                    + string_bytes(&key.identity_property)
+                    + arc_slice_bytes::<ProjectionIdentityIndex>(1)
+                    + index.identities.len() * size_of::<Box<str>>()
+                    + index
+                        .identities
+                        .iter()
+                        .map(|identity| identity.len())
+                        .sum::<usize>()
+            },
+        )
     }
 
     /// The ordered index for one (owner label, record label) pair, building and

@@ -133,6 +133,15 @@ impl Inner {
         self.adjacency_ids.invalidate();
         self.projection_approvals.invalidate();
     }
+
+    /// Heap bytes the store-epoch caches hold. They are derived from the open
+    /// engine and dropped when it hibernates, so they are the engine's.
+    fn store_epoch_cache_bytes(&self) -> usize {
+        self.identity_indexes.heap_bytes()
+            + self.label_keys.heap_bytes()
+            + self.adjacency_ids.heap_bytes()
+            + self.projection_approvals.heap_bytes()
+    }
 }
 
 pub struct GraphSnapshot {
@@ -1122,7 +1131,7 @@ impl GraphDb {
         let Some(database_to_close) = database.take() else {
             return Ok(false);
         };
-        self.inner.identity_indexes.invalidate();
+        self.inner.invalidate_store_epoch_caches();
         if let Err(error) = hotpath::measure_block!(
             "graph_db.runtime.hibernate.engine",
             database_to_close.close()
@@ -1374,28 +1383,20 @@ impl GraphDb {
         }
     }
 
-    /// Heap bytes the resident engine attributes to itself, or `None` when it
-    /// is not resident: its compact base (node and relation columns, CSR
-    /// structures, id maps, property indexes) plus the mutable store, indexes,
-    /// versions, caches and string pools `memory_usage` reports. A sealed
-    /// generation serves almost entirely from the compact base, which
-    /// `memory_usage` alone leaves out.
+    /// Heap bytes the resident engine holds, or `None` when it is not
+    /// resident: its compact base (tables, id maps, property indexes), the
+    /// overlay store, indexes, versions, caches and string pools, and the
+    /// store-epoch caches derived from it. A sealed
+    /// generation's column bodies stay in the mapped container, which is
+    /// file-backed page cache rather than heap, so they are not charged.
     pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
         self.inner
             .database
             .read()
             .map(|database| {
                 database.as_ref().map(|database| {
-                    let compact_base = database.layered_store().map_or(0, |layered| {
-                        layered
-                            .memory_bytes()
-                            .saturating_sub(layered.overlay_memory_bytes())
-                    });
                     u64::try_from(
-                        database
-                            .memory_usage()
-                            .total_bytes
-                            .saturating_add(compact_base),
+                        database.memory_usage().total_bytes + self.inner.store_epoch_cache_bytes(),
                     )
                     .unwrap_or(u64::MAX)
                 })
