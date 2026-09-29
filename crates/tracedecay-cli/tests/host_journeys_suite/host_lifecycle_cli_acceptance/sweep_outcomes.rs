@@ -522,10 +522,10 @@ fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     assert!(stderr.contains("cline: failed:"), "{stderr}");
 }
 
-/// A reachable host CLI that refuses the registration, as #2374 saw one
-/// reported: the install fails with the host CLI's own words, not a
-/// TraceDecay filesystem failure pointing at a source line. An absent or
-/// signed-out host is skipped instead; this is a host TraceDecay can reach.
+/// A reachable host CLI that refuses the registration: the install fails
+/// with the host CLI's own words, not a TraceDecay filesystem failure
+/// pointing at a source line. An absent host is skipped instead; this is a
+/// host TraceDecay can reach.
 #[cfg(unix)]
 #[test]
 fn install_reports_a_host_cli_refusal_in_the_host_clis_words() {
