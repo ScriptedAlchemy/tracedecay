@@ -17,5 +17,6 @@ pub use schema::{
 pub use store::{
     ConfigurationStorageError, GlobalDbConfigurationControlStore,
     OwnedGlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
-    ProfileCodeIndexWorkerConfigurationStore, ProfileCodeIndexWorkerConfigurationV1,
+    ProfileCodeIndexWorkerConfigurationV1, ProfileConfigurationCommitV1, ProfileConfigurationStore,
+    ProfileConfigurationV1,
 };

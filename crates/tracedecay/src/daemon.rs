@@ -356,6 +356,7 @@ mod store_maintenance;
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
+mod profile_configuration;
 mod profile_owner;
 mod profile_retained;
 mod projectless;
@@ -417,7 +418,8 @@ use project_routing::{
     prefer_recorded_open_failure, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
     project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error, resolved_project_server_key,
+    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
+    resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

@@ -11,9 +11,7 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
-use tracedecay_contracts::{
-    ApplicationOutcome, ApplicationProblemRecord, RUNTIME_MOUNTING_REASON_CODE, ResolvedSetting,
-};
+use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
@@ -161,7 +159,9 @@ pub async fn run_doctor(
         .and_then(Option::as_ref);
     check_watcher(&mut dc, profile);
     let upload_enabled = if daemon_listening {
-        configured_upload_enabled(profile, &project_path).await
+        configured_upload_enabled(profile)
+            .await
+            .map(UploadSetting::Resolved)
     } else {
         Ok(UploadSetting::DaemonUnavailable)
     };
@@ -1204,8 +1204,7 @@ fn check_automation_effect_resets(
 #[hotpath::measure(label = "doctor.config.upload", future = true)]
 async fn configured_upload_enabled(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
-    project_path: &Path,
-) -> tracedecay_domain::errors::Result<UploadSetting> {
+) -> tracedecay_domain::errors::Result<bool> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -1218,13 +1217,8 @@ async fn configured_upload_enabled(
                 message: format!("could not create Doctor configuration request: {error}"),
             }
         })?;
-    let handshake = crate::daemon::handshake_for_current_client(
-        profile,
-        Some(project_path.to_path_buf()),
-        None,
-        false,
-        false,
-    )?;
+    // The setting belongs to the profile: the request names no project.
+    let handshake = crate::daemon::handshake_for_current_client(profile, None, None, false, false)?;
     let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
@@ -1245,7 +1239,11 @@ async fn configured_upload_enabled(
         })?;
     let envelope = match result.result {
         Ok(envelope) => envelope,
-        Err(problem) => return upload_setting_refusal(&problem.problem),
+        Err(problem) => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: problem.problem.summary(),
+            });
+        }
     };
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1266,33 +1264,18 @@ async fn configured_upload_enabled(
         });
     }
     match setting.effective_value {
-        ConfigurationValueV1::Boolean(enabled) => Ok(UploadSetting::Resolved(enabled)),
+        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
         _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "worldwide counter upload setting is not boolean".to_owned(),
         }),
     }
 }
 
-/// A configuration refusal is the mounting state when the project runtime
-/// serving it has not finished mounting, and a failure otherwise.
-fn upload_setting_refusal(
-    problem: &ApplicationProblemRecord,
-) -> tracedecay_domain::errors::Result<UploadSetting> {
-    if problem.code == RUNTIME_MOUNTING_REASON_CODE {
-        return Ok(UploadSetting::Mounting);
-    }
-    Err(tracedecay_domain::errors::TraceDecayError::Config {
-        message: problem.summary(),
-    })
-}
-
-/// The worldwide-counter upload setting as the canonical configuration owner
+/// The worldwide-counter upload setting as the profile's configuration owner
 /// answered it.
 #[derive(Debug, PartialEq, Eq)]
 enum UploadSetting {
     Resolved(bool),
-    /// The project runtime that serves canonical configuration is mounting.
-    Mounting,
     /// No daemon listens for this profile, so no configuration owner answered.
     DaemonUnavailable,
 }
@@ -1309,9 +1292,6 @@ fn check_user_config(
         Ok(UploadSetting::Resolved(false)) => {
             dc.info("Worldwide counter upload disabled (default)");
         }
-        Ok(UploadSetting::Mounting) => dc.warn(&format!(
-            "Worldwide counter upload setting is pending: {PROJECT_RUNTIME_MOUNTING}"
-        )),
         Ok(UploadSetting::DaemonUnavailable) => {
             dc.info(&format!(
                 "Worldwide counter upload setting unread: {DAEMON_UNAVAILABLE}"
@@ -1482,9 +1462,6 @@ fn check_network(
         Ok(UploadSetting::Resolved(false)) => {
             dc.info("Worldwide counter skipped (upload disabled)");
         }
-        Ok(UploadSetting::Mounting) => dc.warn(&format!(
-            "Worldwide counter check is pending: {PROJECT_RUNTIME_MOUNTING}"
-        )),
         Ok(UploadSetting::DaemonUnavailable) => {
             dc.info(&format!("Worldwide counter check skipped: {DAEMON_UNAVAILABLE}"));
         }

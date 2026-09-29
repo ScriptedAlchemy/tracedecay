@@ -142,6 +142,10 @@ pub(crate) struct DashboardTestRuntimeV1 {
 }
 
 impl DashboardTestRuntimeV1 {
+    pub(crate) fn profile_sessions_database(&self) -> &RegisteredGlobalDbLeaseV1 {
+        &self.profile_sessions_database
+    }
+
     pub(crate) async fn project(
         profile: &ProfileRoot,
         project_root: impl AsRef<Path>,
