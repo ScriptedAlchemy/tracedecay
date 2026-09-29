@@ -403,7 +403,9 @@ impl RustExtractor {
         Self::collect_receiver_types(state, node, node, &mut receivers);
         Self::extract_call_sites(state, node, &id, &receivers);
         Self::suppress_shadowed_calls(state, node, &id);
+        let in_file_calls = Self::in_file_relative_calls(state, node, &id);
         Self::qualify_block_scoped_uses(state, node, &id);
+        Self::unqualify_calls(state, in_file_calls);
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
@@ -638,6 +640,7 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -757,6 +760,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
 
@@ -850,6 +854,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         if top_level_argument.is_some() {
@@ -872,6 +877,7 @@ impl RustExtractor {
                         column: import.start_column,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             }
@@ -1381,6 +1387,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         let Some(body) = find_direct_child_by_kind(node, "token_tree") else {
@@ -1889,6 +1896,7 @@ impl RustExtractor {
                                 column: position.column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
@@ -1906,6 +1914,7 @@ impl RustExtractor {
                                     column: position.column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1927,6 +1936,7 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
@@ -2459,6 +2469,48 @@ impl RustExtractor {
         }
     }
 
+    /// The `self::`/`super::`/`crate::` calls, as written, that stay inside
+    /// this file. Only their bare name binds same-file items: the qualified
+    /// resolver never binds into the referencing file. Selected before
+    /// `qualify_block_scoped_uses` rewrites `use`-bound calls to file-level
+    /// paths, which must not be read again against the inline module.
+    fn in_file_relative_calls(
+        state: &ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) -> Vec<usize> {
+        let depth = Self::ancestors(function)
+            .filter(|node| node.kind() == "mod_item")
+            .count();
+        state
+            .unresolved_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, reference)| {
+                reference.from_node_id == fn_node_id
+                    && reference.reference_kind == EdgeKind::Calls
+                    && !reference.reference_name.contains('.')
+                    && matches!(
+                        reference.reference_name.split("::").next(),
+                        Some("self" | "super" | "crate")
+                    )
+                    && reference.reference_name.contains("::")
+                    && Self::file_level_use_path(&reference.reference_name, depth)
+                        .is_none_or(|path| !Self::use_path_leaves_file(state, function, &path))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn unqualify_calls(state: &mut ExtractionState<'_>, calls: Vec<usize>) {
+        for index in calls {
+            let reference = &mut state.unresolved_refs[index];
+            if let Some((_, name)) = reference.reference_name.rsplit_once("::") {
+                reference.reference_name = name.to_owned();
+            }
+        }
+    }
+
     /// Rewrites a `use` path written `depth` inline modules below the file's
     /// own module to the path the file's module would write, or `None` when
     /// it names an item inside those inline modules.
@@ -2691,15 +2743,16 @@ impl RustExtractor {
             if cur.kind() == "identifier" {
                 // Check whether the next sibling is a token_tree (call arguments).
                 if i + 1 < children.len() && children[i + 1].kind() == "token_tree" {
-                    let callee_name = state.node_text(cur);
+                    let (callee_name, position) = Self::token_tree_callee(state, &children, i);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: fn_node_id.to_string(),
-                        reference_name: callee_name.to_string(),
+                        reference_name: callee_name,
                         reference_kind: EdgeKind::Calls,
-                        line: cur.start_position().row as u32,
-                        column: cur.start_position().column as u32,
+                        line: position.row as u32,
+                        column: position.column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                     Self::extract_calls_in_token_tree(state, children[i + 1], fn_node_id);
                     i += 2; // skip the token_tree we just handled
@@ -2715,6 +2768,43 @@ impl RustExtractor {
             }
             i += 1;
         }
+    }
+
+    /// Spell the call whose callee identifier is `children[name]` the way
+    /// `extract_call_sites` spells the same call outside a macro: the whole
+    /// `a::b::f` path, or `receiver.method` for a dotted call, so neither
+    /// binds as a bare same-named function.
+    fn token_tree_callee(
+        state: &ExtractionState<'_>,
+        children: &[TsNode<'_>],
+        name: usize,
+    ) -> (String, Point) {
+        let mut start = name;
+        while start >= 2
+            && children[start - 1].kind() == "::"
+            && matches!(
+                children[start - 2].kind(),
+                "identifier" | "self" | "super" | "crate"
+            )
+        {
+            start -= 2;
+        }
+        if start < name {
+            let path = children[start..=name]
+                .iter()
+                .step_by(2)
+                .map(|segment| state.node_text(*segment))
+                .collect::<Vec<_>>()
+                .join("::");
+            return (path, children[start].start_position());
+        }
+        let callee = children[name];
+        if name >= 2 && children[name - 1].kind() == "." {
+            let receiver = state.node_text(children[name - 2]);
+            let method = state.node_text(callee);
+            return (format!("{receiver}.{method}"), callee.start_position());
+        }
+        (state.node_text(callee).to_owned(), callee.start_position())
     }
 
     /// Extract derive macros from attribute items preceding a struct/enum.
@@ -2761,6 +2851,7 @@ impl RustExtractor {
                             column: attr_node.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -2827,6 +2918,7 @@ impl RustExtractor {
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
             return;
         }
@@ -2839,6 +2931,7 @@ impl RustExtractor {
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         if cursor.goto_first_child() {
@@ -2933,6 +3026,7 @@ impl RustExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
 
         state.edges.push(Edge {
@@ -2971,6 +3065,7 @@ impl RustExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 }

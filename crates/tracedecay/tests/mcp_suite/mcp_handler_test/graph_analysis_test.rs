@@ -4044,6 +4044,63 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
     );
 }
 
+/// A Windows checkout under `core.autocrlf=true`: HEAD's blob is LF, the file
+/// on disk is CRLF, and the graph sealed the blob. Each disk offset sits one
+/// byte per preceding line past the sealed offset, so with 300 lines ahead of
+/// the only declarations every disk offset falls beyond the file's last
+/// sealed span and no site could be bound to its declaration.
+#[tokio::test]
+async fn field_sites_binds_qualified_receivers_in_a_crlf_checkout() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    let mut source = "// padding\n".repeat(300);
+    source.push_str(
+        "pub struct Counter {\n    pub n: u32,\n}\n\nimpl Counter {\n    pub fn bump(&mut self) -> u32 {\n        self.n = 1;\n        self.n\n    }\n}\n",
+    );
+    fs::write(
+        project_root.join("src/lib.rs"),
+        source.replace('\n', "\r\n"),
+    )
+    .unwrap();
+    git_run(&project_root, &["init", "--quiet"]);
+    git_run(&project_root, &["config", "core.autocrlf", "true"]);
+    git_run(&project_root, &["add", "."]);
+    git_run(
+        &project_root,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let host = init_test_project(&project_root).await;
+
+    let output = call_field_sites(
+        &host,
+        json!({"field": "Counter::n", "limit": 20, "format": "json"}),
+    )
+    .await;
+
+    let bump = "src/lib.rs::Counter::bump";
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(
+        output["write_sites"],
+        json!([field_site(307, bump, "self.n = 1;")]),
+        "payload: {output}"
+    );
+    assert_eq!(
+        output["read_sites"],
+        json!([field_site(308, bump, "self.n")]),
+        "payload: {output}"
+    );
+}
+
 fn field_site(line: u64, enclosing: &str, snippet: &str) -> Value {
     json!({
         "file": "src/lib.rs",

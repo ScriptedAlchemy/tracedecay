@@ -161,8 +161,9 @@ async fn runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     let mounted = admitted_mcp_invocation(
         &client,
         ApplicationSurfaceOperation::ConfigurationObservedState,
@@ -229,8 +230,9 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -337,8 +339,9 @@ async fn git_runtime_fixture() -> RuntimeFixture {
         false,
     )
     .expect("daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake.clone())
-        .expect("daemon client");
+    let client =
+        tracedecay::daemon::invocation_client_for_current(environment.profile(), handshake.clone())
+            .expect("daemon client");
     RuntimeFixture {
         _daemon: daemon,
         client,
@@ -1106,10 +1109,11 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         .as_str()
         .unwrap_or_else(|| panic!("profile settings must expose a revision: {initial}"))
         .to_owned();
-    assert_eq!(
-        initial["project"]["configuration_revision_id"],
+    let project_revision = initial["project"]["configuration_revision_id"].clone();
+    assert_ne!(
+        project_revision,
         initial_revision.as_str(),
-        "project and profile settings must share the control-plane revision"
+        "profile settings live in the profile store, not the project's"
     );
     let legacy_user_config =
         tracedecay_session_memory::user_config::config_path(fixture._environment.profile_root());
@@ -1145,8 +1149,8 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         .to_owned();
     assert_ne!(applied_revision, initial_revision);
     assert_eq!(
-        applied["payload"]["project"]["configuration_revision_id"],
-        applied_revision.as_str()
+        applied["payload"]["project"]["configuration_revision_id"], project_revision,
+        "a profile settings write must not advance the project's configuration"
     );
     assert_eq!(
         std::fs::read(&legacy_user_config).ok(),
@@ -3013,8 +3017,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         false,
     )
     .expect("cross-scope daemon handshake");
-    let other_client = tracedecay_daemon_identity::invocation_client_for_current(other_handshake)
-        .expect("cross-scope daemon client");
+    let other_client =
+        tracedecay::daemon::invocation_client_for_current(fixture.profile(), other_handshake)
+            .expect("cross-scope daemon client");
     let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,

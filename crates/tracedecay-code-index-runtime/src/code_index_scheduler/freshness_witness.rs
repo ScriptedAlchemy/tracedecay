@@ -34,6 +34,7 @@ use tracedecay_domain::{
     ContentDigest, LanguageId, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
     validate_code_logical_path,
 };
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
@@ -255,10 +256,10 @@ impl StatKeyV1 {
         }
     }
 
-    // ponytail: without a change time a stat cannot prove unchanged bytes, so
-    // non-Unix keys never settle and every sweep re-derives every digest, as
-    // before this cache. Upgrade path: the Windows change time once std
-    // exposes it.
+    // ponytail: without a rewrite witness a stat cannot prove unchanged bytes,
+    // so non-Unix keys never settle and every sweep re-derives every digest,
+    // as before this cache. NTFS ChangeTime is not that witness: it stays put
+    // when a writer restores LastWriteTime through its handle.
     #[cfg(not(unix))]
     fn of(metadata: &Metadata) -> Self {
         Self {
@@ -279,7 +280,7 @@ impl StatKeyV1 {
     /// Whether this key, sampled at `sampled_at`, is old enough that any
     /// later write must produce a different one.
     fn settled(&self, sampled_at: SystemTime) -> bool {
-        cfg!(unix)
+        RewriteWitness::NATIVE.proves_unchanged_bytes()
             && sampled_at
                 .checked_sub(RACY_STAT_WINDOW)
                 .and_then(|horizon| horizon.duration_since(UNIX_EPOCH).ok())
@@ -600,6 +601,7 @@ impl SourceSweepCacheV1 {
         // The few files an edit touches are read on this thread; only a bulk
         // re-derivation (a cold cache) takes the indexing pool and its CPU
         // permits.
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let derived = if unvouched.len() <= INLINE_DIGEST_LIMIT {
             unvouched
                 .iter()
@@ -686,6 +688,47 @@ fn tracked_files_match_after_clean_filters(
         converted.read_to_end(&mut bytes).is_ok()
             && sanitized_digest(candidate, &bytes).is_ok_and(|digest| digest == *expected)
     })
+}
+
+/// The exact sanitized bytes a generation sealed for `logical_path`, recovered
+/// from the checkout, or `None` once the checkout no longer holds them.
+///
+/// Byte offsets the graph records index these bytes, which are not always the
+/// file on disk: a clean-tree generation seals HEAD's blobs, so a checkout
+/// whose clean filters rewrite the file (`core.autocrlf=true` over CRLF
+/// sources) is current while every offset past the first converted line
+/// ending points elsewhere in the disk bytes. The file is tried as it is on
+/// disk first, then through the repository's own filter pipeline, the same
+/// two readings [`tracked_files_match_after_clean_filters`] accepts as current.
+pub fn sealed_source_bytes(
+    project_root: &Path,
+    logical_path: &str,
+    language: &LanguageId,
+    sealed: &ContentDigest,
+) -> Result<Option<Vec<u8>>, CodeIndexSchedulerErrorV1> {
+    let raw =
+        ignored_dependencies::read_bounded_snapshot_source(&project_root.join(logical_path), None)?;
+    let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
+    if content_digest(&sanitized) == *sealed {
+        return Ok(Some(sanitized));
+    }
+    // ponytail: one repository open and filter pipeline per filtered file;
+    // hoist them into a caller-held reader if a caller ever needs hundreds.
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let (mut pipeline, index) = repository
+        .filter_pipeline(None)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    if index.entry_by_path(BStr::new(logical_path)).is_none() {
+        return Ok(None);
+    }
+    let mut filtered = Vec::new();
+    pipeline
+        .convert_to_git(raw.as_slice(), Path::new(logical_path), &index)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
+        .read_to_end(&mut filtered)?;
+    let (sanitized, _, _) = privacy::sanitize_code_file(language, &filtered)?;
+    Ok((content_digest(&sanitized) == *sealed).then_some(sanitized))
 }
 
 /// What the last completed reconcile proved the worktree's source to be, in

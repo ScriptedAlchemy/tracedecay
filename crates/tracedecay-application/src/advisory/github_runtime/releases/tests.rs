@@ -46,21 +46,42 @@ fn release_json() -> serde_json::Value {
 
 #[test]
 fn provider_release_page_rejects_duplicate_asset_identity() {
+    assert_decodes_pristine_release();
     let mut value = release_json();
     let duplicate = value[0]["assets"][0].clone();
     value[0]["assets"].as_array_mut().unwrap().push(duplicate);
-    assert!(
-        decode_provider_page(
-            &serde_json::to_vec(&value).unwrap(),
-            &target(),
-            &GitHubHttpReadConfigV1::default(),
-        )
-        .is_none()
+    assert!(decode_release_page(&value).is_none());
+}
+
+fn decode_release_page(value: &serde_json::Value) -> Option<Vec<GitHubReleaseV1>> {
+    decode_provider_page(
+        &serde_json::to_vec(value).unwrap(),
+        &target(),
+        &GitHubHttpReadConfigV1::default(),
+    )
+}
+
+fn assert_decodes_pristine_release() {
+    let releases = decode_release_page(&release_json()).expect("pristine page decodes");
+    assert_eq!(
+        releases
+            .iter()
+            .map(|release| (
+                release.tag.as_str(),
+                release
+                    .assets
+                    .iter()
+                    .map(|asset| asset.name.as_str())
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("v4.2.0", vec!["tracedecay-aarch64-apple-darwin.tar.gz"])]
     );
 }
 
 #[test]
 fn provider_release_page_rejects_foreign_urls_digests_and_times() {
+    assert_decodes_pristine_release();
     for (pointer, invalid) in [
         (
             "/0/html_url",
@@ -76,12 +97,7 @@ fn provider_release_page_rejects_foreign_urls_digests_and_times() {
         let mut value = release_json();
         *value.pointer_mut(pointer).unwrap() = invalid;
         assert!(
-            decode_provider_page(
-                &serde_json::to_vec(&value).unwrap(),
-                &target(),
-                &GitHubHttpReadConfigV1::default(),
-            )
-            .is_none(),
+            decode_release_page(&value).is_none(),
             "invalid provider field {pointer} must fail closed",
         );
     }

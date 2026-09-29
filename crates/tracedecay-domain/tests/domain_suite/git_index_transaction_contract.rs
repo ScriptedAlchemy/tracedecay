@@ -204,7 +204,7 @@ fn applicable_preview_binds_each_hunk_to_one_immutable_snapshot() {
     .expect("preview is valid");
     preview.validate().expect("preview remains immutable");
     assert!(preview.commit_intent_digest.is_none());
-    assert!(
+    assert_eq!(
         GitIndexPreviewV1::new_with_commit_intent(
             preview_id.clone(),
             GitIndexTransactionOperationV1::StageHunks,
@@ -217,13 +217,15 @@ fn applicable_preview_binds_each_hunk_to_one_immutable_snapshot() {
             UtcMicros(10),
             UtcMicros(20),
         )
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "applicable git index hunk preview is not canonical",
         "stage previews must reject commit-intent commitments"
     );
 
     let mut stale = reference;
     stale.snapshot_digest = digest('9');
-    assert!(
+    assert_eq!(
         GitIndexPreviewV1::new(
             preview_id,
             GitIndexTransactionOperationV1::StageHunks,
@@ -235,7 +237,9 @@ fn applicable_preview_binds_each_hunk_to_one_immutable_snapshot() {
             UtcMicros(10),
             UtcMicros(20),
         )
-        .is_err(),
+        .unwrap_err()
+        .to_string(),
+        "git index preview hunk compare-and-swap binding is not pinned to the required snapshot",
         "a HunkRef from a different repository snapshot must never become applicable"
     );
 }

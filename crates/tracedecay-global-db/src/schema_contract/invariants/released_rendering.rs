@@ -859,7 +859,8 @@ mod tests {
         let restored = database
             .get_session("codex", SESSION)
             .await
-            .expect("session restored from immutable projection");
+            .expect("session restored from immutable projection")
+            .expect("restored session row");
         assert_eq!(restored.provider, "codex");
         assert_eq!(restored.session_id, SESSION);
         let snapshot = database.read_snapshot().await.unwrap();

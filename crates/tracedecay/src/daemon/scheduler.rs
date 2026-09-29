@@ -16,7 +16,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{DaemonEngine, DaemonHandshake, ProjectServerKey};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -900,76 +900,22 @@ impl DaemonEngine {
             .await
     }
 
-    #[hotpath::measure(label = "daemon.scheduler.retire_scheduler", future = true)]
     async fn retire_matching_automation_scheduler_locked(
         &self,
         key: &ProjectServerKey,
         allow_logical_owner: bool,
     ) -> Option<AutomationSchedulerRetirement> {
-        let (task, completion, termination, reservation) = {
-            let mut schedulers = self
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            let owner = if schedulers.contains_key(key) {
-                key.clone()
-            } else if allow_logical_owner {
-                schedulers
-                    .keys()
-                    .find(|candidate| same_scheduler_owner(candidate, key))
-                    .cloned()?
-            } else {
-                return None;
-            };
-            let handle = schedulers.get_mut(&owner)?;
-            let reservation = self
-                .store_administration
-                .reserve_retirement_reaper(&owner)?;
-            handle.stop_requested.request();
-            handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
-            handle
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let task = handle.task.take().map(|task| (owner, task));
-            (
-                task,
-                Arc::clone(&handle.completion),
-                Arc::clone(&handle.termination),
-                reservation,
-            )
-        };
         #[cfg(test)]
-        self.automation_scheduler_state_changed.notify_waiters();
-        if let Some((owner, task)) = task {
-            let completed = Arc::clone(&completion);
-            let reaper_administration = self.store_administration.clone();
-            let reaper_owner = owner.clone();
-            #[cfg(test)]
-            let state_changed = Arc::clone(&self.automation_scheduler_state_changed);
-            self.store_administration.spawn_retirement_reaper(
-                reservation,
-                MaintenanceReaperKind::Automation,
-                owner,
-                task,
-                Arc::clone(&termination),
-                async move {
-                    {
-                        let mut schedulers =
-                            reaper_administration.automation_schedulers().lock().await;
-                        if schedulers.get(&reaper_owner).is_some_and(|handle| {
-                            Arc::ptr_eq(&handle.completion, &completed)
-                                && handle.lifecycle == AutomationSchedulerLifecycle::Retiring
-                        }) {
-                            schedulers.remove(&reaper_owner);
-                        }
-                    }
-                    #[cfg(test)]
-                    state_changed.notify_waiters();
-                },
-            );
-        }
-        Some(AutomationSchedulerRetirement { termination })
+        let state_changed = Some(Arc::clone(&self.automation_scheduler_state_changed));
+        #[cfg(not(test))]
+        let state_changed = None;
+        retire_matching_automation_scheduler(
+            &self.store_administration,
+            key,
+            allow_logical_owner,
+            state_changed,
+        )
+        .await
     }
 
     /// Request every automation loop to stop. Prepare-time cancel must be
@@ -1023,6 +969,96 @@ impl DaemonEngine {
             }
         })
         .await;
+    }
+}
+
+#[hotpath::measure(label = "daemon.scheduler.retire_scheduler", future = true)]
+async fn retire_matching_automation_scheduler(
+    store_administration: &StoreAdministration,
+    key: &ProjectServerKey,
+    allow_logical_owner: bool,
+    state_changed: Option<Arc<tokio::sync::Notify>>,
+) -> Option<AutomationSchedulerRetirement> {
+    let (task, completion, termination, reservation) = {
+        let mut schedulers = store_administration.automation_schedulers().lock().await;
+        let owner = if schedulers.contains_key(key) {
+            key.clone()
+        } else if allow_logical_owner {
+            schedulers
+                .keys()
+                .find(|candidate| same_scheduler_owner(candidate, key))
+                .cloned()?
+        } else {
+            return None;
+        };
+        let handle = schedulers.get_mut(&owner)?;
+        let reservation = store_administration.reserve_retirement_reaper(&owner)?;
+        handle.stop_requested.request();
+        handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
+        handle
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let task = handle.task.take().map(|task| (owner, task));
+        (
+            task,
+            Arc::clone(&handle.completion),
+            Arc::clone(&handle.termination),
+            reservation,
+        )
+    };
+    if let Some(state_changed) = &state_changed {
+        state_changed.notify_waiters();
+    }
+    if let Some((owner, task)) = task {
+        let completed = Arc::clone(&completion);
+        let reaper_administration = store_administration.clone();
+        let reaper_owner = owner.clone();
+        store_administration.spawn_retirement_reaper(
+            reservation,
+            MaintenanceReaperKind::Automation,
+            owner,
+            task,
+            Arc::clone(&termination),
+            async move {
+                {
+                    let mut schedulers = reaper_administration.automation_schedulers().lock().await;
+                    if schedulers.get(&reaper_owner).is_some_and(|handle| {
+                        Arc::ptr_eq(&handle.completion, &completed)
+                            && handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                    }) {
+                        schedulers.remove(&reaper_owner);
+                    }
+                }
+                if let Some(state_changed) = state_changed {
+                    state_changed.notify_waiters();
+                }
+            },
+        );
+    }
+    Some(AutomationSchedulerRetirement { termination })
+}
+
+/// Stops every automation loop bound to one physical store owner and waits
+/// until each has dropped its project handle, so capacity retirement never
+/// races a loop that still holds the owner's session Store client.
+pub(super) async fn retire_owner_automation_schedulers(
+    store_administration: &StoreAdministration,
+    owner: &super::StoreOwnerKey,
+) {
+    let keys: Vec<ProjectServerKey> = store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .keys()
+        .filter(|key| &key.owner == owner)
+        .cloned()
+        .collect();
+    for key in keys {
+        if let Some(retirement) =
+            retire_matching_automation_scheduler(store_administration, &key, false, None).await
+        {
+            retirement.wait().await;
+        }
     }
 }
 

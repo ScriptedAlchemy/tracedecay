@@ -84,8 +84,9 @@ fn test_tool_name_truncation() {
 
     let r = reader(dir.path());
     let entry = r.entry(0).unwrap();
-    // Should be truncated to 31 chars (32 bytes with null)
-    assert_eq!(entry.tool_name.len(), 31);
+    // Truncated to 31 chars (32 bytes with the null terminator).
+    assert_eq!(entry.tool_name, "a".repeat(31));
+    assert_eq!(entry.delta, 42);
 }
 
 #[test]

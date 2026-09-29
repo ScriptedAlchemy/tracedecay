@@ -5708,7 +5708,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5981,7 +5981,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6164,7 +6164,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
- "tracing-subscriber",
  "url",
  "walkdir",
 ]
@@ -6224,7 +6223,6 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-runtime-core",
  "tracing",
- "tracing-subscriber",
  "windows 0.62.2",
 ]
 
@@ -6706,7 +6704,7 @@ dependencies = [
  "hex",
  "hotpath",
  "percent-encoding",
- "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -6741,7 +6739,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "hotpath",
  "rusqlite",
@@ -6840,6 +6838,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 

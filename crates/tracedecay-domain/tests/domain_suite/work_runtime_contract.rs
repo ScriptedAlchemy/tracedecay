@@ -381,7 +381,7 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
         )
         .unwrap();
 
-    assert!(
+    assert_eq!(
         running()
             .transition(
                 WorkAttemptStateV1::CancellationEscalated,
@@ -393,7 +393,9 @@ fn cancellation_request_acknowledgement_and_escalation_are_ordered() {
                 None,
                 lease(1),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "Work attempt transition is not permitted"
     );
 }
 

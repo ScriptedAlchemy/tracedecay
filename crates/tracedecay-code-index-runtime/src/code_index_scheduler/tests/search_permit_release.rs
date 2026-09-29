@@ -509,6 +509,69 @@ async fn map_reporting_search_executor(
     (registry, executor, admitted)
 }
 
+/// A restart mounts its worktree and seats the retained generation before
+/// project open installs the query authority. A search in that window
+/// reports the typed `graph_warming` partial rather than an authority failure
+/// that reads as nothing indexed, and serves once the authority is installed.
+#[tokio::test]
+async fn search_before_the_query_authority_mounts_reports_graph_warming() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let snapshot = latest.generation.snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.search-permit.warming").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.search-permit.warming",
+            )
+            .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope.clone()),
+    );
+
+    let warming = executor(search_request(fixture.path(), None)).await;
+    assert_eq!(
+        unavailable_reason(&warming),
+        Some(CodeIndexSearchUnavailableReasonV1::GraphWarming),
+        "a seated generation without its query authority is warming: {warming:?}"
+    );
+
+    mount_core_query_authority(&registry, fixture.path(), &scope, &latest).await;
+    let CodeIndexSearchOutcomeV1::Complete(served) =
+        executor(search_request(fixture.path(), None)).await
+    else {
+        panic!("search serves once the query authority mounts");
+    };
+    assert_eq!(
+        served
+            .display_by_anchor
+            .values()
+            .map(|display| (display.name.as_str(), display.path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "src/alpha.rs")]
+    );
+    registry.shutdown().await;
+}
+
 /// A search whose dispatch deadline expires shortly after it is issued,
 /// long enough to reach the park each test stages, short enough that the test
 /// observes the settlement rather than the work.

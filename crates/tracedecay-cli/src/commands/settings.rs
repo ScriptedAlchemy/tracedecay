@@ -95,9 +95,11 @@ fn configuration_deadline(
         .map_err(|error| configuration_error(error.to_string()))
 }
 
+/// Invoke one configuration request. A request of profile settings only is
+/// served by the profile's configuration store, so it names no project.
 async fn invoke_configuration_surface(
     profile: &ProfileRoot,
-    project_path: &Path,
+    project_path: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     request: ConfigurationWireRequestV1,
 ) -> tracedecay_domain::errors::Result<ApplicationEnvelope<serde_json::Value>> {
@@ -108,8 +110,8 @@ async fn invoke_configuration_surface(
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(|error| configuration_error(error.to_string()))?;
-    let handshake = super::daemon::client_handshake(profile, Some(project_path))?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let handshake = super::daemon::client_handshake(profile, project_path)?;
+    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)?;
     loop {
         let result = crate::cli::dispatch::resolve_cli_application_surface(
             operation,
@@ -147,7 +149,7 @@ pub(crate) async fn current_configuration_revision(
 ) -> tracedecay_domain::errors::Result<ConfigurationRevisionId> {
     let envelope = invoke_configuration_surface(
         profile,
-        project_path,
+        Some(project_path),
         ApplicationSurfaceOperation::ConfigurationObservedState,
         ConfigurationWireRequestV1::ObservedState(ConfigurationObservedStateRequestV1 {}),
     )
@@ -183,6 +185,16 @@ pub(crate) async fn current_project_setting(
     project_path: &Path,
     key: &str,
 ) -> tracedecay_domain::errors::Result<ConfigurationValueV1> {
+    resolved_setting(profile, Some(project_path), key)
+        .await
+        .map(|setting| setting.effective_value)
+}
+
+async fn resolved_setting(
+    profile: &ProfileRoot,
+    project_path: Option<&Path>,
+    key: &str,
+) -> tracedecay_domain::errors::Result<ResolvedSetting> {
     let key = SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?;
     let envelope = invoke_configuration_surface(
         profile,
@@ -196,20 +208,23 @@ pub(crate) async fn current_project_setting(
             "configuration read returned a non-evidence outcome",
         ));
     };
-    let setting: ResolvedSetting = serde_json::from_value(
+    serde_json::from_value(
         evidence
             .payload
             .ok_or_else(|| configuration_error("configuration read omitted its payload"))?,
     )
-    .map_err(|error| configuration_error(format!("invalid configuration setting: {error}")))?;
-    Ok(setting.effective_value)
+    .map_err(|error| configuration_error(format!("invalid configuration setting: {error}")))
 }
 
+/// The profile's worldwide-counter upload setting, wherever the command runs.
 pub(crate) async fn canonical_upload_enabled(
     profile: &ProfileRoot,
-    project_path: &Path,
 ) -> tracedecay_domain::errors::Result<bool> {
-    match current_project_setting(profile, project_path, USER_UPLOAD_ENABLED_SETTING_KEY).await? {
+    upload_enabled(&resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?)
+}
+
+fn upload_enabled(setting: &ResolvedSetting) -> tracedecay_domain::errors::Result<bool> {
+    match setting.effective_value {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
         _ => Err(configuration_error(
             "worldwide counter upload setting is not boolean",
@@ -258,13 +273,13 @@ pub(crate) async fn mutate_project_configuration(
             }),
         ),
     };
-    let envelope = invoke_configuration_surface(profile, project_path, operation, request).await?;
+    let envelope =
+        invoke_configuration_surface(profile, Some(project_path), operation, request).await?;
     configuration_effect_receipt(envelope, &idempotency_key).map(Some)
 }
 
 async fn mutate_user_configuration(
     profile: &ProfileRoot,
-    project_path: &Path,
     profile_id: &UserProfileId,
     expected_revision: ConfigurationRevisionId,
     mutations: Vec<ConfigurationDirectMutationRequestV1>,
@@ -276,7 +291,7 @@ async fn mutate_user_configuration(
         cli_user_configuration_idempotency_key(profile_id, &expected_revision, &mutations)?;
     let envelope = invoke_configuration_surface(
         profile,
-        project_path,
+        None,
         ApplicationSurfaceOperation::ConfigurationBatch,
         ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
             mutations,
@@ -336,33 +351,24 @@ pub(crate) async fn handle_upload_counter(
     profile: &ProfileRoot,
     enable: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let resolved = super::scope::resolve_project_scope(
-        profile,
-        tracedecay_configuration::resolve_path_with_discovery(profile, None),
-    )
-    .await?;
-    let expected_revision = current_configuration_revision(profile, &resolved.project_path).await?;
-    let current = canonical_upload_enabled(profile, &resolved.project_path).await?;
-    let mutations = if current != enable {
+    let current = resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
+    let profile_id =
+        tracedecay_daemon_identity::profile_identity::load_existing(profile.data_dir())?
+            .profile_id()
+            .clone();
+    let mutations = if upload_enabled(&current)? != enable {
         vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile {
-                profile_id: resolved.profile_id.clone(),
+                profile_id: profile_id.clone(),
             },
-            key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
-                .map_err(|error| configuration_error(error.to_string()))?,
+            key: current.key,
             value: Box::new(ConfigurationValueV1::Boolean(enable)),
         }]
     } else {
         Vec::new()
     };
-    let receipt = mutate_user_configuration(
-        profile,
-        &resolved.project_path,
-        &resolved.profile_id,
-        expected_revision,
-        mutations,
-    )
-    .await?;
+    let receipt =
+        mutate_user_configuration(profile, &profile_id, current.revision_id, mutations).await?;
     if enable {
         eprintln!("Worldwide counter upload enabled.");
     } else {

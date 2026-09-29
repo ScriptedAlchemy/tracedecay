@@ -741,7 +741,9 @@ mod tests {
                 "unexpected": true
             }"#,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `unexpected`")
         );
         assert!(
             serde_json::from_str::<ExactOccurrenceRecord>(
@@ -758,7 +760,9 @@ mod tests {
                 "unexpected": true
             }"#,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `unexpected`")
         );
         assert!(
             serde_json::from_str::<SymbolPrimitiveRecord>(
@@ -776,7 +780,9 @@ mod tests {
                 "unexpected": true
             }"#,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `unexpected`")
         );
         assert!(
             serde_json::from_str::<SymbolPrimitiveRecord>(
@@ -795,7 +801,9 @@ mod tests {
                 "score": null
             }"#,
             )
-            .is_err(),
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `start_line_zero_based`"),
             "zero-based line fields are not part of the symbol record contract"
         );
     }

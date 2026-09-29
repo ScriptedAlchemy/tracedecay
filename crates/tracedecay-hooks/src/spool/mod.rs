@@ -53,7 +53,7 @@ pub use types::{
     HookSpoolResetReasonV1, HookSpoolWriterLeaseV1,
 };
 
-use commit::{CommitLockV1, commit_records};
+use commit::{COMMIT_FILE, CommitLockV1, commit_records};
 use frame::{
     append_frame, decode_complete_frame, encode_frame, encode_spool_payload, scan_records,
     scan_records_from, truncate_records,
@@ -212,6 +212,26 @@ impl HookSpoolV1 {
         })?;
         lease_file.release().map_err(|_| HookSpoolError::Io)?;
         Ok(())
+    }
+
+    /// Retire one exact host spool whose records another durable owner has
+    /// adopted: reset it under the writer lease, then remove its lock members
+    /// and the emptied root.
+    pub fn remove(
+        root: impl Into<PathBuf>,
+        config: HookSpoolConfigV1,
+        now: UtcMicros,
+    ) -> Result<(), HookSpoolError> {
+        let root = root.into();
+        Self::reset(&root, config, now)?;
+        for member in [LEASE_FILE, COMMIT_FILE] {
+            remove_spool_member(&root.join(member))?;
+        }
+        fs::remove_dir(&root).map_err(|_| HookSpoolError::Io)?;
+        let Some(parent) = root.parent() else {
+            return Err(HookSpoolError::UnsafePath);
+        };
+        shared_sync_directory(parent, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
     }
 
     /// Open/recover a bounded spool and acquire the sole writer lease. The OS
@@ -706,6 +726,14 @@ impl HookSpoolV1 {
             .ok_or(HookSpoolError::ReplayClaimUnknown)?;
         self.replay_claims.remove(&session);
         Ok(())
+    }
+
+    /// Every pending record in append order, for adopting this spool's
+    /// contents into another durable owner before [`Self::remove`].
+    pub fn pending_records(&mut self) -> Result<Vec<HookSpoolRecordV1>, HookSpoolError> {
+        self.ensure_healthy()?;
+        let indices = (0..self.pending.len()).collect::<Vec<_>>();
+        self.hydrate_many(&indices)
     }
 
     /// List records whose maximum transport age has elapsed. They remain

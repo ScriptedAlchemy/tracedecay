@@ -27,10 +27,10 @@ fn install_cline(cli: &IsolatedCli) {
     );
 }
 
-/// A Kiro MCP registry that still names TraceDecay, as an older binary or a
-/// removed Kiro install leaves behind.
-fn seed_leftover_kiro_registration(cli: &IsolatedCli) {
-    let path = cli.home.path().join(".kiro/settings/mcp.json");
+/// A Factory Droid MCP registry that still names TraceDecay, as an older
+/// binary or a removed Droid install leaves behind.
+fn seed_leftover_droid_registration(cli: &IsolatedCli) {
+    let path = cli.home.path().join(".factory/mcp.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -83,41 +83,44 @@ pub(super) fn complete_kimi_plugins_install(cli: &IsolatedCli, staged: &Path) {
 fn update_plugin_skips_a_leftover_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
+    seed_leftover_droid_registration(&cli);
 
     let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("cline: refreshed"), "{stderr}");
-    assert!(stderr.contains(KIRO_NOT_INSTALLED), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
-        !tracked_agents(&cli).contains("\"kiro\""),
+        !tracked_agents(&cli).contains("\"droid\""),
         "a skipped leftover host must not become tracked"
     );
 }
 
-fn track_kiro(cli: &IsolatedCli) {
+/// Tracks `agents` beside the installed Cline, as an earlier install would.
+fn track(cli: &IsolatedCli, agents: &[&str]) {
     let config = cli.profile.join("config.toml");
     let tracked = tracked_agents(cli);
+    let listed = agents
+        .iter()
+        .map(|agent| format!(", \"{agent}\""))
+        .collect::<String>();
     fs::write(
         &config,
         tracked.replace(
             "installed_agents = [\"cline\"]",
-            "installed_agents = [\"cline\", \"kiro\"]",
+            &format!("installed_agents = [\"cline\"{listed}]"),
         ),
     )
     .unwrap();
 }
 
-const KIRO_CLI_UNAVAILABLE: &str = "host CLI `kiro-cli` is unavailable for kiro MCP registry \
-     lifecycle; install it or add it to PATH and retry";
+const DROID_CLI_UNAVAILABLE: &str = "host CLI `droid` is unavailable for Factory Droid MCP \
+     registry lifecycle; install it or add it to PATH and retry";
 
-const KIRO_NOT_INSTALLED: &str = "  kiro: skipped, not installed (host CLI `kiro-cli` is \
-     unavailable for kiro MCP registry lifecycle; install it or add it to PATH and retry)\n";
-
-const KIRO_NOT_SIGNED_IN: &str = "kiro: skipped, not signed in (host CLI `kiro-cli` is not \
-     signed in; run `kiro-cli login` to use it)\n";
+const DROID_NOT_INSTALLED: &str = "  droid: skipped, not installed (host CLI `droid` is \
+     unavailable for Factory Droid MCP registry lifecycle; install it or add it to PATH and \
+     retry)\n";
 
 /// A host CLI `program` on the isolated `PATH` running the shell `body`.
 #[cfg(unix)]
@@ -129,54 +132,44 @@ fn install_host_cli(cli: &IsolatedCli, program: &str, body: &str) {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Kiro's CLI while logged out: it refuses every `mcp` command.
+/// Kiro's CLI while signed out, as #2374 found it: it refuses every command
+/// and leaves a mark so a test can prove it never ran.
 #[cfg(unix)]
-const LOGGED_OUT_KIRO_CLI: &str =
-    "echo 'error: You are not logged in, please log in with kiro-cli login' >&2\nexit 1";
-
-/// Kiro's CLI once logged in: `mcp list` answers and `mcp add` registers the
-/// server it names in Kiro's global registry.
-#[cfg(unix)]
-const SIGNED_IN_KIRO_CLI: &str = r#"case "$1 $2" in
-  "mcp add")
-    /bin/mkdir -p "$HOME/.kiro/settings"
-    printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"],"disabled":false}}}\n' "$6" > "$HOME/.kiro/settings/mcp.json"
-    ;;
-esac
-exit 0"#;
+const SIGNED_OUT_KIRO_CLI: &str = "touch \"$HOME/kiro-cli-ran\"\n\
+     echo 'error: You are not logged in, please log in with kiro-cli login' >&2\nexit 1";
 
 #[test]
 fn update_plugin_skips_a_tracked_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
-    track_kiro(&cli);
+    seed_leftover_droid_registration(&cli);
+    track(&cli, &["droid"]);
 
     let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
-    assert!(stderr.contains(KIRO_NOT_INSTALLED), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     let tracked = tracked_agents(&cli);
     assert!(
-        tracked.contains("\"kiro\""),
+        tracked.contains("\"droid\""),
         "a skipped host stays tracked for when it is installed: {tracked}"
     );
 
-    let untrack = cli.run(&["uninstall", "--agent", "kiro"]);
+    let untrack = cli.run(&["uninstall", "--agent", "droid"]);
     let untrack_stderr = self::stderr(&untrack);
     assert_eq!(untrack.status.code(), Some(0), "{untrack_stderr}");
     assert!(
         untrack_stderr.contains(&format!(
-            "  kiro: no longer tracked; the host is not installed, so its host-owned \
-             registration was left in place ({KIRO_CLI_UNAVAILABLE})\n"
+            "  droid: no longer tracked; the host is not installed, so its host-owned \
+             registration was left in place ({DROID_CLI_UNAVAILABLE})\n"
         )),
         "{untrack_stderr}"
     );
     let tracked = tracked_agents(&cli);
     assert!(
-        !tracked.contains("\"kiro\"") && tracked.contains("\"cline\""),
+        !tracked.contains("\"droid\"") && tracked.contains("\"cline\""),
         "the uninstall stops tracking only that host: {tracked}"
     );
 
@@ -184,7 +177,7 @@ fn update_plugin_skips_a_tracked_host_whose_cli_is_not_installed() {
     let after_stderr = self::stderr(&after);
     assert_eq!(after.status.code(), Some(0), "{after_stderr}");
     assert!(
-        after_stderr.contains(KIRO_NOT_INSTALLED),
+        after_stderr.contains(DROID_NOT_INSTALLED),
         "the untracked leftover is skipped, not pending: {after_stderr}"
     );
 }
@@ -266,13 +259,13 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
 fn install_skips_a_named_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
 
-    let output = cli.run(&["install", "--agent", "kiro"]);
+    let output = cli.run(&["install", "--agent", "droid"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains(KIRO_NOT_INSTALLED), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
-        !cli.profile.join("config.toml").exists() || !tracked_agents(&cli).contains("\"kiro\""),
+        !cli.profile.join("config.toml").exists() || !tracked_agents(&cli).contains("\"droid\""),
         "a skipped host is not tracked"
     );
 }
@@ -284,7 +277,7 @@ fn install_skips_a_named_host_whose_cli_is_not_installed() {
 fn post_update_skips_a_tracked_host_without_its_cli_beside_pending_kimi() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    track_kiro(&cli);
+    track(&cli, &["droid"]);
     install_kimi_cli(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
 
@@ -297,7 +290,7 @@ fn post_update_skips_a_tracked_host_without_its_cli_beside_pending_kimi() {
         "{stderr}"
     );
     assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
-    assert!(stderr.contains(KIRO_NOT_INSTALLED), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
         stderr.contains("  kimi: pending operator action: `/plugins install"),
         "{stderr}"
@@ -305,53 +298,79 @@ fn post_update_skips_a_tracked_host_without_its_cli_beside_pending_kimi() {
     assert!(!stderr.contains("reinstall failed for"), "{stderr}");
 }
 
-/// Kiro's CLI installed but logged out, as #2374 reported it: `update-plugin`,
-/// the `post-update` refresh `update` runs, and `doctor` all report it
-/// skipped as not signed in and exit 0; once the CLI admits its commands the
-/// same sweep registers Kiro.
+/// The operator's Kiro registry before TraceDecay touches it: a peer server
+/// and formatting TraceDecay does not own.
+const OPERATOR_KIRO_MCP: &str = "{\n  \"mcpServers\": {\n    \"operator\": {\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }\n  }\n}\n";
+
+/// `OPERATOR_KIRO_MCP` with TraceDecay registered beside the peer server.
+fn kiro_mcp_with_tracedecay(cli: &IsolatedCli) -> String {
+    format!(
+        "{{\n  \"mcpServers\": {{\n    \"operator\": {{\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }},\n    \"tracedecay\": {{\n      \"args\": [\n        \"serve\"\n      ],\n      \"command\": {},\n      \"disabled\": false\n    }}\n  }}\n}}\n",
+        serde_json::to_string(&cli.installed_bin()).unwrap()
+    )
+}
+
+/// #2374: Kiro's CLI installed but signed out. Kiro's MCP registry is the
+/// documented `~/.kiro/settings/mcp.json`, so `install`, `update-plugin`, the
+/// `post-update` refresh `update` runs, `doctor`, and `uninstall` all work on
+/// that file, exit 0, and never run `kiro-cli`.
 #[cfg(unix)]
 #[test]
-fn a_kiro_cli_that_is_not_signed_in_is_skipped_everywhere() {
+fn a_signed_out_kiro_cli_never_blocks_the_kiro_lifecycle() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
-    track_kiro(&cli);
-    install_host_cli(&cli, "kiro-cli", LOGGED_OUT_KIRO_CLI);
+    install_host_cli(&cli, "kiro-cli", SIGNED_OUT_KIRO_CLI);
+    let mcp = cli.home.path().join(".kiro/settings/mcp.json");
+    fs::create_dir_all(mcp.parent().unwrap()).unwrap();
+    fs::write(&mcp, OPERATOR_KIRO_MCP).unwrap();
 
-    let update = cli.run(&["update-plugin"]);
-    let update_stderr = stderr(&update);
-    assert_eq!(update.status.code(), Some(0), "{update_stderr}");
-    assert!(
-        update_stderr.contains(&format!("  {KIRO_NOT_SIGNED_IN}")),
-        "{update_stderr}"
+    let install = cli.run(&["install", "--agent", "kiro"]);
+    let install_stderr = stderr(&install);
+    assert_eq!(install.status.code(), Some(0), "{install_stderr}");
+    assert_eq!(
+        fs::read_to_string(&mcp).unwrap(),
+        kiro_mcp_with_tracedecay(&cli)
     );
 
-    let post_update = cli.run(&["post-update"]);
-    let post_update_stderr = stderr(&post_update);
-    assert_eq!(post_update.status.code(), Some(0), "{post_update_stderr}");
-    assert!(
-        post_update_stderr.contains(&format!("  {KIRO_NOT_SIGNED_IN}")),
-        "{post_update_stderr}"
-    );
+    for refresh in [&["update-plugin"][..], &["post-update"][..]] {
+        let output = cli.run(refresh);
+        let output_stderr = stderr(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{refresh:?}: {output_stderr}"
+        );
+        assert!(
+            output_stderr.contains("  kiro: refreshed\n"),
+            "{output_stderr}"
+        );
+        assert_eq!(
+            fs::read_to_string(&mcp).unwrap(),
+            kiro_mcp_with_tracedecay(&cli)
+        );
+    }
 
     // `post-update` refuses while an unmanaged daemon listens; Doctor reads
     // the daemon's canonical report.
-    let _daemon = ProfileDaemon::start(&cli);
-    let doctor = cli.run(&["doctor"]);
-    let doctor_stderr = stderr(&doctor);
-    assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
-    assert!(
-        doctor_stderr.contains(&format!("  - {KIRO_NOT_SIGNED_IN}")),
-        "{doctor_stderr}"
-    );
+    {
+        let _daemon = ProfileDaemon::start(&cli);
+        let doctor = cli.run(&["doctor"]);
+        let doctor_stderr = stderr(&doctor);
+        assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+        assert!(
+            doctor_stderr.contains(&format!("MCP server registered in {}\n", mcp.display())),
+            "{doctor_stderr}"
+        );
+        assert!(!doctor_stderr.contains("kiro: skipped"), "{doctor_stderr}");
+    }
 
-    install_host_cli(&cli, "kiro-cli", SIGNED_IN_KIRO_CLI);
-    let signed_in = cli.run(&["update-plugin"]);
-    let signed_in_stderr = stderr(&signed_in);
-    assert_eq!(signed_in.status.code(), Some(0), "{signed_in_stderr}");
+    let uninstall = cli.run(&["uninstall", "--agent", "kiro"]);
+    let uninstall_stderr = stderr(&uninstall);
+    assert_eq!(uninstall.status.code(), Some(0), "{uninstall_stderr}");
+    assert_eq!(fs::read_to_string(&mcp).unwrap(), OPERATOR_KIRO_MCP);
     assert!(
-        signed_in_stderr.contains("  kiro: refreshed\n"),
-        "{signed_in_stderr}"
+        !cli.home.path().join("kiro-cli-ran").exists(),
+        "the Kiro lifecycle ran kiro-cli"
     );
 }
 
@@ -395,13 +414,13 @@ impl Drop for ProfileDaemon {
 /// Doctor classifies hosts the way `update-plugin` does: Kimi's pending
 /// `/plugins install` exits 75, a tracked host without its CLI is skipped as
 /// not installed, and the run converges to 0 once the operator installs
-/// Kimi's plugin while Kiro stays tracked and absent.
+/// Kimi's plugin while Droid stays tracked and absent.
 #[cfg(unix)]
 #[test]
 fn doctor_waits_only_on_real_operator_steps_and_skips_absent_hosts() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    track_kiro(&cli);
+    track(&cli, &["droid"]);
     install_kimi_cli(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
     let _daemon = ProfileDaemon::start(&cli);
@@ -418,7 +437,7 @@ fn doctor_waits_only_on_real_operator_steps_and_skips_absent_hosts() {
         "{doctor_stderr}"
     );
     assert!(
-        doctor_stderr.contains(&format!("  - {}", &KIRO_NOT_INSTALLED[2..])),
+        doctor_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{doctor_stderr}"
     );
     assert!(
@@ -438,7 +457,7 @@ fn doctor_waits_only_on_real_operator_steps_and_skips_absent_hosts() {
     let converged_stderr = stderr(&converged);
     assert_eq!(converged.status.code(), Some(0), "{converged_stderr}");
     assert!(
-        converged_stderr.contains(&format!("  - {}", &KIRO_NOT_INSTALLED[2..])),
+        converged_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{converged_stderr}"
     );
     assert!(
@@ -447,22 +466,22 @@ fn doctor_waits_only_on_real_operator_steps_and_skips_absent_hosts() {
     );
 }
 
-/// A tracked Kiro whose CLI is absent is skipped and exits 0; the same Kiro
-/// with a reachable, signed-in CLI and a malformed TraceDecay registration is
-/// an issue and exits 1.
+/// A tracked Droid whose CLI is absent is skipped and exits 0; a tracked Kiro,
+/// which needs no CLI, with a malformed TraceDecay registration is an issue
+/// and exits 1 while Droid stays skipped.
 #[cfg(unix)]
 #[test]
 fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registration() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    track_kiro(&cli);
+    track(&cli, &["droid", "kiro"]);
     let _daemon = ProfileDaemon::start(&cli);
 
     let absent = cli.run(&["doctor"]);
     let absent_stderr = stderr(&absent);
     assert_eq!(absent.status.code(), Some(0), "{absent_stderr}");
     assert!(
-        absent_stderr.contains(&format!("  - {}", &KIRO_NOT_INSTALLED[2..])),
+        absent_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{absent_stderr}"
     );
     assert!(
@@ -470,7 +489,6 @@ fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registratio
         "{absent_stderr}"
     );
 
-    install_host_cli(&cli, "kiro-cli", SIGNED_IN_KIRO_CLI);
     let mcp = cli.home.path().join(".kiro/settings/mcp.json");
     fs::create_dir_all(mcp.parent().unwrap()).unwrap();
     fs::write(&mcp, "{ not valid JSON").unwrap();
@@ -486,7 +504,8 @@ fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registratio
         "{malformed_stderr}"
     );
     assert!(
-        !malformed_stderr.contains("kiro: skipped"),
+        !malformed_stderr.contains("kiro: skipped")
+            && malformed_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{malformed_stderr}"
     );
 }
@@ -501,6 +520,39 @@ fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("cline: failed:"), "{stderr}");
+}
+
+/// A reachable host CLI that refuses the registration: the install fails
+/// with the host CLI's own words, not a TraceDecay filesystem failure
+/// pointing at a source line. An absent host is skipped instead; this is a
+/// host TraceDecay can reach.
+#[cfg(unix)]
+#[test]
+fn install_reports_a_host_cli_refusal_in_the_host_clis_words() {
+    let cli = IsolatedCli::new();
+    install_host_cli(
+        &cli,
+        "droid",
+        r#"case "$1 $2" in
+  "mcp add") echo 'error: the MCP registry is locked by another droid' >&2; exit 1 ;;
+esac
+exit 0"#,
+    );
+
+    let output = cli.run(&["install", "--agent", "droid"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let droid_line = stderr
+        .lines()
+        .find(|line| line.starts_with("  droid: "))
+        .unwrap_or_else(|| panic!("no droid summary line: {stderr}"));
+    assert!(
+        droid_line.starts_with("  droid: failed: ")
+            && droid_line.ends_with("error: the MCP registry is locked by another droid"),
+        "{droid_line}"
+    );
+    assert!(!stderr.contains("filesystem operation failed"), "{stderr}");
 }
 
 #[cfg(unix)]
@@ -548,8 +600,14 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
 
     complete_kimi_plugins_install(&cli, &staged);
 
+    // No daemon listens here, so `daemon_unavailable` is the one step left.
     let doctor = stderr(&cli.run(&["doctor"]));
-    assert!(!doctor.contains("pending operator action"), "{doctor}");
+    assert!(!doctor.contains("open Kimi Code and run"), "{doctor}");
+    assert!(
+        doctor.contains("daemon_unavailable: no TraceDecay daemon is listening")
+            && doctor.contains("1 pending operator action(s), "),
+        "{doctor}"
+    );
     let converged = cli.run(&["update-plugin"]);
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }

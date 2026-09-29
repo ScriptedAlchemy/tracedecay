@@ -26,14 +26,22 @@
 //! whole catalogue up front put ~140 ms on the first scan of every process.
 //! A regex that fails to compile records its [`CredentialRuleSetError`] in the
 //! ruleset, and every scan checks that record before it returns.
+//!
+//! Search caches (the lazy DFA's transition tables) belong to the ruleset's
+//! current holders, not to threads: see [`SearchCachePool`].
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::{Deref, Range};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::thread::ThreadId;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
-use regex::{Captures, Match, Regex};
+use regex_automata::meta::{Cache, Regex};
+use regex_automata::util::captures::Captures;
+use regex_automata::util::iter::Searcher;
+use regex_automata::{Input, Span};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -141,6 +149,149 @@ pub enum CredentialRuleSetError {
 #[derive(Default)]
 struct RuleSetCompilation {
     failure: OnceLock<CredentialRuleSetError>,
+    /// Regexes this load produced; each owns one slot in [`SearchCaches`].
+    regexes: AtomicUsize,
+    caches: Mutex<SearchCachePool>,
+}
+
+/// Search caches for one ruleset, sized to its holders rather than to the
+/// threads that ever scanned.
+///
+/// A regex with an internal cache pool keeps one cache per thread that ever
+/// searched it, for the life of the process. Across a ~200-regex catalogue
+/// that is tens of MB per scanning thread, held after the scan that grew it.
+/// Here each scan takes an idle set and returns it, so single-scan callers
+/// keep one warm set per concurrent scan instead of one per thread; scanning
+/// each record from cold caches would rebuild every lazy DFA per record. A
+/// [`CredentialScanBatchV1`] marks bulk work, whose sets grow with its whole
+/// corpus: once the batch and every scan still running have ended, all idle
+/// sets are freed.
+#[derive(Default)]
+struct SearchCachePool {
+    holders: usize,
+    /// A batch ended; the next time no one holds the ruleset frees every set.
+    drain_when_idle: bool,
+    idle: Vec<SearchCaches>,
+}
+
+/// One cache per regex slot, created on the slot's first search, and the
+/// thread that last scanned with them: a thread that takes back its own set
+/// finds its lazy DFA tables still in that core's cache.
+#[derive(Default)]
+struct SearchCaches {
+    slots: Vec<Option<Cache>>,
+    last_thread: Option<ThreadId>,
+}
+
+impl RuleSetCompilation {
+    fn pool(&self) -> std::sync::MutexGuard<'_, SearchCachePool> {
+        self.caches.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn hold(&self) -> std::sync::MutexGuard<'_, SearchCachePool> {
+        let mut pool = self.pool();
+        pool.holders += 1;
+        pool
+    }
+
+    fn release(&self, caches: Option<SearchCaches>, batch_ended: bool) {
+        let freed = {
+            let mut pool = self.pool();
+            pool.idle.extend(caches);
+            pool.holders = pool.holders.saturating_sub(1);
+            pool.drain_when_idle |= batch_ended;
+            if pool.holders == 0 && std::mem::take(&mut pool.drain_when_idle) {
+                std::mem::take(&mut pool.idle)
+            } else {
+                Vec::new()
+            }
+        };
+        drop(freed);
+    }
+}
+
+/// One scan's exclusive caches, returned to the ruleset when it ends.
+struct CredentialScan<'a> {
+    compilation: &'a RuleSetCompilation,
+    caches: SearchCaches,
+}
+
+impl<'a> CredentialScan<'a> {
+    fn new(compilation: &'a RuleSetCompilation) -> Self {
+        let thread = std::thread::current().id();
+        let mut pool = compilation.hold();
+        let own = pool
+            .idle
+            .iter()
+            .rposition(|caches| caches.last_thread == Some(thread));
+        let mut caches = match own {
+            Some(index) => pool.idle.swap_remove(index),
+            None => pool.idle.pop().unwrap_or_default(),
+        };
+        drop(pool);
+        caches.last_thread = Some(thread);
+        Self {
+            compilation,
+            caches,
+        }
+    }
+
+    /// `None` once `regex` has failed to compile, or when it belongs to
+    /// another ruleset, whose slots these caches do not describe.
+    fn search<'r>(&mut self, regex: &'r RuleRegex) -> Option<(&'r Regex, &mut Cache)> {
+        if !std::ptr::eq(self.compilation, Arc::as_ptr(&regex.compilation)) {
+            return None;
+        }
+        let compiled = regex.get()?;
+        let slots = &mut self.caches.slots;
+        if slots.len() <= regex.slot {
+            slots.resize_with(regex.slot + 1, || None);
+        }
+        let cache = slots[regex.slot].get_or_insert_with(|| compiled.create_cache());
+        Some((compiled, cache))
+    }
+
+    fn is_match(&mut self, regex: &RuleRegex, text: &str) -> bool {
+        self.search(regex).is_some_and(|(compiled, cache)| {
+            compiled
+                .search_half_with(cache, &Input::new(text).earliest(true))
+                .is_some()
+        })
+    }
+}
+
+impl Drop for CredentialScan<'_> {
+    fn drop(&mut self) {
+        self.compilation
+            .release(Some(std::mem::take(&mut self.caches)), false);
+    }
+}
+
+/// Keeps one warm cache set per concurrent scanner of the code-source
+/// ruleset for the duration of one batch, such as one snapshot capture, and
+/// frees them all when the batch and its scans end. A ruleset that failed to
+/// load has no caches to keep, and each scan in the batch reports that
+/// failure itself.
+pub struct CredentialScanBatchV1 {
+    compilation: Option<&'static RuleSetCompilation>,
+}
+
+impl CredentialScanBatchV1 {
+    pub(crate) fn new(set: Option<&'static CredentialPatternSet>) -> Self {
+        let compilation = set.map(|set| &*set.compilation);
+        if let Some(compilation) = compilation {
+            drop(compilation.hold());
+        }
+        Self { compilation }
+    }
+}
+
+impl Drop for CredentialScanBatchV1 {
+    fn drop(&mut self) {
+        if let Some(compilation) = self.compilation {
+            compilation.release(None, true);
+        }
+    }
 }
 
 /// One rule or allowlist regex, compiled on its first evaluation.
@@ -150,6 +301,7 @@ struct RuleRegex {
     source: String,
     compiled: OnceLock<Option<Regex>>,
     compilation: Arc<RuleSetCompilation>,
+    slot: usize,
 }
 
 impl RuleRegex {
@@ -165,6 +317,7 @@ impl RuleRegex {
             source: re2_compatible_regex(source_regex).into_owned(),
             compiled: OnceLock::new(),
             compilation: Arc::clone(compilation),
+            slot: compilation.regexes.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -213,8 +366,26 @@ impl CredentialPatternSet {
         })
     }
 
-    pub(crate) fn keyword_presence(&self, text: &str) -> Vec<bool> {
+    fn keyword_presence(&self, text: &str) -> Vec<bool> {
         self.keyword_matcher.presence(text, &self.patterns)
+    }
+
+    /// Every rule that matched `text`, in rule order, with its admitted
+    /// ranges.
+    pub(crate) fn matched_ranges(
+        &self,
+        text: &str,
+    ) -> Vec<(&CredentialPattern, Vec<Range<usize>>)> {
+        let mut scan = CredentialScan::new(&self.compilation);
+        self.patterns
+            .iter()
+            .zip(self.keyword_presence(text))
+            .filter_map(|(pattern, keywords_present)| {
+                let ranges =
+                    pattern.ranges_when_keywords_present(text, keywords_present, &mut scan);
+                (!ranges.is_empty()).then_some((pattern, ranges))
+            })
+            .collect()
     }
 
     /// Returns `value`, the result of a scan over this ruleset, unless one of
@@ -359,10 +530,11 @@ impl CredentialPattern {
         // rule's precondition and the cheapest possible reject, which is what
         // keeps a 200-rule catalogue affordable inline at ingest.
         let keywords_present = self.keywords_present(text);
+        let mut scan = CredentialScan::new(&self.regex.compilation);
         let matched = keywords_present
-            && self.regex.get().is_some_and(|regex| regex.is_match(text))
+            && scan.is_match(&self.regex, text)
             && !self
-                .ranges_when_keywords_present(text, keywords_present)
+                .ranges_when_keywords_present(text, keywords_present, &mut scan)
                 .is_empty();
         match self.regex.compilation.failure.get() {
             Some(failure) => Err(failure),
@@ -385,53 +557,65 @@ impl CredentialPattern {
     pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
         // Some rules (`sourcegraph-access-token`) accept a bare match that is
         // safe only when their keyword precondition holds.
-        self.ranges_when_keywords_present(text, self.keywords_present(text))
+        let mut scan = CredentialScan::new(&self.regex.compilation);
+        self.ranges_when_keywords_present(text, self.keywords_present(text), &mut scan)
     }
 
-    pub(crate) fn ranges_when_keywords_present(
+    fn ranges_when_keywords_present(
         &self,
         text: &str,
         keywords_present: bool,
+        scan: &mut CredentialScan<'_>,
     ) -> Vec<Range<usize>> {
         if !keywords_present {
             return Vec::new();
         }
-        let Some(regex) = self.regex.get() else {
+        let Some((regex, cache)) = scan.search(&self.regex) else {
             return Vec::new();
         };
         if let Some(min_len) = self.assignment_min_len {
             return credential_assignment_ranges(
                 text,
                 regex,
+                cache,
                 min_len,
                 self.id == SOURCE_ASSIGNMENT_RULE_ID,
-            )
-            .collect();
+            );
         }
-        regex
-            .captures_iter(text)
-            .filter_map(|captures| {
-                let whole = captures.get(0)?;
-                let secret = self.secret(&captures).unwrap_or(whole);
-                self.admits(text, whole, secret).then(|| whole.range())
-            })
+        // Collected before admission: allowlist regexes search through the
+        // same scan, whose caches this iteration borrows.
+        let mut captures = regex.create_captures();
+        let mut searcher = Searcher::new(Input::new(text));
+        let mut found = Vec::new();
+        while let Some(whole) = searcher.advance(|input| {
+            regex.search_captures_with(cache, input, &mut captures);
+            Ok(captures.get_match())
+        }) {
+            let whole = whole.span();
+            found.push((whole, self.secret(&captures).unwrap_or(whole)));
+        }
+        found
+            .into_iter()
+            .filter(|&(whole, secret)| self.admits(text, whole, secret, scan))
+            .map(|(whole, _)| whole.range())
             .collect()
     }
 
     /// Upstream's secret extraction: the named group when a rule declares one,
     /// otherwise the first non-empty capture, otherwise the whole match.
-    fn secret<'t>(&self, captures: &Captures<'t>) -> Option<Match<'t>> {
+    fn secret(&self, captures: &Captures) -> Option<Span> {
         if let Some(group) = self.secret_group {
-            return captures.get(group);
+            return captures.get_group(group);
         }
-        (1..captures.len()).find_map(|index| captures.get(index).filter(|found| !found.is_empty()))
+        (1..captures.group_len())
+            .find_map(|index| captures.get_group(index).filter(|found| !found.is_empty()))
     }
 
-    fn admits(&self, text: &str, whole: Match<'_>, secret: Match<'_>) -> bool {
+    fn admits(&self, text: &str, whole: Span, secret: Span, scan: &mut CredentialScan<'_>) -> bool {
         // Abstention keeps the finding. A score we cannot represent is not
         // evidence that the token is innocent.
         if let Some(threshold) = self.min_entropy_per_mille
-            && let Some(score) = entropy_bits_per_mille(secret.as_str())
+            && let Some(score) = entropy_bits_per_mille(&text[secret.range()])
             && score <= threshold
         {
             return false;
@@ -439,7 +623,7 @@ impl CredentialPattern {
         !self
             .allowlists
             .iter()
-            .any(|allowlist| allowlist.excuses(text, whole, secret))
+            .any(|allowlist| allowlist.excuses(text, whole, secret, scan))
     }
 }
 
@@ -462,25 +646,31 @@ struct CompiledAllowlist {
 }
 
 impl CompiledAllowlist {
-    fn excuses(&self, text: &str, whole: Match<'_>, secret: Match<'_>) -> bool {
+    fn excuses(
+        &self,
+        text: &str,
+        whole: Span,
+        secret: Span,
+        scan: &mut CredentialScan<'_>,
+    ) -> bool {
         // `regexTarget` selects what the *regexes* read. Stopwords always read
         // the secret, upstream included, pointing them at the match would let
         // the keyword that triggered the rule excuse it, so `auth = <secret>`
         // would be waved through by the stopword "auth".
+        let secret = &text[secret.range()];
         let regex_target = match self.target {
-            AllowlistTarget::Secret => secret.as_str(),
-            AllowlistTarget::Match => whole.as_str(),
-            AllowlistTarget::Line => line_containing(text, whole.start()),
+            AllowlistTarget::Secret => secret,
+            AllowlistTarget::Match => &text[whole.range()],
+            AllowlistTarget::Line => line_containing(text, whole.start),
         };
-        let regex_hit = self.regexes.iter().any(|regex| {
-            regex
-                .get()
-                .is_some_and(|regex| regex.is_match(regex_target))
-        });
+        let regex_hit = self
+            .regexes
+            .iter()
+            .any(|regex| scan.is_match(regex, regex_target));
         let stopword_hit = self
             .stopwords
             .iter()
-            .any(|stopword| contains_ignore_ascii_case(secret.as_str(), stopword));
+            .any(|stopword| contains_ignore_ascii_case(secret, stopword));
         if self.all_of {
             (self.regexes.is_empty() || regex_hit) && (self.stopwords.is_empty() || stopword_hit)
         } else {
@@ -965,14 +1155,20 @@ const SOURCE_ASSIGNMENT_RULE_ID: &str = "tracedecay-sensitive-source-assignment-
 /// end rather than accepting whatever a character class happens to cover, so a
 /// value containing punctuation is still redacted whole, and a value whose
 /// closing quote the record truncated is still redacted to the line end.
-fn credential_assignment_ranges<'a>(
-    text: &'a str,
-    prefix: &'a Regex,
+fn credential_assignment_ranges(
+    text: &str,
+    prefix: &Regex,
+    cache: &mut Cache,
     min_len: usize,
     allows_wrapped_source_value: bool,
-) -> impl Iterator<Item = Range<usize>> + 'a {
-    prefix.find_iter(text).filter_map(move |matched| {
-        let prefix_end = matched.end();
+) -> Vec<Range<usize>> {
+    let mut searcher = Searcher::new(Input::new(text));
+    let mut prefixes = Vec::new();
+    while let Some(matched) = searcher.advance(|input| Ok(prefix.search_with(cache, input))) {
+        prefixes.push(matched.span());
+    }
+    let ranges = prefixes.into_iter().filter_map(|matched| {
+        let prefix_end = matched.end;
         let limit = prefix_end
             .saturating_add(MAX_ASSIGNMENT_SCAN_BYTES)
             .min(text.len());
@@ -980,7 +1176,7 @@ fn credential_assignment_ranges<'a>(
         let value_start = if allows_wrapped_source_value {
             match source_assignment_value_start(bytes, prefix_end, limit) {
                 Some(value_start) => value_start,
-                None => return Some(matched.start()..limit),
+                None => return Some(matched.start..limit),
             }
         } else {
             prefix_end
@@ -996,8 +1192,8 @@ fn credential_assignment_ranges<'a>(
             .position(|byte| matches!(*byte, b'\r' | b'\n'))
             .map_or(limit, |offset| value_start + offset);
 
-        if assignment_uses_colon(&matched)
-            && is_obvious_rust_non_secret_value(text, matched.start(), value_start, line_end)
+        if assignment_uses_colon(&text[matched.range()])
+            && is_obvious_rust_non_secret_value(text, matched.start, value_start, line_end)
         {
             return None;
         }
@@ -1013,14 +1209,14 @@ fn credential_assignment_ranges<'a>(
                     if cursor.saturating_sub(raw.content_start) < min_len {
                         return None;
                     }
-                    return Some(matched.start()..cursor + 1 + raw.hash_count);
+                    return Some(matched.start..cursor + 1 + raw.hash_count);
                 }
                 cursor += 1;
             }
 
             // A malformed raw string can continue over line breaks. Do not let
             // an unproved terminator expose its eventual value.
-            return Some(matched.start()..limit);
+            return Some(matched.start..limit);
         }
 
         let quote = bytes
@@ -1069,7 +1265,7 @@ fn credential_assignment_ranges<'a>(
             // Wrapper and constructor forms (for example `Some("secret")`)
             // are not plain values. Redact the rest of the record line rather
             // than stopping just before the wrapped secret.
-            return Some(matched.start()..line_end);
+            return Some(matched.start..line_end);
         }
 
         while !text.is_char_boundary(cursor) {
@@ -1079,15 +1275,16 @@ fn credential_assignment_ranges<'a>(
             return None;
         }
         let end = cursor + usize::from(closed);
-        Some(matched.start()..end)
-    })
+        Some(matched.start..end)
+    });
+    ranges.collect()
 }
 
 /// A bare `key: value` prefix also appears in Rust field and parameter syntax.
 /// Only reject a value when it is plainly a type or a call expression without a
 /// literal: neither form carries credential bytes in the indexed source.
-fn assignment_uses_colon(matched: &Match<'_>) -> bool {
-    matched.as_str().trim_end().ends_with(':')
+fn assignment_uses_colon(matched: &str) -> bool {
+    matched.trim_end().ends_with(':')
 }
 
 fn is_obvious_rust_non_secret_value(
@@ -1499,12 +1696,9 @@ mod tests {
     #[test]
     fn a_first_scan_compiles_only_the_rules_its_text_reaches() {
         let scan = |set: &CredentialPatternSet, text: &str| {
-            set.iter()
-                .zip(set.keyword_presence(text))
-                .filter_map(|(pattern, present)| {
-                    let ranges = pattern.ranges_when_keywords_present(text, present);
-                    (!ranges.is_empty()).then(|| (pattern.id().to_owned(), ranges))
-                })
+            set.matched_ranges(text)
+                .into_iter()
+                .map(|(pattern, ranges)| (pattern.id().to_owned(), ranges))
                 .collect::<Vec<_>>()
         };
         let started = std::time::Instant::now();
@@ -1629,8 +1823,14 @@ mod tests {
     #[test]
     fn wide_word_repetitions_compile_within_the_default_program_limit() {
         let upstream = r"pypi-AgEIcHlwaS5vcmc[\w-]{50,1000}";
-        assert!(Regex::new(upstream).is_err());
-        assert!(Regex::new(&re2_compatible_regex(upstream)).is_ok());
+        assert!(Regex::new(upstream).is_err_and(|error| error.size_limit().is_some()));
+        let translated = Regex::new(&re2_compatible_regex(upstream)).unwrap();
+        let token = format!("pypi-AgEIcHlwaS5vcmc{}", "aZ_9-".repeat(12));
+        assert_eq!(
+            translated.find(&token).map(|found| &token[found.range()]),
+            Some(token.as_str())
+        );
+        assert_eq!(translated.find("pypi-AgEIcHlwaS5vcmcshort"), None);
     }
 
     /// Upstream keywords are a precondition, not a hint. `sourcegraph-access-token`
@@ -1661,15 +1861,13 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let sourcegraph = rule(&compiled, "sourcegraph-access-token");
 
-        assert!(
-            sourcegraph
-                .ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-                .is_empty()
+        assert_eq!(
+            sourcegraph.ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"),
+            Vec::<Range<usize>>::new()
         );
-        assert!(
-            !sourcegraph
-                .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-                .is_empty()
+        assert_eq!(
+            sourcegraph.ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"),
+            vec![18..58]
         );
     }
 

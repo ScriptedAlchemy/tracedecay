@@ -666,7 +666,6 @@ mod registration_tests {
     #[test]
     fn rendered_provenance_stamps_equal_the_passed_generator_commit() {
         const FIXTURE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(FIXTURE_SHA.len(), 40);
         let files = rendered_plugin_files("tracedecay", FIXTURE_SHA).unwrap();
 
         let manifest = &files

@@ -96,14 +96,22 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                             "retained dashboard project belongs to another profile",
                         ));
                     }
-                    Some((server.cg_snapshot().await, server.owner_profile().cloned()))
+                    Some((
+                        server.cg_snapshot().await,
+                        server.owner_profile().cloned(),
+                        server.profile_session_db().cloned(),
+                    ))
                 }
                 None => None,
             };
             graph
-                .map(|(graph, profile)| {
-                    crate::dashboard::dashboard_project_context(&graph, profile.as_ref())
-                        .map(Arc::new)
+                .map(|(graph, profile, profile_sessions)| {
+                    crate::dashboard::dashboard_project_context(
+                        &graph,
+                        profile.as_ref(),
+                        profile_sessions.as_ref(),
+                    )
+                    .map(Arc::new)
                 })
                 .transpose()
         })

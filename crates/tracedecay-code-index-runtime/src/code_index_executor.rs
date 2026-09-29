@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracedecay_contracts::retrieval::LexicalAnchorDropReasonV1;
+use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, SearchDisplayUnavailableV1};
 use tracedecay_query::code_search::{self, CodeIndexSearchDisplayV1};
 use tracedecay_query::retrieval::RetrievalPortError;
+use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
 use tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1;
 
 use crate::code_index_scheduler;
@@ -172,6 +173,22 @@ pub(crate) async fn acquire_execution_permit(
         }
         reason = mcp_search_request_settlement(deadline, cancellation) => Err(reason),
     }
+}
+
+/// How long a search may wait for a restart's retained generation to seat:
+/// half of what its deadline leaves, so the retrieval that runs on the seat
+/// keeps the other half. A request without a deadline declared no wait
+/// budget.
+fn retained_seat_wait_budget(
+    deadline: Option<&tracedecay_contracts::Deadline>,
+) -> std::time::Duration {
+    deadline.map_or(std::time::Duration::ZERO, |deadline| {
+        let remaining_micros = deadline
+            .expires_at
+            .0
+            .saturating_sub(tracedecay_contracts::clock::now_micros().0);
+        std::time::Duration::from_micros(u64::try_from(remaining_micros).unwrap_or(0) / 2)
+    })
 }
 
 pub fn mcp_search_request_termination(
@@ -439,6 +456,24 @@ pub fn code_index_search_display_binding(
     Ok((display, provenance))
 }
 
+/// The chunk an occurrence reads from: a text-lane occurrence names it under
+/// `source_prefix`; a graph-lane occurrence names its symbol, and its evidence
+/// anchor names the chunk the published graph binds that symbol to.
+fn occurrence_chunk_id<'p>(
+    provenance: &'p tracedecay_domain::OccurrenceProvenance,
+    source_prefix: &str,
+) -> Option<&'p str> {
+    let source = provenance.source_occurrence_id.as_str();
+    if source.starts_with("code-graph:") {
+        provenance
+            .retriever_evidence_anchor
+            .as_str()
+            .strip_prefix("code-graph:chunk:")
+    } else {
+        source.strip_prefix(source_prefix)
+    }
+}
+
 pub fn code_index_text_search_display_binding(
     latest: &code_index_scheduler::LatestCodeTextGenerationV1,
     request: &tracedecay_domain::RetrievalRequest,
@@ -471,10 +506,7 @@ pub fn code_index_text_search_display_binding(
         .occurrences
         .iter()
         .find_map(|provenance| {
-            let chunk_id = provenance
-                .source_occurrence_id
-                .as_str()
-                .strip_prefix(&source_prefix)?;
+            let chunk_id = occurrence_chunk_id(provenance, &source_prefix)?;
             (provenance.repository_id.as_ref() == Some(&request.scope.root.repository)
                 && provenance.source_namespace == provenance.freshness.source_namespace
                 && provenance.freshness.compatibility
@@ -675,30 +707,69 @@ where
                     );
                 }
                 if exact_source_bound {
-                    match bounded_by_settlement(
-                        request.deadline.as_ref(),
-                        request.cancellation.as_ref(),
-                        async {
-                            schedulers.query_authority_for_scope(&scope).await.is_none()
-                                && schedulers
+                    let authority_mounted = || async {
+                        schedulers.query_authority_for_scope(&scope).await.is_some()
+                            || matches!(
+                                schedulers
                                     .mount_query_authority_from_project_peer(
                                         &request.project_root,
                                         &scope,
                                     )
+                                    .await,
+                                Ok(true)
+                            )
+                    };
+                    match bounded_by_settlement(
+                        request.deadline.as_ref(),
+                        request.cancellation.as_ref(),
+                        async {
+                            if authority_mounted().await
+                                && schedulers
+                                    .latest_text_serving_freshness_for_scope(&scope)
                                     .await
-                                    .is_err()
+                                    .is_some()
+                            {
+                                return None;
+                            }
+                            // A restart mounts the authority and reopens its
+                            // query owners only once its retained generation
+                            // seats; wait for that seat rather than answer as
+                            // if nothing were indexed.
+                            let seat = schedulers
+                                .wait_for_retained_graph_seat(
+                                    &request.project_root,
+                                    &scope,
+                                    retained_seat_wait_budget(request.deadline.as_ref()),
+                                )
+                                .await;
+                            // Once the authority is mounted, search reports
+                            // its own generation state.
+                            if authority_mounted().await {
+                                return None;
+                            }
+                            match seat {
+                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Seated
+                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Warming => {
+                                    Some(code_index_search_unavailable(
+                                        code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming,
+                                        code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming
+                                            .as_str(),
+                                    ))
+                                }
+                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unpublished
+                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unreachable => {
+                                    Some(code_index_search_unavailable(
+                                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                                        "query_authority_unavailable",
+                                    ))
+                                }
+                            }
                         },
                     )
                     .await
                     {
-                        Ok(false) => (),
-                        Ok(true) => {
-                            return code_index_search_unavailable(
-                                code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                                "query_authority_unavailable",
-                            );
-                        }
-                        Err(outcome) => return outcome,
+                        Ok(None) => (),
+                        Ok(Some(outcome)) | Err(outcome) => return outcome,
                     }
                 }
                 let admission = match admission_provider.admit_current(&scope) {
@@ -1261,11 +1332,10 @@ where
                 };
                 let hydrated_prefix_len = hydrated.results.len();
                 let mut display_by_anchor = HashMap::new();
+                let mut display_unavailable_by_anchor = HashMap::new();
                 let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
                 for result in hydrated.results {
-                    use tracedecay_query::retrieval::hydrate::{
-                        HydrationOutcomeV1, HydrationUnavailableV1,
-                    };
+                    use tracedecay_query::retrieval::hydrate::HydrationOutcomeV1;
 
                     match result.outcome {
                         HydrationOutcomeV1::Complete(display)
@@ -1276,16 +1346,25 @@ where
                                 .insert(result.ranked.candidate.anchor_id.clone(), display);
                             hydrated_candidates.push(result.ranked);
                         }
-                        HydrationOutcomeV1::Unavailable(
-                            HydrationUnavailableV1::AuthorityUnavailable,
-                        ) => {}
-                        HydrationOutcomeV1::Unavailable(_) => {
+                        HydrationOutcomeV1::Unavailable(reason) => {
+                            // A candidate the caller may no longer read is not served.
+                            let Some(omitted) = search_display_unavailable(reason) else {
+                                continue;
+                            };
+                            display_unavailable_by_anchor
+                                .insert(result.ranked.candidate.anchor_id.clone(), omitted);
                             hydrated_candidates.push(result.ranked);
                         }
                     }
                 }
-                hydrated_candidates
-                    .extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
+                // Candidates past the hydrated-results cap are served unhydrated.
+                for ranked in ordered_candidates.into_iter().skip(hydrated_prefix_len) {
+                    display_unavailable_by_anchor.insert(
+                        ranked.candidate.anchor_id.clone(),
+                        SearchDisplayUnavailableV1::BudgetExceeded,
+                    );
+                    hydrated_candidates.push(ranked);
+                }
                 let ordered_candidates = hydrated_candidates;
                 if let Some(reason) = control.request_termination() {
                     return code_index_search_unavailable_for_generation(
@@ -1365,6 +1444,7 @@ where
                         ordered_candidates,
                         query_fallback: executed.authorized.fallback,
                         display_by_anchor,
+                        display_unavailable_by_anchor,
                         next_cursor,
                         coverage,
                         lexical_routes,
@@ -1374,6 +1454,22 @@ where
             label = "daemon.code_index.search"
         ))
     })
+}
+
+/// The typed omission a served candidate carries when its display could not
+/// be hydrated; `None` for a candidate withheld from the page entirely.
+fn search_display_unavailable(
+    reason: HydrationUnavailableV1,
+) -> Option<SearchDisplayUnavailableV1> {
+    match reason {
+        HydrationUnavailableV1::AuthorityUnavailable => None,
+        HydrationUnavailableV1::Incompatible => Some(SearchDisplayUnavailableV1::Incompatible),
+        HydrationUnavailableV1::Stale => Some(SearchDisplayUnavailableV1::Stale),
+        HydrationUnavailableV1::Invalid => Some(SearchDisplayUnavailableV1::Invalid),
+        HydrationUnavailableV1::Internal => Some(SearchDisplayUnavailableV1::Internal),
+        HydrationUnavailableV1::BudgetExceeded => Some(SearchDisplayUnavailableV1::BudgetExceeded),
+        HydrationUnavailableV1::Cancelled => Some(SearchDisplayUnavailableV1::Cancelled),
+    }
 }
 
 /// Count each caller anchor against the sites this response carries: a

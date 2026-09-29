@@ -229,7 +229,10 @@ impl StaticLanguageRegistry {
             // Rust v16 does the same for a `use` in an inline `mod` body and
             // rewrites a call under a block or inline-module glob into the
             // glob's module, marking it so an unbound one stays a caller gap.
-            // Rust v17 gives `const`/`static` initializers their calls.
+            // Rust v17 gives `const`/`static` initializers their calls. Rust
+            // v18 keeps the path or receiver of a call inside macro arguments
+            // and spells in-file `self::`/`super::`/`crate::` calls by their
+            // bare name, so both bind.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -263,12 +266,20 @@ impl StaticLanguageRegistry {
             // calls; Python v7 gives constants, class bodies and arguments,
             // decorators, and default values theirs and module-scope
             // statements a `<module>` init block.
+            // Go v9 emits interface method specs as methods the interface
+            // contains. Java v7, Kotlin and C# v6, and TypeScript v11 (with the
+            // Svelte and Astro scripts it extracts, v7) start a declaration
+            // past its leading annotations, attributes, or decorators, which
+            // `attrs_start_line` keeps, as Rust always has. Java v8 records
+            // call argument counts and declared parameter lists, so a call
+            // binds the one overload that accepts its arguments.
             let extractor_revision = match language.as_str() {
-                "rust" => 17,
-                "typescript" => 10,
-                "go" => 8,
-                "ruby" | "protobuf" | "python" => 7,
-                "sql" | "java" | "dart" | "svelte" | "astro" => 6,
+                "rust" => 18,
+                "typescript" => 11,
+                "go" => 9,
+                "java" => 8,
+                "ruby" | "protobuf" | "python" | "svelte" | "astro" => 7,
+                "sql" | "dart" | "kotlin" | "csharp" => 6,
                 "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
                 _ => 5,
             };
@@ -469,7 +480,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v17");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v18");
 
         assert_eq!(
             registry

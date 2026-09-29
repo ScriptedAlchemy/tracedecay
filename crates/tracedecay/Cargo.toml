@@ -28,7 +28,6 @@ include = [
     "/tests/fixtures/provider_normalization/**",
     "/tests/fixtures/redundancy_eval_labeled.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
-    "/benchmark_data/queries/default.toml",
     "/benchmark_data/claude-observation/**",
     "/benchmark_data/session-temporal/**",
     "/benchmark_data/query-code-index/**",
@@ -378,6 +377,8 @@ tracedecay-query = { path = "../tracedecay-query", features = ["test-helpers"] }
 # defaults) and so the test graph matches the CLI lane plus `test-helpers`.
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers", "test-transport"] }
+# Sealed-generation store fixtures for the maintenance tick's retention tests.
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }

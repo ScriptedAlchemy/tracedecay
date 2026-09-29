@@ -101,6 +101,9 @@ mod tests {
             expires_at: Some(UtcMicros(2 + MAX_WORK_EXPERTISE_CONSENT_LIFETIME_MICROS_V1)),
             allowed_categories: BTreeSet::from([WorkExpertiseCategoryV1::Language]),
         };
-        assert!(consent.validate().is_err());
+        assert_eq!(
+            consent.validate().unwrap_err().to_string(),
+            "enabled work expertise consent is not canonical"
+        );
     }
 }

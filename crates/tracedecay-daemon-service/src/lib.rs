@@ -105,13 +105,14 @@ pub use invocation::{
     GraphToolInvocationV1, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
     HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1,
     LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1, MAX_COALESCED_HOOK_COMPLETIONS,
-    ProjectGraphToolPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredGraphToolOwnerV1, RegisteredRetainedRequestContextError,
-    RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1, admit_registered_hook_orchestration,
-    advisory_cycle_invocation_result, callable_code_request_context,
-    daemon_operation_event_authority, feedback_proximity_invocation_result,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    ProfileConfigurationAuthorityV1, ProjectGraphToolPortV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredGraphToolOwnerV1,
+    RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    admit_registered_hook_orchestration, advisory_cycle_invocation_result,
+    callable_code_request_context, daemon_operation_event_authority, execute_profile_configuration,
+    feedback_proximity_invocation_result, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 pub use mcp_project_registry::DaemonProjectRegistryReadService;
 pub use mcp_workflow_index::DaemonWorkflowIndexReadService;

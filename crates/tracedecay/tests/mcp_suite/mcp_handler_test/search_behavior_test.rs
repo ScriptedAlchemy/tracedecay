@@ -225,3 +225,194 @@ async fn search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed
 
     fixture.harness.shutdown().await;
 }
+
+/// One ledger function per file, so the per-file diversity cap keeps all of
+/// them in the fused set a page walks.
+const LEDGER_FAMILY: [&str; 5] = [
+    "ledger_open",
+    "ledger_close",
+    "ledger_post",
+    "ledger_void",
+    "ledger_audit",
+];
+
+#[tokio::test]
+async fn a_search_cursor_pages_only_the_request_and_operation_that_minted_it() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("search fixture sources");
+        for (value, name) in LEDGER_FAMILY.iter().enumerate() {
+            fs::write(
+                project.join(format!("src/{name}.rs")),
+                format!("pub fn {name}() -> usize {{\n    {value}\n}}\n"),
+            )
+            .expect("write ledger source");
+        }
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production search server");
+    warm_code_index_search(&server, "ledger_open").await;
+    let search = |arguments: Value| {
+        let server = &server;
+        async move {
+            let response =
+                handle_real_server_tool_call(server, "tracedecay_search", arguments).await;
+            serde_json::from_str::<Value>(extract_real_server_text(&response)).expect("search JSON")
+        }
+    };
+
+    let first = search(json!({"query": "ledger", "limit": 2, "format": "json"})).await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("first page continues: {first}"))
+        .to_owned();
+
+    let resized = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_search",
+        json!({"query": "ledger", "limit": 3, "cursor": cursor, "format": "json"}),
+    )
+    .await;
+    let problem = refusal_problem(&resized["result"]);
+    assert_eq!(problem["kind"], "invalid_request", "{resized}");
+    assert_eq!(problem["code"], "cursor.parameter_changed", "{resized}");
+    assert_eq!(
+        problem["message"],
+        "The cursor was issued for a request with a different `limit`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{resized}"
+    );
+
+    let branch_search = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_branch_search",
+        json!({"branch": "master", "query": "ledger", "limit": 2, "cursor": cursor}),
+    )
+    .await;
+    assert_eq!(
+        refusal_problem(&branch_search["result"])["code"],
+        "cursor.invalid",
+        "{branch_search}"
+    );
+
+    let second = search(json!({
+        "query": "ledger", "limit": 2, "cursor": cursor, "format": "json",
+    }))
+    .await;
+    let names = |page: &Value| -> Vec<String> {
+        search_displays(page)
+            .iter()
+            .map(|display| display["name"].as_str().expect("display name").to_owned())
+            .collect()
+    };
+    let (first_names, second_names) = (names(&first), names(&second));
+    assert_eq!(
+        (first_names.len(), second_names.len()),
+        (2, 2),
+        "{first} / {second}"
+    );
+    assert!(
+        second_names
+            .iter()
+            .all(|name| LEDGER_FAMILY.contains(&name.as_str()) && !first_names.contains(name)),
+        "page two repeated page one: {first_names:?} / {second_names:?}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+const UTIL_SOURCE: &str = "\
+pub fn normalize(s: &str) -> String {\n    \
+    s.trim().to_lowercase()\n\
+}\n\
+\n\
+pub fn clamp(v: i64, lo: i64, hi: i64) -> i64 {\n    \
+    if v < lo { lo } else if v > hi { hi } else { v }\n\
+}\n";
+
+const MATH_SOURCE: &str = "\
+use crate::util::clamp;\n\
+\n\
+pub fn normalize_score(v: i64) -> i64 {\n    \
+    clamp(v, 0, 100)\n\
+}\n";
+
+const LIB_SOURCE: &str = "mod math;\nmod util;\n";
+
+fn display(name: &str, file: &str) -> Value {
+    json!({
+        "name": name,
+        "qualified_name": format!("{file}::{name}"),
+        "kind": "function",
+        "path": file,
+    })
+}
+
+/// `clamp` does not contain the query text: the graph lane ranks it as the
+/// callee of `normalize_score`. That candidate is hydrated like the text hits.
+#[tokio::test]
+async fn search_names_every_ranked_symbol_including_graph_reached_callees() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("search fixture sources");
+        fs::write(project.join("src/lib.rs"), LIB_SOURCE).expect("write lib source");
+        fs::write(project.join("src/util.rs"), UTIL_SOURCE).expect("write util source");
+        fs::write(project.join("src/math.rs"), MATH_SOURCE).expect("write math source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production search server");
+    warm_code_index_search(&server, "normalize").await;
+
+    let response = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "normalize", "limit": 5, "format": "json" }),
+    )
+    .await;
+    let page: Value = serde_json::from_str(extract_real_server_text(&response)).expect("JSON");
+    let mut displays = search_displays(&page);
+    displays.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    assert_eq!(
+        displays,
+        vec![
+            display("clamp", "src/util.rs"),
+            display("normalize", "src/util.rs"),
+            display("normalize_score", "src/math.rs"),
+        ],
+        "{page}"
+    );
+    assert!(
+        page["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .all(|row| row.get("display_unavailable").is_none()),
+        "{page}"
+    );
+
+    let rendered = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "normalize", "limit": 5, "format": "markdown" }),
+    )
+    .await;
+    let rendered = extract_real_server_text(&rendered);
+    let mut titles = rendered
+        .lines()
+        .filter_map(|line| line.strip_prefix("- **"))
+        .filter_map(|line| line.split_once("** ("))
+        .map(|(title, _)| title)
+        .collect::<Vec<_>>();
+    titles.sort_unstable();
+    assert_eq!(
+        titles,
+        vec!["clamp", "normalize", "normalize_score"],
+        "{rendered}"
+    );
+
+    fixture.harness.shutdown().await;
+}

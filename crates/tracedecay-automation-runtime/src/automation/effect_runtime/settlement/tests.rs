@@ -1926,7 +1926,13 @@ fn physical_reopen_rejects_a_corrupt_swapped_terminal() {
         &path,
         &serde_json::to_vec_pretty(&corrupt).expect("corrupt fixture bytes"),
     );
-    assert!(reserve_or_replay_blocking(&path, admission).is_err());
+    assert_eq!(
+        reserve_or_replay_blocking(&path, admission)
+            .err()
+            .expect("rejected")
+            .to_string(),
+        "config error: automation application contract is invalid: memory automation durable terminal is inconsistent"
+    );
 }
 
 // The scheduler module itself is unix-only; its request-identity contract
@@ -2598,6 +2604,7 @@ fn durable_abandonment_is_idempotent_after_parent_sync() {
         ReservationResult::Execute { claim, .. } => claim,
         _ => panic!("fresh admission must execute"),
     };
+    assert!(path.exists(), "reservation must persist its journal");
     let cancellation = CancellationSignal::active("abandon.cancel").expect("signal");
     for _ in 0..2 {
         abandon(

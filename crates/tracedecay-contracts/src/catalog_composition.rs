@@ -7,6 +7,7 @@
 //! owner every transport can reach.
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, LazyLock};
 
 use crate::handlers::BoundApplicationHandler;
 use crate::retrieval::catalog::application_catalog_contributions_with;
@@ -36,7 +37,7 @@ pub enum CatalogCompositionError {
 /// Immutable catalog metadata and the application descriptors bound to one
 /// retained canonical dispatcher.
 pub struct ApplicationCatalogComposition<Dispatcher> {
-    snapshot: CatalogSnapshotV1,
+    snapshot: Arc<CatalogSnapshotV1>,
     handlers: ApplicationHandlerDescriptors,
     dispatcher: Dispatcher,
 }
@@ -83,16 +84,29 @@ pub fn compose_application_catalog<Dispatcher>(
 /// Compose the catalog when the retained dispatcher also needs the validated
 /// immutable snapshot for its own binding checks.
 pub fn compose_application_catalog_with<Dispatcher>(
-    dispatcher: impl FnOnce(&CatalogSnapshotV1) -> Dispatcher,
+    dispatcher: impl FnOnce(&Arc<CatalogSnapshotV1>) -> Dispatcher,
 ) -> Result<ApplicationCatalogComposition<Dispatcher>, CatalogCompositionError> {
-    let (snapshot, handlers) =
-        assemble_application_catalog_with(SchemaBodyMaterialization::Materialize)?;
+    let snapshot = Arc::clone(application_catalog_snapshot()?);
+    let handlers = application_handler_descriptors()?;
     let dispatcher = dispatcher(&snapshot);
     Ok(ApplicationCatalogComposition {
         snapshot,
         handlers,
         dispatcher,
     })
+}
+
+/// The process's one catalog snapshot with schema bodies.
+///
+/// Every descriptor behind it is `const`, so it cannot change while the
+/// process runs, and its snapshot was validated against the same handler
+/// descriptors a composition binds. Each composition that assembled its own
+/// kept another full copy of every schema body.
+pub fn application_catalog_snapshot()
+-> Result<&'static Arc<CatalogSnapshotV1>, CatalogCompositionError> {
+    static SNAPSHOT: LazyLock<Result<Arc<CatalogSnapshotV1>, CatalogCompositionError>> =
+        LazyLock::new(|| build_application_catalog_snapshot().map(Arc::new));
+    SNAPSHOT.as_ref().map_err(Clone::clone)
 }
 
 /// Build the immutable catalog snapshot used by transport binding resolution.
@@ -402,19 +416,23 @@ mod tests {
         let composition =
             compose_application_catalog(ParityDispatcher).expect("application composition");
         let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
-        let operation = SurfaceOperationName::new("git_apply").expect("surface operation");
-
-        assert!(
+        let dashboard_use_case = |operation: &str| {
             composition
                 .snapshot()
                 .resolve_binding(
                     &profile,
                     BindingSurface::Dashboard,
-                    &operation,
+                    &SurfaceOperationName::new(operation).expect("surface operation"),
                     1,
                     &BTreeSet::new(),
                 )
-                .is_none()
+                .map(|capability| capability.use_case_id().to_string())
+        };
+
+        assert_eq!(dashboard_use_case("git_apply"), None);
+        assert_eq!(
+            dashboard_use_case("diagnostics_read").as_deref(),
+            Some("use-case.application.primitive.diagnostics-read")
         );
     }
 }

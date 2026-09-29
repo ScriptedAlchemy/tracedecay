@@ -921,7 +921,12 @@ mod tests {
         let decoded = serde_json::from_str::<WorkRetryFailureSelectorV1>(
             r#"{"source":"test","cause":"test_failure","evidence_ref":"test:failure"}"#,
         );
-        assert!(decoded.is_err());
+        assert!(
+            decoded
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown variant `test`")
+        );
     }
 
     #[test]

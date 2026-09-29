@@ -67,7 +67,12 @@ fn telemetry() -> FactOutcomeTelemetry {
 
 #[test]
 fn skill_outcome_requires_an_activation_timestamp() {
-    assert!(skill_outcome(&summary("draft-skill"), 100 * DAY).is_none());
+    let mut record = summary("draft-skill");
+    assert!(skill_outcome(&record, 100 * DAY).is_none());
+    record.activated_at = Some(10 * DAY);
+    let outcome = skill_outcome(&record, 100 * DAY).unwrap();
+    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+    assert_eq!(outcome.days_since_activation, 90);
 }
 
 #[test]

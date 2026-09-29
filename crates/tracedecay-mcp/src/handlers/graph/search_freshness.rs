@@ -59,6 +59,7 @@ fn phase_label(phase: CodeIndexBuildPhaseV1) -> &'static str {
         CodeIndexBuildPhaseV1::BulkCommit => "bulk_commit",
         CodeIndexBuildPhaseV1::IndexBuild => "index_build",
         CodeIndexBuildPhaseV1::Verification => "verification",
+        CodeIndexBuildPhaseV1::GraphPublication => "graph_publication",
         CodeIndexBuildPhaseV1::Ready => "ready",
     }
 }

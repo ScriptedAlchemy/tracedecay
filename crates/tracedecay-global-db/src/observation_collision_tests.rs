@@ -62,7 +62,7 @@ use tracedecay_store::{
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 
 use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -1085,15 +1085,11 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    // Without this, a foreign test thread can cache `Interest::never()` for the
-    // dispatch callsite and make the `runtime_commands == 0` assertions below
-    // pass vacuously; see the helper's documentation.
-    crate::tests::harness::install_tracing_callsite_keepalive();
     let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let first_dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&first_dispatch_trace),
-    });
-    let first_trace_guard = tracing::dispatcher::set_default(&first_dispatch);
+    let first_trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&first_dispatch_trace),
+        });
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -1128,10 +1124,10 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
     let dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&dispatch_trace),
-    });
-    let trace_guard = tracing::dispatcher::set_default(&dispatch);
+    let trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&dispatch_trace),
+        });
     let second = store
         .persist_observation(rewritten_write.clone())
         .await

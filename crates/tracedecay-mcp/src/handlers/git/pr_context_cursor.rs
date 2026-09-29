@@ -1,8 +1,8 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ManifestDigest, RetrievalGrainV1, SessionId, SymbolOccurrenceId, TemporalModeV1,
-    canonical_sha256, sha256_hex_suffix,
+    CursorBindingMismatchV1, CursorBindingV1, ManifestDigest, RetrievalGrainV1, SessionId,
+    SymbolOccurrenceId, TemporalModeV1, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
@@ -158,6 +158,22 @@ pub(super) struct PrContextCursorComparison<'a> {
     pub changes: &'a [GitFileChangeV1],
 }
 
+/// The request parameters a PR-context continuation is minted for.
+pub(super) fn pr_context_request_binding(
+    base_ref: &str,
+    head_ref: &str,
+    maximum_symbols: usize,
+) -> Result<CursorBindingV1> {
+    CursorBindingV1::builder("pr_context")
+        .parameter("base_ref", base_ref)
+        .parameter("head_ref", head_ref)
+        .parameter("maximum_symbols", &maximum_symbols)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind PR context cursor: {error}"),
+        })
+}
+
 /// Why an offered PR-context cursor cannot be honored.
 ///
 /// The distinction is the caller's: a stale cursor means "restart this
@@ -165,6 +181,10 @@ pub(super) struct PrContextCursorComparison<'a> {
 /// both into one opaque config error hides an attempted cross-scope read.
 fn pr_context_cursor_refusal(error: &CursorError) -> TraceDecayError {
     let (reason_code, detail) = match error {
+        CursorError::Binding(mismatch) => return crate::tool_errors::cursor_refusal(mismatch),
+        CursorError::Malformed => {
+            return crate::tool_errors::cursor_refusal(&CursorBindingMismatchV1::Foreign);
+        }
         // Authentication and binding failures: the cursor verifies as some
         // other request's, or as nobody's. Either way this request may not
         // continue from it.
@@ -182,7 +202,6 @@ fn pr_context_cursor_refusal(error: &CursorError) -> TraceDecayError {
         // Everything else means the snapshot this cursor froze has moved on,
         // so the page set it names no longer exists.
         CursorError::WrongRequest
-        | CursorError::Malformed
         | CursorError::Expired
         | CursorError::KeyUnavailable
         | CursorError::FilterMismatch
@@ -343,9 +362,10 @@ fn pr_context_cursor_snapshot(
 pub(super) fn decode_pr_context_cursor(
     encoded: &str,
     snapshot: &TemporalExecutionSnapshot,
+    binding: &CursorBindingV1,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<PrContextCursorPosition> {
-    let sort_key = verify_cursor(encoded, snapshot, authenticator)
+    let sort_key = verify_cursor(encoded, snapshot, binding, authenticator)
         .map_err(|error| pr_context_cursor_refusal(&error))?;
     let key: PrContextCursorKey<'_> =
         serde_json::from_str(&sort_key.stable_id).map_err(|_| TraceDecayError::Config {
@@ -370,6 +390,7 @@ pub(super) fn encode_pr_context_cursor(
     direct_call_edges_admitted: usize,
     impact_bytes_admitted: usize,
     snapshot: &TemporalExecutionSnapshot,
+    binding: &CursorBindingV1,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<String> {
     let stable_id = serde_json::to_string(&PrContextCursorKey {
@@ -383,6 +404,7 @@ pub(super) fn encode_pr_context_cursor(
     })?;
     encode_cursor(
         snapshot,
+        binding,
         &StableSortKey {
             normalized_score_micros: 0,
             knowledge_at_micros: 0,
@@ -411,6 +433,10 @@ mod tests {
             key_id: SessionCursorKeyIdV1::new("key.pr-context.fixture").expect("key id"),
             version: SessionCursorVersionV1::new(1).expect("key version"),
         }
+    }
+
+    fn test_request_binding() -> CursorBindingV1 {
+        pr_context_request_binding("main", "HEAD", 200).expect("request binding")
     }
 
     fn authenticator() -> InMemoryCursorAuthenticator {
@@ -497,11 +523,19 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &snapshot, &authenticator)
-                .expect("cursor issues");
-        let decoded = decode_pr_context_cursor(&encoded, &snapshot, &authenticator)
-            .expect("its own cursor decodes");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &snapshot,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
+        let decoded =
+            decode_pr_context_cursor(&encoded, &snapshot, &test_request_binding(), &authenticator)
+                .expect("its own cursor decodes");
 
         assert_eq!(decoded.after.as_str(), after.as_str());
         assert_eq!(decoded.impact_nodes_admitted, nodes);
@@ -536,12 +570,24 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &left_snapshot, &authenticator)
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &left_snapshot,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
 
-        let refusal = decode_pr_context_cursor(&encoded, &right_snapshot, &authenticator)
-            .expect_err("a cursor from a different root must not decode");
+        let refusal = decode_pr_context_cursor(
+            &encoded,
+            &right_snapshot,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect_err("a cursor from a different root must not decode");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),
@@ -570,12 +616,20 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &theirs, &authenticator)
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &theirs,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
 
-        let refusal = decode_pr_context_cursor(&encoded, &mine, &authenticator)
-            .expect_err("a foreign project's cursor must not decode");
+        let refusal =
+            decode_pr_context_cursor(&encoded, &mine, &test_request_binding(), &authenticator)
+                .expect_err("a foreign project's cursor must not decode");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),
@@ -598,14 +652,22 @@ mod tests {
         let snapshot = snapshot_for(&binding);
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &snapshot, &authenticator())
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &snapshot,
+            &test_request_binding(),
+            &authenticator(),
+        )
+        .expect("cursor issues");
 
         let foreign_store =
             InMemoryCursorAuthenticator::new(cursor_key(), vec![9_u8; 32]).expect("foreign key");
-        let refusal = decode_pr_context_cursor(&encoded, &snapshot, &foreign_store)
-            .expect_err("a foreign store's key must not verify");
+        let refusal =
+            decode_pr_context_cursor(&encoded, &snapshot, &test_request_binding(), &foreign_store)
+                .expect_err("a foreign store's key must not verify");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),
@@ -637,12 +699,24 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &before, &authenticator)
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &before,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
 
-        let refusal = decode_pr_context_cursor(&encoded, &after_change, &authenticator)
-            .expect_err("a moved comparison must refuse its old cursor");
+        let refusal = decode_pr_context_cursor(
+            &encoded,
+            &after_change,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect_err("a moved comparison must refuse its old cursor");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_invalid"),
@@ -679,12 +753,24 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &opened, &authenticator)
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &opened,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
 
-        let decoded = decode_pr_context_cursor(&encoded, &continued, &authenticator)
-            .expect("the same checkout on another branch must continue its own pagination");
+        let decoded = decode_pr_context_cursor(
+            &encoded,
+            &continued,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("the same checkout on another branch must continue its own pagination");
         assert_eq!(decoded.after.as_str(), after.as_str());
     }
 
@@ -787,12 +873,20 @@ mod tests {
         let authenticator = authenticator();
         let (after, nodes, edges, bytes) = position();
 
-        let encoded =
-            encode_pr_context_cursor(&after, nodes, edges, bytes, &theirs, &authenticator)
-                .expect("cursor issues");
+        let encoded = encode_pr_context_cursor(
+            &after,
+            nodes,
+            edges,
+            bytes,
+            &theirs,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect("cursor issues");
 
-        let refusal = decode_pr_context_cursor(&encoded, &mine, &authenticator)
-            .expect_err("a foreign store's cursor must not decode");
+        let refusal =
+            decode_pr_context_cursor(&encoded, &mine, &test_request_binding(), &authenticator)
+                .expect_err("a foreign store's cursor must not decode");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),
@@ -848,12 +942,18 @@ mod tests {
             edges,
             bytes,
             &project_binding,
+            &test_request_binding(),
             &authenticator,
         )
         .expect("cursor issues");
 
-        let refusal = decode_pr_context_cursor(&encoded, &session_binding, &authenticator)
-            .expect_err("the project shard's cursor must not decode against the session shard");
+        let refusal = decode_pr_context_cursor(
+            &encoded,
+            &session_binding,
+            &test_request_binding(),
+            &authenticator,
+        )
+        .expect_err("the project shard's cursor must not decode against the session shard");
         assert_eq!(
             refusal.project_route_context().map(|(reason, _, _)| reason),
             Some("pr_context_cursor_denied"),

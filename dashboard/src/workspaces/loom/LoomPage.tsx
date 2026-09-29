@@ -328,6 +328,7 @@ function TemporalBody({
       case 'commit':
       case 'file_edit':
       case 'pull_request':
+      case 'test_run':
         if (node.laneId !== selectedLane?.id) onSelect(node.laneId);
         return;
       default: {
@@ -456,7 +457,8 @@ function TemporalBody({
                   ? 'unavailable'
                   : `${hierarchy.truncated ? 'partial' : 'loaded'} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}
               . Tool calls and pull requests sit on every lane at the time their host
-              recorded them. A fork leaves the parent on its spawning tool call, graded
+              recorded them; a managed test run sits on the lane of the session that
+              requested it, at its recorded start, with its recorded outcome. A fork leaves the parent on its spawning tool call, graded
               exact, when the host recorded that call; otherwise it leaves at the child
               session&apos;s recorded start, graded inferred. A
               session row and the subagent tree that disagree are both drawn, ambiguous.

@@ -80,7 +80,11 @@ pub async fn run_serve(
         ));
     }
     let handshake = proxy_serve_handshake(profile, path_arg, original_cwd.as_deref(), timings)?;
-    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await
+    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None)
+        .await
+        .map_err(|error| {
+            tracedecay_daemon_control::with_unavailable_daemon_advice(profile, &socket_path, error)
+        })
 }
 
 /// Builds daemon routing metadata without opening a project or global

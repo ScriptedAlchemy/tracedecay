@@ -567,52 +567,63 @@ fn cross_file_edges_require_path_binding_evidence() {
     }));
 }
 
+/// A full build retains no parse tree; an increment retains the files it
+/// re-extracts, and the next increment editing one of them reparses only the
+/// changed region.
 #[test]
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("production owner");
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.1",
-                1_100_000,
-                "commit.retained.1",
-                "tree.retained.1",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 2 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("initial generation");
+    let build = |owner: &mut CodeIndexProductionOwnerV1<
+        SharedPublicationStore,
+        ApplyingProjectionSink,
+    >,
+                 ordinal: i64,
+                 edited: u32| {
+        owner
+            .build_and_publish(
+                request_with_source(
+                    &format!("file.retained.{ordinal}"),
+                    1_000_000 + ordinal * 100_000,
+                    &format!("commit.retained.{ordinal}"),
+                    &format!("tree.retained.{ordinal}"),
+                    &format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n"),
+                ),
+                &ActiveControl,
+            )
+            .expect("generation");
+    };
+    build(&mut owner, 1, 2);
+    let cold = owner.retained_parse_stats();
+    assert_eq!(cold.initial_parses, 1);
+    assert_eq!(cold.full_extractions, 1);
+    assert_eq!(cold.retained_documents, 0);
     let initial_clone_stats = owner.physical_artifact_pool_stats();
     assert_eq!(initial_clone_stats.clone_payloads_computed, 2);
     assert_eq!(initial_clone_stats.clone_payloads_reused, 0);
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.retained.2",
-                1_200_000,
-                "commit.retained.2",
-                "tree.retained.2",
-                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 20 }\n",
-            ),
-            &ActiveControl,
-        )
-        .expect("incremental generation");
 
+    build(&mut owner, 2, 20);
+    let first_increment = owner.retained_parse_stats();
+    assert_eq!(first_increment.initial_parses, 2);
+    assert_eq!(first_increment.incremental_parses, 0);
+    assert_eq!(first_increment.full_extractions, 2);
+    assert_eq!(first_increment.retained_documents, 1);
+
+    build(&mut owner, 3, 200);
     let stats = owner.retained_parse_stats();
-    assert_eq!(stats.initial_parses, 1);
+    assert_eq!(stats.initial_parses, 2);
     assert_eq!(stats.incremental_parses, 1);
-    assert_eq!(stats.full_extractions, 1);
+    assert_eq!(stats.full_extractions, 2);
     assert_eq!(stats.incremental_extractions, 1);
     assert_eq!(stats.reset_extractions, 0);
     assert_eq!(stats.retained_documents, 1);
-    assert!(stats.changed_bytes < 60);
-    assert!(stats.visited_top_level_nodes <= 3);
-    assert!(stats.extracted_bytes < 120);
+    assert!(stats.changed_bytes - first_increment.changed_bytes < 60);
+    assert!(stats.visited_top_level_nodes - first_increment.visited_top_level_nodes <= 3);
+    assert!(stats.extracted_bytes - first_increment.extracted_bytes < 120);
     let clone_stats = owner.physical_artifact_pool_stats();
-    assert_eq!(clone_stats.clone_payloads_reused, 1);
-    assert_eq!(clone_stats.clone_payloads_computed, 3);
+    assert_eq!(clone_stats.clone_payloads_reused, 2);
+    assert_eq!(clone_stats.clone_payloads_computed, 4);
 }
 
 /// Carry-forward rematerialize already succeeds for unchanged files, including
@@ -2985,22 +2996,22 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:263b1d5245c7039b8d1b4c43e7c9f1599c07a31c502ecc68b555991e3b0ff002";
+    "sha256:b7772b8c54a3ea5402b8167ba6b9a2e511e061f4e4ad329eb90cbcf8d40e6c1d";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:158da97356f02049fec96234544bdfe3027b3720768b265faebe059281a2322c",
-        1_735,
+        "sha256:3bb9509e6da5059d42c95f1e9499e2748e4fd62b5c9769dccbb02b1cf59e73c6",
+        1_733,
     ),
     (
-        "sha256:c1744b97e4cb61385a0bf50b4e2bf344cda1c4a03a821d3d365f8c681f1c511c",
-        1_261,
+        "sha256:e0e8d620ecc318c46472c3460f68d5d032c9c3d181f178d74757088d9ec84789",
+        1_260,
     ),
     (
-        "sha256:71ef46da26055702b3a7b5e9a8e7c3974c33df4c50efd7d66774e39e96f734b8",
-        1_309,
+        "sha256:aac76c651bf6ccbff6126e90d328de197c94c093a899ba39cff2ed70e75c4eda",
+        1_311,
     ),
     (
-        "sha256:a6f1728edf9c6b811f809f55e1bbc87966f9eb9b92a1108ee6c5505d03b66263",
+        "sha256:32e117c10b482fa98155a5c2f0a35262f2ef2d04fa30d359cd59f01740f3f82d",
         2_837,
     ),
 ];
@@ -3349,6 +3360,18 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/partitioned_pre_paging");
     let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+    let historical: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("historical manifest json");
+    let retired = u32::try_from(
+        historical["generation"]["format_revision"]
+            .as_u64()
+            .expect("historical format revision"),
+    )
+    .expect("historical format revision fits u32");
+    assert!(
+        retired < SEALED_GENERATION_FORMAT_REVISION_V1,
+        "the archival carrier must stay behind the revision this build serves"
+    );
     let expected =
         std::fs::read(fixture.join("expected-generation.json")).expect("historical generation");
     let provenance: serde_json::Value = serde_json::from_slice(
@@ -3436,7 +3459,8 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
         assert!(
             matches!(
                 error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == retired
             ),
             "retired carrier reached the wrong rejection: {error}"
         );
@@ -3580,6 +3604,9 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
 #[test]
 fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
     let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
 
     for census in [true, false] {
         let mut retired: serde_json::Value =
@@ -3587,7 +3614,7 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
         let payload = retired["generation"]
             .as_object_mut()
             .expect("generation payload");
-        payload.insert("format_revision".to_owned(), serde_json::json!(7));
+        payload.insert("format_revision".to_owned(), serde_json::json!(previous));
         if !census {
             payload
                 .remove("statistics")
@@ -3607,9 +3634,10 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
         assert!(
             matches!(
                 error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == previous
             ),
-            "a revision-seven manifest with census={census} reached the wrong rejection: {error}"
+            "the previous revision with census={census} reached the wrong rejection: {error}"
         );
     }
 }
@@ -3621,12 +3649,15 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
 #[test]
 fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
     let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
     let mut retired: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
     let payload = retired["generation"]
         .as_object_mut()
         .expect("generation payload");
-    payload.insert("format_revision".to_owned(), serde_json::json!(10));
+    payload.insert("format_revision".to_owned(), serde_json::json!(previous));
     retired["state_digest"] = serde_json::json!(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(
@@ -3641,9 +3672,10 @@ fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
     assert!(
         matches!(
             error,
-            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(10)
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                if revision == previous
         ),
-        "revision-10 reached the wrong rejection: {error}"
+        "the previous revision reached the wrong rejection: {error}"
     );
 }
 

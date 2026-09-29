@@ -510,33 +510,97 @@ fn ruby_constant_calls_bind_through_require_relative_chains() {
     );
 }
 
+/// Rust's `main.rs` calls through a grouped crate-name
+/// `use fixture::{compat, legacy, report, shapes}` inside `println!`
+/// arguments, which bind like the same calls outside a macro.
 #[test]
-fn typescript_graph_keeps_its_bindings() {
-    let graph = CallGraphV1::new("typescript", typescript());
-    assert_eq!(graph.calls(), bindable_calls());
+fn typescript_and_rust_graphs_keep_their_bindings() {
+    for (language, symbols) in [("typescript", typescript()), ("rust", rust())] {
+        let graph = CallGraphV1::new(language, symbols);
+        assert_eq!(graph.calls(), bindable_calls(), "{language}");
+    }
 }
 
-/// `main.rs` reaches the library's modules through a grouped crate-name
-/// `use fixture::{compat, legacy, report, shapes}`, whose `report::summary`
-/// calls the Rust resolver does not bind yet; every other call binds and no
-/// call binds a wrong target.
+/// A Java call binds the one overload whose parameters accept its argument
+/// count, within the file and across files; overloads the count cannot tell
+/// apart (equal arity, a variadic tail) leave the call a disclosed gap.
 #[test]
-fn rust_graph_keeps_its_bindings() {
-    let graph = CallGraphV1::new("rust", rust());
-    let crate_name_module_calls = [
-        ("main", "summary"),
-        ("main", "upgrade"),
-        ("main", "area"),
-        ("main", "perimeter"),
-        ("main", "old_format"),
-    ];
-    assert_eq!(
-        graph.calls(),
-        bindable_calls()
-            .into_iter()
-            .filter(|call| !crate_name_module_calls.contains(call))
-            .collect()
+fn java_calls_bind_the_overload_their_argument_count_selects() {
+    let generation = publish_fixture_tree(
+        &Path::new(FIXTURE_ROOT).join("../java-overloads"),
+        "java-overloads",
     );
+    let symbols = &generation.symbols().symbols;
+    let at = |name: &str, line: u32| {
+        symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name.ends_with(name) && symbol.start_line == line)
+            .unwrap_or_else(|| panic!("missing {name} at line {line}"))
+    };
+    let roles = [
+        ("run", at("Caller::run", 3)),
+        ("notNull(obj)", at("Validate::notNull", 3)),
+        ("notNull(obj, msg)", at("Validate::notNull", 7)),
+        ("check(int)", at("Validate::check", 13)),
+        ("check(String)", at("Validate::check", 15)),
+        ("format(pattern, args...)", at("Validate::format", 17)),
+        ("format(pattern, arg)", at("Validate::format", 21)),
+        ("selfCheck", at("Validate::selfCheck", 25)),
+    ];
+    let role = |occurrence: &SymbolOccurrenceId| {
+        roles
+            .iter()
+            .find(|(_, symbol)| &symbol.occurrence == occurrence)
+            .map(|(role, _)| *role)
+    };
+    let calls = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.kind == RelationEdgeKindV1::Calls)
+        .filter_map(|edge| Some((role(&edge.from_occurrence)?, role(&edge.to_occurrence)?)))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        calls,
+        BTreeSet::from([
+            ("notNull(obj)", "notNull(obj, msg)"),
+            ("run", "notNull(obj)"),
+            ("run", "notNull(obj, msg)"),
+            ("run", "format(pattern, args...)"),
+        ])
+    );
+    assert_eq!(
+        disclosed_gaps(&generation, "src/app/Caller.java"),
+        BTreeSet::from(["Validate.check".to_owned(), "Validate.format".to_owned()])
+    );
+    assert_eq!(
+        disclosed_gaps(&generation, "src/app/Validate.java"),
+        BTreeSet::from(["check".to_owned()])
+    );
+    let reader = reader(&generation);
+    for (name, partial) in [
+        ("notNull(obj)", false),
+        ("notNull(obj, msg)", false),
+        ("check(int)", true),
+        ("check(String)", true),
+        ("format(pattern, arg)", true),
+    ] {
+        let symbol = roles
+            .iter()
+            .find(|(role, _)| *role == name)
+            .expect("role")
+            .1;
+        assert_eq!(
+            reader
+                .has_unresolved_callers(
+                    std::slice::from_ref(&symbol.occurrence),
+                    None,
+                    Arc::new(NeverCancelled)
+                )
+                .expect("unresolved caller probe"),
+            partial,
+            "callers({name}) discloses a gap"
+        );
+    }
 }
 
 /// The retained call sites the seal discloses as gaps inside `file`.

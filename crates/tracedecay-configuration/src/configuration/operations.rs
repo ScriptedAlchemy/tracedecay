@@ -895,7 +895,7 @@ mod tests {
         );
 
         let key =
-            SettingKey::new(tracedecay_domain::configuration::USER_UPLOAD_ENABLED_SETTING_KEY)
+            SettingKey::new(tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)
                 .unwrap();
         let expected = registry.definition(&key).unwrap().default_value.clone();
         let actor = AuthorizedActor {
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(resolved.effective_value, expected);
         assert_eq!(
             resolved.effective_value,
-            ConfigurationValueV1::Boolean(false)
+            ConfigurationValueV1::Unsigned(7_000)
         );
         assert!(
             resolved.candidates.is_empty(),

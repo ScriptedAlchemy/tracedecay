@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
@@ -14,7 +15,7 @@ use tracedecay_contracts::retrieval::{
     ContextSurfaceRequestV1, LexicalAnchorDropReasonV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
+use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
 
 use crate::McpToolContext;
 #[cfg(test)]
@@ -79,6 +80,17 @@ struct ContextGraphProjection {
     touched_files: Vec<String>,
 }
 
+/// Whether only the graph lane ranked this candidate. Such a candidate is a
+/// neighbor of the task's matches, not a match; context ranks the neighbors
+/// of its matches itself.
+fn graph_lane_only(ranked: &RankedCandidate) -> bool {
+    let contributions = &ranked.candidate.contributions;
+    !contributions.is_empty()
+        && contributions
+            .iter()
+            .all(|contribution| contribution.retriever == RetrieverKind::Graph)
+}
+
 fn context_search_matches(
     complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
@@ -86,6 +98,7 @@ fn context_search_matches(
     complete
         .ordered_candidates
         .iter()
+        .filter(|ranked| !graph_lane_only(ranked))
         .filter_map(|ranked| {
             let display = complete
                 .display_by_anchor
@@ -146,7 +159,11 @@ fn context_graph_projection(
     max_code_blocks: usize,
 ) -> Result<ContextGraphProjection> {
     let mut selected = Vec::new();
-    for ranked in &complete.ordered_candidates {
+    for ranked in complete
+        .ordered_candidates
+        .iter()
+        .filter(|ranked| !graph_lane_only(ranked))
+    {
         let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
             continue;
         };
@@ -259,13 +276,14 @@ fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
 }
 
 #[hotpath::measure(label = "mcp.graph.context.total")]
-pub async fn compute_context<F>(
+pub async fn compute_context<G, F>(
     ctx: &McpToolContext<'_>,
-    graph: F,
+    open_graph: G,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<GraphToolCompletionV1>
 where
+    G: Fn() -> F,
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
     let search_executor = ctx.code_index_search_executor();
@@ -315,8 +333,25 @@ where
         },
     );
     let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
+    let graph_refused_early = AtomicBool::new(false);
+    let graph = async {
+        let graph = open_graph().await;
+        graph_refused_early.store(graph.is_err(), Ordering::Relaxed);
+        graph
+    };
     let search_and_graph = race_primary_search_with_graph(search, graph, false, None, include_code);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
+    // A graph open refused while search was still waiting for a restart's
+    // retained generation to seat saw the unseated graph; a complete search
+    // proves that seat, so the graph is read again rather than answered empty.
+    let graph = match (&outcome, graph) {
+        (tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(_), Err(_))
+            if graph_refused_early.load(Ordering::Relaxed) =>
+        {
+            open_graph().await
+        }
+        (_, graph) => graph,
+    };
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.
     let freshness_payload = ctx.freshness().await;

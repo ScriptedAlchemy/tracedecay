@@ -21,73 +21,6 @@ static HOST_ADMISSION_TEST_BACKGROUND_CPU: OnceLock<
     Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 > = OnceLock::new();
 
-#[cfg(test)]
-static TRACING_CALLSITE_KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::new();
-
-/// Pins every `tracing` callsite in this test binary to `Interest::sometimes`
-/// so per-test `Dispatch` censuses stay thread-isolated.
-///
-/// `tracing_core` caches callsite interest **process-globally**, and computes
-/// it from `Dispatchers::rebuilder()`. While at most one `Dispatch` is
-/// registered, that rebuilder takes the `Rebuilder::JustOne` fast path, which
-/// asks *the current thread's* default subscriber. Callsites register lazily on
-/// first execution, so under `--test-threads=N` an unrelated test that reaches
-/// `tracedecay::observation_admission_work` first, on a thread with no scoped
-/// dispatcher, i.e. `NoSubscriber`, permanently caches `Interest::never()` for
-/// that callsite. Every later census then observes zero events and reports work
-/// that did happen as work that did not: `persist_observations_dispatches_one_
-/// runtime_command_independent_of_batch_size` saw `runtime_commands == 0`, and
-/// the collision tests' `runtime_commands == 0` assertions passed vacuously.
-///
-/// Registering two permanently-live dispatchers makes `has_just_one` false for
-/// the life of the process, so interest is always folded over the real
-/// registry instead of one arbitrary thread's default. Both keepalives claim
-/// `Interest::sometimes()` for every callsite, which folds to `sometimes`
-/// against any other subscriber, meaning enablement is decided per event by
-/// the *calling thread's* dispatcher, exactly the isolation these censuses
-/// assume. Constructing them also rebuilds the interest cache, repairing any
-/// callsite already poisoned before the first census ran.
-///
-/// This is test-only observability plumbing; it changes no production path.
-#[cfg(test)]
-pub(crate) fn install_tracing_callsite_keepalive() {
-    struct AlwaysConsultThreadDispatch;
-
-    impl tracing::Subscriber for AlwaysConsultThreadDispatch {
-        fn register_callsite(
-            &self,
-            _metadata: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::sometimes()
-        }
-
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            false
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, _event: &tracing::Event<'_>) {}
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    TRACING_CALLSITE_KEEPALIVE.get_or_init(|| {
-        [
-            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
-            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
-        ]
-    });
-}
-
 pub struct RegisteredGlobalDbHarness {
     pub registered: RegisteredGlobalDbLeaseV1,
     /// Retains the shared database runtime slot so concurrent remounts
@@ -805,6 +738,12 @@ impl HostAdmissionTestRuntimeV1 {
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_owned(),
+                    message: error.to_string(),
+                },
+            )?
             .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
                 operation: "seed registered session message fixture".to_owned(),
                 message: format!(
@@ -832,10 +771,15 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
     {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .get_session(provider, session_id)
-            .await)
+            .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "load registered session".to_owned(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     pub async fn transcript_store_counts_for_test(

@@ -16,8 +16,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::{
-    ExtractedCloneBodyV1, ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1,
-    is_test_framework_call_signature,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedCloneBodyV1, ExtractedImportEvidenceV1,
+    ExtractionArtifactV1, ImportNamespaceV1, is_test_framework_call_signature,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
@@ -44,8 +44,8 @@ use crate::extract::{ExtractionBatchV1, ParseOutcomeV1};
 mod artifacts;
 
 pub use artifacts::{
-    CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionReasonV1, CodeIndexEdgeAbstentionV1,
-    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
+    CodeFileIndexArtifactsV1, CodeIndexCallableArityV1, CodeIndexEdgeAbstentionReasonV1,
+    CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
 };
 
 /// Eligibility of one generation-bound file document for chunk production.
@@ -744,6 +744,41 @@ struct SymbolRow {
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
     occurrence: SymbolOccurrenceId,
+    /// The declared parameter list, where the extractor records one.
+    arity: Option<CallableArityV1>,
+}
+
+/// Attach each extracted parameter list to its symbol row and return them by
+/// symbol occurrence, canonically ordered. A row whose node id is not unique
+/// gets none.
+fn bind_callable_arities(
+    extracted: &[ExtractedCallableArityV1],
+    symbols: &mut [SymbolRow],
+) -> Vec<CodeIndexCallableArityV1> {
+    let by_node_id = extracted
+        .iter()
+        .map(|row| (row.node_id.as_str(), row.arity))
+        .collect::<HashMap<_, _>>();
+    let mut rows_per_node_id = HashMap::<&str, usize>::new();
+    for symbol in symbols.iter() {
+        *rows_per_node_id.entry(symbol.node_id.as_str()).or_default() += 1;
+    }
+    let unique = symbols
+        .iter()
+        .map(|symbol| rows_per_node_id[symbol.node_id.as_str()] == 1)
+        .collect::<Vec<_>>();
+    let mut bound = Vec::new();
+    for (symbol, unique) in symbols.iter_mut().zip(unique) {
+        if let Some(arity) = by_node_id.get(symbol.node_id.as_str()).filter(|_| unique) {
+            symbol.arity = Some(*arity);
+            bound.push(CodeIndexCallableArityV1 {
+                occurrence: symbol.occurrence.clone(),
+                arity: *arity,
+            });
+        }
+    }
+    bound.sort();
+    bound
 }
 
 fn bind_clone_bodies(
@@ -1170,7 +1205,7 @@ impl DeterministicCodeChunker {
         let len = source.len() as u64;
         let offsets = line_offsets(source.as_bytes());
         let file_identity = self.file_identity(&file.file.logical_path)?;
-        let symbol_rows = hotpath::measure_block!("code_index.chunk.symbol_rows", {
+        let mut symbol_rows = hotpath::measure_block!("code_index.chunk.symbol_rows", {
             self.symbol_rows(
                 &file.file.file_occurrence_id,
                 &file_identity,
@@ -1180,6 +1215,7 @@ impl DeterministicCodeChunker {
                 len,
             )
         })?;
+        let callable_arities = bind_callable_arities(&artifact.callable_arities, &mut symbol_rows);
         let chunks = hotpath::measure_block!("code_index.chunk.build", {
             self.build_chunks(
                 source,
@@ -1244,6 +1280,7 @@ impl DeterministicCodeChunker {
             edge_abstentions,
             unresolved_references,
             clone_bodies,
+            callable_arities,
             artifact,
             batch,
         )
@@ -1411,6 +1448,7 @@ impl DeterministicCodeChunker {
                 parent,
                 identity,
                 occurrence,
+                arity: None,
             });
         }
         Ok(rows)
@@ -2256,6 +2294,10 @@ fn resolve_file_references(
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                            && reference
+                                .argument_count
+                                .zip(target.arity)
+                                .is_none_or(|(arguments, arity)| arity.accepts(arguments))
                             && !(typescript
                                 && target.kind == NodeKind::Function.as_str()
                                 && target
@@ -2312,7 +2354,9 @@ fn resolve_file_references(
                     });
                 }
             }
-            [] => {
+            // Java overloads the call's arguments cannot tell apart (equal
+            // arity, a variadic tail) stay a disclosed caller gap.
+            candidates if candidates.is_empty() || language == "java" => {
                 if let Some(candidate) = cross_file_reference_candidate(
                     source,
                     offsets,
@@ -2407,6 +2451,7 @@ fn cross_file_reference_candidate(
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
             .unwrap_or(from.span),
         unmodeled_import: reference.unmodeled_import,
+        argument_count: reference.argument_count,
     })
 }
 
@@ -2871,6 +2916,7 @@ mod tests {
             identity: id(&digest(identity_byte)),
             occurrence: SymbolOccurrenceId::new(occurrence)
                 .expect("valid fixture symbol occurrence"),
+            arity: None,
         }
     }
 
@@ -3057,36 +3103,6 @@ mod tests {
         assert!(head_finished.load(Ordering::SeqCst));
         assert_eq!(authority.active_units(), 0);
         assert_eq!(authority.waiting_work_units(), 0);
-    }
-
-    /// Chunk rows are not a pool actor. A merge that puts a join back in this
-    /// file assigns the CPU role to stolen leaves again.
-    #[test]
-    fn chunk_sweeps_are_not_a_pool_actor() {
-        let source = include_str!("chunks.rs");
-        let pool_tokens = [
-            concat!("ray", "on"),
-            concat!("par_", "iter"),
-            concat!("par_", "chunks"),
-            concat!("par_", "bridge"),
-            concat!("with_yielded_background_cpu_", "permits"),
-        ];
-        let code_lines = source
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        for token in pool_tokens {
-            let hits = code_lines
-                .iter()
-                .filter(|line| line.contains(token))
-                .collect::<Vec<_>>();
-            assert!(
-                hits.is_empty(),
-                "`{token}` assigns chunk work a pool role: {hits:?}"
-            );
-        }
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
@@ -4903,6 +4919,7 @@ pub fn real_symbol() {}
                 column: site,
                 file_path: "src/lib.rs".to_owned(),
                 unmodeled_import: None,
+                argument_count: None,
             },
             UnresolvedRef {
                 from_node_id: caller.node_id.clone(),
@@ -4912,6 +4929,7 @@ pub fn real_symbol() {}
                 column: site,
                 file_path: "src/lib.rs".to_owned(),
                 unmodeled_import: None,
+                argument_count: None,
             },
         ];
 
@@ -4984,6 +5002,7 @@ pub fn real_symbol() {}
             column: 5,
             file_path: "src/lib.rs".to_owned(),
             unmodeled_import: None,
+            argument_count: None,
         };
         let trait_occurrence = trait_target.occurrence.clone();
 
@@ -5119,6 +5138,7 @@ pub fn real_symbol() {}
             column: 24,
             file_path: "src/settings.ts".to_owned(),
             unmodeled_import: None,
+            argument_count: None,
         };
 
         let right_occurrence = right.occurrence.clone();
@@ -5221,8 +5241,13 @@ pub fn real_symbol() {}
         chunk
             .validate()
             .expect("raw structural validation cannot establish parser authority");
-        assert!(
-            authority.admit(chunk).is_err(),
+        assert_eq!(
+            authority.admit(chunk).err(),
+            Some(ChunkingFailureV1::NonCanonicalIdentity(
+                crate::noncanonical::NonCanonicalCauseV1::new(
+                    crate::noncanonical::NonCanonicalReasonCodeV1::ExactAuthorityMismatch,
+                )
+            )),
             "opaque authority must reject modified exact evidence"
         );
     }

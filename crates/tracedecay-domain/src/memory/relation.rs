@@ -384,7 +384,7 @@ mod tests {
         let source_fact_id = fact_id_for(&owner, "operation.relation.source");
         let target_fact_id = fact_id_for(&owner, "operation.relation.target");
         let evidence_fact_ids = relation_evidence(&owner);
-        assert!(
+        assert_eq!(
             new_relation(
                 owner.clone(),
                 source_fact_id.clone(),
@@ -392,14 +392,16 @@ mod tests {
                 FactRelationKindV1::Supports,
                 evidence_fact_ids.clone(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation endpoints is not canonical"
         );
 
         let foreign_owner = FactOwnerV1::Project {
             project_id: id("project.foreign"),
         };
         let foreign_fact_id = fact_id_for(&foreign_owner, "operation.relation.foreign");
-        assert!(
+        assert_eq!(
             new_relation(
                 owner.clone(),
                 source_fact_id.clone(),
@@ -407,12 +409,14 @@ mod tests {
                 FactRelationKindV1::Supports,
                 evidence_fact_ids.clone(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact owner binding references an unknown identity"
         );
         let mut foreign_evidence = evidence_fact_ids;
         foreign_evidence.push(foreign_fact_id);
         foreign_evidence.sort_unstable();
-        assert!(
+        assert_eq!(
             new_relation(
                 owner,
                 source_fact_id,
@@ -420,7 +424,9 @@ mod tests {
                 FactRelationKindV1::Supports,
                 foreign_evidence,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact owner binding references an unknown identity"
         );
     }
 
@@ -432,7 +438,7 @@ mod tests {
         let evidence_fact_ids = relation_evidence(&owner);
         let mut unsorted = evidence_fact_ids.clone();
         unsorted.reverse();
-        assert!(
+        assert_eq!(
             new_relation(
                 owner.clone(),
                 source_fact_id.clone(),
@@ -440,9 +446,11 @@ mod tests {
                 FactRelationKindV1::DerivedFrom,
                 unsorted,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation evidence order is not canonical"
         );
-        assert!(
+        assert_eq!(
             new_relation(
                 owner.clone(),
                 source_fact_id.clone(),
@@ -450,9 +458,11 @@ mod tests {
                 FactRelationKindV1::DerivedFrom,
                 vec![evidence_fact_ids[0].clone(), evidence_fact_ids[0].clone()],
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation evidence contains a duplicate identity"
         );
-        assert!(
+        assert_eq!(
             new_relation(
                 owner,
                 source_fact_id,
@@ -460,44 +470,46 @@ mod tests {
                 FactRelationKindV1::DerivedFrom,
                 vec![],
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "fact relation evidence must not be empty"
         );
     }
 
     #[test]
     fn fact_relation_rejects_invalid_label_provenance_and_confidence() {
         let metadata = serde_json::json!({"provider": "fixture"});
-        for source_label in ["", " untrimmed", "control\n"] {
-            let receipt = relation_receipt(source_label, &metadata);
-            assert!(
-                FactRelationProvenanceV1::new(source_label.to_owned(), metadata.clone(), receipt,)
-                    .is_err()
+        let rejection = |label: &str, metadata: Value, receipt_metadata: &Value| {
+            let receipt = relation_receipt(label, receipt_metadata);
+            FactRelationProvenanceV1::new(label.to_owned(), metadata, receipt)
+                .unwrap_err()
+                .to_string()
+        };
+        let oversized_label = "x".repeat(MAX_FACT_RELATION_SOURCE_LABEL_BYTES + 1);
+        for source_label in ["", " untrimmed", "control\n", oversized_label.as_str()] {
+            assert_eq!(
+                rejection(source_label, metadata.clone(), &metadata),
+                "fact relation source label is not canonical"
             );
         }
-        let oversized_label = "x".repeat(MAX_FACT_RELATION_SOURCE_LABEL_BYTES + 1);
-        let receipt = relation_receipt(&oversized_label, &metadata);
-        assert!(FactRelationProvenanceV1::new(oversized_label, metadata.clone(), receipt).is_err());
-
-        let mismatched_receipt = relation_receipt("curation.fixture", &metadata);
-        assert!(
-            FactRelationProvenanceV1::new(
-                "curation.fixture".to_owned(),
+        assert_eq!(
+            rejection(
+                "curation.fixture",
                 serde_json::json!({"provider": "other"}),
-                mismatched_receipt,
-            )
-            .is_err()
+                &metadata
+            ),
+            "fact relation provenance sanitization receipt is not pinned to the required snapshot"
         );
         let oversized_metadata = serde_json::json!({
             "value": "x".repeat(MAX_FACT_RELATION_METADATA_BYTES),
         });
-        let receipt = relation_receipt("curation.fixture", &oversized_metadata);
-        assert!(
-            FactRelationProvenanceV1::new(
-                "curation.fixture".to_owned(),
-                oversized_metadata,
-                receipt,
-            )
-            .is_err()
+        assert_eq!(
+            rejection(
+                "curation.fixture",
+                oversized_metadata.clone(),
+                &oversized_metadata
+            ),
+            "fact relation provenance metadata is not canonical"
         );
         let max_label = "l".repeat(MAX_FACT_RELATION_SOURCE_LABEL_BYTES);
         let max_metadata = Value::String("m".repeat(MAX_FACT_RELATION_METADATA_BYTES - 2));
@@ -506,7 +518,12 @@ mod tests {
         let mut provenance_wire =
             serde_json::to_value(relation_provenance("curation.fixture", metadata)).unwrap();
         provenance_wire["sanitization_receipt"]["disposition"] = serde_json::json!("rejected");
-        assert!(serde_json::from_value::<FactRelationProvenanceV1>(provenance_wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactRelationProvenanceV1>(provenance_wire)
+                .unwrap_err()
+                .to_string(),
+            "rejected or quarantined content cannot carry a payload reference"
+        );
 
         let owner = FactOwnerV1::Profile;
         let relation = new_relation(
@@ -519,6 +536,11 @@ mod tests {
         .unwrap();
         let mut wire = serde_json::to_value(relation).unwrap();
         wire["confidence"] = serde_json::json!(1.1);
-        assert!(serde_json::from_value::<FactRelationV1>(wire).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactRelationV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "confidence must be finite and within [0.0, 1.0]"
+        );
     }
 }

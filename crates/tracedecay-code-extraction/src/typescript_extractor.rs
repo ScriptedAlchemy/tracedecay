@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{declaration_start, local_node_id};
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::traversal::find_direct_child_by_kind;
@@ -658,9 +658,8 @@ impl TypeScriptExtractor {
         };
         let docstring = Self::extract_jsdoc(state, node);
         let signature = Some(Self::extract_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -678,7 +677,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -822,9 +821,9 @@ impl TypeScriptExtractor {
         );
         let visibility = Self::extract_ts_accessibility(state, node);
         let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
+        // Unlike a method's, a field's decorators are its own leading children.
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -842,7 +841,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -951,6 +950,7 @@ impl TypeScriptExtractor {
                             column: parent.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -1412,6 +1412,7 @@ impl TypeScriptExtractor {
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1430,6 +1431,7 @@ impl TypeScriptExtractor {
                                             column: iface.start_position().column as u32,
                                             file_path: state.file_path.clone(),
                                             unmodeled_import: None,
+                                            argument_count: None,
                                         });
                                     }
                                     if !inner.goto_next_sibling() {
@@ -1487,6 +1489,7 @@ impl TypeScriptExtractor {
                         column: site.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 Self::extract_call_sites(state, child, fn_node_id);
@@ -1693,6 +1696,7 @@ impl TypeScriptExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             } else {
@@ -1834,6 +1838,7 @@ impl TypeScriptExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 }

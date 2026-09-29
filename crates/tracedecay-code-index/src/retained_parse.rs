@@ -314,41 +314,20 @@ impl SharedRetainedParsePool {
                         );
                     }
                     drop(state);
-                    let opened = match grammar_key {
-                        Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
-                            identity,
-                            language_id,
-                            grammar_key,
-                            source,
-                            prepared_source,
-                            self.limits.document,
-                            control,
-                        ),
-                        None => RetainedParseDocument::open(
-                            identity,
-                            language_id,
-                            source,
-                            self.limits.document,
-                        ),
-                    };
-                    let (document, report) = match opened {
-                        Ok(parsed) => parsed,
+                    let (document, report, parsed) = match self.open_and_extract(
+                        identity,
+                        language_id,
+                        source,
+                        prepared_source,
+                        grammar_key,
+                        extraction.map(|(extractor, _)| extractor),
+                        control,
+                    ) {
+                        Ok(opened) => opened,
                         Err(error) => {
                             self.record_failure_at(admission_epoch);
                             return Err(error);
                         }
-                    };
-                    let parsed = match extraction {
-                        Some((extractor, _)) => {
-                            match document.extract_canonical_artifact(extractor, &report, None) {
-                                Ok(extraction) => Some(extraction),
-                                Err(error) => {
-                                    self.record_failure_at(admission_epoch);
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        None => None,
                     };
                     let retained_artifact = parsed.as_ref().map(|parsed| parsed.artifact.clone());
                     let current_size = document.retained_source_bytes();
@@ -375,6 +354,97 @@ impl SharedRetainedParsePool {
                 }
             }
         })
+    }
+
+    /// Parse and extract one full canonical artifact without retaining its
+    /// tree. A full build parses every file once; its trees would only pay
+    /// off for an increment that reparses the same document before eviction,
+    /// which a pool bounded far below a repository's file count almost never
+    /// sees, while holding them keeps each document's tree and parser alive.
+    pub fn parse_and_extract_artifact_unretained_with_control(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        extractor: &dyn LanguageExtractor,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
+        crate::hotpath_observe::measure_hot_loop!("code_index.collect.unretained_artifact", {
+            if source.len() > self.limits.max_total_source_bytes {
+                self.record_failure();
+                return Err(ParseError::SourceTooLarge {
+                    size: source.len(),
+                    limit: self.limits.max_total_source_bytes,
+                });
+            }
+            let prepared_source = extractor.prepare_parse_source(source);
+            let grammar_key = extractor.retained_grammar_key(identity.logical_path());
+            let opened = self.open_and_extract(
+                identity,
+                language_id,
+                source,
+                prepared_source.as_ref(),
+                Some(grammar_key.as_str()),
+                Some(extractor),
+                control,
+            );
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match opened {
+                Ok((_, report, Some(extraction))) => {
+                    record_success(&mut state.stats, &report, Some(&extraction));
+                    Ok((report, extraction))
+                }
+                Ok((_, _, None)) => {
+                    state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
+                    Err(ParseError::ParseFailed)
+                }
+                Err(error) => {
+                    state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_and_extract(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        prepared_source: &str,
+        grammar_key: Option<&str>,
+        extractor: Option<&dyn LanguageExtractor>,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<
+        (
+            RetainedParseDocument,
+            ParseReport,
+            Option<ParsedExtractionArtifactV1>,
+        ),
+        ParseError,
+    > {
+        let (document, report) = match grammar_key {
+            Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
+                identity,
+                language_id,
+                grammar_key,
+                source,
+                prepared_source,
+                self.limits.document,
+                control,
+            ),
+            None => {
+                RetainedParseDocument::open(identity, language_id, source, self.limits.document)
+            }
+        }?;
+        let parsed = extractor
+            .map(|extractor| document.extract_canonical_artifact(extractor, &report, None))
+            .transpose()?;
+        Ok((document, report, parsed))
     }
 
     #[allow(clippy::too_many_arguments)]

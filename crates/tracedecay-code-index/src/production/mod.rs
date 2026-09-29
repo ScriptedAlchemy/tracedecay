@@ -2274,6 +2274,7 @@ where
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
         retained_parses: &SharedRetainedParsePool,
+        retain_parse: bool,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
@@ -2366,6 +2367,7 @@ where
             let cancellation = ExtractionControlBridge { control };
             let extraction = match parse_for_indexing(
                 retained_parses,
+                retain_parse,
                 ParseDocumentIdentity::Repository {
                     project_id: config.project_id.clone(),
                     repository_id: snapshot.repository.clone(),
@@ -2498,6 +2500,7 @@ where
                     config,
                     physical_artifacts,
                     retained_parses,
+                    false,
                     intake,
                     capability,
                     manifest,
@@ -2706,6 +2709,7 @@ where
                                 config,
                                 physical_artifacts,
                                 retained_parses,
+                                true,
                                 intake,
                                 capability,
                                 manifest,
@@ -2735,6 +2739,7 @@ where
                             config,
                             physical_artifacts,
                             retained_parses,
+                            true,
                             intake,
                             capability,
                             manifest,

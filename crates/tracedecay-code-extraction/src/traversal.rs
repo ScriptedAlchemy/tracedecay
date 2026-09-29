@@ -107,10 +107,13 @@ mod tests {
 
     #[test]
     fn direct_child_helper_does_not_match_nested_children() {
-        let function = parse_c_function("int answer(void) { return 42; }");
+        let source = "int answer(void) { return 42; }";
+        let function = parse_c_function(source);
 
         assert!(find_direct_child_by_kind(function, "identifier").is_none());
-        assert!(find_descendant_by_kind(function, "identifier").is_some());
+        let nested = find_descendant_by_kind(function, "identifier")
+            .expect("the declarator nests the function name");
+        assert_eq!(nested.utf8_text(source.as_bytes()), Ok("answer"));
     }
 
     #[test]

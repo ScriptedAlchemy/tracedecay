@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange,
-    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
+    ChangePlanId, ConfigurationAuditEvent, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange, RestartRequirementV1,
+    RollbackModeV1, SettingKey, SettingSensitivityV1, is_profile_setting_key,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -123,8 +123,9 @@ pub struct ConfigurationRollbackPreviewRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditRequestV1 {
+    /// The previous page's `next_cursor`, valid only with the same `limit`.
     #[serde(default)]
-    pub after_event_id: Option<ConfigurationAuditEventId>,
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -183,7 +184,8 @@ pub struct ConfigurationMutationReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConfigurationAuditPage {
     pub events: Vec<ConfigurationAuditEvent>,
-    pub next_after_event_id: Option<ConfigurationAuditEventId>,
+    /// Opaque continuation, bound to this operation and request.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -200,6 +202,35 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationProtectedApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
+}
+
+impl ConfigurationWireRequestV1 {
+    /// Whether the profile's own configuration store answers this request:
+    /// a read or direct write of profile settings only. Every other request,
+    /// a mixed batch included, is a project configuration request.
+    pub fn targets_profile_settings(&self) -> bool {
+        let mutation_key = |mutation: &ConfigurationDirectMutationRequestV1| match mutation {
+            ConfigurationDirectMutationRequestV1::Set { key, .. }
+            | ConfigurationDirectMutationRequestV1::Unset { key, .. } => {
+                is_profile_setting_key(key)
+            }
+        };
+        match self {
+            Self::Get(request) => is_profile_setting_key(&request.key),
+            Self::Set(request) => is_profile_setting_key(&request.key),
+            Self::Unset(request) => is_profile_setting_key(&request.key),
+            Self::Batch(request) => {
+                !request.mutations.is_empty() && request.mutations.iter().all(mutation_key)
+            }
+            Self::List(_)
+            | Self::ObservedState(_)
+            | Self::ProtectedPreview(_)
+            | Self::ProtectedApply(_)
+            | Self::RollbackPreview(_)
+            | Self::RollbackApply(_)
+            | Self::Audit(_) => false,
+        }
+    }
 }
 
 /// Decode an envelope-stripped configuration invocation payload.

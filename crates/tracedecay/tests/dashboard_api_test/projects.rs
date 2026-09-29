@@ -19,8 +19,12 @@ pub(crate) async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf
         .expect("initialize retained target project");
     let target_cg = Arc::new(target_cg);
     fixture.project_graphs.register(Arc::new(
-        dashboard::dashboard_project_context(&target_cg, Some(fixture.host_runtime.profile()))
-            .expect("target dashboard project context"),
+        dashboard::dashboard_project_context(
+            &target_cg,
+            Some(fixture.host_runtime.profile()),
+            Some(fixture.host_runtime.profile_sessions_database()),
+        )
+        .expect("target dashboard project context"),
     ));
     (target_root, target_cg)
 }

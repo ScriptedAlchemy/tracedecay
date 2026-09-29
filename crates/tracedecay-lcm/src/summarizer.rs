@@ -193,16 +193,18 @@ mod tests {
         });
 
         assert!(adapter.persisted_summary_invocation().is_none());
-        assert!(
-            adapter
-                .summary_request(
-                    "cursor",
-                    "session-1",
-                    None,
-                    &[raw_message(11, "user", "source")]
-                )
-                .is_some()
-        );
+        let request = adapter
+            .summary_request(
+                "cursor",
+                "session-1",
+                None,
+                &[raw_message(11, "user", "source")],
+            )
+            .expect("an empty provided summary must request an authoritative summary");
+        assert_eq!(request.provider, "cursor");
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.source_range.from_store_id, 11);
+        assert_eq!(request.source_range.to_store_id, 11);
     }
 
     #[test]

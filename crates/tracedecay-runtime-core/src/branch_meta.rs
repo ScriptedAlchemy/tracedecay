@@ -468,6 +468,8 @@ pub fn format_timestamp(ts: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use serde_json::error::Category;
+
     use super::*;
 
     #[test]
@@ -488,27 +490,52 @@ mod tests {
     fn cannot_remove_default_branch() {
         let mut meta = BranchMeta::new("main");
         assert!(meta.remove_branch("main").is_none());
+        assert!(meta.is_tracked("main"));
+        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
     }
 
     #[test]
     fn parse_rejects_schema_mismatch_as_corrupt() {
-        assert!(parse(r#"{"default_branch":"main","branches":{}}"#).is_err());
-        assert!(parse("{not valid json").is_err());
-        assert!(parse(r#"{"default_branch": 5}"#).is_err());
-        assert!(parse("[]").is_err());
+        let missing_default = parse(r#"{"default_branch":"main","branches":{}}"#).unwrap_err();
+        assert_eq!(
+            missing_default.to_string(),
+            "default_branch 'main' has no matching branch entry"
+        );
+        assert_eq!(
+            parse("{not valid json").unwrap_err().classify(),
+            Category::Syntax
+        );
+        assert_eq!(
+            parse(r#"{"default_branch": 5}"#).unwrap_err().classify(),
+            Category::Data
+        );
+        assert_eq!(parse("[]").unwrap_err().classify(), Category::Data);
     }
 
     #[test]
     fn parse_rejects_semantically_invalid_branch_metadata() {
-        for content in [
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"legacy":{"db_file":"branches/legacy.db","parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+        for (content, expected) in [
+            (
+                r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "branch 'main' must reference the project graph store 'tracedecay.db', found 'branches/main.db'",
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "default branch 'main' must not have a parent",
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "branch 'escape' must reference the project graph store 'tracedecay.db', found '../escape.db'",
+            ),
+            (
+                r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"legacy":{"db_file":"branches/legacy.db","parent":"main","created_at":"0","last_synced_at":"0","gc_protected":false}}}"#,
+                "branch 'legacy' must reference the project graph store 'tracedecay.db', found 'branches/legacy.db'",
+            ),
         ] {
-            assert!(
-                parse(content).is_err(),
-                "accepted invalid metadata: {content}"
+            assert_eq!(
+                parse(content).unwrap_err().to_string(),
+                expected,
+                "{content}"
             );
         }
     }
@@ -542,6 +569,11 @@ mod tests {
         std::os::unix::fs::symlink(&outside, data_dir.join(BRANCH_META_FILENAME)).unwrap();
 
         assert!(load_branch_meta(&data_dir).is_none());
+
+        std::fs::remove_file(data_dir.join(BRANCH_META_FILENAME)).unwrap();
+        std::fs::copy(&outside, data_dir.join(BRANCH_META_FILENAME)).unwrap();
+        let loaded = load_branch_meta(&data_dir).expect("regular metadata file loads");
+        assert_eq!(loaded.default_branch, "main");
     }
 
     #[test]

@@ -1966,6 +1966,11 @@ async fn graph_rebuild_rejects_a_dangling_canonical_link_event() {
                 &format!("fixture.seed.dangling-{label}-evidence"),
             )
         };
+        let dangling = if dangling_target {
+            target.clone()
+        } else {
+            evidence.clone()
+        };
         let event = FactLineageEventV1::new(
             source.clone(),
             fixture.owner.clone(),
@@ -2010,14 +2015,14 @@ async fn graph_rebuild_rejects_a_dangling_canonical_link_event() {
             .await
             .expect("inject dangling event outside generic commit boundary");
 
-        assert!(
+        assert!(matches!(
             relation_kinds_from_canonical_source_for_test(
                 &fixture.db,
                 &fixture.owner,
                 &accepting_read_control(),
             )
-            .await
-            .is_err()
-        );
+            .await,
+            Err(FactStoreError::FactNotFound { fact_id }) if fact_id == dangling
+        ));
     }
 }

@@ -91,13 +91,16 @@ fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
 #[test]
 fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     let parsed = super::daemon_runtime_status(&serde_json::json!({
-        "content": [
-            {"type": "text", "text": "daemon notice"},
-            {
-                "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"doctor_report":{"kind":"unknown","table_growth_evidence":[]}}"#
-            }
-        ]
+        "tracedecay_version": "0.0.66",
+        "process": {"pid": 1234},
+        "database": {
+            "canonical_db_path": "/tmp/project.db",
+            "quick_check_ok": true,
+            "authority_audit_ok": true,
+            "authority_audit_error": null,
+            "dirty_marker": {"exists": false}
+        },
+        "doctor_report": {"kind": "unknown", "table_growth_evidence": []}
     }))
     .unwrap()
     .expect("published database telemetry is ready status");
@@ -225,12 +228,6 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
     );
 }
 
-#[test]
-fn daemon_runtime_parser_rejects_missing_json_payload() {
-    let error = super::daemon_runtime_status(&serde_json::json!({ "content": [] })).unwrap_err();
-    assert!(error.to_string().contains("returned no JSON payload"));
-}
-
 fn storage_runtime_finding(
     state: tracedecay_contracts::doctor::DoctorEvidenceStateV1,
     reference: &str,
@@ -334,39 +331,6 @@ fn a_mounting_project_runtime_is_the_typed_mounting_state() {
         super::canonical_daemon_doctor_report(&status).unwrap(),
         super::CanonicalDoctorReport::Mounting
     );
-    let refusal = |problem| {
-        tracedecay_contracts::ApplicationProblemEnvelope::new(
-            tracedecay_contracts::ResultContractRef::new(
-                tracedecay_tool_catalog::SchemaId::new("schema.doctor.configuration").unwrap(),
-                1,
-            )
-            .unwrap(),
-            tracedecay_contracts::RequestId::new("request.doctor.configuration").unwrap(),
-            problem,
-        )
-        .unwrap()
-        .problem
-    };
-    assert_eq!(
-        super::upload_setting_refusal(&refusal(
-            tracedecay_contracts::ApplicationProblem::runtime_mounting()
-        ))
-        .unwrap(),
-        super::UploadSetting::Mounting
-    );
-    let unavailable = tracedecay_contracts::ApplicationProblem::unavailable(
-        tracedecay_contracts::SafeDiagnostic::new(
-            "application.configuration.unavailable",
-            "The configuration store is unavailable",
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        super::upload_setting_refusal(&refusal(unavailable))
-            .unwrap_err()
-            .to_string(),
-        "config error: application.configuration.unavailable: The configuration store is unavailable"
-    );
 }
 
 #[test]
@@ -404,19 +368,16 @@ fn canonical_doctor_revalidates_observed_report_wire_contract() {
 /// from an unreachable owner (an error) and from malformed telemetry (an error).
 #[test]
 fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
-    let pending = super::daemon_runtime_status(&serde_json::json!({
-        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
-    }))
-    .unwrap();
+    let pending =
+        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}})).unwrap();
     assert!(
         pending.is_none(),
         "absent telemetry is warming, not an error"
     );
 
-    let malformed = super::daemon_runtime_status(&serde_json::json!({
-        "content": [{"type": "text", "text": r#"{"process":{"pid":1234},"database":7}"#}]
-    }))
-    .unwrap_err();
+    let malformed =
+        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}, "database": 7}))
+            .unwrap_err();
     assert!(malformed.to_string().contains("was not an object"));
 }
 

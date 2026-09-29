@@ -144,6 +144,11 @@ mod tests {
                 "content or an invalid identity must not become Work authority",
             );
         }
+        let started = captured(b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n");
+        let source = provider_session(WorkProviderProtocol::CodexExecJson, Some(&started))
+            .expect("Codex thread.started session");
+        assert_eq!(source.provider().as_str(), "codex");
+        assert_eq!(source.session_id().as_str(), "codex-thread");
     }
 
     fn captured(bytes: &[u8]) -> (Vec<u8>, u64) {

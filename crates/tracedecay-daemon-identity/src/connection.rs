@@ -22,7 +22,10 @@ use crate::authority;
 ///
 /// Retryable only while the record is absent: a starting daemon writes its
 /// record before it binds, so absence resolves itself. A record naming a
-/// different endpoint does not.
+/// different endpoint does not. An absence states only what was checked:
+/// whether to start the daemon depends on the managed service, which only the
+/// boundary profile's home and config home can see, so that advice is added by
+/// `tracedecay_daemon_control::with_unavailable_daemon_advice`.
 pub const DAEMON_AUTHORITY_UNAVAILABLE: &str = "daemon_authority_unavailable";
 
 /// Process exit status (`EX_UNAVAILABLE`) of a CLI command refused because no
@@ -132,17 +135,6 @@ fn ensure_record_current(
     Ok(())
 }
 
-/// Authenticated invocation client for the daemon authority of the profile
-/// the handshake names.
-pub fn invocation_client_for_current(
-    handshake: tracedecay_daemon_protocol::DaemonHandshake,
-) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
-    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
-        current_daemon_connection(&handshake.client_identity.profile_root)?.into_protocol(),
-        handshake,
-    ))
-}
-
 /// The connection for the daemon authority recorded in `profile_root`.
 pub fn current_daemon_connection(profile_root: &Path) -> Result<ResolvedDaemonConnection> {
     match authority::current_record(profile_root)? {
@@ -151,7 +143,7 @@ pub fn current_daemon_connection(profile_root: &Path) -> Result<ResolvedDaemonCo
             DAEMON_AUTHORITY_UNAVAILABLE,
             true,
             format!(
-                "TraceDecay daemon is not available: no authority record at '{}'. Start or restart the daemon.",
+                "TraceDecay daemon is not available: no authority record at '{}'.",
                 authority::record_path(profile_root)?.display()
             ),
         )),
@@ -192,7 +184,7 @@ fn connection_for_socket_in(
             DAEMON_AUTHORITY_UNAVAILABLE,
             true,
             format!(
-                "no TraceDecay daemon authority record names socket '{socket}' (checked {records}). Start or restart the daemon."
+                "no TraceDecay daemon authority record names socket '{socket}' (checked {records})."
             ),
         )
     } else {

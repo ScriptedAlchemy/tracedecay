@@ -612,14 +612,30 @@ mod tests {
         std::fs::write(marker_path(container), serde_json::to_vec(&file).unwrap()).unwrap();
     }
 
+    fn write_honest_marker(container: &Path) {
+        let honest = body(64, "sha256:abc");
+        let digest = honest.digest().unwrap();
+        write_marker(container, honest, digest);
+    }
+
+    fn proven(container: &Path, observed: ContainerIdentity) -> Vec<(String, u64)> {
+        load(container, observed)
+            .into_values()
+            .map(|proof| (proof.recovered_digest, proof.canonical_bytes))
+            .collect()
+    }
+
+    fn honest_proof() -> Vec<(String, u64)> {
+        vec![("sha256:abc".to_owned(), 42)]
+    }
+
     #[test]
     fn a_marker_written_against_different_bytes_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
-        let body = body(64, "sha256:abc");
-        let digest = body.digest().unwrap();
-        write_marker(&container, body, digest);
+        write_honest_marker(&container);
 
+        assert_eq!(proven(&container, identity(64)), honest_proof());
         // Same header, different length: the container grew since the proof.
         assert!(load(&container, identity(65)).is_empty());
     }
@@ -631,9 +647,8 @@ mod tests {
     fn a_marker_for_another_checkpoint_of_the_same_container_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
-        let body = body(64, "sha256:abc");
-        let digest = body.digest().unwrap();
-        write_marker(&container, body, digest);
+        write_honest_marker(&container);
+        assert_eq!(proven(&container, identity(64)), honest_proof());
 
         let mut checkpointed = identity(64);
         checkpointed.iteration += 1;
@@ -647,6 +662,8 @@ mod tests {
     fn a_marker_carrying_a_foreign_identity_shape_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
+        write_honest_marker(&container);
+        assert_eq!(proven(&container, identity(64)), honest_proof());
         let honest = body(64, "sha256:abc");
         let digest = honest.digest().unwrap();
         let mut parsed = serde_json::to_value(MarkerFile {
@@ -678,6 +695,8 @@ mod tests {
     fn a_marker_whose_body_digest_does_not_bind_its_body_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
+        write_honest_marker(&container);
+        assert_eq!(proven(&container, identity(64)), honest_proof());
         let honest = body(64, "sha256:abc");
         let digest = honest.digest().unwrap();
         write_marker(&container, body(64, "sha256:forged"), digest);
@@ -689,6 +708,8 @@ mod tests {
     fn an_unsorted_marker_is_rejected_so_the_encoding_stays_canonical() {
         let temp = tempfile::tempdir().unwrap();
         let container = temp.path().join("graph.grafeo");
+        write_honest_marker(&container);
+        assert_eq!(proven(&container, identity(64)), honest_proof());
         let mut unsorted = body(64, "sha256:abc");
         unsorted.generations.push(VerifiedGenerationRecord {
             namespace: "aa".to_owned(),
@@ -706,7 +727,11 @@ mod tests {
     #[test]
     fn a_missing_marker_is_an_empty_set_not_an_error() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(load(&temp.path().join("graph.grafeo"), identity(64)).is_empty());
+        let container = temp.path().join("graph.grafeo");
+        assert!(load(&container, identity(64)).is_empty());
+
+        write_honest_marker(&container);
+        assert_eq!(proven(&container, identity(64)), honest_proof());
     }
 
     #[test]

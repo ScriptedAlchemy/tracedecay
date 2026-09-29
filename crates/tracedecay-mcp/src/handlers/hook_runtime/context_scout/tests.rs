@@ -228,3 +228,75 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
         assert_eq!(lifecycle.logical_message_id.as_str(), latest_call);
     }
 }
+
+/// Admission order is per host: another session's events, and this session's
+/// events that carry no lifecycle, leave gaps between one session's lifecycle
+/// positions. A gap must still commit, and an older event arriving after a
+/// newer one is already covered; neither may stay backpressured forever.
+#[tokio::test]
+async fn lifecycle_positions_with_gaps_or_late_arrivals_settle() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.native-hook-scout-gaps").unwrap();
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            temporary.path().join("profile"),
+            temporary.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let hook_project_id = [73; 16];
+    let hook_worktree_id = [74; 16];
+    assert_eq!(
+        tracedecay_daemon_service::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+            hook_project_id,
+            hook_worktree_id,
+            project_id,
+            tracedecay_domain::WorktreeId::new("worktree.native-hook-scout-gaps").unwrap(),
+            &sessions,
+        ),
+        AuthorityRegistrationV1::Registered
+    );
+    let session = "session.kimi.gaps";
+    let admit = |call: &'static str, start: u64| {
+        let sessions = &sessions;
+        let background_cpu = runtime.background_cpu();
+        async move {
+            admit_native_context_scout_lifecycle(
+                sessions,
+                Some(&background_cpu),
+                ProviderId::new("kimi").unwrap(),
+                &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1::new(
+                    session, call, [1; 16],
+                )
+                .unwrap(),
+                ObservationSourceRangeV1::new(start, start + 1).unwrap(),
+            )
+            .await
+        }
+    };
+
+    assert!(admit("call.kimi.first", 1).await);
+    assert!(admit("call.kimi.after-gap", 5).await, "a gap must commit");
+    assert!(
+        admit("call.kimi.after-gap", 5).await,
+        "a retry stays admitted"
+    );
+    assert!(
+        admit("call.kimi.late", 3).await,
+        "an event older than the committed cursor is already covered"
+    );
+
+    let lifecycle =
+        tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+            hook_project_id,
+            hook_worktree_id,
+            &SessionId::new(session.to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lifecycle.turn_id.as_str(), "call.kimi.after-gap");
+}

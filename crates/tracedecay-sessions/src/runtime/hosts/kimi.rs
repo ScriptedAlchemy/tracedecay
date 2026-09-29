@@ -1186,11 +1186,10 @@ mod tests {
         std::fs::write(session.join("state.json"), "{ not json").unwrap();
         let admission = MemoryHostAdmission::default();
         let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let dispatch = tracing::Dispatch::new(WarningCensus {
+        let _guard = tracedecay_runtime_core::logging::set_tracing_capture(WarningCensus {
             message: "Kimi session discovery is incomplete",
             count: std::sync::Arc::clone(&warnings),
         });
-        let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let mut failures = 0;
         for _ in 0..5 {

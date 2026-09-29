@@ -577,7 +577,11 @@ mod tests {
         journal.recovery_files[0].expected = Some("tampered".to_owned());
         durability.persist_journal(&journal).unwrap();
 
-        assert!(durability.load_journal().is_err());
+        let error = durability.load_journal().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: source edit recovery journal digest does not match its preimages"
+        );
     }
 
     #[test]
@@ -967,15 +971,20 @@ mod tests {
         );
         let operation = source_edit_operation(request.edit.kind()).unwrap();
 
-        assert!(
-            reconcile_prepared_source_edit(
-                &durability,
-                project.path(),
-                &operation,
-                reconciliation,
-            )
-            .is_err()
+        let Err(error) =
+            reconcile_prepared_source_edit(&durability, project.path(), &operation, reconciliation)
+        else {
+            panic!("a reconciliation naming an unrelated committed state must be refused");
+        };
+        assert_eq!(
+            error.to_string(),
+            "config error: source edit committed-state inspection does not match the exact preview"
         );
-        assert!(durability.load_journal().unwrap().is_some());
+        let retained = durability
+            .load_journal()
+            .unwrap()
+            .expect("journal retained");
+        assert_eq!(retained.effect_id, journal.effect_id);
+        assert!(matches!(retained.state, SourceEditJournalStateV1::Prepared));
     }
 }

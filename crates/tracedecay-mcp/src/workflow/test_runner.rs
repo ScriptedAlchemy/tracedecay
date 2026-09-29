@@ -355,12 +355,10 @@ fn run_selected_cargo_tests(
                 return Err(failure.with_partial_output(stdout, stderr, control.output_bytes()));
             }
         };
-        let observed = parse_libtest_output(&output.stdout)
-            .into_iter()
-            .find(|(observed, _)| observed == test_identity);
+        let observed = parse_libtest_output(&output.stdout).observed(test_identity);
         stdout.push_str(&output.stdout);
         stderr.push_str(&output.stderr);
-        if observed.is_none() {
+        if !observed {
             let failure = if output.exit_code == Some(0) {
                 TestRunFailure::NoMatch {
                     test_identity: test_identity.clone(),
@@ -652,8 +650,24 @@ fn signal_process_tree(process_group: u32, _signal: TerminationSignal) {
 #[cfg(not(any(unix, windows)))]
 fn signal_process_tree(_process_group: u32, _signal: TerminationSignal) {}
 
-pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
-    let mut results = Vec::new();
+/// Per-test outcomes libtest reported: pass/fail results in report order, and
+/// the tests it reported as ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LibtestReport {
+    pub results: Vec<(String, bool)>,
+    pub ignored: Vec<String>,
+}
+
+impl LibtestReport {
+    /// Whether libtest reported any outcome for `test`.
+    pub fn observed(&self, test: &str) -> bool {
+        self.results.iter().any(|(observed, _)| observed == test)
+            || self.ignored.iter().any(|ignored| ignored == test)
+    }
+}
+
+pub fn parse_libtest_output(stdout: &str) -> LibtestReport {
+    let mut report = LibtestReport::default();
     for raw in stdout.lines() {
         let line = raw.trim_start_matches("\u{1b}[0m").trim();
         let Some(rest) = line.strip_prefix("test ") else {
@@ -665,14 +679,15 @@ pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
         let Some((name, status)) = rest.rsplit_once(" ... ") else {
             continue;
         };
-        let passed = match status.trim() {
-            "ok" => true,
-            "FAILED" | "failed" => false,
-            _ => continue,
-        };
-        results.push((name.trim().to_owned(), passed));
+        let name = name.trim().to_owned();
+        match status.trim() {
+            "ok" => report.results.push((name, true)),
+            "FAILED" | "failed" => report.results.push((name, false)),
+            "ignored" => report.ignored.push(name),
+            _ => {}
+        }
     }
-    results
+    report
 }
 
 #[cfg(test)]
@@ -927,7 +942,7 @@ mod tests {
 
         assert_eq!(output.exit_code, Some(0));
         assert_eq!(
-            super::parse_libtest_output(&output.stdout),
+            super::parse_libtest_output(&output.stdout).results,
             vec![
                 ("tests::selected_one".to_owned(), true),
                 ("tests::selected_two".to_owned(), true)
@@ -963,7 +978,7 @@ mod tests {
 
         assert_eq!(output.exit_code, Some(101));
         assert_eq!(
-            super::parse_libtest_output(&output.stdout),
+            super::parse_libtest_output(&output.stdout).results,
             vec![
                 ("tests::passes".to_owned(), true),
                 ("tests::fails".to_owned(), false)

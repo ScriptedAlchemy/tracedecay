@@ -4,11 +4,12 @@
 //! deterministic staging format, bounded page admission, verification, and
 //! lightweight read ports over an already-published file.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
+use tracedecay_runtime_core::path_safety::{SqliteDatabasePathError, sqlite_database_path};
 
 mod builder;
 mod clone_census;
@@ -49,6 +50,7 @@ pub use reader::{
     CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactRestoreWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
 };
+pub use schema::CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1;
 
 /// Floor for the artifact build memory ledger.
 ///
@@ -163,6 +165,21 @@ fn sqlite_error(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
+/// The spelling every artifact SQLite open hands to SQLite. A name SQLite can
+/// never open is a contract failure, which ends the build instead of
+/// retrying it as an unavailable store.
+fn sqlite_open_path(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+    sqlite_database_path(path).map_err(|error| match error {
+        SqliteDatabasePathError::NameTooLong { .. } => {
+            CodeLexicalArtifactErrorV1::Contract(error.to_string())
+        }
+        SqliteDatabasePathError::Unresolved { .. }
+        | SqliteDatabasePathError::VfsUnavailable { .. } => {
+            CodeLexicalArtifactErrorV1::Io(error.to_string())
+        }
+    })
+}
+
 fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     match error.sqlite_error_code() {
         Some(
@@ -204,7 +221,7 @@ fn open_builder_connection(
     durability: BuilderDurabilityV1,
     memory_budget_bytes: usize,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
-    let connection = rusqlite::Connection::open(path).map_err(sqlite_error)?;
+    let connection = rusqlite::Connection::open(sqlite_open_path(path)?).map_err(sqlite_error)?;
     match durability {
         BuilderDurabilityV1::Unpublished => {
             connection

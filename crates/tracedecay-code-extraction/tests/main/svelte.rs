@@ -70,12 +70,12 @@ fn test_svelte_no_script_block_returns_file_node_only() {
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // Only the File node. No symbols to extract.
-    let non_file: Vec<_> = result
+    let nodes: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| n.kind != NodeKind::File)
+        .map(|n| (n.kind.clone(), n.name.as_str()))
         .collect();
-    assert!(non_file.is_empty(), "unexpected nodes: {:?}", non_file);
+    assert_eq!(nodes, [(NodeKind::File, "Static.svelte")]);
 }
 
 #[test]

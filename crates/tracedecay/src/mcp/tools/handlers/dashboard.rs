@@ -220,7 +220,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         )
         .map_err(|error| error.to_string())?;
         let executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor> = Arc::new(
-            tracedecay_daemon_identity::invocation_client_for_current(handshake)
+            crate::daemon::invocation_client_for_current(profile, handshake)
                 .map_err(|error| error.to_string())?,
         );
         Self::new(
@@ -891,6 +891,7 @@ pub(super) async fn compute_dashboard(
             let retained_cg = Arc::new(crate::dashboard::dashboard_project_context(
                 &retained_graph,
                 daemon_profile.as_ref(),
+                retained_server.profile_session_db(),
             )?);
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()

@@ -13,8 +13,9 @@ use tracedecay_domain::{
 };
 
 use crate::chunks::{
-    CodeFileChunksV1, CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1,
-    CodeSearchEligibilityV1, code_chunk_id, code_file_identity, published_symbol_spans,
+    CodeFileChunksV1, CodeIndexCallableArityV1, CodeIndexUnresolvedReferenceV1,
+    CodeSearchDocumentV1, CodeSearchEligibilityV1, code_chunk_id, code_file_identity,
+    published_symbol_spans,
 };
 use crate::extract::ExtractionBatchV1;
 use crate::intake::content_digest;
@@ -167,6 +168,8 @@ struct PersistedFileIndexArtifactsRefV2<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
     unresolved_references: &'a [CodeIndexUnresolvedReferenceV1],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    callable_arities: &'a [CodeIndexCallableArityV1],
 }
 
 #[derive(Deserialize)]
@@ -180,6 +183,8 @@ struct PersistedFileIndexArtifactsV2 {
     clone_bodies: PersistedCloneBodiesV1,
     schema_evidence: Option<ExtractedSchemaEvidenceV1>,
     unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
+    #[serde(default)]
+    callable_arities: Vec<CodeIndexCallableArityV1>,
 }
 
 #[derive(Serialize)]
@@ -791,6 +796,7 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                 )?,
                 schema_evidence: artifacts.schema_evidence.as_ref(),
                 unresolved_references: &artifacts.unresolved_references,
+                callable_arities: &artifacts.callable_arities,
             },
         })
     }
@@ -1038,6 +1044,7 @@ impl PersistedFileGenerationArtifactsV2 {
                 clone_bodies,
                 schema_evidence: artifacts.schema_evidence,
                 unresolved_references: artifacts.unresolved_references,
+                callable_arities: artifacts.callable_arities,
             },
         })
     }
@@ -1322,8 +1329,24 @@ mod tests {
 
     #[test]
     fn chunk_text_slices_refuse_ranges_that_disagree_with_their_text() {
-        assert!(ChunkTextSlicesV1::new(&[[0, 4]], "abc").is_err());
-        assert!(ChunkTextSlicesV1::new(&[[0, 4], [2, 6]], "abcdefgh").is_err());
-        assert!(ChunkTextSlicesV1::new(&[[4, 4]], "").is_err());
+        let refusal = |ranges: &[[u64; 2]], text: &str| match ChunkTextSlicesV1::new(ranges, text) {
+            Err(CodeIndexProductionErrorV1::Contract(message)) => message,
+            other => panic!("expected a contract refusal, got {:?}", other.map(|_| ())),
+        };
+        assert_eq!(
+            refusal(&[[0, 4]], "abc"),
+            "sealed file segment text does not match its ranges"
+        );
+        assert_eq!(
+            refusal(&[[0, 4], [2, 6]], "abcdefgh"),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        assert_eq!(
+            refusal(&[[4, 4]], ""),
+            "sealed file segment text ranges are not ascending and disjoint"
+        );
+        let accepted = ChunkTextSlicesV1::new(&[[0, 4], [6, 10]], "abcdefgh")
+            .expect("ascending disjoint ranges covering the text");
+        assert_eq!(accepted.slice(span(6, 9)).expect("slice"), "efg");
     }
 }

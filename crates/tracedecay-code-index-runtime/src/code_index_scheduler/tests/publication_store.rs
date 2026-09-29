@@ -2402,55 +2402,7 @@ fn restart_rejects_pointer_generation_mismatch() {
     );
 }
 
-#[derive(Clone)]
-struct CapturedLogWriter {
-    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
-}
-
-impl std::io::Write for CapturedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogWriter {
-    type Writer = Self;
-
-    fn make_writer(&self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
-    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .without_time()
-        .with_ansi(false)
-        .with_writer(CapturedLogWriter {
-            bytes: Arc::clone(&bytes),
-        })
-        .finish();
-    let value = tracing::subscriber::with_default(subscriber, scope);
-    let bytes = bytes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    (
-        value,
-        String::from_utf8(bytes).expect("captured tracing is UTF-8"),
-    )
-}
-
-fn rewrite_active_generation_as_revision_seven(
+fn rewrite_active_generation_as_previous_revision(
     store: &Path,
     keeps_census: bool,
 ) -> DurablePublicationPointerV1 {
@@ -2466,7 +2418,10 @@ fn rewrite_active_generation_as_revision_seven(
     let payload = manifest["generation"]
         .as_object_mut()
         .expect("generation payload");
-    payload.insert("format_revision".to_owned(), serde_json::json!(7));
+    payload.insert(
+        "format_revision".to_owned(),
+        serde_json::json!(SEALED_GENERATION_FORMAT_REVISION_V1 - 1),
+    );
     if !keeps_census {
         payload
             .remove("statistics")
@@ -2538,7 +2493,7 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
                 .generation_id
                 .clone()
         };
-        rewrite_active_generation_as_revision_seven(store.path(), keeps_census);
+        rewrite_active_generation_as_previous_revision(store.path(), keeps_census);
 
         let mut reopened = CodeIndexWorktreeSchedulerV1::open(
             test_project_id(),
@@ -2547,10 +2502,13 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("foreground open defers sealed validation");
-        let (outcome, log) = captured_tracing(|| reopened.activate_or_reconcile());
+        let (outcome, log) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            reopened.activate_or_reconcile()
+        });
         published(outcome.expect("a retired revision must rebuild, not fail activation"));
+        let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
         assert!(
-            log.contains("sealed_format_revision=7"),
+            log.contains(&format!("sealed_format_revision={previous}")),
             "the rebuild must name the retired revision it refused (census={keeps_census}): {log}"
         );
 
@@ -2609,7 +2567,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
         .generation;
     let scope = seeded.sealed_scope();
     drop(scheduler);
-    let observed = rewrite_active_generation_as_revision_seven(store.path(), true);
+    let observed = rewrite_active_generation_as_previous_revision(store.path(), true);
 
     let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),

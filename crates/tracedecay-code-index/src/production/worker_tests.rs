@@ -422,7 +422,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v17"
+        "extractor.rust.v18"
     );
     assert_ne!(
         rebuilt.files[0].extraction.parser_import_rows_digest,
@@ -490,7 +490,7 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v17"
+        "extractor.rust.v18"
     );
     assert!(
         rebuilt.files[0]
@@ -556,31 +556,49 @@ fn incremental_carry_forward_rejects_a_stale_extractor_revision() {
 
 #[test]
 fn prior_sealed_generation_is_rejected_before_manifest_decode() {
-    for revision in [4, 9] {
+    let refuse = |revision: u32| {
         let generation = format!(r#"{{"format_revision":{revision}}}"#);
         let digest =
             ManifestDigest::from_sha256_bytes(&sha2::Sha256::digest(generation.as_bytes()))
-                .expect("prior generation digest");
-        let prior = format!(
+                .expect("generation digest");
+        let envelope = format!(
             r#"{{"state_digest":"{}","generation":{generation}}}"#,
             digest.as_str()
         );
-        let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            prior.as_bytes(),
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            envelope.as_bytes(),
             &SharedDecodedContentPoolV1::default(),
-            |_, _| panic!("a retired manifest must be refused before any segment read"),
+            |_, _| panic!("a revision gate must refuse before any segment read"),
         )
-        .expect_err("prior generation must require a rebuild");
-        assert!(
-            matches!(
-                error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
-                    if refused == revision
-            ),
-            "revision {revision} reached the wrong rejection: {error}"
-        );
-        assert!(error.to_string().contains("will be rebuilt from source"));
-    }
+        .expect_err("an incomplete envelope cannot decode")
+    };
+
+    let current = SEALED_GENERATION_FORMAT_REVISION_V1;
+    let current_error = refuse(current);
+    assert!(
+        matches!(
+            current_error,
+            CodeIndexProductionErrorV1::Contract(ref message)
+                if message.contains("payload decoding failed")
+        ),
+        "the current revision must pass the revision gate and reach payload decode: {current_error}"
+    );
+
+    let previous = current - 1;
+    let previous_error = refuse(previous);
+    assert!(
+        matches!(
+            previous_error,
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
+                if refused == previous
+        ),
+        "the previous revision reached the wrong rejection: {previous_error}"
+    );
+    assert!(
+        previous_error
+            .to_string()
+            .contains("will be rebuilt from source")
+    );
 }
 
 /// Seal `generation` partitioned, keeping every segment in memory with the

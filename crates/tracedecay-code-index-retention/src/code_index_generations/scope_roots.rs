@@ -75,6 +75,55 @@ pub fn record_scope_root(scope_root: &Path, canonical_project_root: &Path) -> st
     std::fs::rename(&temporary, &path)
 }
 
+/// One `code-index-v1/<scope hash>/` directory with the canonical root its
+/// scope-root record proves, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexScopeV1 {
+    pub store_root: PathBuf,
+    /// `None` when the scope has no record, or its record does not hash to
+    /// the directory name.
+    pub recorded_root: Option<PathBuf>,
+}
+
+/// Every scope directory under one project data root, in name order.
+///
+/// A missing `code-index-v1/` is an empty inventory. Entries that are not
+/// scope-hash directories (the shared segment and text-artifact directories)
+/// are not scopes.
+pub fn code_index_scopes(
+    data_root: &Path,
+) -> Result<Vec<CodeIndexScopeV1>, CodeGenerationRetentionErrorV1> {
+    let parent = code_index_scope_store_root(data_root);
+    let entries = match std::fs::read_dir(&parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut scopes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(storage)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_code_index_scope_hash(&name) || !entry.file_type().map_err(storage)?.is_dir() {
+            continue;
+        }
+        let store_root = entry.path();
+        let recorded_root = std::fs::read_to_string(store_root.join(SCOPE_ROOT_RECORD_FILE))
+            .ok()
+            .filter(|recorded| {
+                !recorded.is_empty() && code_index_scope_hash(Path::new(recorded)) == name
+            })
+            .map(PathBuf::from);
+        scopes.push(CodeIndexScopeV1 {
+            store_root,
+            recorded_root,
+        });
+    }
+    scopes.sort_by(|left, right| left.store_root.cmp(&right.store_root));
+    Ok(scopes)
+}
+
 /// Whether the scope's recorded canonical root has left the filesystem.
 ///
 /// `true` only when a record exists, hashes to `scope_hash` (so a stray or

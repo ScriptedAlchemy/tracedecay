@@ -135,13 +135,10 @@ impl HostAdmissionFacade<'_> {
             .authorities
             .registered_database(host_scope(scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .get_parse_offset_result(path)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset read failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
+        database.get_parse_offset(path).await.map_err(|error| {
+            tracing::warn!(?error, "registered host parse-offset read failed");
+            HostAdmissionOutcome::registered_authority_unavailable()
+        })
     }
 
     #[hotpath::measure(label = "usecases.admission.advance_parse_offset", future = true)]

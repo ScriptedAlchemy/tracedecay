@@ -1113,7 +1113,7 @@ export = createApi();
             ),
             ("init_block", "<module>", 4, vec!["enableDevtools"]),
             ("init_block", "<module>", 8, vec!["defineConfig", "react"]),
-            ("class", "Panel", 10, vec!["Component", "register", "memo"]),
+            ("class", "Panel", 11, vec!["Component", "register", "memo"]),
             ("method", "paint", 17, vec!["defaultSize", "paintAll"]),
             ("enum", "Size", 22, vec!["compute"]),
             ("namespace", "Setup", 26, vec!["configure"]),
@@ -1125,6 +1125,43 @@ export = createApi();
             ),
             ("function", "helper", 36, vec!["defaults", "work"]),
             ("init_block", "<module>", 40, vec!["createApi"]),
+        ]
+    );
+}
+
+#[test]
+fn typescript_declaration_line_is_past_its_decorators() {
+    let source = "@Component({})\n\
+class Circle {\n\
+    @Input()\n\
+    r = 1;\n\
+\n\
+    @Memo()\n\
+    @Trace()\n\
+    area(): number { return this.r; }\n\
+\n\
+    name(): string { return \"c\"; }\n\
+}\n";
+    let result = TypeScriptExtractor
+        .extract_artifact("circle.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| ["Circle", "r", "area", "name"].contains(&n.name.as_str()))
+        .filter(|n| n.kind != NodeKind::Decorator)
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    // Method decorators are `class_body` siblings of the method; class and
+    // field decorators are leading children of the declaration.
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 1, 0),
+            ("r", 3, 2),
+            ("area", 7, 7),
+            ("name", 9, 9)
         ]
     );
 }

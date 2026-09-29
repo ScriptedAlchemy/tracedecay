@@ -209,7 +209,7 @@ fn object_revision_and_partition_cursor_remain_separate_frontier_axes() {
     assert!(frontier_wire.get("cursor").is_some());
     assert!(frontier_wire.get("revision").is_none());
 
-    assert!(
+    assert_eq!(
         SourcePartitionFrontierV1::new(
             binding.immutable_identity().unwrap(),
             SourcePartitionIdV1::new(digest('6')),
@@ -221,6 +221,8 @@ fn object_revision_and_partition_cursor_remain_separate_frontier_axes() {
             None,
             digest('d'),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "external source partition sequence is not canonical"
     );
 }

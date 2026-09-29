@@ -322,7 +322,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(append_or_reuse_blocking(&path, &candidate, Some("effect-anchor")).is_err());
+        assert_eq!(
+            append_or_reuse_blocking(&path, &candidate, Some("effect-anchor"))
+                .unwrap_err()
+                .to_string(),
+            "config error: scheduler diagnostic effectful anchor identity is invalid"
+        );
     }
 
     #[test]

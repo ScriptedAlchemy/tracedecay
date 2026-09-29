@@ -223,6 +223,7 @@ impl CppExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -374,6 +375,7 @@ impl CppExtractor {
                         column: start_column,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                     state.edges.push(Edge {
                         source: id,

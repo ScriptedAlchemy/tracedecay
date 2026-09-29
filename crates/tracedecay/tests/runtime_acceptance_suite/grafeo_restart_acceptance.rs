@@ -692,12 +692,16 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
 
     let first_a = project_route(&environment, &project_a);
     let first_b = project_route(&environment, &project_b);
-    let first_a_client =
-        tracedecay_daemon_identity::invocation_client_for_current(first_a.handshake.clone())
-            .expect("project A client");
-    let first_b_client =
-        tracedecay_daemon_identity::invocation_client_for_current(first_b.handshake.clone())
-            .expect("project B client");
+    let first_a_client = tracedecay::daemon::invocation_client_for_current(
+        &first_a.profile,
+        first_a.handshake.clone(),
+    )
+    .expect("project A client");
+    let first_b_client = tracedecay::daemon::invocation_client_for_current(
+        &first_b.profile,
+        first_b.handshake.clone(),
+    )
+    .expect("project B client");
     assert_client_project_identity(
         &first_a_client,
         &project_a_id,
@@ -879,12 +883,16 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
 
     let restarted_a = project_route(&environment, &project_a);
     let restarted_b = project_route(&environment, &project_b);
-    let restarted_a_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_a.handshake.clone())
-            .expect("restarted A client");
-    let restarted_b_client =
-        tracedecay_daemon_identity::invocation_client_for_current(restarted_b.handshake.clone())
-            .expect("restarted B client");
+    let restarted_a_client = tracedecay::daemon::invocation_client_for_current(
+        &restarted_a.profile,
+        restarted_a.handshake.clone(),
+    )
+    .expect("restarted A client");
+    let restarted_b_client = tracedecay::daemon::invocation_client_for_current(
+        &restarted_b.profile,
+        restarted_b.handshake.clone(),
+    )
+    .expect("restarted B client");
     assert_client_project_identity(
         &restarted_a_client,
         &project_a_id,

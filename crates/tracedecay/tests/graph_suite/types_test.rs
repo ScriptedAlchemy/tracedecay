@@ -91,6 +91,7 @@ fn extraction_result_sanitize_no_empty_names() {
         column: 0,
         file_path: "src/lib.rs".to_string(),
         unmodeled_import: None,
+        argument_count: None,
     };
 
     let mut result = ExtractionResult {

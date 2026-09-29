@@ -4009,6 +4009,31 @@ function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): 
     .sort((a, b) => a.recorded_at - b.recorded_at || a.message_id.localeCompare(b.message_id));
   const toolEvents = events.filter((event) => event.kind === 'tool_call').length;
   const pullRequestEvents = events.length - toolEvents;
+  // Managed test runs the daemon recorded against the session that requested
+  // them; one run's request named no session and is counted, never placed.
+  const testRuns = sessions.slice(0, 12).flatMap((session, i) => {
+    if (i % 3 !== 1) return [];
+    const recordedAt = (session.started_at as number) + 1_800;
+    return [
+      {
+        provider: session.provider,
+        session_id: session.session_id,
+        kind: 'test_run',
+        operation_id: `request.managed-test-run.${i}`,
+        recorded_at: recordedAt,
+        started_at_micros: recordedAt * 1_000_000,
+        outcome: {
+          finished_at_micros: (recordedAt + 42) * 1_000_000,
+          termination: 'completed',
+          exit_code: i % 2 === 0 ? 0 : 101,
+          passed: 12 + i,
+          failed: i % 2 === 0 ? 0 : 1,
+          ignored: 1,
+        },
+      },
+    ];
+  });
+  const testRunReason = `${testRuns.length} of ${testRuns.length + 1} recorded test runs served at their recorded start; 1 recorded without a requesting session are counted, not placed; 0 older than the newest 2000 page runs are omitted; 0 served runs have no recorded outcome yet`;
   const eventReason = (served: number, eligible: number) =>
     `${served} of ${eligible} recorded events served at their host-recorded time; ${eligible - served} recorded without a timestamp are not placed; 0 older than the newest 2000 page events are omitted`;
   return {
@@ -4017,7 +4042,7 @@ function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): 
     commits,
     edited_files: editedFiles,
     branch_spans: branchSpans,
-    events,
+    events: [...events, ...testRuns].sort((a, b) => a.recorded_at - b.recorded_at),
     // The source ids, labels, authorities and granularities the route emits
     // (`loom_api.rs`), so a surface that keys on them finds them.
     source_statuses: [
@@ -4049,24 +4074,14 @@ function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): 
       {
         id: 'session_test',
         label: 'Session → test run',
-        state: 'unsupported',
-        granularity: 'recorded test outcome',
-        authority: null,
-        required_authority: 'a session-attributed test-run recording authority',
-        providers: [],
-        item_count: null,
-        reason:
-          'host transcripts record a test command only as a tool call with no typed outcome, and daemon-managed test runs are in-memory operations with no session attribution; no recorded test event can be placed on a session',
-        coverage: {
-          completeness: 'unknown',
-          eligible: null,
-          examined: null,
-          matched: null,
-          omitted: null,
-          unit: null,
-          reason:
-            'host transcripts record a test command only as a tool call with no typed outcome, and daemon-managed test runs are in-memory operations with no session attribution; no recorded test event can be placed on a session',
-        },
+        state: 'partial',
+        granularity: 'managed test run',
+        authority: 'managed_test_runs recorded against the requesting session',
+        required_authority: null,
+        providers: [...new Set(testRuns.map((run) => String(run.provider)))].sort(),
+        item_count: testRuns.length,
+        reason: testRunReason,
+        coverage: coverage(testRuns.length, testRuns.length + 1, 'recorded test runs', testRunReason),
       },
       {
         id: 'session_commit',

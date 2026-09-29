@@ -5,7 +5,8 @@ use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
 };
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
+    ActorId, CursorBindingMismatchV1, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1,
+    SessionId, TemporalModeV1,
 };
 pub use tracedecay_session_temporal_store::execution::SessionDataFreshness;
 pub use tracedecay_sessions::{
@@ -578,6 +579,9 @@ pub enum SessionRetrievalOutcome<T> {
     /// The cursor's frozen candidate cohort no longer matches the authorized
     /// snapshot. Replaying this cursor cannot succeed; restart without it.
     CursorStale,
+    /// The cursor was minted by another operation or for a request with a
+    /// bound parameter changed.
+    CursorRefused(CursorBindingMismatchV1),
     Partial {
         items: Vec<T>,
         freshness: SessionDataFreshness,

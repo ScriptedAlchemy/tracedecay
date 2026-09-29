@@ -151,6 +151,165 @@ impl<K: Ord, S: PartialEq> Default for StateChangeLogGate<K, S> {
     }
 }
 
+#[cfg(feature = "test-helpers")]
+static TRACING_CALLSITE_KEEPALIVE: std::sync::OnceLock<[tracing::Dispatch; 2]> =
+    std::sync::OnceLock::new();
+
+/// Pins every `tracing` callsite in this test process to `Interest::sometimes`
+/// so a per-test thread-local `Dispatch` census stays isolated to that thread.
+///
+/// `tracing_core` caches callsite interest process-globally and computes it
+/// from `Dispatchers::rebuilder()`. While at most one `Dispatch` is registered,
+/// that rebuilder takes the `Rebuilder::JustOne` fast path, which asks the
+/// current thread's default subscriber. Callsites register lazily on first
+/// execution, so under `--test-threads=N` an unrelated test that reaches a
+/// callsite first, on a thread with no scoped dispatcher (`NoSubscriber`),
+/// permanently caches `Interest::never()` for that callsite. A later census
+/// then observes zero events for work that did happen.
+///
+/// Registering two permanently-live dispatchers makes `has_just_one` false for
+/// the life of the process, so interest is folded over the real registry
+/// instead of one arbitrary thread's default. Both keepalives claim
+/// `Interest::sometimes()` for every callsite, which means enablement is
+/// decided per event by the calling thread's dispatcher. Constructing them
+/// also rebuilds the interest cache, repairing any callsite already poisoned
+/// before the census ran.
+#[cfg(feature = "test-helpers")]
+fn install_tracing_callsite_keepalive() {
+    struct AlwaysConsultThreadDispatch;
+
+    impl tracing::Subscriber for AlwaysConsultThreadDispatch {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    TRACING_CALLSITE_KEEPALIVE.get_or_init(|| {
+        [
+            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
+            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
+        ]
+    });
+}
+
+/// Installs the callsite keepalive, then sets `subscriber` as this thread's
+/// default until the guard drops.
+///
+/// While only one dispatcher is registered, `tracing_core` caches interest from
+/// the thread that first reaches a callsite. A thread with no subscriber stores
+/// `Interest::never()` for the process. The keepalive keeps two dispatchers
+/// registered so a later capture on this thread still observes the event.
+#[cfg(feature = "test-helpers")]
+#[must_use = "dropping the guard unregisters the capturing subscriber"]
+pub fn set_tracing_capture<S>(subscriber: S) -> tracing::subscriber::DefaultGuard
+where
+    S: tracing::Subscriber + Send + Sync + 'static,
+{
+    install_tracing_callsite_keepalive();
+    tracing::subscriber::set_default(subscriber)
+}
+
+/// Formatted `tracing` lines recorded on this thread.
+#[cfg(feature = "test-helpers")]
+pub struct FormattedTracingCapture {
+    bytes: std::sync::Arc<Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+#[cfg(feature = "test-helpers")]
+#[derive(Clone)]
+struct CaptureBuffer(std::sync::Arc<Mutex<Vec<u8>>>);
+
+#[cfg(feature = "test-helpers")]
+impl std::io::Write for CaptureBuffer {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-helpers")]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureBuffer {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[cfg(feature = "test-helpers")]
+impl FormattedTracingCapture {
+    /// Starts a thread-local formatted subscriber. The keepalive is installed
+    /// with it, so a callsite already poisoned by `Interest::never()` is repaired
+    /// before the first captured event.
+    #[must_use]
+    pub fn start() -> Self {
+        let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes)))
+            .finish();
+        Self {
+            bytes,
+            _guard: set_tracing_capture(subscriber),
+        }
+    }
+
+    /// Lines written so far, including their trailing newlines.
+    ///
+    /// A non-UTF-8 buffer is returned as a diagnostic string so the capturing
+    /// test fails its literal comparison instead of panicking in the helper.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).unwrap_or_else(|error| {
+            format!("captured tracing is not UTF-8: {}", error.utf8_error())
+        })
+    }
+}
+
+/// Runs `scope` under [`FormattedTracingCapture`] and returns its output.
+#[cfg(feature = "test-helpers")]
+pub fn capture_formatted_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
+    let capture = FormattedTracingCapture::start();
+    let value = scope();
+    (value, capture.text())
+}
+
 #[cfg(test)]
 mod state_change_gate_tests {
     use super::StateChangeLogGate;

@@ -93,7 +93,15 @@ fn daemon_handshake_requires_client_identity() {
     })
     .to_string();
 
-    assert!(DaemonHandshake::from_line(&encoded).is_err());
+    let Err(error) = DaemonHandshake::from_line(&encoded) else {
+        panic!("a handshake without client identity must be refused");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("missing field `client_identity`"),
+        "unexpected refusal: {error}"
+    );
 }
 
 /// Handshake metadata is negotiated over a live daemon connection. Absent

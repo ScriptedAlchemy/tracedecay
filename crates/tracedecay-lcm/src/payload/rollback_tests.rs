@@ -29,7 +29,10 @@ async fn cancellation_guard_removes_new_file_on_drop() {
     .unwrap();
 
     let payload_path = payload_dir(&storage_root).join(created.payload_ref);
-    assert!(payload_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&payload_path).unwrap(),
+        "created payload"
+    );
     drop(rollback);
     assert!(!payload_path.exists());
 }
@@ -56,7 +59,10 @@ async fn disarmed_guard_preserves_committed_file() {
 
     let payload_path = payload_dir(&storage_root).join(created.payload_ref);
     rollback.disarm();
-    assert!(payload_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&payload_path).unwrap(),
+        "created payload"
+    );
 }
 
 #[tokio::test]

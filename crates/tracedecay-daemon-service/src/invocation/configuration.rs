@@ -4,8 +4,10 @@ use super::*;
 
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+mod profile;
 mod settlement;
 
+pub use profile::{ProfileConfigurationAuthorityV1, execute_profile_configuration};
 use settlement::{configuration_effect, reconcile_configuration_runtime};
 
 #[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
@@ -47,6 +49,23 @@ pub(super) async fn execute_configuration(
     let actor = AuthorizedActor {
         actor_id: registered.actor.clone(),
     };
+    let audit_query = match &request {
+        ConfigurationWireRequestV1::Audit(audit) => {
+            match ConfigurationAuditQuery::from_request(audit.cursor.as_deref(), audit.limit) {
+                Ok(Ok(query)) => Some(query),
+                Ok(Err(mismatch)) => {
+                    return application_problem(
+                        wire_request_id,
+                        ApplicationProblem::cursor_refused(&mismatch),
+                    );
+                }
+                Err(error) => {
+                    return application_problem(wire_request_id, configuration_problem(error));
+                }
+            }
+        }
+        _ => None,
+    };
     let client = registered.runtime.client();
     let result: Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> = async {
         match (surface_operation, request) {
@@ -82,16 +101,12 @@ pub(super) async fn execute_configuration(
             ),
             (
                 ApplicationSurfaceOperation::ConfigurationAudit,
-                ConfigurationWireRequestV1::Audit(request),
+                ConfigurationWireRequestV1::Audit(_),
             ) => configuration_evidence(
                 serde_json::to_value(
-                    Box::pin(client.audit(
-                        actor,
-                        ConfigurationAuditQuery {
-                            after_event_id: request.after_event_id,
-                            limit: request.limit,
-                        },
-                    ))
+                    Box::pin(
+                        client.audit(actor, audit_query.ok_or(ConfigurationError::Unavailable)?),
+                    )
                     .await?,
                 )
                 .map_err(|_| ConfigurationError::Unavailable)?,
@@ -499,7 +514,41 @@ fn configuration_request_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<AuthorityReceipt, ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
+    configuration_route_authority(
+        ConfigurationRoutePolicyV1 {
+            actor: &registered.actor,
+            scope: &registered.scope,
+            grant_expires_at: registered.grants.expires_at,
+            policy_epoch: registered.grants.policy_epoch,
+            policy_digest: &registered.grants.policy_digest,
+        },
+        request_id,
+        operation,
+        observed_at,
+        deadline,
+        cancellation,
+    )
+}
+
+/// The actor, scope, and policy one configuration route admits requests
+/// under: a project's registration, or the profile's own route.
+struct ConfigurationRoutePolicyV1<'a> {
+    actor: &'a ActorId,
+    scope: &'a ResolvedScope,
+    grant_expires_at: UtcMicros,
+    policy_epoch: u64,
+    policy_digest: &'a AccessPolicyDigest,
+}
+
+fn configuration_route_authority(
+    policy: ConfigurationRoutePolicyV1<'_>,
+    request_id: &str,
+    operation: ApplicationSurfaceOperation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<AuthorityReceipt, ApplicationProblem> {
+    if observed_at >= policy.grant_expires_at {
         return Err(ApplicationProblem::not_found_or_not_authorized(
             RetryDirective::Never,
         ));
@@ -508,7 +557,7 @@ fn configuration_request_authority(
         tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
             .ok_or_else(invalid_configuration_request)?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(deadline.expires_at.0.min(policy.grant_expires_at.0));
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!("grant.daemon.configuration.{request_id}"))
             .map_err(|_| invalid_configuration_request())?,
@@ -516,34 +565,34 @@ fn configuration_request_authority(
         stable_digest(&(
             "tracedecay.daemon.configuration-route-grant.v1",
             request_id,
-            &registered.scope,
+            policy.scope,
             operation,
         ))?,
         ActorId::new("actor.tracedecay-daemon").map_err(|_| invalid_configuration_request())?,
         observed_at,
         expires_at,
-        registered.scope.clone(),
+        policy.scope.clone(),
         std::collections::BTreeSet::from([application_operation.capability_id().clone()]),
         std::collections::BTreeSet::from([application_operation.use_case_id().clone()]),
         DisclosureClass::Sensitive,
     )
     .map_err(|_| invalid_configuration_request())?;
     let context = RequestContext::new(
-        registered.actor.clone(),
-        registered.scope.clone(),
+        policy.actor.clone(),
+        policy.scope.clone(),
         grant,
         RequestId::new(request_id).map_err(|_| invalid_configuration_request())?,
         deadline,
         cancellation,
     )
     .map_err(|_| invalid_configuration_request())?;
-    let policy_digest = ManifestDigest::new(registered.grants.policy_digest.as_str().to_owned())
+    let policy_digest = ManifestDigest::new(policy.policy_digest.as_str().to_owned())
         .map_err(|_| invalid_configuration_request())?;
     AuthorityReceipt::from_context(
         &context,
         PolicyDecisionRef::new(
             "policy.daemon.configuration.v1",
-            registered.grants.policy_epoch,
+            policy.policy_epoch,
             policy_digest,
             ComponentVersion::new("tracedecay.daemon.configuration-policy.v1")
                 .map_err(|_| invalid_configuration_request())?,

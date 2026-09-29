@@ -8,9 +8,11 @@ use crate::retained_parse::SharedRetainedParsePool;
 
 use super::{CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 
+#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "code_index.extract.parser_artifact")]
 pub(super) fn parse_for_indexing(
     retained_parses: &SharedRetainedParsePool,
+    retain_parse: bool,
     identity: ParseDocumentIdentity,
     file: &SanitizedCodeFileV1,
     captured: &CodeIndexCapturedFileV1,
@@ -35,15 +37,25 @@ pub(super) fn parse_for_indexing(
             .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES),
     );
     let admitted = || !control.is_cancelled() && !control.is_deadline_exceeded();
-    let (report, mut extraction) = retained_parses
-        .parse_and_extract_artifact_for_revision_with_control(
+    let source = &source[..parsed_len];
+    let (report, mut extraction) = if retain_parse {
+        retained_parses.parse_and_extract_artifact_for_revision_with_control(
             identity,
             language.as_str(),
-            &source[..parsed_len],
+            source,
             parser,
             extractor_revision,
             Some(&admitted),
-        )?;
+        )?
+    } else {
+        retained_parses.parse_and_extract_artifact_unretained_with_control(
+            identity,
+            language.as_str(),
+            source,
+            parser,
+            Some(&admitted),
+        )?
+    };
     if let ParseCompleteness::Partial { reasons } = report.completeness {
         extraction
             .artifact

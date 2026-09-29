@@ -896,22 +896,17 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     // is deferred (the next command retries); the flush-bearing commands
     // (`sync`, `status`) still surface it, so a persistent failure
     // stays visible exactly where the flush is expected to happen.
-    // `init` cannot resolve this setting until it creates the requested
-    // project, which may differ from the current directory.
-    if runs_worldwide_counter_flush(command)
-        && user_config.pending_upload > 0
-        && let Ok(cwd) = std::env::current_dir()
-        && let Some(project_root) =
-            tracedecay_project::config::discover_project_root_with_identity(profile, &cwd).await
-    {
-        match commands::canonical_upload_enabled(profile, &project_root).await {
+    // The setting belongs to the profile, so the flush does not depend on
+    // the current directory.
+    if runs_worldwide_counter_flush(command) && user_config.pending_upload > 0 {
+        match commands::canonical_upload_enabled(profile).await {
             Ok(upload_enabled) => {
                 global::try_flush(&mut user_config, is_force_flush, upload_enabled);
             }
             Err(error) if is_force_flush => {
                 eprintln!(
                     "warning: canonical worldwide-counter upload setting is unavailable: {}",
-                    commands::annotate_reset_required(error, Some(&project_root))
+                    commands::annotate_reset_required(error, None)
                 );
             }
             Err(error) => {
@@ -1098,9 +1093,8 @@ impl CommandFamily {
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
             | Commands::Gitignore { .. } => Self::Configuration,
-            Commands::Doctor
+            Commands::Doctor { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor => Self::Diagnostics,
             Commands::Git { .. }
@@ -1904,9 +1898,13 @@ async fn dispatch_diagnostics_command(
     command: Commands,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
-        Commands::Doctor => {
+        Commands::Doctor { json } => {
             let completion = hotpath::future!(
-                tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes(),),
+                tracedecay::doctor::run_doctor(
+                    profile,
+                    crate::cloud::doctor_network_probes(),
+                    json
+                ),
                 label = "cli.doctor.run"
             )
             .await?;
@@ -1922,14 +1920,6 @@ async fn dispatch_diagnostics_command(
             export,
         } => {
             cost_cmd::handle_cost(profile, range, by_model, export).await?;
-        }
-        Commands::Bench {
-            queries,
-            json,
-            path,
-            max_nodes,
-        } => {
-            commands::handle_bench(profile, queries, json, path, max_nodes).await?;
         }
         Commands::Gain {
             all,
@@ -2018,7 +2008,7 @@ impl CommandStartupPolicy {
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
-            | Commands::Doctor
+            | Commands::Doctor { .. }
             | Commands::Analytics { .. }
             | Commands::Sessions {
                 action:
@@ -2036,7 +2026,6 @@ impl CommandStartupPolicy {
             Commands::Status { .. }
             | Commands::CurrentCounter { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor
             | Commands::List { .. }

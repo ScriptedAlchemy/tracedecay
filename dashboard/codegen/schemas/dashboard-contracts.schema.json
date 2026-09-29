@@ -3887,15 +3887,24 @@
     },
     "CodeIndexBuildPhaseV1": {
       "description": "The durable build phase whose committed boundary the dashboard is reading.\n\nA phase is not inferred from scheduler state. The mounted registry publishes\nthe exact phase that owns the active generation.",
-      "enum": [
-        "source_scan",
-        "relational_preparation",
-        "bulk_commit",
-        "index_build",
-        "verification",
-        "ready"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "source_scan",
+            "relational_preparation",
+            "bulk_commit",
+            "index_build",
+            "verification",
+            "ready"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "graph_publication",
+          "description": "Text serving is built and the pass that sealed the generation is\nstill publishing its native graph.",
+          "type": "string"
+        }
+      ]
     },
     "CodeIndexBuildProgressV1": {
       "description": "The latest committed progress boundary for one active code-index generation.\n\nEvery count is scoped to `generation_id`. The snapshot never includes a\nstaged page: work is reported only after the batch that owns it commits.",
@@ -16154,63 +16163,153 @@
       ],
       "type": "object"
     },
-    "LoomEventKindV1": {
-      "enum": [
-        "tool_call",
-        "pull_request"
-      ],
-      "type": "string"
-    },
     "LoomEventV1": {
-      "description": "One event a host transcript recorded for a displayed session.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/LoomEventKindV1"
+      "description": "One recorded event on a displayed session's lane.",
+      "oneOf": [
+        {
+          "description": "A tool call the host transcript recorded.",
+          "properties": {
+            "kind": {
+              "const": "tool_call",
+              "type": "string"
+            },
+            "label": {
+              "description": "The recorded tool names; absent when the row carries none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message_id": {
+              "description": "The stored message that recorded the event, the id the session's\ntranscript page serves for the same row.",
+              "type": "string"
+            },
+            "ordinal": {
+              "description": "Position in the session's recorded order.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "recorded_at": {
+              "description": "Epoch seconds the host recorded for the event. A row the host\nrecorded without one is not served; the source status counts it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "description": "The host's own identifier of the tool invocation, the value a\nchild session's `parent_tool_use_id` names.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "session_id",
+            "message_id",
+            "ordinal",
+            "recorded_at"
+          ],
+          "type": "object"
         },
-        "label": {
-          "description": "Tool names for a tool call; the recorded link or number for a pull\nrequest. Absent when the row carries neither.",
-          "type": [
-            "string",
-            "null"
-          ]
+        {
+          "description": "A pull-request link the host transcript recorded.",
+          "properties": {
+            "kind": {
+              "const": "pull_request",
+              "type": "string"
+            },
+            "label": {
+              "description": "The recorded link or number; absent when the row carries neither.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "ordinal": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "recorded_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "session_id",
+            "message_id",
+            "ordinal",
+            "recorded_at"
+          ],
+          "type": "object"
         },
-        "message_id": {
-          "description": "The stored message that recorded the event, the id the session's\ntranscript page serves for the same row.",
-          "type": "string"
-        },
-        "ordinal": {
-          "description": "Position in the session's recorded order.",
-          "format": "int64",
-          "type": "integer"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "recorded_at": {
-          "description": "Epoch seconds the host recorded for the event. A row the host recorded\nwithout one is not served; the source status counts it.",
-          "format": "int64",
-          "type": "integer"
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "tool_use_id": {
-          "description": "The host's own identifier of the tool invocation, the value a child\nsession's `parent_tool_use_id` names.",
-          "type": [
-            "string",
-            "null"
-          ]
+        {
+          "description": "A daemon-managed test run the session requested.",
+          "properties": {
+            "kind": {
+              "const": "test_run",
+              "type": "string"
+            },
+            "operation_id": {
+              "description": "The managed run's operation, the id `tracedecay_test_results`\nand the run's terminal receipt name.",
+              "type": "string"
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LoomTestRunOutcomeV1"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Absent while the run has not recorded a terminal outcome."
+            },
+            "provider": {
+              "type": "string"
+            },
+            "recorded_at": {
+              "description": "Epoch seconds the run started.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "started_at_micros": {
+              "description": "Unix microseconds the run started.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "session_id",
+            "operation_id",
+            "recorded_at",
+            "started_at_micros"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "provider",
-        "session_id",
-        "kind",
-        "message_id",
-        "ordinal",
-        "recorded_at"
-      ],
-      "type": "object"
+      ]
     },
     "LoomFileSessionProjectionV1": {
       "properties": {
@@ -16491,7 +16590,7 @@
           "type": "array"
         },
         "events": {
-          "description": "Recorded tool-call and pull-request events, oldest first.",
+          "description": "Recorded tool-call, pull-request, and test-run events, oldest first.",
           "items": {
             "$ref": "#/$defs/LoomEventV1"
           },
@@ -16557,6 +16656,50 @@
         "active_generations",
         "latest_activated_at_micros",
         "authority"
+      ],
+      "type": "object"
+    },
+    "LoomTestRunOutcomeV1": {
+      "description": "The outcome a finished managed test run recorded.",
+      "properties": {
+        "exit_code": {
+          "description": "The test process exit status; absent when it never exited.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "failed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at_micros": {
+          "description": "Unix microseconds the run terminated.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "ignored": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "termination": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "finished_at_micros",
+        "termination",
+        "passed",
+        "failed",
+        "ignored"
       ],
       "type": "object"
     },
@@ -19849,6 +19992,7 @@
         }
       },
       "required": [
+        "provider",
         "session_id"
       ],
       "type": "object"
@@ -26523,23 +26667,8 @@
       ]
     },
     "WorkAttemptListCursorV1": {
-      "additionalProperties": false,
-      "description": "Resume point for the next attempt-list page, bound to the exact verified\ntopology generation it was minted under.",
-      "properties": {
-        "generation": {
-          "description": "The verified topology generation the cursor was minted under.",
-          "type": "string"
-        },
-        "start_after": {
-          "$ref": "#/$defs/WorkAttemptIdentityV1",
-          "description": "The last attempt identity the prior page returned."
-        }
-      },
-      "required": [
-        "generation",
-        "start_after"
-      ],
-      "type": "object"
+      "description": "Opaque resume point for the next page of one attempt-list-family read,\nbound to the operation and `page_size` that minted it and pinned to the\nverified topology generation the page was read under.",
+      "type": "string"
     },
     "WorkAttemptListRequestV1": {
       "additionalProperties": false,
@@ -33141,6 +33270,10 @@
         "attempt": {
           "$ref": "#/$defs/WorkAttemptIdentityV1"
         },
+        "binding": {
+          "description": "Binds the continuation to the retrieve-evidence operation and the\nresult-shaping request fields the envelope does not echo.",
+          "type": "string"
+        },
         "participant_epoch": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -33168,6 +33301,7 @@
         "attempt",
         "source",
         "participant_epoch",
+        "binding",
         "temporal_cursor",
         "ranking_cursor"
       ],

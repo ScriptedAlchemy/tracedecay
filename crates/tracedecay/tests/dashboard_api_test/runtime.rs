@@ -142,6 +142,10 @@ pub(crate) struct DashboardTestRuntimeV1 {
 }
 
 impl DashboardTestRuntimeV1 {
+    pub(crate) fn profile_sessions_database(&self) -> &RegisteredGlobalDbLeaseV1 {
+        &self.profile_sessions_database
+    }
+
     pub(crate) async fn project(
         profile: &ProfileRoot,
         project_root: impl AsRef<Path>,
@@ -480,6 +484,10 @@ impl DashboardTestRuntimeV1 {
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "seed dashboard test session message".to_owned(),
+                message: error.to_string(),
+            })?
             .ok_or_else(|| TraceDecayError::Database {
                 operation: "seed dashboard test session message".to_owned(),
                 message: format!(
@@ -540,10 +548,13 @@ impl DashboardTestRuntimeV1 {
         provider: &str,
         session_id: &str,
     ) -> Result<Option<SessionRecord>> {
-        Ok(self
-            .database(scope)?
+        self.database(scope)?
             .get_session(provider, session_id)
-            .await)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "load registered session".to_owned(),
+                message: error.to_string(),
+            })
     }
 
     /// Drives one host transcript source through the production project

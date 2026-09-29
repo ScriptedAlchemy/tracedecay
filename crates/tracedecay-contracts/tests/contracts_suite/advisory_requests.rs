@@ -31,10 +31,12 @@ fn github_request_only_admits_closed_read_operations() {
         "graphql_add_pull_request_review",
         "graphql_resolve_review_thread",
     ] {
+        let error = serde_json::from_str::<GitHubReviewReadOperationV1>(&format!("\"{mutation}\""))
+            .unwrap_err()
+            .to_string();
         assert!(
-            serde_json::from_str::<GitHubReviewReadOperationV1>(&format!("\"{mutation}\""))
-                .is_err(),
-            "GitHub mutation operation {mutation} must stay unrepresentable"
+            error.starts_with(&format!("unknown variant `{mutation}`, expected one of")),
+            "GitHub mutation operation {mutation} must stay unrepresentable: {error}"
         );
     }
 }

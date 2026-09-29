@@ -1598,8 +1598,8 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
         contents.push('\n');
     }
     std::fs::write(&path, contents).unwrap();
-    super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.store(0, Ordering::Release);
-    let prepared_before = super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.load(Ordering::Acquire);
+    let file_identity = crate::runtime::source::jsonl_file_identity(&path).unwrap();
+    let rendezvous = super::SharedJsonlPreparationRendezvous::register(file_identity);
 
     let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
         &path,
@@ -1611,18 +1611,19 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
     .await
     .expect("bounded exact-hook admission");
 
-    assert!(progress.frames_persisted >= u64::try_from(event_count).unwrap());
-    assert!(
-        super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS
-            .load(Ordering::Acquire)
-            .saturating_sub(prepared_before)
-            >= event_count,
-        "every in-scope event is prepared once through the shared window"
+    assert_eq!(progress.frames_persisted, 33);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(file_identity),
+        33,
+        "every in-scope frame is prepared once through the shared window"
     );
-    if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1) {
-        assert!(
-            super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.load(Ordering::Acquire) > 1,
-            "the exact-hook path must overlap independent frame preparation"
-        );
-    }
+    assert_eq!(
+        rendezvous.state(),
+        super::SharedJsonlPreparationRendezvousState {
+            inside: 2,
+            overlapped: true,
+            serialized: false,
+        },
+        "the exact-hook path must overlap independent frame preparation"
+    );
 }

@@ -302,17 +302,7 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
 #[tokio::test]
 async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
     let (cg, _dir, _authority) = init_indexed_repo().await;
-    let log_dir = tempfile::tempdir().expect("log directory");
-    let log_path = log_dir.path().join("refresh.log");
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .with_writer(Arc::new(
-            std::fs::File::create(&log_path).expect("log file"),
-        ))
-        .finish();
-    // This current-thread runtime also polls the spawned refresh task.
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
     let cause = format!("publication manifest is corrupt: {}", "x".repeat(600));
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let refresh_writer: BackgroundRefreshWriter = {
@@ -371,7 +361,7 @@ async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
     .expect("refused probe settles");
     server.shutdown().await;
 
-    let log = std::fs::read_to_string(&log_path).expect("read log");
+    let log = capture.text();
     let line = log
         .lines()
         .find(|line| line.contains("background read reconciliation was not admitted"))
