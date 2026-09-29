@@ -355,13 +355,11 @@ async fn dispatch_opencode_tool_after(
 
 /// Deliver a response hook's output and retain its delivery receipt.
 ///
-/// The receipt spool's writer lock is shared with the daemon's replay
-/// consumer, so admission waits for it, bounded by one synchronous hook budget
-/// measured from this write. The budget is not anchored at hook start: the
-/// body that produced `output` may legitimately have spent longer than one
-/// synchronous budget (a bounded transcript catch-up, a daemon compaction
-/// call), and an already-expired deadline would refuse even an uncontended
-/// lock and fail the hook without delivering anything to the host.
+/// The host's output is the delivery, so it is flushed first and a receipt
+/// that cannot be retained never fails the hook. Receipt writers share the
+/// spool and wait on each other only for a rename; a publish lock held past
+/// the synchronous budget, measured from that wait, leaves the synced receipt
+/// staged for the daemon's drain to adopt.
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
     profile: &ProfileRoot,
@@ -370,7 +368,7 @@ pub(crate) async fn write_hook_output(
     event_json: &str,
     output: &str,
 ) -> bool {
-    let delivery_writer = match project_root {
+    let layout = match project_root {
         None => None,
         Some(project_root) => {
             let Some(layout) = store_layout::enrolled_layout(profile.data_dir(), project_root)
@@ -381,16 +379,7 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
-                tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
-                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-            ) {
-                Ok(writer) => Some(writer),
-                Err(error) => {
-                    tracing::warn!(host = host.hook_key(), %error, "Hook output delivery receipt spool could not be opened");
-                    return false;
-                }
-            }
+            Some(layout)
         }
     };
     let written = {
@@ -405,37 +394,34 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    let Some(_) = project_root else {
-        return true;
-    };
-    let Some(delivery_writer) = delivery_writer else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery writer disappeared"
-        );
-        return false;
-    };
+    if let Some(layout) = layout
+        && let Err(error) = retain_output_receipt(&layout.data_root, host, event_json, output)
+    {
+        tracing::warn!(host = host.hook_key(), %error, "Hook output was delivered but its delivery receipt was not retained");
+    }
+    true
+}
+
+/// Durably retains the delivery receipt of a hook output the host already
+/// received. The daemon replay lane settles and acknowledges it, including
+/// when the callback runs while the daemon is offline.
+fn retain_output_receipt(
+    data_root: &Path,
+    host: NativeHostIdentityV1,
+    event_json: &str,
+    output: &str,
+) -> Result<tracedecay_hooks::HookDeliveryRetentionV1, String> {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let session = event_session_id(&parsed).unwrap_or_else(|| "session-unavailable".to_owned());
     let settled_at = daemon_ports::now_utc();
-    let Some(owner) = hook_output_owner_event_id(host, event_json, output) else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery identity could not be derived"
-        );
-        return false;
-    };
-    let Ok(channel) = tracedecay_domain::canonical_sha256(&(
+    let owner = hook_output_owner_event_id(host, event_json, output)
+        .ok_or("delivery identity could not be derived")?;
+    let channel = tracedecay_domain::canonical_sha256(&(
         "tracedecay.hook-output-channel.v1",
         host.hook_key(),
         session,
-    )) else {
-        tracing::error!(
-            host = host.hook_key(),
-            "Hook output delivery channel identity could not be derived"
-        );
-        return false;
-    };
+    ))
+    .map_err(|_| "delivery channel identity could not be derived")?;
     let settlement = tracedecay_domain::DeliverySettlementV1 {
         attempt: tracedecay_domain::DeliverySettlementAttemptV1 {
             owner_event_id: owner,
@@ -457,23 +443,14 @@ pub(crate) async fn write_hook_output(
         settled_at,
         drop_reason: None,
     };
-    let receipt = match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            tracing::warn!(%error, "Hook output delivery receipt is invalid");
-            return false;
-        }
-    };
-    match delivery_writer.append_or_replay(&receipt) {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
-            return false;
-        }
-    }
-    // The daemon replay lane settles and acknowledges this durable source
-    // receipt, including when the callback runs while the daemon is offline.
-    true
+    let receipt = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement)
+        .map_err(|error| error.to_string())?;
+    tracedecay_hooks::HookDeliveryReceiptWriterV1::open_within(
+        tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    )
+    .and_then(|writer| writer.retain(&receipt))
+    .map_err(|error| error.to_string())
 }
 
 fn hook_output_owner_event_id(
@@ -1420,6 +1397,9 @@ mod wire_stdin_bound_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod hint_analytics_tests;
+
+#[cfg(test)]
+mod output_delivery_tests;
 
 #[cfg(test)]
 mod tests;

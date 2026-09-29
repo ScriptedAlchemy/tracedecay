@@ -17,7 +17,7 @@ pub use coarse_time::{RewriteWitness, change_time_settled};
 pub use inode_generation::inode_generation;
 
 pub use file_lease::FileLease;
-pub use lock_admission::{LockAdmissionError, lock_until};
+pub use lock_admission::{LockAdmissionError, lock_shared_until, lock_until};
 #[cfg(windows)]
 pub mod windows_file;
 
