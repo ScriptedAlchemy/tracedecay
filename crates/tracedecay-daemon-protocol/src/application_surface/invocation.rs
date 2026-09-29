@@ -406,6 +406,18 @@ pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
                 cancellation.context(),
             )
         }
+        (InvocationTarget::Profile, ApplicationSurfaceRequest::Configuration(request))
+            if request.targets_profile_settings() =>
+        {
+            DaemonInvocationRequest::configuration(
+                request_id.as_str(),
+                operation,
+                request,
+                now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
         (InvocationTarget::Profile, _) => return Err(InvocationError::InvalidRequest),
         (target, request) => daemon_invocation_request(
             &request_id,
