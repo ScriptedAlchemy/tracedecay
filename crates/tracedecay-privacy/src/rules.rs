@@ -153,17 +153,22 @@ struct RuleSetCompilation {
     caches: Mutex<SearchCachePool>,
 }
 
-/// Search caches for one ruleset, kept only while someone holds it.
+/// Search caches for one ruleset, sized to its holders rather than to the
+/// threads that ever scanned.
 ///
 /// A regex with an internal cache pool keeps one cache per thread that ever
 /// searched it, for the life of the process. Across a ~200-regex catalogue
 /// that is tens of MB per scanning thread, held after the scan that grew it.
-/// Here a scan or a [`CredentialScanBatchV1`] holds the ruleset; scans reuse
-/// idle caches while any holder remains, so concurrent and back-to-back
-/// scans stay warm, and the last holder to let go frees every cache.
+/// Here a scan or a [`CredentialScanBatchV1`] holds the ruleset, and scans
+/// reuse idle caches while any holder remains. When the last holder lets go,
+/// one set stays warm for sequential single-scan callers, which would
+/// otherwise rebuild every lazy DFA per record; a batch's sets grew with its
+/// whole corpus, so the end of a batch frees them all.
 #[derive(Default)]
 struct SearchCachePool {
     holders: usize,
+    /// A batch ended; the next time no one holds the ruleset frees every set.
+    drain_when_idle: bool,
     idle: Vec<SearchCaches>,
 }
 
@@ -182,12 +187,20 @@ impl RuleSetCompilation {
         pool
     }
 
-    fn release(&self, caches: Option<SearchCaches>) {
+    fn release(&self, caches: Option<SearchCaches>, batch_ended: bool) {
         let freed = {
             let mut pool = self.pool();
             pool.idle.extend(caches);
             pool.holders = pool.holders.saturating_sub(1);
-            (pool.holders == 0).then(|| std::mem::take(&mut pool.idle))
+            pool.drain_when_idle |= batch_ended;
+            if pool.holders > 0 {
+                Vec::new()
+            } else if std::mem::take(&mut pool.drain_when_idle) {
+                std::mem::take(&mut pool.idle)
+            } else {
+                let warm = pool.idle.pop();
+                std::mem::replace(&mut pool.idle, warm.into_iter().collect())
+            }
         };
         drop(freed);
     }
@@ -234,15 +247,15 @@ impl<'a> CredentialScan<'a> {
 impl Drop for CredentialScan<'_> {
     fn drop(&mut self) {
         self.compilation
-            .release(Some(std::mem::take(&mut self.caches)));
+            .release(Some(std::mem::take(&mut self.caches)), false);
     }
 }
 
-/// Keeps the code-source ruleset's search caches warm across the scans of
-/// one batch, such as one snapshot capture; dropping the last holder frees
-/// them. Without a batch, sequential scans each start from cold caches.
-/// A ruleset that failed to load has no caches to keep, and each scan in
-/// the batch reports that failure itself.
+/// Keeps one warm cache set per concurrent scanner of the code-source
+/// ruleset for the duration of one batch, such as one snapshot capture, and
+/// frees them all when the batch and its scans end. A ruleset that failed to
+/// load has no caches to keep, and each scan in the batch reports that
+/// failure itself.
 pub struct CredentialScanBatchV1 {
     compilation: Option<&'static RuleSetCompilation>,
 }
@@ -260,7 +273,7 @@ impl CredentialScanBatchV1 {
 impl Drop for CredentialScanBatchV1 {
     fn drop(&mut self) {
         if let Some(compilation) = self.compilation {
-            compilation.release(None);
+            compilation.release(None, true);
         }
     }
 }
