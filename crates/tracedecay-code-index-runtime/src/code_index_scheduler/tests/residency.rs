@@ -48,6 +48,8 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
         &store,
     )
     .await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(text.query_owners_are_ready());
     let fresh = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
