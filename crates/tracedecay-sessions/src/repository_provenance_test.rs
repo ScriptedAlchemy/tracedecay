@@ -114,10 +114,21 @@ fn identity_capture_keeps_head_ref_and_private_locator_evidence() {
         RepositoryRemoteIdentityV1::Known(_)
     ));
     let encoded = serde_json::to_string(&capture).unwrap();
+    let RepositoryRemoteIdentityV1::Known(digest) = capture.evidence().remote_identity() else {
+        panic!(
+            "remote identity must be a privacy-bound digest, got {:?}",
+            capture.evidence().remote_identity()
+        );
+    };
+    assert_eq!(
+        digest.as_str(),
+        "sha256:50ef140bac90e9de982b2c596522dee50eefb1e05f064392ad62321a96a22f90"
+    );
     assert!(!encoded.contains("alice"));
     assert!(!encoded.contains("top-secret"));
     assert!(!encoded.contains("token=hidden"));
     assert!(!encoded.contains(fixture.path().to_string_lossy().as_ref()));
+    assert!(encoded.contains(digest.as_str()));
 
     fixture.git(&[
         "remote",

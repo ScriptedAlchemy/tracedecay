@@ -1487,9 +1487,16 @@ mod authority_tests {
             .unwrap()
             .unwrap();
         let debug = format!("{authority:?}");
+        assert_eq!(
+            &debug[debug.find("content_hash:").expect("content hash field")..],
+            "content_hash: \"25b36376c50544179d61adce27285045fbd8824ca4c024a33efff88e22a234a9\", byte_count: 10, char_count: 7, locator: \"<redacted>\" }"
+        );
         assert!(!debug.contains(content));
         assert!(!debug.contains("秘密-payload.payload"));
-        assert!(debug.contains(&hash));
+        assert_eq!(
+            hash,
+            "25b36376c50544179d61adce27285045fbd8824ca4c024a33efff88e22a234a9"
+        );
         assert!(remove_verified_payload_file(&authority).unwrap());
         assert!(!path.exists());
     }

@@ -258,7 +258,14 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     assert_eq!(observations.len(), 1);
     let payload = observations[0].observation().payload();
     let payload = payload.to_string();
+    let root = fixture.temp.path().to_string_lossy().into_owned();
+    let normalized = payload.replace(&root, "/fixture");
+    assert_eq!(
+        normalized,
+        r#"{"evidence":{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{"end":255,"start":0}},"facts":[{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript"},{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}],"native_record_kind":"user","provider":"claude","relations":{"message_id":"message-production-vertical","session_id":"production-session"},"stable_record_id":"message-production-vertical","version":1}"#
+    );
     assert!(!payload.contains("never-persist-this-secret"));
+    assert!(payload.contains("production vertical searchable"));
     let canonical_transcript = std::fs::canonicalize(&fixture.transcript).unwrap();
     let authority_json = fixture.authority_documents();
     assert_eq!(authority_json.len(), 3);
@@ -600,8 +607,14 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
     fixture.write_record("protected cursor restart", "restart-secret");
     let source_adapter = fixture.source(&raw_session_id);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
-    assert!(identity.session_id.starts_with("privacy.structural-id.v1."));
-    assert!(!identity.session_id.contains(&raw_session_id));
+    assert_eq!(
+        identity.session_id,
+        "privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d"
+    );
+    assert_eq!(
+        identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"
+    );
 
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -633,6 +646,10 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
         .expect("reopened protected source cursor");
     assert!(cursor.byte_offset() > 0);
     let durable = serde_json::to_string(cursor.source()).unwrap();
+    assert_eq!(
+        durable,
+        r#"{"provider":"claude","session_id":"privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d","source_key":"tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"}"#
+    );
     assert!(!durable.contains(&raw_session_id));
 }
 

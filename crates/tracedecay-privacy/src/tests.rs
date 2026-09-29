@@ -729,10 +729,17 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
         .expect("redacted workflow fact remains durable");
     let durable_json = serde_json::to_string(durable).unwrap();
     let receipt_json = serde_json::to_string(outcome.receipt()).unwrap();
-
+    assert_eq!(
+        durable_json,
+        r#"{"observation_id":"sha256:25761f498b0a11d02d2e28d77863d62302b4aa16773d13d442e750b143d3ed12","identity":{"source":{"provider":"provider-neutral-fixture","session_id":"session.workflow-privacy-fixture"},"scope":{"kind":"profile"},"generation":1,"position":{"start":20,"end":21},"ordering_domain":"daemon_sequence","native_record_id":"workflow.privacy-fixture"},"receipt":{"receipt":{"receipt_id":"privacy.observation.v1.5c1c371cf44eee2968a3a0e689f417039904917eb24570a1f1c52bf4cf6987d2","sanitizer_version":"privacy.observation-record.v1"},"disposition":"redacted","sensitivity":"secret","payload":{"digest":"sha256:3eb5def26d4ace15b09fe4bbde99ee9b2bcfcb018912246f05f04a4980723f41","byte_len":558}},"retention_class":"retention.privacy-test","payload":{"evidence":{"ordering_domain":"daemon_sequence","range":{"end":21,"start":20}},"facts":[{"content":{"api_key":"[TraceDecay redacted: sensitive field]","text":"publish release"},"event_sequence":1,"item_id":"task.stable.privacy-fixture","kind":"workflow_lifecycle","provider_reference":"task.native.privacy-fixture","semantic_kind":"task","status":"pending"}],"native_record_kind":"workflow_fixture","provider":"provider-neutral-fixture","relations":{"session_id":"session.workflow-privacy-fixture"},"stable_record_id":"workflow.privacy-fixture","version":1}}"#
+    );
+    assert_eq!(
+        receipt_json,
+        r#"{"receipt":{"receipt_id":"privacy.observation.v1.5c1c371cf44eee2968a3a0e689f417039904917eb24570a1f1c52bf4cf6987d2","sanitizer_version":"privacy.observation-record.v1"},"disposition":"redacted","sensitivity":"secret","payload":{"digest":"sha256:3eb5def26d4ace15b09fe4bbde99ee9b2bcfcb018912246f05f04a4980723f41","byte_len":558}}"#
+    );
     assert!(!durable_json.contains(SECRET));
     assert!(!receipt_json.contains(SECRET));
-    assert!(durable_json.contains("[TraceDecay redacted:"));
+    assert!(durable_json.contains("publish release"));
     assert!(outcome.findings().iter().all(|finding| {
         !format!("{finding:?}").contains(SECRET)
             && finding.action() == SanitizationActionV1::Redacted
@@ -904,14 +911,11 @@ fn default_exact_formats_are_detected_and_redacted() {
     }
 
     let sanitized = observation.payload().to_string();
-    for detected_text in [
-        bearer_token,
-        private_key_label,
-        prefixed_credential,
-        assignment,
-    ] {
-        assert!(!sanitized.contains(&detected_text));
-    }
+    assert_eq!(
+        sanitized,
+        r#"{"events":["[TraceDecay redacted: bearer token]","[TraceDecay redacted: private key]","[TraceDecay redacted: exact credential]","[TraceDecay redacted: credential assignment]"]}"#
+    );
+    assert!(!sanitized.contains("Aa0Aa0"));
 }
 
 #[test]
@@ -1051,7 +1055,10 @@ fn quoted_assignments_with_punctuation_are_redacted() {
             && finding.action() == SanitizationActionV1::Redacted
     }));
     let sanitized = observation.payload().to_string();
-    assert!(secrets.iter().all(|secret| !sanitized.contains(secret)));
+    assert_eq!(
+        sanitized,
+        r#"{"messages":["[TraceDecay redacted: credential assignment]","[TraceDecay redacted: credential assignment]","[TraceDecay redacted: credential assignment]","[TraceDecay redacted: credential assignment]"]}"#
+    );
     assert!(!sanitized.contains("p@ssw0rd!"));
     assert!(!sanitized.contains("truncated!"));
     assert!(!sanitized.contains("tailsecret"));
@@ -1280,18 +1287,11 @@ fn findings_never_contain_detected_secret_text() {
         &record,
     );
     let diagnostic = format!("{:?}", outcome.findings());
-    let original: Value = serde_json::from_slice(&record).expect("parse fixture for assertion");
-    let secret = original["payload"]
-        .as_str()
-        .expect("fixture payload is text");
-
-    assert!(!diagnostic.contains(secret));
-    assert!(
-        outcome
-            .findings()
-            .iter()
-            .all(|finding| !finding.location().contains(secret))
+    assert_eq!(
+        diagnostic,
+        r#"[SanitizationFindingV1 { detector: ExactCredential, detector_origin: BuiltInDetectorKernel, detector_revision: V1, location: "$/field[0]", confidence: Exact, action: Redacted, remediation_class: RotateOrRevokeCredential, evidence_anchors: [SanitizationEvidenceAnchorV1 { structural_location: "$/field[0]" }], scanned_coverage: Complete, assessment: None }]"#
     );
+    assert!(!diagnostic.contains(&detected_text));
 }
 
 #[test]

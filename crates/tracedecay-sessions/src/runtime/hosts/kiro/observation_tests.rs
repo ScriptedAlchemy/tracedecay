@@ -307,10 +307,13 @@ fn snapshot_normalization_emits_only_redacted_canonical_evidence() {
     assert_eq!(canonical["evidence"]["range"]["start"], 4);
     assert_eq!(canonical["facts"].as_array().unwrap().len(), 1);
     let encoded = canonical.to_string();
+    assert_eq!(
+        encoded,
+        r#"{"evidence":{"native_sequence":4,"native_timestamp":1800000000,"ordering_domain":"snapshot_order","range":{"end":5,"start":4}},"facts":[{"content":"Redacted response","kind":"message","model":"redacted-model","role":"assistant","timestamp":1800000000}],"native_record_kind":"message","provider":"kiro","relations":{"message_id":"redacted-message","session_id":"redacted-session"},"stable_record_id":"redacted-message","version":1}"#
+    );
     assert!(!encoded.contains("must-not-survive"));
-    assert!(!encoded.contains("source_path"));
-    assert!(!encoded.contains("metadata"));
     assert!(!encoded.contains("Redacted reasoning"));
+    assert!(encoded.contains("Redacted response"));
 }
 
 #[test]
@@ -415,23 +418,13 @@ fn hostile_lookalike_fields_remain_absent() {
         assert!(relations.get(key).is_none(), "{key} must remain absent");
     }
     let encoded = canonical.to_string();
-    for rejected in [
-        "thread-native-1",
-        "turn-native-1",
-        "agent-native-1",
-        "check the invoice join",
-        "call-read-1",
-        "abc123",
-        "kiro-workflow-1",
-        "arbitrary result",
-        "999999",
-    ] {
-        assert!(!encoded.contains(rejected), "{rejected} must not survive");
-    }
-    assert!(
-        !encoded.contains("\"kind\":\"workflow_lifecycle\""),
-        "Kiro hostile workflow lookalike must not emit WorkflowLifecycle"
+    assert_eq!(
+        encoded,
+        r#"{"evidence":{"native_sequence":2,"native_timestamp":1800000000,"ordering_domain":"snapshot_order","range":{"end":3,"start":2}},"facts":[{"content":"echoed protocol noise","kind":"message","model":"redacted-model","role":"assistant","timestamp":1800000000}],"native_record_kind":"message","provider":"kiro","relations":{"message_id":"kiro-session:msg-native-1","session_id":"kiro-session"},"stable_record_id":"kiro-session:msg-native-1","version":1}"#
     );
+    assert!(!encoded.contains("check the invoice join"));
+    assert!(!encoded.contains("\"kind\":\"workflow_lifecycle\""));
+    assert!(encoded.contains("echoed protocol noise"));
 }
 
 #[test]
