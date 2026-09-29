@@ -167,29 +167,28 @@ mod tests {
     fn mutation_rejects_overlap_and_removing_the_last_root() {
         let workspace =
             AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///workspace/root-a"));
-        assert!(
-            WorkspaceFolderMutation::parse(
-                &json!({
-                    "event": {
-                        "added": [{"uri": "file:///workspace/root-b"}],
-                        "removed": [{"uri": "file:///workspace/root-b"}]
-                    }
-                }),
-                &workspace,
-            )
-            .is_err()
+        let rejection = |event| {
+            let Err(failure) =
+                WorkspaceFolderMutation::parse(&json!({ "event": event }), &workspace)
+            else {
+                panic!("workspace mutation {event} must be refused");
+            };
+            assert_eq!(failure.code, -32602);
+            failure.data["detail"].clone()
+        };
+        assert_eq!(
+            rejection(json!({
+                "added": [{"uri": "file:///workspace/root-b"}],
+                "removed": [{"uri": "file:///workspace/root-b"}]
+            })),
+            "workspace folder URIs must be unique and cannot be both added and removed"
         );
-        assert!(
-            WorkspaceFolderMutation::parse(
-                &json!({
-                    "event": {
-                        "added": [],
-                        "removed": [{"uri": "file:///workspace/root-a"}]
-                    }
-                }),
-                &workspace,
-            )
-            .is_err()
+        assert_eq!(
+            rejection(json!({
+                "added": [],
+                "removed": [{"uri": "file:///workspace/root-a"}]
+            })),
+            "the active workspace root cannot be removed"
         );
     }
 }

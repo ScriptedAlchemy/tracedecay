@@ -425,7 +425,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(durability.load_receipt(&request.idempotency_key).is_err());
+        let error = durability
+            .load_receipt(&request.idempotency_key)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: unsupported source edit durable receipt version"
+        );
     }
 
     #[test]

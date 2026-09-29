@@ -260,6 +260,10 @@ mod tests {
     fn ast_grep_reconstruction_rejects_mismatched_source() {
         let output =
             br#"[{"text":"not-old","replacement":"new","replacementOffsets":{"start":3,"end":6}}]"#;
-        assert!(reconstruct_ast_grep_rewrite("fn old() {}\n", output).is_err());
+        let error = reconstruct_ast_grep_rewrite("fn old() {}\n", output).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: ast-grep replacement offsets did not match the source bytes"
+        );
     }
 }
