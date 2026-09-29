@@ -427,11 +427,23 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 let Ok(from) =
                     tracedecay_domain::SymbolOccurrenceId::new(request.from_node_id.clone())
                 else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.from-node-id-invalid",
+                        "from_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
                 };
                 let Ok(to) = tracedecay_domain::SymbolOccurrenceId::new(request.to_node_id.clone())
                 else {
-                    return failed(EvidenceDomain::Graph, now_observed());
+                    return refused(
+                        PrimitiveFailureKind::InvalidRequest,
+                        "application.call-chain.to-node-id-invalid",
+                        "to_node_id is not a symbol occurrence id",
+                        EvidenceDomain::Graph,
+                        now_observed(),
+                    );
                 };
                 let path = match reader.shortest_path(
                     &from,
