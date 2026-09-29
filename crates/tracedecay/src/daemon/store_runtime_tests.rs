@@ -135,7 +135,7 @@ async fn project_sessions_convergence_fixture(
         "seed project sessions registered schema fixture",
     )
     .expect("project sessions fixture database authority");
-    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_for_profile_identity(
+    let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control_for_profile_identity(
         &sessions_path,
         &authority,
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
@@ -149,6 +149,10 @@ async fn project_sessions_convergence_fixture(
     )
     .await
     .expect("seed complete registered schema");
+    let (owner, runtime, retirement) = fixture.into_parts();
+    let database = owner
+        .issue_lease()
+        .expect("seed project sessions fixture lease");
     if remove_checkpoint {
         database
             .execute_write_batch(
@@ -158,7 +162,17 @@ async fn project_sessions_convergence_fixture(
             .await
             .expect("remove durable convergence checkpoint");
     }
-    drop(database);
+    // Dropping the last lease does not always close the store before this
+    // returns: another holder of the fixture registry can outlive it, and its
+    // later close checkpoints the WAL while the caller already writes with a
+    // zero busy timeout. Close it through its registry and await the close.
+    drop((database, owner, runtime));
+    retirement
+        .registry()
+        .close_path(&sessions_path)
+        .await
+        .expect("close the seeded project sessions runtime")
+        .expect("the seeded project sessions runtime is registered");
     (
         temporary,
         identity,
