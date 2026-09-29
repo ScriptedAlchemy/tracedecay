@@ -283,6 +283,10 @@ pub struct UnresolvedRef {
     /// disclosed gap while it stays unbound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unmodeled_import: Option<UnmodeledImportShapeV1>,
+    /// Arguments the call site passes, where the extractor counts them;
+    /// overload resolution binds only a declaration that accepts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_count: Option<u32>,
 }
 
 /// A `use` whose binding the extractor cannot decide from one file: a glob

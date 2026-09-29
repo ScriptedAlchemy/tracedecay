@@ -618,7 +618,12 @@ where
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
     for reference in &files[index].as_ref().artifacts.unresolved_references {
-        let cache_key = (index, reference.reference_name.as_str(), reference.kind);
+        let cache_key = (
+            index,
+            reference.reference_name.as_str(),
+            reference.kind,
+            reference.argument_count,
+        );
         let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
         } else {
@@ -664,8 +669,10 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.replace(0))
 }
 
-type ResolvedReferenceCacheV1<'a> =
-    HashMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, Vec<SymbolOccurrenceId>)>>;
+type ResolvedReferenceCacheV1<'a> = HashMap<
+    (usize, &'a str, RelationEdgeKindV1, Option<u32>),
+    Option<(usize, Vec<SymbolOccurrenceId>)>,
+>;
 
 fn resolve_cross_file_reference<T>(
     files: &[T],

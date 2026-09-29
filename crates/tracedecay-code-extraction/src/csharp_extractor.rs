@@ -298,6 +298,7 @@ impl CSharpExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -1192,6 +1193,7 @@ impl CSharpExtractor {
                         column: start_column,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
 
                     if let Some(ref tid) = target_id {
@@ -1452,6 +1454,7 @@ impl CSharpExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -1658,6 +1661,7 @@ impl CSharpExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1671,6 +1675,7 @@ impl CSharpExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
