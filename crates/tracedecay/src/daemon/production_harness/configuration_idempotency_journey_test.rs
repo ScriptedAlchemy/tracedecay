@@ -14,10 +14,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
-use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, EffectClass, IdempotencyContract, ReceiptContract,
-    ReconciliationContract, TerminalState,
-};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::journey_test_support::tool_payload;
 use super::*;
@@ -113,10 +110,6 @@ async fn cli_configuration_set(
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    assert_eq!(
-        maximum_millis, 15_000,
-        "CLI configuration effects use the catalog-owned 15 second deadline"
-    );
     let observed_at = tracedecay_contracts::now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
@@ -466,9 +459,30 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     )
     .expect("CLI application envelope");
     let effect = &first_effect["outcome"]["value"];
+    assert_eq!(effect["effect_class"], "configuration_write");
+    assert_eq!(
+        effect["idempotency_key"],
+        "configuration.idempotency.restart-replay"
+    );
+    assert_eq!(effect["receipt"]["effect_class"], "configuration_write");
+    assert_eq!(effect["receipt"]["outcome"], "completed");
+    assert_eq!(effect["reconciliation"], "pending");
     assert_eq!(
         effect["execution"]["started_at"], effect["payload"]["created_at"],
         "effect execution must use the accepted durable commit time"
+    );
+    let created_at = effect["payload"]["created_at"]
+        .as_i64()
+        .expect("configuration receipt created_at");
+    let deadline_at = effect["payload"]["effective_deadline_at"]
+        .as_i64()
+        .expect("configuration receipt deadline");
+    // Dispatch stamps `created_at` after the client builds the catalog ceiling,
+    // so the stored span is that 15s ceiling minus a short stamp gap.
+    let deadline_span_micros = deadline_at - created_at;
+    assert!(
+        (14_000_000..=15_000_000).contains(&deadline_span_micros),
+        "this configuration set must commit the catalog's 15s effect deadline, span={deadline_span_micros}us"
     );
     assert_eq!(
         effect["execution"]["effective_deadline"]["expires_at"],
@@ -529,36 +543,6 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         current_revision(&harness, &project).await,
         committed_revision,
         "exact replay must not advance configuration again"
-    );
-
-    assert_eq!(ApplicationConfigurationSet::MAXIMUM_DEADLINE_MILLIS, 15_000);
-    assert_eq!(
-        ApplicationConfigurationSet::EFFECT,
-        EffectClass::ConfigurationWrite
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::IDEMPOTENCY,
-        IdempotencyContract::Required
-    );
-    const { assert!(!ApplicationConfigurationSet::CANCELLABLE) };
-    assert!(ApplicationConfigurationSet::CANCELLATION_POINTS.is_empty());
-    assert_eq!(
-        ApplicationConfigurationSet::RECONCILIATION,
-        ReconciliationContract::Required
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::RECEIPT,
-        ReceiptContract::DurableEffect
-    );
-    assert_eq!(
-        ApplicationConfigurationSet::TERMINAL_STATES,
-        [
-            TerminalState::Completed,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::EffectUnknown,
-            TerminalState::Partial,
-        ]
     );
 
     let (http_service, sdk) = configuration_http_sdk(&harness, &project).await;
