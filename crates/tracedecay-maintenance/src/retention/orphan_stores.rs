@@ -344,10 +344,7 @@ pub enum CollectionCompletionV1 {
 pub use collection::execute_registered_collection;
 pub(crate) use collection::{CollectionControl, execute_unregistered_collection_controlled};
 #[cfg(test)]
-pub(crate) use collection::{
-    execute_registered_collection_controlled, execute_unregistered_collection,
-    unbounded_collection_control,
-};
+pub(crate) use collection::{execute_unregistered_collection, unbounded_collection_control};
 pub use pages::{
     OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
     build_store_census, build_store_census_page, plan_unregistered_collection,

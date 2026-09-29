@@ -255,8 +255,11 @@ pub(super) fn tool_call_open_refusal_response(
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
-        tool_name, request_id, detail,
+    let (_, envelope) = tracedecay_daemon_service::application_surface::settled_tool_refusal(
+        tracedecay_tool_catalog::BindingSurface::Mcp,
+        tool_name,
+        request_id,
+        tracedecay_contracts::ApplicationProblem::from_detail(detail),
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
     let structured_content =

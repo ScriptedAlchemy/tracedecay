@@ -180,11 +180,9 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     }
 }
 
-/// The typed problem a project-route refusal of `tool_name` carries: the
-/// JSON-RPC error `data` of an MCP tool call, and the `problem` member
-/// `tracedecay tool` prints for a JSON request. `None` for any other error.
-#[must_use]
-pub fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option<Value> {
+/// The JSON-RPC error `data` a project-route refusal of `tool_name` carries.
+/// `None` for any other error.
+fn project_route_problem(tool_name: &str, error: &TraceDecayError) -> Option<Value> {
     let (reason_code, retryable, detail) = error.project_route_context()?;
     let mut data = json!({
         "tool": tool_name,

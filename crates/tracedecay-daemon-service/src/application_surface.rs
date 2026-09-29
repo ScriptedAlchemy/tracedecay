@@ -73,7 +73,7 @@ pub use feedback_observation::observe_surface_argument_rejection;
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
 use operation_events::http_operation_event_router;
-pub use problems::{map_dispatch_error, mcp_project_open_reset_refusal};
+pub use problems::{map_dispatch_error, settled_tool_refusal};
 pub(crate) use registered_http::registered_executor_unavailable;
 use request_control::application_http_context;
 pub use workflow::invoke_workflow_operation;

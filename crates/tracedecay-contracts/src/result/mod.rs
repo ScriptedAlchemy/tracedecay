@@ -26,7 +26,9 @@ pub use problem::{
     ApplicationUnavailableClassV1, LegalAction, ProblemOwningLayer, ProblemTerminality,
     RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
-pub use problem_detail::{ApplicationProblemDetailV1, DiagnosticsSearchedTsconfigV1};
+pub use problem_detail::{
+    ApplicationProblemDetailV1, DaemonServiceUnitObservationV1, DiagnosticsSearchedTsconfigV1,
+};
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt,
