@@ -1503,7 +1503,7 @@ mod tests {
 
     #[test]
     fn spanless_github_anchor_is_refused_rather_than_placed_at_an_arbitrary_offset() {
-        let anchor = tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1 {
+        let mut anchor = tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1 {
             repository_id: id("repository.fixture"),
             commit_id: id("commit.abc123"),
             retrieval_anchor_id: id("anchor.github-code.2"),
@@ -1512,14 +1512,35 @@ mod tests {
             span: None,
             symbol: None,
         };
-        assert!(
+        let contribute = |anchor: &tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1| {
             github_review_contribution_v1(
-                &anchor,
+                anchor,
                 "github-review",
                 DiagnosticSeverityV1::Information,
                 "unresolved review comment",
             )
-            .is_none()
+        };
+        assert_eq!(contribute(&anchor), None);
+
+        anchor.span = Some(SourceSpan {
+            start_byte: 4,
+            end_byte: 9,
+        });
+        assert_eq!(
+            contribute(&anchor),
+            Some(DiagnosticContributionV1 {
+                anchor: id("anchor.github-code.2"),
+                file_occurrence_id: id("src/lib.rs"),
+                content_digest: id(&digest('a')),
+                span: SourceSpan {
+                    start_byte: 4,
+                    end_byte: 9,
+                },
+                symbol_occurrence_id: None,
+                code: "github-review".to_owned(),
+                severity: DiagnosticSeverityV1::Information,
+                message: "unresolved review comment".to_owned(),
+            })
         );
     }
 

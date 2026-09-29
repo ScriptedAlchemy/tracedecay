@@ -253,7 +253,7 @@ async fn unregistered_profile_authority_fails_before_ingest_writes() {
     assert!(
         runtime
             .database
-            .get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
+            .get_parse_offset(USER_INGEST_PROVIDER_FRONTIER_KEY)
             .await
             .unwrap()
             .is_none()
@@ -293,7 +293,7 @@ async fn foreign_brain_profile_session_authority_fails_before_store_mutation() {
     let foreign_brain = BrainId::new("brain.foreign-profile-session").unwrap();
     let before_frontier = runtime
         .database
-        .get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
+        .get_parse_offset(USER_INGEST_PROVIDER_FRONTIER_KEY)
         .await
         .unwrap();
     let before_messages = runtime.database.session_message_count().await.unwrap();
@@ -320,7 +320,7 @@ async fn foreign_brain_profile_session_authority_fails_before_store_mutation() {
     assert_eq!(
         runtime
             .database
-            .get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
+            .get_parse_offset(USER_INGEST_PROVIDER_FRONTIER_KEY)
             .await
             .unwrap(),
         before_frontier,
@@ -412,7 +412,7 @@ async fn unwired_session_review_port_refuses_the_user_pass() {
     assert!(
         runtime
             .database
-            .get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
+            .get_parse_offset(USER_INGEST_PROVIDER_FRONTIER_KEY)
             .await
             .unwrap()
             .is_none(),
@@ -669,7 +669,7 @@ async fn run_bounded_project_pass(
 async fn project_rotation_frontier(runtime: &IngestTestRuntime) -> Option<u64> {
     runtime
         .database
-        .get_parse_offset_result(PROJECT_INGEST_PROVIDER_FRONTIER_KEY)
+        .get_parse_offset(PROJECT_INGEST_PROVIDER_FRONTIER_KEY)
         .await
         .unwrap()
         .map(|offset| offset.byte_offset)

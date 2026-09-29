@@ -26,9 +26,14 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_text_artifact_staging_root, scoped_code_index_store_root,
 };
 
+use tracedecay_contracts::code_index_freshness::{
+    CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1,
+};
+
 use super::super::graph_activation::{
-    injected_activation_attempt_count, install_injected_activation_gate,
-    set_injected_activation_failures,
+    GRAPH_PUBLICATION_DEADLINE_REASON, injected_activation_attempt_count,
+    install_injected_activation_gate, set_injected_activation_failures,
+    set_injected_publication_deadline,
 };
 use super::super::tests::OwnerSignals;
 use super::CodeIndexSchedulerRegistryV1;
@@ -469,9 +474,9 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
         .serving_code_scope(&fixture.project)
         .await
         .expect("mounted scope");
-    // Injected deadline failures are the retryable class, and they carry no
-    // conflict verdict, so every attempt takes the retry arm rather than
-    // falling through to the terminal one that already keeps the seat.
+    // Injected unavailable-runtime failures are the retryable class, and they
+    // carry no conflict verdict, so every attempt takes the retry arm rather
+    // than falling through to the terminal one that already keeps the seat.
     set_injected_activation_failures(&scope.worktree_id, UNDRAINABLE_ACTIVATION_FAILURES);
     drop(admission);
 
@@ -485,6 +490,120 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
         seated.is_some(),
         "the sealed generation must take the serving seat while graph activation retries \
          (activation attempts: {attempts})"
+    );
+    fixture.registry.shutdown().await;
+}
+
+/// A graph publication that ran out its background budget is a typed refusal
+/// for that sealed generation, never a retry. The build is a pure function of
+/// the sealed generation, so every retry replayed the identical corpus-sized
+/// work into the same budget, and a 200k-symbol repository stayed
+/// `rebuild_in_flight` with a pending graph indefinitely (#2505).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.publication-budget", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    set_injected_publication_deadline(&scope.worktree_id, true);
+    drop(admission);
+
+    let refused = CodeGraphServingReadinessV1::Refused {
+        reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
+    };
+    let settled = fixture
+        .wait_for_freshness(|freshness| {
+            freshness.code_graph_serving.as_ref() == Some(&refused) && !freshness.rebuild_in_flight
+        })
+        .await
+        .expect("freshness is observable");
+    assert_eq!(settled.code_graph_serving.as_ref(), Some(&refused));
+    assert!(!settled.rebuild_in_flight, "{settled:?}");
+    assert!(
+        fixture.wait_for_seated_generation().await.is_some(),
+        "exact and lexical keep serving the generation whose graph was refused"
+    );
+
+    // Past the whole retry backoff ladder, with the worker woken throughout.
+    let observe_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < observe_until {
+        fixture.wake_without_new_input().await;
+        tokio::time::sleep(POLL_SPACING).await;
+    }
+    assert_eq!(
+        injected_activation_attempt_count(&scope.worktree_id),
+        1,
+        "the spent publication must not be replayed for the same sealed generation"
+    );
+    let after = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("freshness after the retry window");
+    assert_eq!(after.code_graph_serving.as_ref(), Some(&refused));
+    set_injected_publication_deadline(&scope.worktree_id, false);
+    fixture.registry.shutdown().await;
+}
+
+/// Text readiness is not generation readiness. While the sealing pass still
+/// publishes the native graph, progress names that publication with no
+/// remaining-time estimate; it reads `ready` only once the graph seated.
+/// Status used to report `ready, 0 s remaining` for the whole publication
+/// (#2470).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_names_graph_publication_until_the_graph_seats() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-publication-phase", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    drop(admission);
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation starts");
+
+    let text_built = |phase: CodeIndexBuildPhaseV1| {
+        matches!(
+            phase,
+            CodeIndexBuildPhaseV1::GraphPublication | CodeIndexBuildPhaseV1::Ready
+        )
+    };
+    let publishing = fixture
+        .wait_for_freshness(|freshness| {
+            freshness
+                .progress
+                .as_ref()
+                .is_some_and(|progress| text_built(progress.phase))
+        })
+        .await
+        .expect("freshness while graph activation is held");
+    let progress = publishing.progress.as_ref().expect("progress");
+    assert_eq!(
+        publishing.code_graph_serving,
+        Some(CodeGraphServingReadinessV1::Pending)
+    );
+    assert_eq!(progress.phase, CodeIndexBuildPhaseV1::GraphPublication);
+    assert_eq!(progress.estimated_remaining_seconds, None);
+
+    gate.release();
+    let seated = fixture
+        .wait_for_freshness(|freshness| {
+            freshness.code_graph_serving == Some(CodeGraphServingReadinessV1::Ready)
+                && !freshness.rebuild_in_flight
+        })
+        .await
+        .expect("freshness after the graph seats");
+    assert_eq!(
+        seated.progress.as_ref().map(|progress| progress.phase),
+        Some(CodeIndexBuildPhaseV1::Ready)
     );
     fixture.registry.shutdown().await;
 }

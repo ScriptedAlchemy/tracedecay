@@ -92,8 +92,11 @@ mod safe_config_tests {
     fn safe_write_cleans_up_new_file_on_success() {
         let dir = tmpdir();
         let path = dir.path().join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({})).unwrap();
+        safe_write_json_file(&path, &serde_json::json!({"mcpServers": {}})).unwrap();
 
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({"mcpServers": {}}));
         let new_path = dir.path().join("config.json.new");
         assert!(!new_path.exists(), ".new staging file should be removed");
     }

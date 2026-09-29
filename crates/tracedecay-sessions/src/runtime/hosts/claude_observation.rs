@@ -15,7 +15,7 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationStoreError, ParseOffset, ProjectionStoreError,
@@ -226,7 +226,7 @@ enum FrameCaptureOutcome {
     Quarantined(SanitizationReceiptV1),
     /// A deterministic refusal that will never succeed. The caller covers past
     /// the frame so the source does not fail every pass.
-    Refused(NonDurableFrameReason),
+    Refused(ObservationCoverageReason),
 }
 
 struct FrameCaptureContext {
@@ -240,7 +240,7 @@ struct FrameCaptureContext {
 
 struct NonDurableSegment {
     covered: ObservationSourceRangeV1,
-    reason: NonDurableFrameReason,
+    reason: ObservationCoverageReason,
     sanitization_receipt: Option<SanitizationReceiptV1>,
     resume_fingerprint: u64,
 }
@@ -413,9 +413,9 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
             // source leaves history blocked on a record that cannot commit.
             if is_deterministic_content_refusal(&error) && !context.cancellation.is_cancelled() {
                 let reason = if error.reason_code == Some("observation_identity_collision") {
-                    NonDurableFrameReason::ObservationIdentityCollision
+                    ObservationCoverageReason::ObservationIdentityCollision
                 } else {
-                    NonDurableFrameReason::AdmissionRefused
+                    ObservationCoverageReason::AdmissionRefused
                 };
                 return Ok(FrameCaptureOutcome::Refused(reason));
             }
@@ -729,8 +729,8 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
         ScannedSegment::Skipped(skipped) => {
             let covered = ObservationSourceRangeV1::new(skipped.offset, skipped.end_offset)?;
             let reason = match skipped.reason {
-                ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
-                ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
+                ClaudeSkippedFrameReason::Whitespace => ObservationCoverageReason::BlankFrame,
+                ClaudeSkippedFrameReason::OutOfScope => ObservationCoverageReason::OutOfScope,
                 ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized => {
                     stats.deferred_sources = 1;
                     return Ok(false);
@@ -781,7 +781,7 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                         observation_cursor,
                         NonDurableSegment {
                             covered: range,
-                            reason: NonDurableFrameReason::SanitizerRejected,
+                            reason: ObservationCoverageReason::SanitizerRejected,
                             sanitization_receipt: Some(receipt),
                             resume_fingerprint,
                         },
@@ -813,7 +813,7 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                         observation_cursor,
                         NonDurableSegment {
                             covered: range,
-                            reason: NonDurableFrameReason::SanitizerQuarantined,
+                            reason: ObservationCoverageReason::SanitizerQuarantined,
                             sanitization_receipt: Some(receipt),
                             resume_fingerprint,
                         },

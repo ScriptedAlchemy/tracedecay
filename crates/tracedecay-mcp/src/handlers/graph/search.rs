@@ -16,12 +16,14 @@ use tracedecay_contracts::retrieval::{
     SearchLaneStatusV1, SearchResultDisplayV1, SearchResultRowV1, SearchResultV1,
     SearchSurfaceRequestV1, SearchUnavailableV1,
 };
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::CursorBindingV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
 
 use crate::handlers::dependency_hints;
 use crate::handlers::support::{
-    decode_primitive_request, decode_retrieval_cursor, rendered_tool_result, unique_file_paths,
+    decode_primitive_request, decode_retrieval_cursor, encode_retrieval_cursor,
+    rendered_tool_result, unique_file_paths,
 };
 use crate::tools::render::{self, Md};
 use crate::{McpToolContext, ToolResult};
@@ -36,6 +38,32 @@ use super::search_freshness::{
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{graph_occurrence_id, graph_tool_completion};
 use super::{lexical_routing, search_evidence};
+
+/// The request parameters a search continuation is minted for: every field
+/// that shapes the ranked result set, and the page size.
+fn search_cursor_binding(
+    request: &SearchSurfaceRequestV1,
+    scope_prefix: Option<&str>,
+) -> Result<CursorBindingV1> {
+    CursorBindingV1::builder("search")
+        .parameter("query", &request.query)
+        .parameter("limit", &request.limit)
+        .parameter("lexical_anchors", &request.lexical_anchors)
+        .parameter("prefer_symbol", &request.prefer_symbol)
+        .parameter("lexical_aliases", &request.lexical_aliases)
+        .parameter("lexical_phrases", &request.lexical_phrases)
+        .parameter("lexical_proximities", &request.lexical_proximities)
+        .parameter("lexical_field_filters", &request.lexical_field_filters)
+        .parameter(
+            "lazy_index_ignored_dependencies",
+            &request.lazy_index_ignored_dependencies,
+        )
+        .parameter("scope", &scope_prefix)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind search cursor: {error}"),
+        })
+}
 
 pub(super) async fn execute_code_index_search(
     executor: Option<&tracedecay_query::code_search::CodeIndexSearchExecutor>,
@@ -133,7 +161,8 @@ where
     let cancellation = ctx.cancellation().cloned();
     let lexical_routing = lexical_routing::routing_from_request(&request)?;
     let lazy_indexing_requested = request.lazy_index_ignored_dependencies.unwrap_or(false);
-    let cursor = decode_retrieval_cursor(request.cursor.as_deref())?;
+    let cursor_binding = search_cursor_binding(&request, scope_prefix)?;
+    let cursor = decode_retrieval_cursor(&cursor_binding, request.cursor.as_deref())?;
     let include_graph_node_ids = render::wants_json(&args);
     let limit = request.limit.map_or(10, |v| v.min(500) as usize);
     let query = request.query.as_str();
@@ -282,11 +311,10 @@ where
                     &worktree_freshness,
                 ),
                 query_fallback_digest: complete.query_fallback.digest.as_str().to_owned(),
-                next_cursor: complete
-                    .next_cursor
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
+                next_cursor: encode_retrieval_cursor(
+                    &cursor_binding,
+                    complete.next_cursor.as_ref(),
+                )?,
                 coverage: search_coverage(&coverage),
                 code_generation: complete.code_generation,
                 results,

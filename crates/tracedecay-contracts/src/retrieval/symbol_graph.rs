@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{EphemeralSanitizedQueryViewV1, UtcMicros};
+use tracedecay_domain::{CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, UtcMicros};
 
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
@@ -129,6 +129,8 @@ pub struct PrimitiveSupportGap {
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveFailureKind {
     InvalidRequest,
+    /// A continuation cursor minted for another operation or request.
+    CursorRefused,
     NotFoundOrNotAuthorized,
     Stale,
     Unavailable,
@@ -159,6 +161,14 @@ impl PrimitiveFailure {
         })
     }
 
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self {
+            kind: PrimitiveFailureKind::CursorRefused,
+            code: mismatch.code().to_owned(),
+            message: mismatch.message(),
+        }
+    }
+
     /// The application problem a caller receives for this failure.
     pub fn into_problem(self) -> ApplicationProblem {
         let diagnostic = SafeDiagnostic {
@@ -172,6 +182,7 @@ impl PrimitiveFailure {
                     diagnostic.message,
                 )
             }
+            PrimitiveFailureKind::CursorRefused => ApplicationProblem::cursor_refusal(diagnostic),
             PrimitiveFailureKind::NotFoundOrNotAuthorized => {
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
             }

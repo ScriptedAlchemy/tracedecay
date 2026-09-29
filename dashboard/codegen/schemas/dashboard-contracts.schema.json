@@ -3887,15 +3887,24 @@
     },
     "CodeIndexBuildPhaseV1": {
       "description": "The durable build phase whose committed boundary the dashboard is reading.\n\nA phase is not inferred from scheduler state. The mounted registry publishes\nthe exact phase that owns the active generation.",
-      "enum": [
-        "source_scan",
-        "relational_preparation",
-        "bulk_commit",
-        "index_build",
-        "verification",
-        "ready"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "source_scan",
+            "relational_preparation",
+            "bulk_commit",
+            "index_build",
+            "verification",
+            "ready"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "graph_publication",
+          "description": "Text serving is built and the pass that sealed the generation is\nstill publishing its native graph.",
+          "type": "string"
+        }
+      ]
     },
     "CodeIndexBuildProgressV1": {
       "description": "The latest committed progress boundary for one active code-index generation.\n\nEvery count is scoped to `generation_id`. The snapshot never includes a\nstaged page: work is reported only after the batch that owns it commits.",
@@ -26524,23 +26533,8 @@
       ]
     },
     "WorkAttemptListCursorV1": {
-      "additionalProperties": false,
-      "description": "Resume point for the next attempt-list page, bound to the exact verified\ntopology generation it was minted under.",
-      "properties": {
-        "generation": {
-          "description": "The verified topology generation the cursor was minted under.",
-          "type": "string"
-        },
-        "start_after": {
-          "$ref": "#/$defs/WorkAttemptIdentityV1",
-          "description": "The last attempt identity the prior page returned."
-        }
-      },
-      "required": [
-        "generation",
-        "start_after"
-      ],
-      "type": "object"
+      "description": "Opaque resume point for the next page of one attempt-list-family read,\nbound to the operation and `page_size` that minted it and pinned to the\nverified topology generation the page was read under.",
+      "type": "string"
     },
     "WorkAttemptListRequestV1": {
       "additionalProperties": false,
@@ -33142,6 +33136,10 @@
         "attempt": {
           "$ref": "#/$defs/WorkAttemptIdentityV1"
         },
+        "binding": {
+          "description": "Binds the continuation to the retrieve-evidence operation and the\nresult-shaping request fields the envelope does not echo.",
+          "type": "string"
+        },
         "participant_epoch": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -33169,6 +33167,7 @@
         "attempt",
         "source",
         "participant_epoch",
+        "binding",
         "temporal_cursor",
         "ranking_cursor"
       ],

@@ -1169,8 +1169,18 @@ mod tests {
     #[test]
     fn journal_filename_is_exact_digest_only() {
         assert!(validate_journal_filename(&format!("{}.json", "a".repeat(64))).is_ok());
-        assert!(validate_journal_filename("../foreign.json").is_err());
-        assert!(validate_journal_filename(&format!("{}.json", "A".repeat(64))).is_err());
+        assert_eq!(
+            validate_journal_filename("../foreign.json")
+                .unwrap_err()
+                .to_string(),
+            "config error: automation application contract is invalid: automation journal filename digest is invalid"
+        );
+        assert_eq!(
+            validate_journal_filename(&format!("{}.json", "A".repeat(64)))
+                .unwrap_err()
+                .to_string(),
+            "config error: automation application contract is invalid: automation journal filename digest is invalid"
+        );
     }
 
     #[test]
@@ -1182,7 +1192,10 @@ mod tests {
         let mut file = std::fs::File::create(&path).expect("index");
         file.set_len(MAX_INDEX_BYTES + 1).expect("oversized index");
         file.flush().expect("flush");
-        assert!(read_index(&path).is_err());
+        assert_eq!(
+            read_index(&path).unwrap_err().to_string(),
+            "config error: automation application contract is invalid: automation pending index is not a bounded regular file"
+        );
     }
 
     #[cfg(unix)]
@@ -1195,7 +1208,10 @@ mod tests {
         std::fs::write(&outside, br#"{"schema_version":1,"entries":[]}"#).expect("outside");
         let path = root.join(INDEX_FILENAME);
         std::os::unix::fs::symlink(&outside, &path).expect("symlink");
-        assert!(read_index(&path).is_err());
+        assert_eq!(
+            read_index(&path).unwrap_err().to_string(),
+            "config error: automation application contract is invalid: automation pending index path failed: automation pending index path must not contain symlinks"
+        );
     }
 
     #[cfg(unix)]

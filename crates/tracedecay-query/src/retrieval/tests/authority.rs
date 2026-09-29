@@ -15,9 +15,7 @@ use crate::retrieval::evidence_lanes::TaskSessionLaneEvidenceV1;
 use crate::retrieval::fusion::{
     CompositionKernel, FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
 };
-use crate::retrieval::{
-    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-};
+use crate::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 use crate::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
 fn query_view() -> EphemeralSanitizedQueryViewV1 {
@@ -120,13 +118,15 @@ fn fallback_cursor_serves_disjoint_canonical_pages() {
 fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate_set() {
     let generation = CodeGenerationId::new("generation.prepared-query.v1").expect("generation");
     let bindings = PreparedQueryBindingsV1::new(
-        "code_index_branch_diff.v1",
         tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
         generation.clone(),
-        PreparedQueryBindingV1::new(vec![(
-            "query",
-            tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
-        )])
+        tracedecay_domain::CursorBindingV1::new(
+            "code_index_branch_diff.v1",
+            vec![(
+                "query",
+                tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+            )],
+        )
         .expect("query binding"),
     )
     .expect("bindings");
@@ -153,13 +153,15 @@ fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate
     assert_eq!(resumed.items, ["second"]);
 
     let changed_generation = PreparedQueryBindingsV1::new(
-        "code_index_branch_diff.v1",
         tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
         CodeGenerationId::new("generation.prepared-query.v2").expect("changed generation"),
-        PreparedQueryBindingV1::new(vec![(
-            "query",
-            tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
-        )])
+        tracedecay_domain::CursorBindingV1::new(
+            "code_index_branch_diff.v1",
+            vec![(
+                "query",
+                tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+            )],
+        )
         .expect("query binding"),
     )
     .expect("changed generation bindings");

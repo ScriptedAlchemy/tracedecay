@@ -134,9 +134,12 @@ fn work_grant_is_absent_for_partial_access_but_expiry_still_fails_closed() {
             .is_none(),
         "a denied Work operation must leave the Work owner unmounted"
     );
-    assert!(
-        project_open_work_grant(&access, access.grant_expires_at).is_err(),
-        "an expired project-open authority must still fail closed"
+    let Err(error) = project_open_work_grant(&access, access.grant_expires_at) else {
+        panic!("an expired project-open authority must still fail closed");
+    };
+    assert_eq!(
+        error.to_string(),
+        "project-open Work capability grant is inconsistent with the application contract"
     );
 }
 

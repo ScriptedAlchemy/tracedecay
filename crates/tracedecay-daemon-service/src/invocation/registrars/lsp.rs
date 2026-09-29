@@ -111,9 +111,8 @@ impl DaemonLspOwnerRegistrar {
             scope_grant.scope.clone(),
             project_root.clone(),
         ));
-        let diagnostic_records = Arc::new(
-            tracedecay_application::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
-        );
+        let diagnostic_records =
+            Arc::new(tracedecay_application::diagnostics_store::DiagnosticsStore::new(database));
         // The invocation handler publishes into the same per-project fan-out
         // that sessions from this factory forward as read-only notifications.
         let native_integration_status = self

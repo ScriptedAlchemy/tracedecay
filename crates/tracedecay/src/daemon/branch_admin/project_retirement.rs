@@ -1,5 +1,5 @@
 use super::{StoreAdministration, StoreOwnerKey};
-use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
+use tracedecay_store_runtime::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
 
 /// Drops the process-global Context Scout owner when this project's other
 /// owners are torn down. A retired or remotely-deleted project must not keep
@@ -279,11 +279,9 @@ async fn shutdown_receipt(
             match tokio::time::timeout_at(deadline, wait_for_project_server_retirement(completion))
                 .await
             {
-                Ok(ProjectServerRetirementStatus::Clean) => ShutdownTaskStatus::Clean,
-                Ok(ProjectServerRetirementStatus::Failed(error)) => {
-                    ShutdownTaskStatus::Failed(error)
-                }
-                Ok(ProjectServerRetirementStatus::Pending) | Err(_) => ShutdownTaskStatus::TimedOut,
+                Ok(ProjectServerRetirementStatus::Clean) => ShutdownStatus::Clean,
+                Ok(ProjectServerRetirementStatus::Failed(error)) => ShutdownStatus::Failed(error),
+                Ok(ProjectServerRetirementStatus::Pending) | Err(_) => ShutdownStatus::TimedOut,
             };
         receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
     }
@@ -607,7 +605,7 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await;
-        assert_eq!(first.status(), ShutdownTaskStatus::TimedOut);
+        assert_eq!(first.status(), ShutdownStatus::TimedOut);
         assert_eq!(retirements.lock().await.len(), 2);
 
         first_release.notify_one();
@@ -633,7 +631,7 @@ mod tests {
             tokio::time::Instant::now(),
         )
         .await;
-        assert_eq!(partially_settled.status(), ShutdownTaskStatus::TimedOut);
+        assert_eq!(partially_settled.status(), ShutdownStatus::TimedOut);
         assert_eq!(retirements.lock().await.len(), 1);
         second_release.notify_one();
         let second = settle_project_retirements(
@@ -662,7 +660,7 @@ mod tests {
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-        assert!(matches!(receipt.status(), ShutdownTaskStatus::Failed(_)));
+        assert!(matches!(receipt.status(), ShutdownStatus::Failed(_)));
         assert_eq!(retirements.lock().await.len(), 1);
     }
 
@@ -991,7 +989,7 @@ mod tests {
         assert!(
             receipt.outcomes.iter().any(|outcome| {
                 outcome.owner == "project_server_retirement[project-idle]"
-                    && outcome.status == ShutdownTaskStatus::Clean
+                    && outcome.status == ShutdownStatus::Clean
             }),
             "shutdown must report the exact evicted owner through its retirement receipt"
         );

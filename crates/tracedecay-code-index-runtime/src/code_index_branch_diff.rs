@@ -4,14 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ContentDigest, FileIdentityDigest, FileOccurrenceId, FreshnessVectorDigest, GitOidV1, RefId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1,
-    SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark, canonical_sha256,
+    ContentDigest, CursorBindingMismatchV1, CursorBindingV1, FileIdentityDigest, FileOccurrenceId,
+    FreshnessVectorDigest, GitOidV1, RefId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, VectorWatermark,
+    canonical_sha256,
 };
 use tracedecay_query::code_search;
-use tracedecay_query::retrieval::{
-    PreparedQueryBindingV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-};
+use tracedecay_query::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 
 use crate::code_index_scheduler;
 use crate::mcp_admission::{
@@ -362,22 +361,34 @@ pub fn bounded_diff(
     diff_symbols(base_id, base_symbols, head_id, head_symbols)
 }
 
-fn prepared_error_reason(
+/// What a branch-diff caller is told when its continuation cannot page this
+/// request. The refs, revisions, and generations ride the scope digest, so a
+/// cursor whose request still matches but whose scope moved names a comparison
+/// that no longer exists: it is stale, not foreign.
+fn prepared_error_outcome(
+    base_generation: Option<String>,
+    head_generation: Option<String>,
     error: PreparedQueryErrorV1,
-) -> code_search::CodeIndexSearchUnavailableReasonV1 {
-    match error {
-        PreparedQueryErrorV1::Invalid
-        | PreparedQueryErrorV1::Foreign
-        | PreparedQueryErrorV1::ParameterChanged { .. } => {
-            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
+) -> code_search::CodeIndexBranchDiffOutcomeV1 {
+    let reason = match error {
+        PreparedQueryErrorV1::Invalid => {
+            return code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(
+                CursorBindingMismatchV1::Foreign,
+            );
         }
-        PreparedQueryErrorV1::Stale => {
+        PreparedQueryErrorV1::ParameterChanged { parameter } => {
+            return code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(
+                CursorBindingMismatchV1::ParameterChanged { parameter },
+            );
+        }
+        PreparedQueryErrorV1::Foreign | PreparedQueryErrorV1::Stale => {
             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
         }
         PreparedQueryErrorV1::Unavailable => {
             code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
         }
-    }
+    };
+    unavailable(base_generation, head_generation, reason)
 }
 
 fn branch_diff_scope_digest(
@@ -401,16 +412,18 @@ fn branch_diff_scope_digest(
     ))
 }
 
+const BRANCH_DIFF_OPERATION: &str = "branch_diff";
+
 fn branch_diff_query_binding(
     request: &code_search::CodeIndexBranchDiffRequestV1,
-) -> Result<PreparedQueryBindingV1, PreparedQueryErrorV1> {
-    let digest = |value: Option<&str>| {
-        canonical_sha256(&value).map_err(|_| PreparedQueryErrorV1::Unavailable)
-    };
-    PreparedQueryBindingV1::new(vec![
-        ("file_filter", digest(request.file_filter.as_deref())?),
-        ("kind_filter", digest(request.kind_filter.as_deref())?),
-    ])
+) -> Result<CursorBindingV1, PreparedQueryErrorV1> {
+    CursorBindingV1::builder(BRANCH_DIFF_OPERATION)
+        .parameter("base", &request.base_reference)
+        .parameter("head", &request.head_reference)
+        .parameter("file", &request.file_filter)
+        .parameter("kind", &request.kind_filter)
+        .build()
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
 pub fn code_index_branch_diff_executor<A, S>(
@@ -631,7 +644,6 @@ where
                     }
                 };
                 let bindings = match PreparedQueryBindingsV1::new(
-                    "code_index_branch_diff.v1",
                     scope_digest,
                     generations
                         .head
@@ -642,11 +654,11 @@ where
                     query_binding,
                 ) {
                     Ok(bindings) => bindings,
-                    Err(error) => {
+                    Err(_) => {
                         return unavailable(
                             Some(base_id),
                             Some(head_id),
-                            prepared_error_reason(error),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                         );
                     }
                 };
@@ -657,11 +669,7 @@ where
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        return unavailable(
-                            Some(base_id),
-                            Some(head_id),
-                            prepared_error_reason(error),
-                        );
+                        return prepared_error_outcome(Some(base_id), Some(head_id), error);
                     }
                 };
                 let page_size = match u32::try_from(
@@ -686,11 +694,7 @@ where
                 ) {
                     Ok(page) => page,
                     Err(error) => {
-                        return unavailable(
-                            Some(base_id),
-                            Some(head_id),
-                            prepared_error_reason(error),
-                        );
+                        return prepared_error_outcome(Some(base_id), Some(head_id), error);
                     }
                 };
                 let total_changes = match usize::try_from(page.total) {

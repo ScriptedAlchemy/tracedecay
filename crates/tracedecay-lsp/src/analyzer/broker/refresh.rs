@@ -396,11 +396,17 @@ mod tests {
     #[test]
     fn global_queued_batch_reservation_rejects_the_129th_batch() {
         let capacity = BrokerRefreshCapacity::new();
-        let _full = capacity
-            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
-            .expect("full queue reservation");
+        let full = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES - 1)
+            .expect("all but one queued batch");
+        let _last = capacity.reserve(1).expect("the 128th batch fits");
 
         assert!(capacity.reserve(1).is_none());
+        drop(full);
+        assert!(
+            capacity.reserve(1).is_some(),
+            "released batches are reusable"
+        );
     }
 
     #[tokio::test]

@@ -8,19 +8,6 @@ use super::types::{CheckpointMode, CheckpointReport, WalSample};
 const WAL_HEADER_BYTES: u64 = 32;
 const WAL_FRAME_HEADER_BYTES: u64 = 24;
 
-/// Narrow physical-driver seam used by the writer-owned policy.
-///
-/// Implementations may configure and checkpoint only their already-open writer
-/// connection. There is deliberately no path, open, close, delete, scheduling,
-/// transaction, or arbitrary-SQL capability in this interface.
-pub(crate) trait CheckpointDriver {
-    type Error;
-
-    fn disable_auto_checkpoint(&mut self) -> Result<(), Self::Error>;
-    fn sample_wal(&mut self) -> Result<WalSample, Self::Error>;
-    fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error>;
-}
-
 #[derive(Debug)]
 pub(crate) enum RusqliteCheckpointError {
     Sqlite(rusqlite::Error),
@@ -62,10 +49,8 @@ impl RusqliteCheckpointDriver {
     }
 }
 
-impl CheckpointDriver for RusqliteCheckpointDriver {
-    type Error = RusqliteCheckpointError;
-
-    fn disable_auto_checkpoint(&mut self) -> Result<(), Self::Error> {
+impl RusqliteCheckpointDriver {
+    pub(crate) fn disable_auto_checkpoint(&mut self) -> Result<(), RusqliteCheckpointError> {
         self.connection
             .pragma_update(None, "wal_autocheckpoint", 0_i64)
             .map_err(Into::into)
@@ -75,7 +60,7 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
     /// so it is measured apart from `rusqlite.wal_checkpoint`: a hot writer
     /// span with cold checkpoints means the per-commit NOOP probe itself is
     /// the cost, not WAL copy-back.
-    fn sample_wal(&mut self) -> Result<WalSample, Self::Error> {
+    pub(crate) fn sample_wal(&mut self) -> Result<WalSample, RusqliteCheckpointError> {
         hotpath::measure_block!("rusqlite.wal_sample", {
             let (_, frames, _) = self.checkpoint_row("PRAGMA wal_checkpoint(NOOP)")?;
             let page_size = self
@@ -97,7 +82,10 @@ impl CheckpointDriver for RusqliteCheckpointDriver {
         })
     }
 
-    fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointReport, Self::Error> {
+    pub(crate) fn checkpoint(
+        &mut self,
+        mode: CheckpointMode,
+    ) -> Result<CheckpointReport, RusqliteCheckpointError> {
         hotpath::measure_block!("rusqlite.wal_checkpoint", {
             let sql = match mode {
                 CheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",

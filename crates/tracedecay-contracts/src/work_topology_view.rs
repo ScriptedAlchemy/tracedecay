@@ -19,9 +19,9 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{RunId, TaskId};
 
 use crate::work_attempt::{
-    WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptService, WorkAttemptStoragePort, WorkAttemptTopologyBindingV1,
-    WorkAttemptTopologyStateV1,
+    WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListOperationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptService, WorkAttemptStoragePort,
+    WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
 };
 use crate::work_placement::{
     WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStatusRequestV1,
@@ -127,6 +127,7 @@ where
     }
     let list = attempts.list(
         context,
+        WorkAttemptListOperationV1::Topology,
         &WorkAttemptListRequestV1 {
             page_size: request.page_size,
             cursor: request.cursor.clone(),

@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
-use tracedecay_daemon_control::default_socket_path;
-#[cfg(not(unix))]
-use tracedecay_daemon_identity::current_daemon_connection;
+use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
 use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
+    current_daemon_connection,
 };
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
@@ -144,9 +143,37 @@ pub(crate) fn default_available_socket_path(profile: &ProfileRoot) -> Result<Pat
     }
     #[cfg(not(unix))]
     {
-        current_daemon_connection(profile.data_dir())?;
+        current_profile_daemon_connection(profile)?;
         Ok(socket_path)
     }
+}
+
+/// The daemon authority recorded in `profile`, whichever socket it bound. An
+/// absent record carries the boundary profile's managed-service advice.
+pub(crate) fn current_profile_daemon_connection(
+    profile: &ProfileRoot,
+) -> Result<ResolvedDaemonConnection> {
+    match current_daemon_connection(profile.data_dir()) {
+        Ok(connection) => Ok(connection),
+        Err(error) => Err(with_unavailable_daemon_advice(
+            profile,
+            &default_socket_path(profile.data_dir())?,
+            error,
+        )),
+    }
+}
+
+/// Authenticated invocation client for the daemon whose authority record
+/// `profile` holds, whichever socket it bound, so a daemon's own surfaces reach
+/// it under a custom `--socket`.
+pub fn invocation_client_for_current(
+    profile: &ProfileRoot,
+    handshake: DaemonHandshake,
+) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
+    Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
+        current_profile_daemon_connection(profile)?.into_protocol(),
+        handshake,
+    ))
 }
 
 /// Authenticated invocation client for the daemon serving this client: the
@@ -158,7 +185,8 @@ pub fn invocation_client_for_current_client(
     handshake: DaemonHandshake,
 ) -> Result<tracedecay_daemon_protocol::DaemonInvocationClient> {
     let socket_path = default_available_socket_path(profile)?;
-    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)?;
+    let connection = client_connection(&handshake.client_identity.profile_root, &socket_path)
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))?;
     Ok(tracedecay_daemon_protocol::DaemonInvocationClient::new(
         connection.into_protocol(),
         handshake,
@@ -601,7 +629,8 @@ pub async fn call_default_tool(
     .await;
     let retry_deadline = (Instant::now() + PROJECT_OPEN_RETRY_GRACE).min(deadline);
     let Some(wait) = project_open_retry_wait(&result, retry_deadline) else {
-        return result;
+        return result
+            .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
     };
     tokio::time::sleep(wait).await;
     call_tool_with_project_open_retry(
@@ -612,6 +641,7 @@ pub async fn call_default_tool(
         retry_deadline,
     )
     .await
+    .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 pub async fn call_default_tool_within(
@@ -625,7 +655,9 @@ pub async fn call_default_tool_within(
     // Deadline-aware application callers need the daemon's typed warming
     // response. Retrying that response until `deadline` turns a useful
     // temporary state into a client-side timeout with no response body.
-    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 /// Calls a daemon tool, waiting out a warming project, and the owners that
@@ -644,7 +676,9 @@ pub async fn call_default_tool_awaiting_project_open(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path(profile)?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+        .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error))
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring

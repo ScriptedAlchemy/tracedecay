@@ -9,9 +9,9 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, CollectionRevision, ManifestDigest, ProjectId, RefId, RepositoryId, RootGenerationV1,
-    RootScopeOutcomeV1, ScopeOutcome, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1,
-    StackRevision, UtcMicros, WorktreeId,
+    ActorId, CollectionRevision, CursorBindingMismatchV1, ManifestDigest, ProjectId, RefId,
+    RepositoryId, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome, ScopeSetId, ScopeSetRevision,
+    ScopeUnavailableReasonV1, StackRevision, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -260,9 +260,7 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
         AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
             .execute(drifted)
             .unwrap_err(),
-        MultiRootQueryError::CursorMismatch {
-            field: "root generations"
-        }
+        MultiRootQueryError::ContinuationStale
     );
 
     let mismatch = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
@@ -270,9 +268,9 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
         .unwrap_err();
     assert_eq!(
         mismatch,
-        MultiRootQueryError::CursorMismatch {
-            field: "query digest"
-        }
+        MultiRootQueryError::CursorRefused(CursorBindingMismatchV1::ParameterChanged {
+            parameter: "operation"
+        })
     );
 }
 

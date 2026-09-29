@@ -8,7 +8,7 @@ pub use target::{
 
 use serde::Serialize;
 use tracedecay_contracts::retained_surfaces::{
-    FactFeedbackRequestV1, FactRetrievalTelemetryV1, FactStoreAddRequestV1,
+    FactFeedbackRequestV1, FactReadOptionsV1, FactRetrievalTelemetryV1, FactStoreAddRequestV1,
     FactStoreContradictRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
     FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
     FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreSupersedeRequestV1,
@@ -20,7 +20,7 @@ use tracedecay_contracts::{
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
-use tracedecay_domain::{FactOwnerV1, ManifestDigest};
+use tracedecay_domain::{CursorBindingV1, FactOwnerV1, ManifestDigest};
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryOperationContext, ProjectMemoryFactAddRequestOutcome,
 };
@@ -35,7 +35,7 @@ use tracedecay_contracts::retained_receipts::{
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
-use tracedecay_session_memory::memory_mapping;
+use tracedecay_session_memory::memory_mapping::{self, FactPageOperation};
 use tracedecay_session_memory::memory_mutation::{
     bounded_memory_operation, fact_write_control, validate_memory_mutation,
 };
@@ -685,7 +685,7 @@ async fn search_on_db(
     let memory = memory_application(database, owner.clone())?;
     let search = memory_mapping::PreparedFactSearch::new(owner.clone(), request)?;
     let logical_effect = search.logical_effect()?;
-    let query = search.into_query();
+    let (query, binding) = search.into_parts();
     let request_id = context.request_context.request_id().as_str();
     let actor = Some(context.request_context.actor().clone());
     let operation_context =
@@ -766,7 +766,7 @@ async fn search_on_db(
             "Retrieval telemetry committed, but the authority result failed validation.",
         );
     }
-    let mut mapped = match memory_mapping::search_page(&page) {
+    let mut mapped = match memory_mapping::search_page(&page, &binding) {
         Ok(mapped) => mapped,
         Err(error) => {
             let Some(committed_state) = tracked.committed_state() else {
@@ -862,13 +862,14 @@ async fn semantic_search_on_db(
     owner: FactOwnerV1,
     request: SemanticRead<'_>,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let (kind, query_text, options, after, operation) = match request {
+    let (kind, query_text, options, after, operation, binding) = match request {
         SemanticRead::Probe(request) => (
             ProjectMemoryFactSearchKindV1::Probe,
             Some(request.entity.clone()),
             &request.options,
-            request.after.as_ref(),
+            request.after.as_deref(),
             RetainedSurfaceOperation::FactStoreProbe,
+            semantic_page_binding(FactPageOperation::Probe, &request.entity, &request.options)?,
         ),
         SemanticRead::Related(request) => (
             ProjectMemoryFactSearchKindV1::Related {
@@ -876,22 +877,30 @@ async fn semantic_search_on_db(
             },
             None,
             &request.options,
-            request.after.as_ref(),
+            request.after.as_deref(),
             RetainedSurfaceOperation::FactStoreRelated,
+            semantic_page_binding(
+                FactPageOperation::Related,
+                &request.entity,
+                &request.options,
+            )?,
         ),
         SemanticRead::Reason(request) => {
             let entities = memory_mapping::normalize_reason_entities(&request.entities)?;
+            let binding =
+                semantic_page_binding(FactPageOperation::Reason, &entities, &request.options)?;
             (
                 ProjectMemoryFactSearchKindV1::Reason { entities },
                 None,
                 &request.options,
-                request.after.as_ref(),
+                request.after.as_deref(),
                 RetainedSurfaceOperation::FactStoreReason,
+                binding,
             )
         }
     };
     let memory = memory_application(database, owner.clone())?;
-    let query = memory_mapping::search_query(owner, kind, query_text, options, after)?;
+    let query = memory_mapping::search_query(owner, kind, query_text, options, after, &binding)?;
     let read_control = fact_read_control(context);
     let (page, _) = bounded_memory_operation(context, async {
         let page = match request {
@@ -920,7 +929,7 @@ async fn semantic_search_on_db(
         page.map_err(memory_mapping::map_memory_error)
     })
     .await?;
-    let mapped = memory_mapping::search_page(&page)?;
+    let mapped = memory_mapping::search_page(&page, &binding)?;
     let result = memory_mapping::semantic_search_result(operation, mapped)?;
     evidence_outcome(context, operation, result)
 }
@@ -1004,12 +1013,20 @@ async fn list_on_db(
     request: &FactStoreListRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
+    let limit = memory_mapping::fact_limit(request.options.limit)?;
+    let binding = memory_mapping::fact_page_binding(
+        FactPageOperation::List,
+        &(),
+        &request.options,
+        request.options.min_trust,
+        limit,
+    )?;
     let query = ProjectMemoryFactListQueryV1::new(
         owner,
         request.options.category,
         memory_mapping::confidence(request.options.min_trust)?,
-        request.after_fact_id.clone(),
-        memory_mapping::fact_limit(request.options.limit)?,
+        memory_mapping::decode_list_cursor(&binding, request.after.as_deref())?,
+        limit,
     )
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
@@ -1022,7 +1039,8 @@ async fn list_on_db(
         .map_err(memory_mapping::map_memory_error)
     })
     .await?;
-    let result = RetainedSurfaceResultV1::FactStoreList(memory_mapping::list_page(&page)?);
+    let result =
+        RetainedSurfaceResultV1::FactStoreList(memory_mapping::list_page(&page, &binding)?);
     evidence_outcome(context, RetainedSurfaceOperation::FactStoreList, result)
 }
 
@@ -1046,6 +1064,20 @@ async fn execute_status_on_db(
     .await?;
     let result = memory_mapping::status_result(&status);
     evidence_outcome(context, RetainedSurfaceOperation::MemoryStatus, result)
+}
+
+fn semantic_page_binding<S: Serialize + ?Sized>(
+    operation: FactPageOperation,
+    subject: &S,
+    options: &FactReadOptionsV1,
+) -> Result<CursorBindingV1, RetainedSurfaceExecutionErrorV1> {
+    memory_mapping::fact_page_binding(
+        operation,
+        subject,
+        options,
+        options.min_trust,
+        memory_mapping::fact_limit(options.limit)?,
+    )
 }
 
 fn memory_application(

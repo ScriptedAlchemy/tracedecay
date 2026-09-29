@@ -441,7 +441,13 @@ mod tests {
             project.path(),
         );
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!(
+                "config error: refusing to write project-local config through symlink: {}",
+                project.path().join(".devin").display()
+            )
+        );
         assert!(
             load_json_file(&external_config)
                 .pointer("/mcpServers/tracedecay")

@@ -436,7 +436,7 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn live_remote_operational_status(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> Result<RemoteOperationalStatusReadV1> {
-    let connection = tracedecay_daemon_identity::current_daemon_connection(profile.data_dir())?;
+    let connection = super::current_profile_daemon_connection(profile)?;
     let Some(endpoint) = connection.http_application_endpoint() else {
         return Err(TraceDecayError::Config {
             message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),

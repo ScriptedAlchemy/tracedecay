@@ -26,6 +26,9 @@ pub enum CodeIndexBuildPhaseV1 {
     BulkCommit,
     IndexBuild,
     Verification,
+    /// Text serving is built and the pass that sealed the generation is
+    /// still publishing its native graph.
+    GraphPublication,
     Ready,
 }
 

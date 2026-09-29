@@ -27,9 +27,9 @@ use tracedecay_contracts::{
     StreamTermination, now_micros,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, CursorBindingMismatchV1, CursorBindingV1,
+    ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
+    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -249,6 +249,8 @@ pub enum OperationEventError {
     InvalidTerminal(String),
     #[error("managed test-run event is invalid")]
     InvalidTestRunEvent,
+    #[error("{0}")]
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 impl OperationEventError {
@@ -263,6 +265,7 @@ impl OperationEventError {
             Self::NotFoundOrNotAuthorized => {
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
             }
+            Self::CursorRefused(mismatch) => ApplicationProblem::cursor_refused(&mismatch),
             Self::FrontierExpired | Self::ResumeExpired => ApplicationProblem::Stale {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.resume_expired",
@@ -452,21 +455,9 @@ impl CanonicalManagedTestRunReader {
         &self,
         root_uri: &str,
         page: &PageRequest,
-    ) -> Result<ManagedTestRunSnapshot, ManagedTestRunUnavailableReason> {
-        let snapshot = self
-            .events
-            .latest_managed_test_run(root_uri)
-            .await
-            .map_err(|error| match error {
-                OperationEventError::FrontierExpired => {
-                    ManagedTestRunUnavailableReason::FrontierExpired
-                }
-                _ => ManagedTestRunUnavailableReason::AuthorityFailure,
-            })?;
-        self.events
-            .page_managed_test_run(snapshot, page)
-            .await
-            .map_err(|_| ManagedTestRunUnavailableReason::AuthorityFailure)
+    ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
+        let snapshot = self.events.latest_managed_test_run(root_uri).await?;
+        self.events.page_managed_test_run(snapshot, page).await
     }
 
     #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
@@ -621,6 +612,7 @@ impl OperationResumeAuthority {
         let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
         let encoded = encode_cursor(
             &snapshot,
+            &resume_binding()?,
             &StableSortKey {
                 normalized_score_micros: 0,
                 knowledge_at_micros: generation as i64,
@@ -639,8 +631,13 @@ impl OperationResumeAuthority {
     ) -> Result<(), OperationEventError> {
         let snapshot =
             operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
-        let sort_key = verify_cursor(token.as_str(), &snapshot, &self.authenticator)
-            .map_err(operation_resume_verification_error)?;
+        let sort_key = verify_cursor(
+            token.as_str(),
+            &snapshot,
+            &resume_binding()?,
+            &self.authenticator,
+        )
+        .map_err(operation_resume_verification_error)?;
         if sort_key.normalized_score_micros != 0
             || sort_key.knowledge_at_micros != record.generation as i64
             || sort_key.stable_id != record.binding.operation_id.to_string()
@@ -656,10 +653,12 @@ impl OperationResumeAuthority {
         generation: u64,
         completed: u64,
         next_offset: usize,
+        page_size: u32,
     ) -> Result<OpaqueCursor, OperationEventError> {
         let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
         let encoded = encode_cursor(
             &snapshot,
+            &test_result_binding(page_size)?,
             &StableSortKey {
                 normalized_score_micros: u64::try_from(next_offset)
                     .map_err(|_| OperationEventError::ResumeUnavailable)?,
@@ -678,11 +677,23 @@ impl OperationResumeAuthority {
         cursor: &OpaqueCursor,
         record: &OperationRecord,
         completed: u64,
+        page_size: u32,
     ) -> Result<usize, OperationEventError> {
         let snapshot =
             operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
-        let sort_key = verify_cursor(cursor.as_str(), &snapshot, &self.authenticator)
-            .map_err(operation_resume_verification_error)?;
+        let sort_key = verify_cursor(
+            cursor.as_str(),
+            &snapshot,
+            &test_result_binding(page_size)?,
+            &self.authenticator,
+        )
+        .map_err(|error| match error {
+            CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
+            CursorError::Malformed | CursorError::Tampered => {
+                OperationEventError::CursorRefused(CursorBindingMismatchV1::Foreign)
+            }
+            error => operation_resume_verification_error(error),
+        })?;
         if sort_key.stable_id != record.binding.operation_id.to_string()
             || sort_key.knowledge_at_micros
                 != i64::try_from(completed).map_err(|_| OperationEventError::ResumeUnavailable)?
@@ -1016,11 +1027,12 @@ impl OperationEventAuthority {
         }
         let available_results = snapshot.results.len();
         let offset = match page.cursor.as_ref() {
-            Some(cursor) => {
-                self.inner
-                    .resume
-                    .verify_test_result_cursor(cursor, record, snapshot.completed)?
-            }
+            Some(cursor) => self.inner.resume.verify_test_result_cursor(
+                cursor,
+                record,
+                snapshot.completed,
+                page.page_size,
+            )?,
             None => 0,
         };
         if offset > available_results {
@@ -1039,6 +1051,7 @@ impl OperationEventAuthority {
                     record.generation,
                     snapshot.completed,
                     end,
+                    page.page_size,
                 )
             })
             .transpose()?;
@@ -1759,8 +1772,23 @@ fn operation_resume_snapshot(
     .map_err(|_| OperationEventError::ResumeUnavailable)
 }
 
+/// Resume tokens continue one operation's event stream; the operation and its
+/// generation ride the snapshot.
+fn resume_binding() -> Result<CursorBindingV1, OperationEventError> {
+    CursorBindingV1::new("operation_events", Vec::new())
+        .map_err(|_| OperationEventError::ResumeUnavailable)
+}
+
+fn test_result_binding(page_size: u32) -> Result<CursorBindingV1, OperationEventError> {
+    CursorBindingV1::builder("test_results")
+        .parameter("page_size", &page_size)
+        .build()
+        .map_err(|_| OperationEventError::ResumeUnavailable)
+}
+
 fn operation_resume_verification_error(error: CursorError) -> OperationEventError {
     match error {
+        CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
         CursorError::Expired
         | CursorError::UnknownOrExpiredKey
         | CursorError::KeyUnavailable
@@ -2033,7 +2061,7 @@ mod tests {
             reader
                 .latest_page("file:///workspace", &PageRequest::first(1).expect("page"),)
                 .await,
-            Err(ManagedTestRunUnavailableReason::FrontierExpired)
+            Err(OperationEventError::FrontierExpired)
         );
     }
 
@@ -2131,12 +2159,48 @@ mod tests {
             reader
                 .latest_current_page(
                     &current,
-                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
+                    &PageRequest::new(2, Some(tampered.clone())).expect("tampered page"),
                 )
                 .await,
             ManagedTestRunReadOutcome::Unavailable(
                 ManagedTestRunUnavailableReason::AuthorityFailure,
             )
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Err(OperationEventError::CursorRefused(
+                tracedecay_domain::CursorBindingMismatchV1::Foreign
+            ))
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(1, Some(cursor.clone())).expect("resized page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Err(OperationEventError::CursorRefused(
+                tracedecay_domain::CursorBindingMismatchV1::ParameterChanged {
+                    parameter: "page_size"
+                }
+            ))
+        );
+        assert_eq!(
+            reader
+                .latest_page(
+                    "file:///workspace",
+                    &PageRequest::new(2, Some(cursor.clone())).expect("continuation page"),
+                )
+                .await
+                .map(|page| page.result_offset),
+            Ok(2)
         );
 
         let ManagedTestRunReadOutcome::Current(second) = reader
