@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::support::{production_composition_fixture_with_sources, wait_for_current_graph};
+use crate::support::{
+    production_composition_fixture_with_sources, refusal_problem, wait_for_current_graph,
+};
 
 const SYMBOL: &str = "missing_feedback_list_symbol";
 const SOURCE: &str = "pub fn entry() { missing_feedback_list_symbol(); }\n";
@@ -149,7 +151,7 @@ async fn feedback_list_returns_the_published_compiler_finding_and_denies_other_h
         }),
     )
     .await;
-    let unknown = problem_record(&unknown_response);
+    let unknown = refusal_problem(&unknown_response["result"]);
     assert_eq!(unknown["kind"], "not_found_or_not_authorized", "{unknown}");
     assert_eq!(unknown["code"], "not_found_or_not_authorized", "{unknown}");
     assert_eq!(unknown["retryable"], false, "{unknown}");
@@ -305,9 +307,9 @@ async fn published_cycle(fixture: &crate::support::ProductionCompositionFixture)
 
 fn retryable_mount(response: &Value) -> bool {
     let reason = response["error"]["data"]["reason_code"].as_str();
-    let code = response["result"]["problem"]["code"].as_str();
+    let code = response["result"]["structuredContent"]["problem"]["code"].as_str();
     let retryable = response["error"]["data"]["retryable"] == true
-        || response["result"]["problem"]["retryable"] == true;
+        || response["result"]["structuredContent"]["problem"]["retryable"] == true;
     retryable
         && matches!(
             reason.or(code),
@@ -369,24 +371,11 @@ async fn deny_list(
         }),
     )
     .await;
-    let problem = problem_record(&response);
+    let problem = refusal_problem(&response["result"]);
     assert_eq!(
         problem["kind"], "not_found_or_not_authorized",
         "{reason}: {problem}"
     );
     assert_eq!(problem["code"], "not_found_or_not_authorized", "{problem}");
     assert_eq!(problem["retryable"], false, "{problem}");
-}
-
-fn problem_record(response: &Value) -> &Value {
-    assert_eq!(
-        response["result"]["isError"], true,
-        "a refused list must be a tool error, not an empty success: {response}"
-    );
-    let record = &response["result"]["problem"];
-    assert!(
-        record.is_object(),
-        "refused list omitted its problem: {response}"
-    );
-    record
 }

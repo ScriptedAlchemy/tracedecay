@@ -289,7 +289,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
-            mut retained_reservations,
+            retained_reservations,
         } = captured;
         let reextracted_files = changed_paths.len();
         let roster = self.ignored_source_admissions.clone();
@@ -320,9 +320,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
-        Self::finish_snapshot_build_memory(&mut retained_reservations)?;
-        self.retained_snapshot_bytes = retained_bytes;
-        self._retained_snapshot_memory = retained_reservations;
+        drop((retained_bytes, retained_reservations));
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled(SourceContentManifestV1::for_snapshot(generation.snapshot()));
         let latest = self.bind_latest_complete(Arc::clone(&generation), None);

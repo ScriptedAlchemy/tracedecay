@@ -15,7 +15,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
-use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::tests::harness::{HostAdmissionTestRuntimeV1, writer_telemetry};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
@@ -38,12 +38,7 @@ fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
 }
 
 fn committed_transactions(database: &tracedecay_global_db::RegisteredGlobalDb) -> u64 {
-    database
-        .runtime_client()
-        .writer_telemetry_snapshot()
-        .expect("registered database must expose rusqlite writer telemetry")
-        .writer
-        .expect("mounted writer must carry rusqlite writer telemetry")
+    writer_telemetry(database)
         .transactions
         .committed_transactions
 }

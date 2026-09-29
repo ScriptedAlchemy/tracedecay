@@ -15,7 +15,7 @@ use tracedecay_contracts::ResolvedScope;
 
 use super::{
     CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexReconcileAdmissionV1,
-    CodeIndexSchedulerRegistryV1, unique_mounted_for_scope,
+    CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1, unique_mounted_for_scope,
 };
 use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
 use crate::code_index_scheduler::{
@@ -400,20 +400,27 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match self
-            .wait_for_readiness(
+        // A retained seat that recovers its verified head serves within
+        // moments. One whose graph is being built serves only after
+        // corpus-sized work, so the read answers warming instead of spending
+        // its deadline on that build.
+        tokio::select! {
+            biased;
+            read = self.wait_for_readiness(
                 project_root,
                 CodeIndexReadinessTargetV1::GraphReady,
                 remaining,
-            )
-            .await
-        {
-            Ok(CodeIndexReadinessWaitReadV1::Reached { .. }) => {}
-            Ok(CodeIndexReadinessWaitReadV1::TimedOut { .. }) => {
+            ) => match read {
+                Ok(CodeIndexReadinessWaitReadV1::Reached { .. }) => {}
+                Ok(CodeIndexReadinessWaitReadV1::TimedOut { .. }) => {
+                    return CodeIndexRetainedSeatWaitV1::Warming;
+                }
+                Ok(CodeIndexReadinessWaitReadV1::Unreachable { .. }) | Err(_) => {
+                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                }
+            },
+            () = self.graph_publication_in_progress(project_root) => {
                 return CodeIndexRetainedSeatWaitV1::Warming;
-            }
-            Ok(CodeIndexReadinessWaitReadV1::Unreachable { .. }) | Err(_) => {
-                return CodeIndexRetainedSeatWaitV1::Unreachable;
             }
         }
         // The graph seats before the retained text owners reopen their query
@@ -448,6 +455,22 @@ impl CodeIndexSchedulerRegistryV1 {
                     return CodeIndexRetainedSeatWaitV1::Unreachable;
                 }
                 Ok(Ok(())) => {}
+            }
+        }
+    }
+
+    /// Resolves once `project_root`'s worker is building a sealed
+    /// generation's code graph; never resolves while it is not.
+    async fn graph_publication_in_progress(&self, project_root: &Path) {
+        let Some(mut activity) = self.subscribe_owner_activity(project_root).await else {
+            return std::future::pending().await;
+        };
+        loop {
+            if activity.worker_phase() == CodeIndexWorkerPhaseV1::PublishingGraph {
+                return;
+            }
+            if activity.changed().await.is_err() {
+                return std::future::pending().await;
             }
         }
     }

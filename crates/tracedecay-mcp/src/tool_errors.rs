@@ -1,7 +1,7 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_contracts::ApplicationProblem;
+use tracedecay_contracts::{ApplicationProblem, ApplicationProblemRecord};
 use tracedecay_domain::errors::{
     PROFILE_RESET_COMMAND, STALE_STORE_RESET_COMMAND, TraceDecayError,
 };
@@ -119,32 +119,21 @@ pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
         .map(|text| text.trim_start().to_string())
 }
 
-/// Moves a tool result's typed `problem` into its MCP structured content.
+/// The MCP `structuredContent` member of a tool result that refuses with
+/// `problem`.
 ///
-/// `CallToolResult` has no extension members, so a problem left beside
-/// `content` reaches MCP clients only as prose. Every route that answers
-/// `tools/call` to a host renders the refusal record here.
-pub fn structure_tool_problem(result: &mut Value) {
-    let Some(object) = result.as_object_mut() else {
-        return;
-    };
-    let Some(problem) = object.remove("problem") else {
-        return;
-    };
-    match object
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    {
-        Some(structured) => {
-            structured.insert("problem".to_owned(), problem);
-        }
-        None => {
-            object.insert(
-                "structuredContent".to_owned(),
-                json!({ "problem": problem }),
-            );
-        }
-    }
+/// `CallToolResult` has no extension members, so structured content is the
+/// only place a typed record reaches MCP clients. Every route, and the
+/// `tracedecay tool --json` output, carries the refusal record there and
+/// nowhere else; [`tool_result_problem`] is its one reader.
+pub fn problem_structured_content(problem: &ApplicationProblemRecord) -> serde_json::Result<Value> {
+    Ok(json!({ "problem": serde_json::to_value(problem)? }))
+}
+
+/// The typed problem record a tool result refuses with, if any.
+#[must_use]
+pub fn tool_result_problem(result: &Value) -> Option<&Value> {
+    result.get("structuredContent")?.get("problem")
 }
 
 pub fn mark_semantic_tool_error(result: &mut ToolResult) {

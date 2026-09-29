@@ -241,7 +241,7 @@ fn graph_read_failed<T>(
         CodeGraphReadError::MissingRegistry => {
             DashboardEnvelopeV1::unavailable(scope, None, "missing_registry")
         }
-        CodeGraphReadError::Unavailable { detail } => {
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
             DashboardEnvelopeV1::unavailable(scope, None, detail)
         }
         CodeGraphReadError::Stale { detail } => {

@@ -234,7 +234,7 @@ fn assert_concealed_impact(response: &JsonRpcResponse) {
         "legal_actions": [],
         "coverage": null
     });
-    assert_eq!(result["problem"], problem);
+    assert_eq!(result["structuredContent"]["problem"], problem);
     assert_eq!(envelope["problem"], problem);
 }
 
@@ -256,16 +256,15 @@ async fn wait_for_feedback_owner(
             .await
             .expect("absent impact handle");
         if response.error.is_none()
-            && response
-                .result
-                .as_ref()
-                .is_some_and(|result| result["problem"]["kind"] == "not_found_or_not_authorized")
+            && response.result.as_ref().is_some_and(|result| {
+                result["structuredContent"]["problem"]["kind"] == "not_found_or_not_authorized"
+            })
         {
             return response;
         }
         let retryable_owner = response.result.as_ref().is_some_and(|result| {
-            result["problem"]["code"] == "feedback.owner_unavailable"
-                && result["problem"]["retryable"] == true
+            result["structuredContent"]["problem"]["code"] == "feedback.owner_unavailable"
+                && result["structuredContent"]["problem"]["retryable"] == true
         });
         assert!(
             retryable_owner,
@@ -334,8 +333,9 @@ async fn publish_advisory_cycle(
             );
         } else {
             let retryable = response.result.as_ref().is_some_and(|result| {
-                result["problem"]["code"] == "feedback.advisory-cycle.unavailable"
-                    && result["problem"]["retryable"] == true
+                result["structuredContent"]["problem"]["code"]
+                    == "feedback.advisory-cycle.unavailable"
+                    && result["structuredContent"]["problem"]["retryable"] == true
             });
             assert!(
                 retryable,

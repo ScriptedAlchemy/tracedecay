@@ -245,7 +245,10 @@ async fn type_hierarchy_reports_literal_trees_and_typed_refusals() {
         .as_ref()
         .unwrap_or_else(|| panic!("{absent:?}"));
     assert_eq!(
-        (&absent["isError"], &absent["problem"]["kind"]),
+        (
+            &absent["isError"],
+            &absent["structuredContent"]["problem"]["kind"],
+        ),
         (&json!(true), &json!("not_found_or_not_authorized")),
         "an absent root is a typed miss, not an empty hierarchy: {absent}"
     );
@@ -339,7 +342,8 @@ fn assert_refused(response: &JsonRpcResponse, context: &str) {
         .and_then(|error| error.data.as_ref())
         .is_some_and(|data| data["reason_code"] == "application_surface_invalid_request");
     let refused_by_contract = response.result.as_ref().is_some_and(|result| {
-        result["isError"] == true && result["problem"]["kind"] == "invalid_request"
+        result["isError"] == true
+            && result["structuredContent"]["problem"]["kind"] == "invalid_request"
     });
     assert!(
         refused_at_parse || refused_by_contract,

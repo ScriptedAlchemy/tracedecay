@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tracedecay_code_index::parallelism::collect_idle_installed_worker_heaps;
 use tracedecay_code_index_retention::code_index_generations::code_index_store_root;
 use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
 use tracedecay_maintenance::generation::{
@@ -520,7 +521,8 @@ impl MaintenanceCoordinator {
     /// reaches the high watermark, so this loop is what turns a climb during
     /// a cold index into released memory instead of refused admissions. Each
     /// sample first returns freed C-library heap, which no owner is charged
-    /// for and which no other release reaches between graph publications.
+    /// for and which no other release reaches between graph publications,
+    /// and has an index pool that went idle collect its workers' heaps.
     #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
         let log = Arc::clone(&self.resident_memory_log);
@@ -529,6 +531,7 @@ impl MaintenanceCoordinator {
             RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
             Arc::new(move || {
                 let _ = release_c_library_heap_v1();
+                collect_idle_installed_worker_heaps();
                 record_process_resident_memory_gauge(&log);
                 sweep_resident_owners();
             }),

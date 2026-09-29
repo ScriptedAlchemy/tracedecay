@@ -343,6 +343,12 @@ pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFa
             "The project's verified code graph is not serving yet; retry after the code index \
              seals a generation.",
         ),
+        CodeGraphReadError::Refused { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.refused",
+            "The project's code graph is refused for the serving generation; exact and lexical \
+             reads still serve, and graph reads return once another generation seals.",
+        ),
         CodeGraphReadError::ResetRequired { .. } => (
             PrimitiveFailureKind::Unavailable,
             "application.code-graph.reset-required",

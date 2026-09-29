@@ -800,6 +800,7 @@ fn graph_read_failure(error: CodeGraphReadError) -> FeedbackImpactPortOutcome {
         CodeGraphReadError::Stale { .. } => FeedbackImpactPortOutcome::Stale,
         CodeGraphReadError::MissingRegistry
         | CodeGraphReadError::Unavailable { .. }
+        | CodeGraphReadError::Refused { .. }
         | CodeGraphReadError::ResetRequired { .. }
         | CodeGraphReadError::BudgetExhausted { .. }
         | CodeGraphReadError::Denied

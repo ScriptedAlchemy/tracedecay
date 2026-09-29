@@ -3028,7 +3028,8 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
         )
     });
     assert_eq!(
-        printed["problem"]["code"], "application.retained.authority-unavailable",
+        printed["structuredContent"]["problem"]["code"],
+        "application.retained.authority-unavailable",
         "stdout must carry the mounted owner's answer, got:\n{stdout}"
     );
     assert!(
@@ -3047,7 +3048,7 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
     // The mounting refusal and the final answer are both `after_delay`
     // problems built by the one problem-record authority, so the printed
     // delay is the delay each ridden-out refusal waited.
-    let retry_after_millis = printed["problem"]["retry_after_millis"]
+    let retry_after_millis = printed["structuredContent"]["problem"]["retry_after_millis"]
         .as_u64()
         .expect("an after_delay problem names its delay");
     assert!(
@@ -3090,10 +3091,14 @@ fn tool_returns_a_completed_authority_result_without_resending() {
     });
     assert_eq!(printed["isError"], true);
     assert_eq!(
-        printed["problem"]["code"], "application.retained.authority-unavailable",
+        printed["structuredContent"]["problem"]["code"],
+        "application.retained.authority-unavailable",
         "the daemon's completed answer must be surfaced, got:\n{stdout}"
     );
-    assert_eq!(printed["problem"]["retry"], "after_delay");
+    assert_eq!(
+        printed["structuredContent"]["problem"]["retry"],
+        "after_delay"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stderr.lines().last(),

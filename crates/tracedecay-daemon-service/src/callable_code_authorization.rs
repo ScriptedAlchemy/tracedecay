@@ -235,7 +235,7 @@ fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
         Err(CodeGraphReadError::MissingRegistry) => {
             hotpath::gauge!("daemon.code_authorization.admit.refused.missing_registry").inc(1.0);
         }
-        Err(CodeGraphReadError::Unavailable { .. }) => {
+        Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {
             hotpath::gauge!("daemon.code_authorization.admit.refused.unavailable").inc(1.0);
         }
         Err(CodeGraphReadError::ResetRequired { .. }) => {

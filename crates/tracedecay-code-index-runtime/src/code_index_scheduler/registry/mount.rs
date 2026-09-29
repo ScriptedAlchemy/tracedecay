@@ -1891,6 +1891,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                      the graph after the serving decode"
                                 ),
                                 Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                                    );
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1901,6 +1905,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::Working,
+                                    );
                                     drop(reservation);
                                     match published {
                                         Ok(published) => graph_head_published = published,
@@ -2259,6 +2267,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
                     graph_seat_attempted =
                         Some(latest.generation().manifest().generation_id.clone());
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                    );
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2269,6 +2281,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             Arc::clone(&worker_shutting_down),
                         )
                         .await;
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::Working,
+                    );
                     match activation {
                         Ok(()) => {
                             next_seat_attempt_at = None;

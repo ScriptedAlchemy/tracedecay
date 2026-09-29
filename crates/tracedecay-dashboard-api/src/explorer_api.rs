@@ -716,11 +716,13 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "missing_registry",
             "the exact project graph registry is missing",
         ),
-        CodeGraphReadError::Unavailable { detail } => ExplorerSourceProgressV1::unavailable(
-            ExplorerSourceIdV1::CodeGraph,
-            "graph_authority_unavailable",
-            detail,
-        ),
+        CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
+            ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::CodeGraph,
+                "graph_authority_unavailable",
+                detail,
+            )
+        }
         CodeGraphReadError::Stale { detail } => ExplorerSourceProgressV1::stale(
             ExplorerSourceIdV1::CodeGraph,
             "graph_generation_stale",
