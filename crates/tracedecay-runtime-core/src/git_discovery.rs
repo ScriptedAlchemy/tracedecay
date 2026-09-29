@@ -33,9 +33,9 @@ const MODELLED_SLOW_AUTHORITY_WALK: Duration = Duration::from_millis(750);
 const CLI_FALLBACK_HEADROOM: Duration = Duration::from_millis(250);
 /// Default probe budget for synchronous discovery without an explicit deadline.
 ///
-/// Authority and CLI fallback share one deadline. The total is the modelled
-/// first-phase cost plus reserved CLI headroom, not the first-phase cost
-/// alone, so a slow unreadable authority cannot starve the supported fallback.
+/// The total is the modelled first-phase cost plus reserved CLI headroom. The
+/// fallback is also granted [`CLI_FALLBACK_HEADROOM`] from when the authority
+/// returns, so an authority slower than its model cannot starve it.
 const DEFAULT_DISCOVERY_TIMEOUT: Duration =
     MODELLED_SLOW_AUTHORITY_WALK.saturating_add(CLI_FALLBACK_HEADROOM);
 /// Upper bound between `try_wait` polls. Keep slices short enough that cancel
@@ -351,18 +351,33 @@ async fn published_identity(
 ///
 /// Daemon and other async callers should use [`discover_repository_identity`].
 pub fn discover_repository_identity_bounded(directory: &Path) -> GitRepositoryIdentityOutcome {
-    discover_repository_identity_with_control(
+    discover_repository_identity_sync(
         directory,
         MonotonicDeadline::at(Instant::now() + DEFAULT_DISCOVERY_TIMEOUT),
+        Some(CLI_FALLBACK_HEADROOM),
         &CancellationToken::new(),
     )
 }
 
 /// Synchronous discovery with explicit cancellation and monotonic deadline.
-#[hotpath::measure(label = "runtime_core.git.discover_control")]
+///
+/// The caller's deadline bounds the Git CLI fallback as well: it is never
+/// extended, however long the in-process authority took.
 pub fn discover_repository_identity_with_control(
     directory: &Path,
     deadline: MonotonicDeadline,
+    cancellation: &CancellationToken,
+) -> GitRepositoryIdentityOutcome {
+    discover_repository_identity_sync(directory, deadline, None, cancellation)
+}
+
+/// `fallback_share` guarantees the Git CLI fallback at least that long after
+/// the authority returns, extending `deadline` when the authority overran it.
+#[hotpath::measure(label = "runtime_core.git.discover_control")]
+fn discover_repository_identity_sync(
+    directory: &Path,
+    deadline: MonotonicDeadline,
+    fallback_share: Option<Duration>,
     cancellation: &CancellationToken,
 ) -> GitRepositoryIdentityOutcome {
     if cancellation.is_cancelled() {
@@ -377,6 +392,11 @@ pub fn discover_repository_identity_with_control(
     if let Some(identity) = repository_identity_from_authority(directory) {
         return identity;
     }
+    // The in-process authority cannot be interrupted, so an authority slower
+    // than its model would otherwise leave the fallback none of the budget.
+    let deadline = fallback_share.map_or(deadline, |share| {
+        MonotonicDeadline::at(deadline.instant().max(Instant::now() + share))
+    });
 
     let Ok(mut command) = repository_identity_command(directory) else {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
@@ -725,26 +745,47 @@ mod tests {
         repository
     }
 
-    /// Default budget must still resolve when the in-process phase pays the
-    /// modelled slow walk, returns unreadable, and the Git CLI fallback has
-    /// to finish under the same deadline.
+    /// An unreadable authority that alone outlasts the whole default budget
+    /// still leaves the Git CLI fallback its full reserve. The fallback's
+    /// `git` is held on a FIFO config include, so the outcome cannot depend on
+    /// how fast `git` runs on a loaded host; only the granted wait is measured.
+    #[cfg(unix)]
     #[test]
     fn default_budget_keeps_cli_fallback_after_slow_unreadable_authority() {
         let tmp = tempdir().unwrap();
         let repository = tmp.path().join("repository");
         fs::create_dir_all(&repository).unwrap();
         run_git(&repository, &["init", "-b", "main", "--quiet"]);
-        crate::git_repository::unreadable_repository_discovery_for_test(&repository, SLOW_WALK);
+        let held = repository.join(".git").join("held-config");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&held)
+                .status()
+                .unwrap()
+                .success()
+        );
+        run_git(
+            &repository,
+            &["config", "include.path", held.to_str().unwrap()],
+        );
+        crate::git_repository::unreadable_repository_discovery_for_test(
+            &repository,
+            DEFAULT_DISCOVERY_TIMEOUT,
+        );
 
+        let started = Instant::now();
         let outcome = discover_repository_identity_bounded(&repository);
+        let elapsed = started.elapsed();
         crate::git_repository::reset_repository_discovery_for_test(&repository);
 
-        let GitRepositoryIdentityOutcome::Resolved(identity) = outcome else {
-            panic!(
-                "default discovery budget must leave CLI fallback headroom after a slow unreadable authority: {outcome:?}"
-            );
-        };
-        assert_eq!(identity.worktree_root, repository.canonicalize().unwrap());
+        assert_eq!(
+            outcome,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
+        assert!(
+            elapsed >= DEFAULT_DISCOVERY_TIMEOUT + CLI_FALLBACK_HEADROOM,
+            "the held CLI fallback must be granted its reserve after the authority: {elapsed:?}"
+        );
     }
 
     /// Wait for whatever resolution is running for `directory` to retire its

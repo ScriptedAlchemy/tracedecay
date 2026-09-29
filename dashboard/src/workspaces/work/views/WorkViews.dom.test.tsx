@@ -432,82 +432,133 @@ describe('every attempt-shaped projection', () => {
    * projection that drew either would be drawing a number nobody could check.
    */
   it.each([
-    ['Timeline', 'timeline'],
-    ['Causal', 'causal'],
-    ['Topology', 'topology'],
-  ])('%s states the measurements it could not take', async (name, view) => {
+    [
+      'timeline',
+      'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started, WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, and the work-product graph read does not add one, because its runtime projection carries an attempt identity and a state and no instant at all, so every mark has an end and never a width',
+      2,
+    ],
+    [
+      'causal',
+      "no order of execution is readable here: the snapshot carries no timestamp, and the work-product graph read answers declared causal candidates rather than an observed sequence, so nothing binds a task's completion to the instant another task finished, the weave's terminal order, read from the attempt list, is the nearest measurement this build has and it ranks attempts rather than tasks",
+      2,
+    ],
+    [
+      'topology',
+      'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started, WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, and the work-product graph read does not add one, because its runtime projection carries an attempt identity and a state and no instant at all, so every mark has an end and never a width',
+      1,
+    ],
+  ] as const)('%s states the measurements it could not take', async (view, sentence, count) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
       expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
     );
-
-    const absences = container.querySelectorAll('[data-work-channel="absent"]');
-    expect(absences.length).toBeGreaterThan(0);
-    for (const absence of absences) {
-      expect((absence.textContent ?? '').length).toBeGreaterThan(40);
-    }
-    expect(name.length).toBeGreaterThan(0);
+    expect(screen.getAllByText(sentence)).toHaveLength(count);
   });
 
   it.each([
-    ['Timeline', 'timeline'],
-    ['Causal', 'causal'],
-    ['Workload', 'workload'],
-  ])('%s draws an empty board as an empty board, not as a failure', async (name, view) => {
+    [
+      'timeline',
+      'The work-product graph version this read returned holds no task at all, so there is no instant to record. This is the authority reporting an empty graph, not a read that failed.',
+    ],
+    [
+      'causal',
+      'The snapshot returned no tasks, so there is no declared order to overlay. This is the daemon reporting an empty board, not a projection that failed to draw.',
+    ],
+    [
+      'workload',
+      'The snapshot returned no tasks, so there is nothing to aggregate. This is the daemon reporting an empty board, not an aggregation that failed to draw.',
+    ],
+  ] as const)('%s draws an empty board as an empty board, not as a failure', async (view, sentence) => {
     serveWork(undefined, viewsBody({ ...VIEWS_GRAPH, tasks: [] }));
     const { container } = renderPage(`/work?view=${view}`);
 
     await waitFor(() =>
       expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
     );
-    expect(container.querySelector('[data-work-reading="empty"]')).not.toBeNull();
-    expect(name.length).toBeGreaterThan(0);
+    expect(screen.getByText(sentence)).toBeTruthy();
+    expect(container.querySelector('[data-work-reading="refused"]')).toBeNull();
   });
 
   /** Any table these projections draw is read by a screen reader, so it needs
    * a caption and column headers like every other table in the workspace. */
+  const activityCaption =
+    'Admitted task-activity frames still held by the live connection, newest first, with the observation instant, project, and detail word each frame carried. The stream coalesces task mutations per project and carries no task identity or title, so neither is a column; canonical Work reads refetch on every frame.';
+  const activityHeaders = ['Observed (UTC)', 'Project', 'Event', 'Frame'] as const;
+
   it.each([
-    ['DAG', 'dag'],
-    ['Timeline', 'timeline'],
-    ['Causal', 'causal'],
-    ['Workload', 'workload'],
-  ])('%s captions every table it draws', async (name, view) => {
+    [
+      'dag',
+      [
+        "Every task on the dependency graph with its identity, the authority's projected lane, its stratum depth, its gating and soft relation counts, declared effort, and the milestone it belongs to. Selecting a row selects the same task the graph card selects.",
+        'Every relation drawn on the graph: its kind, the task it leaves, the task it reaches, and whether it runs against the strata inside a declared cycle.',
+        activityCaption,
+      ],
+      [
+        ['Task', 'Identity', 'Lane', 'Depth', 'Gating in', 'Gating out', 'Soft', 'Effort', 'Milestone', 'Grade'],
+        ['Relation', 'From', 'To', 'Direction'],
+        activityHeaders,
+      ],
+    ],
+    [
+      'timeline',
+      [
+        'Every task the work-product graph returned, with the instant it was created, the instant it last changed, the instant it is scheduled for and the instant it is due by. None of these is the start of an attempt, so no duration is derivable from them.',
+        activityCaption,
+      ],
+      [['Task', 'Created', 'Last changed', 'Scheduled', 'Due'], activityHeaders],
+    ],
+    [
+      'causal',
+      [
+        'Every dependency the returned tasks declare, with the task it names, the task that declares it, and what the terminal attempt state at the two ends reads as.',
+        activityCaption,
+      ],
+      [['Dependency', 'Dependent', 'Reading'], activityHeaders],
+    ],
+    ['workload', [activityCaption], [activityHeaders]],
+  ] as const)('%s captions every table it draws', async (view, captions, headers) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
       expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
     );
 
-    for (const table of container.querySelectorAll('table')) {
-      expect(table.querySelector('caption')?.textContent ?? '').not.toBe('');
-      expect(table.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
-    }
-    expect(name.length).toBeGreaterThan(0);
+    const tables = [...container.querySelectorAll('table')];
+    expect(
+      tables.map((table) =>
+        (table.querySelector('caption')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      ),
+    ).toEqual(captions);
+    expect(
+      tables.map((table) =>
+        [...table.querySelectorAll('th[scope="col"]')].map((header) =>
+          (header.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        ),
+      ),
+    ).toEqual(headers);
   });
 
   /** 44px explicitly: the app's root font size is 14px, so a spacing-11
    * minimum computes to 38.5px and lands under the target size the
    * accessibility gate measures. */
   it.each([
-    ['DAG', 'dag'],
-    ['Timeline', 'timeline'],
-    ['Causal', 'causal'],
-    ['Workload', 'workload'],
-    ['Topology', 'topology'],
-  ])('%s gives every task control a reachable target', async (name, view) => {
+    ['dag', 12],
+    ['timeline', 8],
+    ['causal', 6],
+    ['workload', 6],
+    ['topology', 2],
+  ] as const)('%s gives every task control a reachable target', async (view, count) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
       expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
     );
 
-    const controls = container.querySelectorAll(`[data-work-view="${view}"] [data-work-task]`);
-    // Anti-vacuity: a projection that drew no task control at all would pass
-    // the loop below without measuring anything, and every projection in this
-    // fixture has tasks to draw.
-    expect(controls.length).toBeGreaterThan(0);
-    for (const control of controls) {
-      expect(control.className).toContain('min-h-[44px]');
-    }
-    expect(name.length).toBeGreaterThan(0);
+    const controls = [
+      ...container.querySelectorAll(`[data-work-view="${view}"] [data-work-task]`),
+    ];
+    expect(controls).toHaveLength(count);
+    expect(controls.map((control) => control.className.includes('min-h-[44px]'))).toEqual(
+      Array.from({ length: count }, () => true),
+    );
   });
 });
 

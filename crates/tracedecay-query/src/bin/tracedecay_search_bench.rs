@@ -69,7 +69,9 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
     MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
+use tracedecay_query::retrieval::ports::{
+    RetrievalExecutionControl, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+};
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_LEXICAL_PROFILE_REVISION_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
     QUERY_NORMALIZATION_REVISION_V1, QUERY_SANITIZER_REVISION_V1, RawRetrievalRequestV1,
@@ -77,15 +79,14 @@ use tracedecay_query::retrieval::{
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "search-bench.v1";
+const WORKLOAD_REVISION: &str = "search-bench.v2";
 const CORPUS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_SEARCH_BENCH_REPLICAS";
 const KEEP_SCRATCH_ENV: &str = "TRACEDECAY_SEARCH_BENCH_KEEP_SCRATCH";
 
-/// Sealed-source paging bounds, mirrored from `tracedecay-index-bench` so the
-/// artifact this workload queries is built the same way the daemon builds it.
-const MAX_PAGE_CHUNKS: usize = 64;
-const MAX_PAGE_BYTES: usize = 512 * 1024;
+/// The artifact this workload queries is paged with the daemon's own sealed
+/// page bounds (`TEXT_ARTIFACT_PAGE_*_V1`), so it is built the same way the
+/// daemon builds it.
 const BATCH_MAX_PAGES: usize = 16;
 const BATCH_MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
@@ -381,8 +382,8 @@ fn run(options: &Options) -> Result<String, String> {
         SealedDrainBounds {
             batch_pages: BATCH_MAX_PAGES,
             batch_retained_bytes: BATCH_MAX_RETAINED_BYTES,
-            page_chunks: MAX_PAGE_CHUNKS,
-            page_bytes: MAX_PAGE_BYTES,
+            page_chunks: TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            page_bytes: TEXT_ARTIFACT_PAGE_BYTES_V1,
         },
     )?;
     let drain_wall = drain_started.elapsed();

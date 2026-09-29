@@ -287,9 +287,12 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         let mut rows = self
             .transaction
             .query(
+                // `+span_id` keeps the planner off an ordered full scan of
+                // the primary key; the two indexed ranges bound the read to
+                // the spans this pass can still attribute.
                 "SELECT record FROM git_evidence_span
                  WHERE sequence > ?1 OR last_ts >= ?2
-                 ORDER BY span_id",
+                 ORDER BY +span_id",
                 params![attributed_through, open_since],
             )
             .await?;
