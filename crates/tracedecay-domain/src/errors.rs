@@ -121,6 +121,49 @@ pub type Result<T> = std::result::Result<T, TraceDecayError>;
 /// the next open creates the shape the running binary writes.
 pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
 
+/// Deletes exactly the stores the daemon reports in their typed
+/// reset-required state and nothing else; the next open recreates each one
+/// empty. Stores it cannot reset on their own name [`PROFILE_RESET_COMMAND`].
+pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
+
+/// A registered store [`STALE_STORE_RESET_COMMAND`] deletes on its own, named
+/// by the `store` label [`StoreResetRequiredV1`] carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResettableStoreV1 {
+    ProfileSessions,
+    ProjectSessions { project_id: String },
+}
+
+impl ResettableStoreV1 {
+    const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
+    const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::ProfileSessions => Self::PROFILE_SESSIONS_LABEL.to_owned(),
+            Self::ProjectSessions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
+            }
+        }
+    }
+
+    /// The store a [`Self::label`] names, `None` for a store that is not
+    /// resettable on its own.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        if label == Self::PROFILE_SESSIONS_LABEL {
+            return Some(Self::ProfileSessions);
+        }
+        label
+            .strip_prefix(Self::PROJECT_SESSIONS_PREFIX)
+            .filter(|project_id| !project_id.is_empty())
+            .map(|project_id| Self::ProjectSessions {
+                project_id: project_id.to_owned(),
+            })
+    }
+}
+
 /// A persisted store the daemon keeps mounted in a typed reset-required state
 /// instead of refusing to serve: every read against it returns the typed
 /// refusal, stores that admit keep serving, and `remedy` is the exact command
@@ -201,9 +244,24 @@ impl TraceDecayError {
         Some((authority, reason))
     }
 
+    /// Whether this is a persisted-shape refusal a store is served in until
+    /// its reset.
+    #[must_use]
+    pub fn is_store_reset_required(&self) -> bool {
+        matches!(
+            self,
+            Self::ResetRequired { .. } | Self::ProfileResetRequired { .. }
+        )
+    }
+
     /// The typed reset-required state `store` is mounted in when this error is
     /// a profile-scoped persisted-shape refusal, `None` for any other failure.
-    pub fn store_reset_required(&self, store: impl Into<String>) -> Option<StoreResetRequiredV1> {
+    /// `remedy` is the command that resets `store`.
+    pub fn store_reset_required(
+        &self,
+        store: impl Into<String>,
+        remedy: &str,
+    ) -> Option<StoreResetRequiredV1> {
         let (authority, found_version, required_version) = match self {
             Self::ResetRequired { authority, .. } => (authority.clone(), None, None),
             Self::ProfileResetRequired {
@@ -223,7 +281,7 @@ impl TraceDecayError {
             found_version,
             required_version,
             reason: self.to_string(),
-            remedy: PROFILE_RESET_COMMAND.to_owned(),
+            remedy: remedy.to_owned(),
         })
     }
 

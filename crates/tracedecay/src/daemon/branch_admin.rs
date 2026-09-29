@@ -104,6 +104,14 @@ pub(super) fn graph_writer_scope(
     store_writer_scope(&cg.store_layout().data_root, class)
 }
 
+/// What a caller reads from a project session store: session features are
+/// refused while the store is held reset-required, its configuration is not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectSessionShardUse {
+    Sessions,
+    Configuration,
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum MaintenanceReaperKind {
@@ -1048,11 +1056,48 @@ impl StoreAdministration {
         graphs
     }
 
+    /// The project session store for session features. A store held in its
+    /// typed reset-required state answers that refusal.
     #[hotpath::measure(label = "daemon.branch_admin.project_session_database", future = true)]
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
         store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Sessions,
+        ))
+        .await
+    }
+
+    /// The project session store as the project's configuration authority,
+    /// served even while the store's session features answer a reset
+    /// refusal.
+    #[hotpath::measure(
+        label = "daemon.branch_admin.project_configuration_database",
+        future = true
+    )]
+    pub(super) async fn registered_project_configuration_database(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Configuration,
+        ))
+        .await
+    }
+
+    #[hotpath::skip]
+    async fn registered_project_session_shard(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+        shard_use: ProjectSessionShardUse,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -1098,7 +1143,14 @@ impl StoreAdministration {
             &project_id,
         ))
         .await?;
-        Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+        match shard_use {
+            ProjectSessionShardUse::Sessions => {
+                Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+            }
+            ProjectSessionShardUse::Configuration => {
+                Box::pin(registry.project_session_store(project_id, enrollment_roots)).await
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1804,7 +1856,7 @@ impl StoreAdministration {
             });
         };
         let configuration_database = self
-            .registered_project_session_database(project_root, &layout)
+            .registered_project_configuration_database(project_root, &layout)
             .await?;
         // Branch administration runs inside the daemon, which owns the durable
         // configuration store. Resolve the pinned snapshot on demand when this

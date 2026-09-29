@@ -11,7 +11,10 @@ use tokio::sync::Semaphore;
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
 };
-use tracedecay_domain::errors::{StoreResetRequiredV1, TraceDecayError};
+use tracedecay_domain::errors::{
+    PROFILE_RESET_COMMAND, ResettableStoreV1, STALE_STORE_RESET_COMMAND, StoreResetRequiredV1,
+    TraceDecayError,
+};
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
@@ -547,7 +550,14 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Result<RegisteredGlobalDbOwnerV1> {
         let shard_id = runtime.binding().shard_id.clone();
         let attached = self.attach_registered_inner(runtime).await;
-        self.record_registered_admission(shard_id, attached.as_ref().err());
+        let refused_authority = attached
+            .as_ref()
+            .ok()
+            .and_then(RegisteredGlobalDbOwnerV1::reset_required);
+        self.record_registered_admission(
+            shard_id,
+            attached.as_ref().err().or(refused_authority.as_ref()),
+        );
         attached
     }
 
@@ -557,15 +567,25 @@ impl DaemonSessionRuntimeRegistryV1 {
         refusal: Option<&TraceDecayError>,
     ) {
         let reset_required = refusal.and_then(|error| {
-            let store = match &shard_id.scope {
-                StoreShardScopeV1::Profile => "profile authority".to_owned(),
-                StoreShardScopeV1::ProfileSessions => "profile sessions".to_owned(),
+            let resettable = match &shard_id.scope {
+                StoreShardScopeV1::ProfileSessions => Some(ResettableStoreV1::ProfileSessions),
                 StoreShardScopeV1::ProjectSessions { project_id } => {
-                    format!("project sessions {project_id}")
+                    Some(ResettableStoreV1::ProjectSessions {
+                        project_id: project_id.to_string(),
+                    })
                 }
-                scope => format!("{scope:?}"),
+                _ => None,
             };
-            error.store_reset_required(store)
+            match resettable {
+                Some(store) => error.store_reset_required(store.label(), STALE_STORE_RESET_COMMAND),
+                None => {
+                    let store = match &shard_id.scope {
+                        StoreShardScopeV1::Profile => "profile authority".to_owned(),
+                        scope => format!("{scope:?}"),
+                    };
+                    error.store_reset_required(store, PROFILE_RESET_COMMAND)
+                }
+            }
         });
         let mut stores = self
             .reset_required_stores
@@ -614,9 +634,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         Box::pin(async move {
             let database =
                 Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-            let long_lived = self.long_lived_session_maintenance;
             // Only long-lived daemons defer schema convergence to resumable
-            // maintenance.
+            // maintenance. A store refused for reset is never converged: its
+            // reset deletes it.
+            let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
                 let (database, convergence) =
                     RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
@@ -627,7 +648,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     None,
                 )
             };
-            if long_lived {
+            if long_lived && database.reset_required().is_none() {
                 let lease = database.issue_lease().map_err(|error| {
                     session_registry_error(
                         "issue registered schema convergence client",

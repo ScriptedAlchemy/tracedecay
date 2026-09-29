@@ -483,8 +483,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    /// The profile session store. A store held in its typed reset-required
+    /// state answers that refusal instead of a client.
     #[hotpath::skip]
     pub async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
+        refuse_reset_required(Box::pin(self.mount_profile_session_store()).await?)
+    }
+
+    #[hotpath::skip]
+    async fn mount_profile_session_store(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let existing = {
             let mounted = self
                 .profile_sessions
@@ -1172,8 +1179,22 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(identities)
     }
 
+    /// The mounted project session store for session features, `None` while
+    /// it is held in its typed reset-required state.
     #[hotpath::skip]
     pub async fn mounted_project_sessions(
+        &self,
+        project_id: &ProjectId,
+    ) -> Option<RegisteredGlobalDbLeaseV1> {
+        self.mounted_project_session_store(project_id)
+            .await
+            .filter(|lease| lease.reset_required().is_none())
+    }
+
+    /// The mounted project session store for the authorities it holds
+    /// besides sessions; see [`Self::project_session_store`].
+    #[hotpath::skip]
+    pub async fn mounted_project_session_store(
         &self,
         project_id: &ProjectId,
     ) -> Option<RegisteredGlobalDbLeaseV1> {
@@ -1198,6 +1219,30 @@ impl DaemonSessionRuntimeRegistryV1 {
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,
     ) -> Result<RegisteredGlobalDbLeaseV1> {
+        self.register_project_session_authority(&project_id, enrollment_roots)?;
+        self.mount_registered_project_sessions(project_id).await
+    }
+
+    /// The project session store for the authorities it holds besides
+    /// sessions: the project's configuration and query cursor keys. Unlike
+    /// [`Self::project_sessions`], a store held in its typed reset-required
+    /// state still serves them, so the project opens and code intelligence
+    /// serves while every session feature answers the refusal.
+    #[hotpath::skip]
+    pub async fn project_session_store(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
+        self.register_project_session_authority(&project_id, enrollment_roots)?;
+        self.mount_project_session_store(project_id).await
+    }
+
+    fn register_project_session_authority(
+        &self,
+        project_id: &ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<()> {
         self.resolver
             .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
                 project_id.clone(),
@@ -1205,12 +1250,21 @@ impl DaemonSessionRuntimeRegistryV1 {
             ))
             .map_err(|error| {
                 session_registry_error("register project session authority", format!("{error:?}"))
-            })?;
-        self.mount_registered_project_sessions(project_id).await
+            })
+    }
+
+    /// The project session store. A store held in its typed reset-required
+    /// state answers that refusal instead of a client.
+    #[hotpath::skip]
+    pub async fn mount_registered_project_sessions(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
+        refuse_reset_required(Box::pin(self.mount_project_session_store(project_id)).await?)
     }
 
     #[hotpath::skip]
-    pub async fn mount_registered_project_sessions(
+    async fn mount_project_session_store(
         &self,
         project_id: ProjectId,
     ) -> Result<RegisteredGlobalDbLeaseV1> {
@@ -1743,6 +1797,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             mounted.get(project_id),
             Some(ProjectRuntimeOwnerStateV1::Ready(owners)) if owners.memory.is_some()
         )
+    }
+}
+
+/// A session client, or the typed reset refusal of the store behind it.
+fn refuse_reset_required(lease: RegisteredGlobalDbLeaseV1) -> Result<RegisteredGlobalDbLeaseV1> {
+    match lease.reset_required() {
+        Some(refusal) => Err(refusal),
+        None => Ok(lease),
     }
 }
 

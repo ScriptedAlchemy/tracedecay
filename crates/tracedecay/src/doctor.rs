@@ -217,7 +217,7 @@ fn render_current_project_daemon_status(
         Some(Err(error)) => {
             if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
                 *pending_reset = true;
-                dc.warn(&format!(
+                dc.pending(&format!(
                     "Current project is not served: {authority} requires reset ({reason}). \
                      Pending operator action: run `{}`",
                     tracedecay_mcp::reset_required_command(&authority, Some(project_path))
@@ -389,7 +389,7 @@ fn check_reset_required_stores(
     match tracedecay_daemon_control::daemon_reset_required_stores(profile, build_version) {
         Ok(stores) => {
             for store in &stores {
-                dc.warn(&format!(
+                dc.pending(&format!(
                     "Store {} requires reset ({}). Pending operator action: run `{}`",
                     store.store, store.reason, store.remedy
                 ));

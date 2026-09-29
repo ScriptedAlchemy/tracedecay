@@ -356,7 +356,7 @@ async fn projectless_tools_call_response_with_connection(
     }
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
-        if error.store_reset_required("profile authority").is_some() {
+        if error.is_store_reset_required() {
             return tool_error_response(id, tool_name, &error);
         }
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());

@@ -11,6 +11,7 @@ use super::{
     global_db_operation_message, managed_test_runs, observability_rollup, observation,
     observation_projection, project_registry, session_temporal_schema, stack_delivery,
 };
+use crate::registered::RefusedAuthorityV1;
 use tracedecay_runtime_core::{
     db::{
         Database, DatabaseWriteTransaction,
@@ -538,7 +539,7 @@ pub async fn ensure_registered_schema_for_admission(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    install_and_commit_registered_schema(
+    if let Some(refused) = install_and_commit_registered_schema(
         transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
@@ -547,7 +548,10 @@ pub async fn ensure_registered_schema_for_admission(
         "commit registered global schema",
         "roll back registered global schema",
     )
-    .await?;
+    .await?
+    {
+        return Err(refused.error());
+    }
 
     observation_projection::ensure_observation_projection_performance_indexes(installation)
         .await
@@ -586,7 +590,7 @@ async fn install_registered_schema_stages(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     Box::pin(install_registered_schema_stage_sequence(
         transaction,
         configuration_fresh,
@@ -605,7 +609,7 @@ async fn install_and_commit_registered_schema<T>(
     force_exhaustive: bool,
     commit_operation: &'static str,
     rollback_operation: &'static str,
-) -> tracedecay_domain::errors::Result<()>
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>
 where
     T: Executor + Sync + SchemaInstallTransaction,
 {
@@ -618,9 +622,12 @@ where
     )
     .await;
     match admission {
-        Ok(()) => transaction.commit().await.map_err(|error| {
-            global_db_operation_error(commit_operation, std::io::Error::other(error))
-        }),
+        Ok(refused_authority) => {
+            transaction.commit().await.map_err(|error| {
+                global_db_operation_error(commit_operation, std::io::Error::other(error))
+            })?;
+            Ok(refused_authority)
+        }
         Err(error) => match transaction.rollback().await {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(global_db_operation_error(
@@ -670,7 +677,7 @@ async fn install_registered_schema_stage_sequence(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     crate::hotpath_observe::record_transaction_rows(1);
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
@@ -805,7 +812,7 @@ async fn install_registered_schema_stage_sequence(
         }
         session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}
     }
-    observation::ensure_observation_schema(transaction).await?;
+    let refused_authority = observation::ensure_observation_schema(transaction).await?;
     observation_projection::ensure_observation_projection_schema(transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize observation projection", error))?;
@@ -859,7 +866,7 @@ async fn install_registered_schema_stage_sequence(
     tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
-    Ok(())
+    Ok(refused_authority)
 }
 
 /// Completes resumable authority convergence after the registered runtime is
@@ -978,10 +985,12 @@ pub async fn converge_attached_registered_schema(
 /// initialization. The returned convergence plan carries the LCM status-index
 /// work for lifecycle-owned daemon maintenance; short-lived callers run that
 /// same work synchronously through [`converge_attached_registered_schema`].
+/// A store whose observation rows this binary refuses is still admitted for
+/// its other authorities and returns that refused authority beside the plan.
 #[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
-pub async fn ensure_attached_registered_schema(
+pub(crate) async fn ensure_attached_registered_schema(
     database: &Database,
-) -> tracedecay_domain::errors::Result<RegisteredSchemaConvergence> {
+) -> tracedecay_domain::errors::Result<(RegisteredSchemaConvergence, Option<RefusedAuthorityV1>)> {
     let read_connection = database.read_connection();
     let RegisteredSchemaAdmissionClassification {
         configuration_fresh,
@@ -992,7 +1001,7 @@ pub async fn ensure_attached_registered_schema(
     let transaction = database
         .begin_bulk_write_transaction("install attached registered global database schema")
         .await?;
-    install_and_commit_registered_schema(
+    let refused_authority = install_and_commit_registered_schema(
         transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
@@ -1015,11 +1024,14 @@ pub async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
-    Ok(RegisteredSchemaConvergence {
-        force_exhaustive,
-        is_fresh: configuration_fresh.is_some(),
-        lcm_status_performance_indexes: true,
-    })
+    Ok((
+        RegisteredSchemaConvergence {
+            force_exhaustive,
+            is_fresh: configuration_fresh.is_some(),
+            lcm_status_performance_indexes: true,
+        },
+        refused_authority,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

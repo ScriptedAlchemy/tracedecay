@@ -308,7 +308,7 @@ impl TraceDecay {
             project_id.as_str(),
         )?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, vec![project_root.to_path_buf()])
+            .project_session_store(project_id, vec![project_root.to_path_buf()])
             .await?;
         Self::init_with_registered_configuration(
             project_root,
@@ -569,7 +569,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_with_registered_configuration(
             project_root,
@@ -764,7 +764,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_read_only_with_registered_configuration(
             project_root,

@@ -1309,7 +1309,10 @@ async fn dispatch_project_command(
         Commands::Storage { action } => {
             commands::handle_profile_storage_action(profile, action, assume_yes).await?;
         }
-        Commands::Wipe { all } => {
+        Commands::Wipe { stale: true, .. } => {
+            commands::handle_wipe_stale(profile, assume_yes).await?;
+        }
+        Commands::Wipe { all, stale: false } => {
             commands::handle_wipe(profile, all, assume_yes).await?;
         }
         Commands::List { all } => {
