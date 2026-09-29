@@ -629,7 +629,7 @@ async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
 /// candidate indexes, so an 8x larger store costs the same tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_tick_reads_do_not_scale_with_the_session_store() {
-    const STREAMED: u64 = 8;
+    const STREAMED: u64 = 64;
     let _measured = MEASURED.lock().await;
     let fixture = DrainFixture::open().await;
     let facade = fixture.facade();
