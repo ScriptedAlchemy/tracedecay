@@ -33,6 +33,10 @@ use crate::production::{
     SealedGenerationSegmentReaderV1,
 };
 
+/// A refresh whose files changed since its base exceed this share, one in
+/// this many, seals cold and becomes the next base.
+const LAYERED_MAX_CHANGED_FILE_SHARE_DENOMINATOR: usize = 8;
+
 /// What a layered build did, beside the rows it sealed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CodeGraphLayeredReportV1 {
@@ -55,7 +59,8 @@ pub struct CodeGraphLayeredBuildV1 {
 /// Builds a sealed code generation's graph as a delta over `spill`'s base.
 ///
 /// `Ok(None)` when the base carries no resolution inputs this projector can
-/// read, which a cold build answers.
+/// read, or the refresh changed too much of it to stay a delta; a cold build
+/// answers both.
 #[hotpath::measure(label = "code_index.graph.build_layered_rows")]
 pub fn build_layered_code_graph_rows(
     projection_identity: GraphProjectionIdentity,
@@ -95,6 +100,15 @@ pub fn build_layered_code_graph_rows(
             "layered base inputs belong to a different graph generation".to_owned(),
         )
         .into());
+    }
+    // Every layered generation is a delta since the same cold base, so the
+    // delta grows with each refresh until a cold build replaces the base.
+    // ponytail: the changed-file share stands in for the delta's row share;
+    // measuring the delta against the base's rows is the upgrade.
+    let changed_files = resolution.reextracted_files.max(resolution.removed.len());
+    let child_files = resolution.added.len() + resolution.unchanged.len();
+    if changed_files.saturating_mul(LAYERED_MAX_CHANGED_FILE_SHARE_DENOMINATOR) > child_files {
+        return Ok(None);
     }
     let report = hotpath::measure_block!(
         "code_index.graph.build_layered_rows.emit",

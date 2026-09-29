@@ -275,196 +275,116 @@ fn answers(snapshot: VerifiedGraphSnapshot, generation: &CodeGenerationId) -> An
     }
 }
 
-/// Fails on a build that re-encodes the whole graph for a small refresh:
-/// the refresh's artifact must be layered over its predecessor's container
-/// by hard link and encode a small fraction of the rows a cold build
-/// encodes. Fails as well if the layered generation records a digest or
-/// answers any read differently from a cold build of the same tree.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_three_file_refresh_seals_a_delta_that_serves_like_its_cold_build() {
-    let temporary = tempfile::tempdir().expect("temporary fixture parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let project_root = root.join("project");
-    write_corpus(&project_root);
-    git(&project_root, &["init", "-q", "-b", "main"]);
-    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
-    git(
-        &project_root,
-        &["config", "user.email", "tracedecay@example.invalid"],
-    );
-    git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "layered refresh corpus"]);
-    let project_id = ProjectId::new("project.layered-refresh").expect("project id");
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
-        &project_root,
-        project_id.as_str(),
-    )
-    .expect("project enrollment");
-    let canonical_project = project_root.canonicalize().expect("canonical project root");
-    let scoped_store =
-        scoped_code_index_store_root(&root.join("code-index-store"), &canonical_project);
-    let seal_next = || {
+/// The fixture repository, its code-index store, and the daemon profile the
+/// refreshes publish through.
+struct RefreshFixture {
+    root: PathBuf,
+    project_root: PathBuf,
+    canonical_project: PathBuf,
+    scoped_store: PathBuf,
+    project_id: ProjectId,
+}
+
+impl RefreshFixture {
+    fn commit(&self, message: &str) {
+        git(&self.project_root, &["add", "-A"]);
+        git(&self.project_root, &["commit", "-qm", message]);
+    }
+
+    /// Seals the worktree's next code generation; returns its runtime source,
+    /// generation, parent, and replay binding.
+    fn seal(
+        &self,
+    ) -> (
+        RuntimeSource,
+        CodeGenerationId,
+        Option<CodeGenerationId>,
+        CodeGraphReplayBindingV1,
+    ) {
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-            project_id.clone(),
-            &canonical_project,
-            scoped_store.clone(),
+            self.project_id.clone(),
+            &self.canonical_project,
+            self.scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("open worktree scheduler");
         scheduler.reconcile_now().expect("seal a generation");
         let latest = scheduler.latest_complete().expect("complete generation");
         let generation = latest.generation();
-        (
-            generation.snapshot().repository.clone(),
-            generation.snapshot().reference.clone(),
-            scheduler.identity().worktree_id().clone(),
-            generation.manifest().parent_generation.clone(),
-        )
-    };
-    let (repository, reference, worktree, _) = seal_next();
-    let (parent_generation, parent_binding) = sealed_binding(&scoped_store);
-
-    let profile_root = root.join("profile");
-    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-        &profile_root,
-        45,
-        "layered refresh",
-    )
-    .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(
-        profile_identity::load_or_create(&profile_root).expect("profile identity"),
-    )
-    .await
-    .expect("session runtime registry");
-    let project_database = registry
-        .project_memory(project_id.clone(), [canonical_project.clone()])
-        .await
-        .expect("project graph database");
-    let source = RuntimeSource {
-        project: project_id.clone(),
-        repository,
-        worktree,
-        reference,
-    };
-    let parent_runtime = source
-        .retain(
-            &registry,
-            &project_database,
-            &parent_generation,
-            parent_binding,
-        )
-        .await
-        .expect("retain the parent graph runtime");
-    let parent = parent_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
-        .expect("publish the parent graph cold");
-
-    edit_three_files(&project_root);
-    git(&project_root, &["add", "."]);
-    git(&project_root, &["commit", "-qm", "edit three files"]);
-    let (_, _, _, child_parent) = seal_next();
-    assert_eq!(child_parent.as_ref(), Some(&parent_generation));
-    let (child_generation, child_binding) = sealed_binding(&scoped_store);
-    let child_runtime = source
-        .retain(
-            &registry,
-            &project_database,
-            &child_generation,
-            child_binding.clone(),
-        )
-        .await
-        .expect("retain the child graph runtime");
-    let layered = child_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
-        .expect("publish the refresh");
-
-    // The refresh sealed a delta whose base is the parent's own container.
-    let (parent_directory, parent_receipt) =
-        receipt_for(&root.join("profile"), parent.generation().as_str());
-    let (child_directory, child_receipt) =
-        receipt_for(&root.join("profile"), layered.generation().as_str());
-    assert_eq!(parent_receipt["form"], "compact");
-    assert_eq!(child_receipt["form"], "layered");
-    assert_eq!(
-        child_receipt["base"]["generation"],
-        parent.generation().as_str()
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let parent_container = std::fs::metadata(parent_directory.join("generation.grafeo"))
-            .expect("parent container");
-        let base_link = std::fs::metadata(child_directory.join("base.grafeo")).expect("base link");
-        assert_eq!(
-            (base_link.dev(), base_link.ino()),
-            (parent_container.dev(), parent_container.ino()),
-            "the refresh references the parent's container instead of re-encoding it"
-        );
+        let source = RuntimeSource {
+            project: self.project_id.clone(),
+            repository: generation.snapshot().repository.clone(),
+            worktree: scheduler.identity().worktree_id().clone(),
+            reference: generation.snapshot().reference.clone(),
+        };
+        let parent = generation.manifest().parent_generation.clone();
+        drop(latest);
+        drop(scheduler);
+        let (sealed, binding) = sealed_binding(&self.scoped_store);
+        (source, sealed, parent, binding)
     }
-    let cold_rows =
-        child_receipt["entities"].as_u64().unwrap() + child_receipt["relations"].as_u64().unwrap();
-    let delta_rows = rows_in(&child_receipt["row_sum"])
-        + rows_in(&child_receipt["base"]["hidden_row_sum"])
-        - rows_in(&child_receipt["base"]["row_sum"]);
-    assert!(
-        delta_rows * 10 < cold_rows,
-        "a three-file refresh encoded {delta_rows} of its generation's {cold_rows} rows"
-    );
 
-    // The same child generation published cold in an isolated profile.
-    let cold_profile = root.join("profile-cold");
-    let _cold_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-        &cold_profile,
-        46,
-        "layered refresh cold reference",
-    )
-    .expect("cold daemon database scope");
-    let cold_registry = DaemonSessionRuntimeRegistryV1::open(
-        profile_identity::load_or_create(&cold_profile).expect("cold profile identity"),
-    )
-    .await
-    .expect("cold session runtime registry");
-    let cold_database = cold_registry
-        .project_memory(project_id.clone(), [canonical_project.clone()])
-        .await
-        .expect("cold project graph database");
-    let cold_runtime = source
-        .retain(
-            &cold_registry,
-            &cold_database,
-            &child_generation,
-            child_binding,
+    async fn open_profile(
+        &self,
+        name: &str,
+        epoch: u64,
+    ) -> (
+        tracedecay_runtime_core::db::DaemonDatabaseScope,
+        DaemonSessionRuntimeRegistryV1,
+        Arc<tracedecay_runtime_core::db::Database>,
+    ) {
+        let profile = self.root.join(name);
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile, epoch, name)
+            .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(
+            profile_identity::load_or_create(&profile).expect("profile identity"),
         )
         .await
-        .expect("retain the cold graph runtime");
-    let cold = cold_runtime
-        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
-        .expect("publish the child graph cold");
-    let (_, cold_receipt) = receipt_for(&cold_profile, cold.generation().as_str());
-    assert_eq!(cold_receipt["form"], "compact");
-    assert_eq!(cold.generation(), layered.generation());
+        .expect("session runtime registry");
+        let database = registry
+            .project_memory(self.project_id.clone(), [self.canonical_project.clone()])
+            .await
+            .expect("project graph database");
+        (scope, registry, database)
+    }
+}
+
+/// `layered`, published by `runtime`, holds exactly the rows a cold build
+/// of its code generation holds: the same digest over rows spilled cold in
+/// its own namespace, and, published cold in a fresh profile, the same
+/// served rows and the same answers to every graph read.
+async fn assert_matches_cold_build(
+    fixture: &RefreshFixture,
+    source: &RuntimeSource,
+    runtime: &super::RetainedCodeGraphRuntimeV1,
+    layered: VerifiedGraphSnapshot,
+    binding: CodeGraphReplayBindingV1,
+    profile: &str,
+    epoch: u64,
+) {
+    let generation = runtime.generation_id.clone();
     // Namespaces are per profile and bind the digest, so the digest check
     // runs in the layered generation's own namespace, and the cross-profile
     // check compares every served row.
     let cold_in_namespace = GraphGenerationRows::from(
         super::super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
-            &child_runtime.generations_root,
-            &child_runtime.replay_root,
-            &child_runtime.sealed_state_digest,
-            &child_generation,
+            &runtime.generations_root,
+            &runtime.replay_root,
+            &runtime.sealed_state_digest,
+            &generation,
             layered.projection().clone(),
             &GraphProjectorRevision::try_from(
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )
             .expect("projector revision"),
-            GraphGenerationRowSpill::create(root.join("cold-rows"), layered.projection().clone())
-                .expect("cold row spill"),
+            GraphGenerationRowSpill::create(
+                fixture.root.join(format!("{profile}-rows")),
+                layered.projection().clone(),
+            )
+            .expect("cold row spill"),
             &|| Ok(()),
         )
-        .expect("cold rows of the child"),
+        .expect("cold rows"),
     );
     assert_eq!(
         cold_in_namespace
@@ -473,28 +393,22 @@ async fn a_three_file_refresh_seals_a_delta_that_serves_like_its_cold_build() {
         layered.verified_head().recovered_digest,
         "the layered generation holds exactly the cold build's rows"
     );
-    assert_eq!(
-        cold_in_namespace.row_counts(),
-        (
-            child_receipt["entities"].as_u64().unwrap() as usize,
-            child_receipt["relations"].as_u64().unwrap() as usize
-        )
-    );
-    assert_eq!(scan_rows(&layered), scan_rows(&cold));
-    assert_eq!(
-        (
-            cold_receipt["entities"].clone(),
-            cold_receipt["relations"].clone()
-        ),
-        (
-            child_receipt["entities"].clone(),
-            child_receipt["relations"].clone()
-        )
-    );
 
-    let graph_generation = child_generation.clone();
-    let from_layered = answers(layered, &graph_generation);
-    let from_cold = answers(cold, &graph_generation);
+    let (_scope, registry, database) = fixture.open_profile(profile, epoch).await;
+    let cold_runtime = source
+        .retain(&registry, &database, &generation, binding)
+        .await
+        .expect("retain the cold graph runtime");
+    let cold = cold_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the generation cold");
+    let (_, cold_receipt) = receipt_for(&fixture.root.join(profile), cold.generation().as_str());
+    assert_eq!(cold_receipt["form"], "compact");
+    assert_eq!(cold.generation(), layered.generation());
+    assert_eq!(scan_rows(&layered), scan_rows(&cold));
+
+    let from_layered = answers(layered, &generation);
+    let from_cold = answers(cold, &generation);
     assert!(
         from_cold.symbols.len() > MODULES * 3,
         "the cold graph serves the corpus: {} symbols",
@@ -514,5 +428,175 @@ async fn a_three_file_refresh_seals_a_delta_that_serves_like_its_cold_build() {
     assert_eq!(from_layered.callees, from_cold.callees);
     assert_eq!(from_layered.exact, from_cold.exact);
     assert_eq!(from_layered.file_dependents, from_cold.file_dependents);
-    drop((parent_runtime, child_runtime, cold_runtime));
+    drop(cold_runtime);
+}
+
+/// The file identity of a sealed container, which a hard link shares.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).expect("sealed container metadata");
+    (metadata.dev(), metadata.ino())
+}
+
+/// `generation`'s receipt in `profile`, asserted layered over `base`, whose
+/// container file identity was `base_container`: the layer's base is those
+/// bytes by hard link, and the delta it encodes is under a tenth of the
+/// generation's rows.
+fn assert_layered_over(
+    profile: &Path,
+    generation: &str,
+    base: &str,
+    #[cfg(unix)] base_container: (u64, u64),
+) {
+    let (directory, receipt) = receipt_for(profile, generation);
+    assert_eq!(receipt["form"], "layered");
+    assert_eq!(receipt["base"]["generation"], base);
+    #[cfg(unix)]
+    assert_eq!(
+        file_identity(&directory.join("base.grafeo")),
+        base_container,
+        "the refresh references its base's container instead of re-encoding it"
+    );
+    let rows = receipt["entities"].as_u64().unwrap() + receipt["relations"].as_u64().unwrap();
+    let delta = rows_in(&receipt["row_sum"]) + rows_in(&receipt["base"]["hidden_row_sum"])
+        - rows_in(&receipt["base"]["row_sum"]);
+    assert!(
+        delta * 10 < rows,
+        "a small refresh encoded {delta} of its generation's {rows} rows"
+    );
+}
+
+/// Fails on a build that re-encodes the whole graph for a small refresh:
+/// each refresh's artifact must be layered over the last cold container by
+/// hard link and encode a small fraction of the rows a cold build encodes,
+/// including a second refresh whose parent is itself layered. Fails as well
+/// if a layered generation records a digest, serves a row, or answers a read
+/// differently from a cold build of the same tree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let project_root = root.join("project");
+    write_corpus(&project_root);
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    let project_id = ProjectId::new("project.layered-refresh").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+    let fixture = RefreshFixture {
+        scoped_store: scoped_code_index_store_root(
+            &root.join("code-index-store"),
+            &canonical_project,
+        ),
+        root: root.clone(),
+        project_root: project_root.clone(),
+        canonical_project,
+        project_id,
+    };
+    fixture.commit("layered refresh corpus");
+    let (source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
+    let base_runtime = source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain the base graph runtime");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the base graph cold");
+    let profile = root.join("profile");
+    let (base_directory, base_receipt) = receipt_for(&profile, base.generation().as_str());
+    assert_eq!(base_receipt["form"], "compact");
+    #[cfg(unix)]
+    let base_container = file_identity(&base_directory.join("generation.grafeo"));
+    #[cfg(not(unix))]
+    let _ = base_directory;
+
+    // A three-file edit.
+    edit_three_files(&project_root);
+    fixture.commit("edit three files");
+    let (source, child_generation, child_parent, child_binding) = fixture.seal();
+    assert_eq!(child_parent.as_ref(), Some(&base_generation));
+    let child_runtime = source
+        .retain(
+            &registry,
+            &database,
+            &child_generation,
+            child_binding.clone(),
+        )
+        .await
+        .expect("retain the child graph runtime");
+    let child = child_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the refresh");
+    assert_layered_over(
+        &profile,
+        child.generation().as_str(),
+        base.generation().as_str(),
+        #[cfg(unix)]
+        base_container,
+    );
+    assert_matches_cold_build(
+        &fixture,
+        &source,
+        &child_runtime,
+        child,
+        child_binding,
+        "profile-cold",
+        46,
+    )
+    .await;
+
+    // A file added and a file deleted, over the layered child: the delta is
+    // still taken against the cold base. The deleted file's callers stay.
+    std::fs::remove_file(project_root.join("src/m030.rs")).expect("delete m030");
+    std::fs::write(
+        project_root.join("src/extra.rs"),
+        "pub fn extra_value() -> usize { crate::m031::value_031() + crate::m003::value_003() }\n",
+    )
+    .expect("add extra");
+    fixture.commit("add and delete a file");
+    let (source, grandchild_generation, grandchild_parent, grandchild_binding) = fixture.seal();
+    assert_eq!(grandchild_parent.as_ref(), Some(&child_generation));
+    let grandchild_runtime = source
+        .retain(
+            &registry,
+            &database,
+            &grandchild_generation,
+            grandchild_binding.clone(),
+        )
+        .await
+        .expect("retain the grandchild graph runtime");
+    let grandchild = grandchild_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the second refresh");
+    assert_layered_over(
+        &profile,
+        grandchild.generation().as_str(),
+        base.generation().as_str(),
+        #[cfg(unix)]
+        base_container,
+    );
+    assert_matches_cold_build(
+        &fixture,
+        &source,
+        &grandchild_runtime,
+        grandchild,
+        grandchild_binding,
+        "profile-cold-second",
+        47,
+    )
+    .await;
+    drop((base_runtime, child_runtime, grandchild_runtime));
 }
