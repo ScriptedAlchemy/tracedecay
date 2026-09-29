@@ -5,11 +5,11 @@ use super::filesystem_authority::{
     ensure_contained, existing_payload_dir_opt, inspect_payload_file_for_delete,
     read_payload_file_for_verify, remove_verified_payload_file, verify_payload_file_authority,
 };
-use super::{LcmError, gc, load_payload_metadata, validate_payload_ref};
+use super::{LcmError, LcmPayloadRef, gc, load_payload_metadata, validate_payload_ref};
 use tracedecay_domain::canonical_text::sha256_hex;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {
@@ -214,8 +214,10 @@ pub(super) async fn prepare_external_payload_delete_in_transaction(
         params![payload_ref],
     )
     .await?;
-    if opts.rewrite_placeholders {
-        placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
+    if opts.rewrite_placeholders
+        && let Some(metadata) = metadata.as_ref()
+    {
+        placeholders_rewritten = tombstone_owner_placeholders(conn, metadata).await?;
     }
 
     let file_removed = opts.remove_file && file_existed;
@@ -392,28 +394,28 @@ pub fn payload_file_fingerprint(
     ))
 }
 
-async fn tombstone_residual_placeholders(
+/// Tombstones the deleted payload's placeholders in its owner row, the only
+/// row that references it (`gc::owner_referenced_payloads`). The lookup is one
+/// `(provider, message_id)` unique-index seek, so a delete never reads other
+/// rows' text; a placeholder quoted elsewhere is text, not a reference.
+async fn tombstone_owner_placeholders(
     conn: &(impl Executor + ?Sized),
-    payload_ref: &str,
+    metadata: &LcmPayloadRef,
 ) -> Result<usize, LcmError> {
-    // `payload_ref = ?` is the indexable arm and covers every row whose stored
-    // ref must be cleared. The `LIKE` arm is only reachable for text that embeds
-    // a placeholder, which no index can answer; narrowing it from a bare
-    // `%ref%` to `%live-prefix%ref%` keeps the arm exact, a rewrite only ever
-    // changes a bracket that starts with a live prefix and carries `ref=<ref>`
-    // after it, while dropping inline bodies and already-tombstoned rows that
-    // the bare pattern dragged back for no change.
-    let like_patterns = gc::live_prefix_ref_like_patterns(payload_ref);
-    let like_sql = gc::placeholder_text_like_sql(like_patterns.len());
-    let sql = format!(
-        "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json,
-                placeholder_text
-         FROM lcm_raw_messages
-         WHERE payload_ref = ? OR {like_sql}"
-    );
-    let mut values = vec![SqlValue::Text(payload_ref.to_string())];
-    values.extend(gc::bind_placeholder_like_patterns(&like_patterns));
-    let mut rows = conn.query(&sql, values).await?;
+    let payload_ref = metadata.payload_ref.as_str();
+    let mut rows = conn
+        .query(
+            "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text,
+                    metadata_json, placeholder_text
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2 AND session_id = ?3",
+            params![
+                metadata.provider.as_str(),
+                metadata.message_id.as_str(),
+                metadata.session_id.as_str()
+            ],
+        )
+        .await?;
     let mut updates = Vec::new();
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;
