@@ -56,6 +56,10 @@ const MAX_LCM_PAYLOAD_BYTES_V1: usize = 64 * 1024 * 1024;
 /// a YAML flow sequence, a spaced marker breaks a URL back apart).
 const REDACTED_STRUCTURED_FIELD: &str = "TraceDecay-redacted-sensitive-field";
 
+/// Replacement for a JSON or TOML number: neither grammar has a bare-word
+/// scalar, so the marker must become a string to keep the document parseable.
+const QUOTED_REDACTED_STRUCTURED_FIELD: &str = "\"TraceDecay-redacted-sensitive-field\"";
+
 /// Shortest value that may be located by a unique whole-document match. Below
 /// this length an incidental match elsewhere is likelier than the real value,
 /// so location falls back to the key's own line.
@@ -146,6 +150,7 @@ struct SensitiveCandidate {
     key: String,
     origin: SanitizationDetectorOriginV1,
     spans: Vec<Range<usize>>,
+    marker: &'static str,
     value_len: usize,
     decoded_value_matched: bool,
 }
@@ -200,21 +205,26 @@ fn sanitize_structured_text_with(
     let ranks = ordinal_ranks(&candidates)?;
     let candidate_count =
         u32::try_from(candidates.len()).map_err(|_| DetectionError::ScanLimitExceeded)?;
-    let mut redactions: Vec<Range<usize>> = candidates
+    let mut redactions: Vec<(Range<usize>, &'static str)> = candidates
         .iter()
-        .flat_map(|candidate| candidate.spans.iter().cloned())
+        .flat_map(|candidate| {
+            candidate
+                .spans
+                .iter()
+                .map(|span| (span.clone(), candidate.marker))
+        })
         .collect();
-    redactions.sort_by(|left, right| {
+    redactions.sort_by(|(left, _), (right, _)| {
         left.start
             .cmp(&right.start)
             .then_with(|| right.end.cmp(&left.end))
     });
-    redactions.dedup_by(|later, earlier| later.start < earlier.end);
+    redactions.dedup_by(|(later, _), (earlier, _)| later.start < earlier.end);
 
     let mut findings = Vec::new();
     let mut sanitized_text = String::with_capacity(raw.len());
     let mut cursor = 0usize;
-    for span in redactions {
+    for (span, marker) in redactions {
         if span.start < cursor {
             continue;
         }
@@ -227,7 +237,7 @@ fn sanitize_structured_text_with(
             SanitizationActionV1::Redacted,
         );
         sanitized_text.push_str(&segment);
-        sanitized_text.push_str(REDACTED_STRUCTURED_FIELD);
+        sanitized_text.push_str(marker);
         cursor = span.end;
     }
     let mut tail = raw[cursor..].to_owned();
@@ -268,8 +278,15 @@ fn sanitize_structured_text_with(
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
+    // A redaction that no longer parses as the input's format is plain text,
+    // whatever format the input was.
+    let format = matches!(
+        parse_structured_text(&sanitized_text),
+        Ok(Some(ref reparsed)) if reparsed.format == parsed.format
+    )
+    .then_some(parsed.format);
     Ok(StructuredTextSanitizationV1 {
-        format: Some(parsed.format),
+        format,
         sanitized_text,
         findings,
         quarantine_findings,
@@ -368,6 +385,7 @@ fn line_candidates(
             origin,
             value_len: field.value_span.end - field.value_span.start,
             spans: vec![field.value_span.clone()],
+            marker: REDACTED_STRUCTURED_FIELD,
             decoded_value_matched,
         });
     }
@@ -405,8 +423,18 @@ fn tree_candidates(
         quarantine_findings,
     );
 
+    let bare_words_are_invalid = matches!(
+        parsed.format,
+        StructuredTextFormatV1::Json | StructuredTextFormatV1::Toml
+    );
     let mut candidates = Vec::new();
-    for (key, value, origin) in sensitive {
+    for SensitiveScalar {
+        key,
+        value,
+        is_number,
+        origin,
+    } in sensitive
+    {
         let spans = locate_value(raw, &key, &value)
             .or_else(|| locate_key_line_tail(raw, &key).map(|span| vec![span]));
         let Some(spans) = spans else {
@@ -424,17 +452,30 @@ fn tree_candidates(
             origin,
             value_len: value.len(),
             spans,
+            marker: if is_number && bare_words_are_invalid {
+                QUOTED_REDACTED_STRUCTURED_FIELD
+            } else {
+                REDACTED_STRUCTURED_FIELD
+            },
             decoded_value_matched: false,
         });
     }
     candidates
 }
 
+/// A scalar under a sensitive key, as decoded by the tree parse.
+struct SensitiveScalar {
+    key: String,
+    value: String,
+    is_number: bool,
+    origin: SanitizationDetectorOriginV1,
+}
+
 fn collect_tree_fields(
     value: &Value,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
     patterns: &CredentialPatternSet,
-    sensitive: &mut Vec<(String, String, SanitizationDetectorOriginV1)>,
+    sensitive: &mut Vec<SensitiveScalar>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) {
     match value {
@@ -475,13 +516,21 @@ fn collect_scalars(
     value: &Value,
     key: &str,
     origin: SanitizationDetectorOriginV1,
-    sensitive: &mut Vec<(String, String, SanitizationDetectorOriginV1)>,
+    sensitive: &mut Vec<SensitiveScalar>,
 ) {
     match value {
-        Value::String(text) if !text.is_empty() => {
-            sensitive.push((key.to_owned(), text.clone(), origin));
-        }
-        Value::Number(number) => sensitive.push((key.to_owned(), number.to_string(), origin)),
+        Value::String(text) if !text.is_empty() => sensitive.push(SensitiveScalar {
+            key: key.to_owned(),
+            value: text.clone(),
+            is_number: false,
+            origin,
+        }),
+        Value::Number(number) => sensitive.push(SensitiveScalar {
+            key: key.to_owned(),
+            value: number.to_string(),
+            is_number: true,
+            origin,
+        }),
         Value::Object(fields) => {
             for child in fields.values() {
                 collect_scalars(child, key, origin, sensitive);
@@ -529,7 +578,9 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
 
 /// Fail-closed fallback when a parsed value cannot be matched byte-for-byte in
 /// the original text, an escaped JSON string, a folded YAML block. Redacting
-/// the rest of the key's line cannot leave the value behind.
+/// the rest of the key's line cannot leave the value behind. A value that
+/// opens a quoted string on the key's line is redacted only up to its closing
+/// quote, so the terminator and whatever follows it (a JSON `,`) survive.
 ///
 /// The key must be *anchored* to an occurrence that syntactically looks like
 /// a key. An unanchored `raw.find(key)` would happily match a decoy, e.g. a
@@ -545,15 +596,47 @@ fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
         .map_or(raw.len(), |position| after + position);
     let bytes = raw.as_bytes();
     let mut start = after;
+    if start < line_end && matches!(bytes[start], b'"' | b'\'') {
+        start += 1;
+    }
     while start < line_end
         && matches!(
             bytes[start],
-            b' ' | b'\t' | b':' | b'=' | b'"' | b'\'' | b'>' | b'|' | b'-'
+            b' ' | b'\t' | b':' | b'=' | b'>' | b'|' | b'-'
         )
     {
         start += 1;
     }
-    (start < line_end && raw.is_char_boundary(start)).then_some(start..line_end)
+    let mut end = line_end;
+    if start < line_end && matches!(bytes[start], b'"' | b'\'') {
+        let quote = bytes[start];
+        start += 1;
+        if let Some(close) = closing_quote(&bytes[start..line_end], quote) {
+            end = start + close;
+        }
+    }
+    (start < end && raw.is_char_boundary(start)).then_some(start..end)
+}
+
+/// Offset of the quote that terminates a string whose body starts at
+/// `body[0]`: `"` strings honor backslash escapes, `'` strings the doubled
+/// `''` escape.
+fn closing_quote(body: &[u8], quote: u8) -> Option<usize> {
+    let mut index = 0;
+    while index < body.len() {
+        match body[index] {
+            b'\\' if quote == b'"' => index += 2,
+            byte if byte == quote => {
+                if quote == b'\'' && body.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                } else {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 /// First occurrence of `key` in `raw` that is actually a key, not incidental
