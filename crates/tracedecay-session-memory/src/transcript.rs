@@ -168,7 +168,7 @@ where
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
         self.db()
-            .get_parse_offset_result(&cursor_key)
+            .get_parse_offset(&cursor_key)
             .await
             .map(Option::unwrap_or_default)
             .map_err(|error| Self::persistence_error(cursor_path, error))
@@ -253,7 +253,7 @@ where
         session_id: &str,
     ) -> TranscriptStoreResult<Option<tracedecay_sessions::runtime::SessionRecord>> {
         self.db()
-            .get_session_result(provider, session_id)
+            .get_session(provider, session_id)
             .await
             .map_err(|error| match error {
                 TranscriptPersistenceError::Storage { operation, source } => {

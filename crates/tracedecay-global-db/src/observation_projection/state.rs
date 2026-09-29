@@ -1731,7 +1731,8 @@ mod reconcile_tests {
             .registered
             .get_session(&original.provider, &original.session_id)
             .await
-            .unwrap();
+            .expect("load projected session")
+            .expect("projected session row");
         assert_eq!(persisted.project_key, project_id.as_str());
         assert_eq!(
             persisted.project_path,
