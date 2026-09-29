@@ -30,26 +30,6 @@ async fn schema_object_exists(db_path: &Path, object_type: &str, name: &str) -> 
     rows.next().await.unwrap().is_some()
 }
 
-async fn schema_object_sql(db_path: &Path, object_type: &str, name: &str) -> String {
-    let raw_db = TestConnection::open(db_path);
-    let conn = (*raw_db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
-            params![object_type, name],
-        )
-        .await
-        .unwrap();
-    rows.next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap()
-}
-
-/// `session_relation_receipts` exactly as persisted by v4 stores before
-/// receipt recovery (byte-identical to the beta.37 published definition).
 #[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();

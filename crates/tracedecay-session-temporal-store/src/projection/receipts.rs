@@ -154,8 +154,10 @@ pub async fn validate_final_projection_receipt(
     Ok(())
 }
 
-/// Source frontier of the generation a candidate extends: the latest
-/// activated generation below it, or zero for a session's first rows.
+/// Source frontier a candidate extends: the frontier the latest activated
+/// generation below it projected and proved, or zero for a session's first
+/// rows. A bootstrap generation activates without rows and summary
+/// publication without projection, so neither moves this frontier.
 pub(crate) async fn base_source_frontier(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
@@ -163,11 +165,15 @@ pub(crate) async fn base_source_frontier(
 ) -> SessionStoreResult<u64> {
     let mut rows = conn
         .query(
-            "SELECT CAST(json_extract(frozen_watermarks_json, '$.source_frontier') AS INTEGER)
-             FROM session_temporal_generations
-             WHERE session_id = ?1 AND generation < ?2
-               AND state IN ('active', 'superseded')
-             ORDER BY generation DESC LIMIT 1",
+            "SELECT receipt.source_through
+             FROM session_temporal_projection_receipts AS receipt
+             JOIN session_temporal_generations AS settled
+               ON settled.session_id = receipt.session_id
+              AND settled.generation = receipt.generation
+             WHERE receipt.session_id = ?1 AND receipt.generation < ?2
+               AND settled.state IN ('active', 'superseded')
+             ORDER BY receipt.generation DESC, receipt.batch_ordinal DESC
+             LIMIT 1",
             params![session_id.as_str(), generation],
         )
         .await
@@ -186,10 +192,6 @@ pub(crate) async fn base_source_frontier(
     }
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.validate_assertions"
-)]
 /// The base generation proved its own lineage at activation, so a candidate
 /// proves only the effects past the base frontier against the assertions
 /// whose subjects it introduced.
@@ -487,7 +489,7 @@ pub async fn record_canonical_observation_effect(
     }
 }
 
-pub(super) fn sorted_json<T: serde::Serialize>(values: &[T]) -> SessionStoreResult<Vec<String>> {
+fn sorted_json<T: serde::Serialize>(values: &[T]) -> SessionStoreResult<Vec<String>> {
     let mut encoded = values
         .iter()
         .map(serde_json::to_string)

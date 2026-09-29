@@ -414,6 +414,49 @@ async fn bootstrap_first_active_generation(
     Ok(())
 }
 
+/// Message ids resolve to one occurrence per session, so a message the
+/// candidate introduced must not already have an occurrence in its base.
+async fn require_unsettled_message_ids(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &str,
+    generation: i64,
+    introduced: &super::projection::ParentMessageResolver,
+) -> SessionStoreResult<()> {
+    let requested = serde_json::to_string(&introduced.message_ids().collect::<Vec<_>>())
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+    let mut settled = conn
+        .query(
+            "SELECT requested.value
+             FROM json_each(?3) AS requested
+             WHERE EXISTS (
+                 SELECT 1 FROM session_occurrences
+                 WHERE session_id = ?1 AND message_id = requested.value AND generation < ?2
+             )
+             LIMIT 1",
+            params![session_id, generation, requested],
+        )
+        .await
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+    match settled
+        .next()
+        .await
+        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+    {
+        Some(row) => {
+            let message_id: String = row
+                .get(0)
+                .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+            Err(storage_message(
+                ACTIVATE_OPERATION,
+                format!(
+                    "session-scoped message id {message_id} resolves to more than one occurrence"
+                ),
+            ))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Proves the candidate introduced exactly the canonical outputs of the
 /// effects past its base frontier. The base proved its own prefix when it
 /// activated, so only the new effects' observations are read.
@@ -472,38 +515,7 @@ pub(super) async fn validate_candidate_frontier(
             "candidate generation has no canonical message outputs past its base frontier",
         ));
     }
-    let mut settled = conn
-        .query(
-            "SELECT requested.value
-             FROM json_each(?3) AS requested
-             WHERE EXISTS (
-                 SELECT 1 FROM session_occurrences
-                 WHERE session_id = ?1 AND message_id = requested.value AND generation < ?2
-             )
-             LIMIT 1",
-            params![
-                session_id,
-                generation,
-                serde_json::to_string(&parent_resolver.message_ids().collect::<Vec<_>>())
-                    .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-    if let Some(row) = settled
-        .next()
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
-    {
-        let message_id: String = row
-            .get(0)
-            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-        return Err(storage_message(
-            ACTIVATE_OPERATION,
-            format!("session-scoped message id {message_id} resolves to more than one occurrence"),
-        ));
-    }
-    drop(settled);
+    require_unsettled_message_ids(conn, session_id, generation, &parent_resolver).await?;
 
     let mut actual = BTreeSet::new();
     let mut rows = conn

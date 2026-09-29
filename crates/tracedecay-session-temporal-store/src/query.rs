@@ -12,7 +12,8 @@ use tracedecay_runtime_core::db::engine::{Row, params, params_from_iter};
 use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
 
 use crate::sql::{
-    SHARED_GENERATION_TABLES, discard_candidate_rows_sql, retire_superseded_versions_sql,
+    SHARED_GENERATION_TABLES, SharedGenerationTable, discard_candidate_rows_sql,
+    retire_superseded_versions_sql,
 };
 
 pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";
@@ -200,16 +201,15 @@ pub(super) async fn discard_candidate_rows(
     generation: SessionProjectionGenerationV1,
     operation: &'static str,
 ) -> SessionStoreResult<()> {
-    let generation = generation_i64(generation, operation)?;
-    for table in SHARED_GENERATION_TABLES {
-        conn.execute(
-            &discard_candidate_rows_sql(table),
-            params![session_id.as_str(), generation],
-        )
-        .await
-        .map_err(|error| storage(operation, error))?;
-    }
-    Ok(())
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES.iter(),
+        discard_candidate_rows_sql,
+    )
+    .await
 }
 
 /// Deletes the row versions an activating generation superseded.
@@ -219,17 +219,32 @@ pub(super) async fn retire_superseded_versions(
     generation: SessionProjectionGenerationV1,
     operation: &'static str,
 ) -> SessionStoreResult<()> {
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES
+            .iter()
+            .filter(|table| table.versioned),
+        retire_superseded_versions_sql,
+    )
+    .await
+}
+
+async fn execute_per_shared_table<'a>(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+    tables: impl Iterator<Item = &'a SharedGenerationTable>,
+    sql: fn(&SharedGenerationTable) -> String,
+) -> SessionStoreResult<()> {
     let generation = generation_i64(generation, operation)?;
-    for table in SHARED_GENERATION_TABLES
-        .iter()
-        .filter(|table| table.versioned)
-    {
-        conn.execute(
-            &retire_superseded_versions_sql(table),
-            params![session_id.as_str(), generation],
-        )
-        .await
-        .map_err(|error| storage(operation, error))?;
+    for table in tables {
+        conn.execute(&sql(table), params![session_id.as_str(), generation])
+            .await
+            .map_err(|error| storage(operation, error))?;
     }
     Ok(())
 }

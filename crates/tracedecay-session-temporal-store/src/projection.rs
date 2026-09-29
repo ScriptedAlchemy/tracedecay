@@ -22,7 +22,7 @@ mod tests;
 
 use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 
-pub(super) use materialize::canonical_parent_message_resolver;
+pub(super) use materialize::{ParentMessageResolver, canonical_parent_message_resolver};
 pub(crate) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
     ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,

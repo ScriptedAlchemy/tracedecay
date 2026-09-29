@@ -655,7 +655,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND occurrence.generation <= generation.generation
                  WHERE generation.state = 'active'"
         )
         .await,
@@ -680,7 +680,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND occurrence.generation <= generation.generation
                  WHERE generation.state = 'active'"
         )
         .await,

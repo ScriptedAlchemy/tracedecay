@@ -1883,25 +1883,7 @@ async fn activate_bound_generation(
         .await
         .map_err(|error| storage(COMPLETE_REFRESH, error))?;
     }
-    let superseded = conn
-        .execute(
-            "UPDATE session_temporal_generations
-             SET state = 'superseded', completed_at = ?3
-             WHERE session_id = ?1 AND generation = ?4 AND state = 'active'",
-            params![
-                session_id.as_str(),
-                generation,
-                terminal_at.0,
-                generation_i64(binding.watermarks.active_generation(), COMPLETE_REFRESH)?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-    if superseded != 1 {
-        return Err(SessionStoreError::InvalidStateTransition {
-            context: "refresh candidate base generation is no longer active",
-        });
-    }
+    supersede_base_generation(conn, session_id, binding, terminal_at).await?;
     retire_superseded_versions(conn, session_id, binding.generation, COMPLETE_REFRESH).await?;
     let changed = conn
         .execute(
@@ -1915,6 +1897,35 @@ async fn activate_bound_generation(
     if changed != 1 {
         return Err(SessionStoreError::InvalidStateTransition {
             context: "refresh candidate activation",
+        });
+    }
+    Ok(())
+}
+
+/// The candidate extends the generation that was active when it began, so
+/// only that generation may be the one it supersedes.
+async fn supersede_base_generation(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    binding: &RefreshBinding,
+    terminal_at: UtcMicros,
+) -> SessionStoreResult<()> {
+    let superseded = conn
+        .execute(
+            "UPDATE session_temporal_generations
+             SET state = 'superseded', completed_at = ?2
+             WHERE session_id = ?1 AND generation = ?3 AND state = 'active'",
+            params![
+                session_id.as_str(),
+                terminal_at.0,
+                generation_i64(binding.watermarks.active_generation(), COMPLETE_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    if superseded != 1 {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh candidate base generation is no longer active",
         });
     }
     Ok(())
