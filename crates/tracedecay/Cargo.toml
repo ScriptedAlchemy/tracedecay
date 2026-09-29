@@ -28,7 +28,6 @@ include = [
     "/tests/fixtures/provider_normalization/**",
     "/tests/fixtures/redundancy_eval_labeled.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
-    "/benchmark_data/queries/default.toml",
     "/benchmark_data/claude-observation/**",
     "/benchmark_data/session-temporal/**",
     "/benchmark_data/query-code-index/**",
