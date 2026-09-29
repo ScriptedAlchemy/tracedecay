@@ -17,6 +17,25 @@ pub(super) fn project_server_capacity_error() -> TraceDecayError {
     )
 }
 
+/// Capacity refusal while the idle owner chosen for retirement still holds a
+/// store the release could not close. The next open retries that release.
+pub(super) fn project_server_retirement_blocked_error(
+    owner: &StoreOwnerKey,
+    blocker: &TraceDecayError,
+) -> TraceDecayError {
+    let owner = owner
+        .project_id
+        .clone()
+        .unwrap_or_else(|| owner.store_root.display().to_string());
+    TraceDecayError::project_route(
+        PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        format!(
+            "daemon project server capacity reached (capacity={MAX_CACHED_PROJECT_SERVERS}); retiring idle project '{owner}' is blocked: {blocker}; retry after the blocker releases"
+        ),
+    )
+}
+
 pub(super) fn project_open_task_capacity_error() -> TraceDecayError {
     TraceDecayError::project_route(
         PROJECT_OPEN_TASK_CAPACITY_REASON_CODE,
