@@ -62,9 +62,18 @@ pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
 
 pub struct HostAdmissionBroker {
     runtime: Arc<Mutex<HostAdmissionRuntime>>,
+    /// Admissions awaiting the next group commit: whichever admission holds
+    /// the runtime next appends every queued item as one durable batch.
+    appends: Arc<Mutex<Vec<QueuedAppend>>>,
     replay: tokio::sync::Mutex<()>,
     /// Coalesced wake for daemon-owned profile/project replay workers.
     replay_wake: tokio::sync::Notify,
+}
+
+struct QueuedAppend {
+    source: String,
+    payload: Vec<u8>,
+    admitted: tokio::sync::oneshot::Sender<Result<DurableHostAdmission, HostAdmissionOutcome>>,
 }
 
 pub struct HostAdmissionReplay<'a> {
@@ -72,10 +81,32 @@ pub struct HostAdmissionReplay<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
+fn spool_runtime_unavailable() -> HostAdmissionOutcome {
+    HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
+}
+
+/// Append every queued admission as one batch and answer each admitter.
+fn commit_queued_appends(runtime: &mut HostAdmissionRuntime, queued: Vec<QueuedAppend>) {
+    if queued.is_empty() {
+        return;
+    }
+    let items = queued
+        .iter()
+        .map(|append| (append.source.as_str(), append.payload.as_slice()))
+        .collect::<Vec<_>>();
+    let admitted = runtime.admit_batch(&items);
+    for (append, admitted) in queued.into_iter().zip(admitted) {
+        // A dropped receiver is a cancelled admitter; its durable record
+        // still replays through the worker.
+        let _ = append.admitted.send(admitted);
+    }
+}
+
 impl HostAdmissionBroker {
     pub fn new(runtime: HostAdmissionRuntime) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            appends: Arc::new(Mutex::new(Vec::new())),
             replay: tokio::sync::Mutex::new(()),
             replay_wake: tokio::sync::Notify::new(),
         }
@@ -89,30 +120,41 @@ impl HostAdmissionBroker {
     {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || {
-            let mut runtime = runtime.lock().map_err(|_| {
-                HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
-            })?;
+            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
             operation(&mut runtime)
         })
         .await
-        .unwrap_or_else(|_| {
-            Err(HostAdmissionOutcome::retained_unavailable(
-                "spool_runtime_unavailable",
-            ))
-        })
+        .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
     }
 
+    /// Durably admit one record, group-committed with every concurrent
+    /// admission queued while an earlier batch holds the spool.
     #[hotpath::measure(label = "usecases.admission.admit", future = true)]
     pub async fn admit(
         &self,
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let source = source.to_owned();
-        let payload = payload.to_vec();
-        let admitted = self
-            .with_runtime(move |runtime| runtime.admit(&source, &payload))
-            .await?;
+        let (admitted, durable) = tokio::sync::oneshot::channel();
+        self.appends
+            .lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .push(QueuedAppend {
+                source: source.to_owned(),
+                payload: payload.to_vec(),
+                admitted,
+            });
+        let appends = Arc::clone(&self.appends);
+        self.with_runtime(move |runtime| {
+            let queued =
+                std::mem::take(&mut *appends.lock().map_err(|_| spool_runtime_unavailable())?);
+            commit_queued_appends(runtime, queued);
+            Ok(())
+        })
+        .await?;
+        // This admission was queued before its own runtime turn, so that turn
+        // or an earlier one already answered it.
+        let admitted = durable.await.map_err(|_| spool_runtime_unavailable())??;
         self.request_replay();
         Ok(admitted)
     }

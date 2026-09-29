@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -11,12 +11,14 @@ use super::writer_test_support::{
     WriterTestFixtureAuthority, init_indexed_repo, registered_context, registered_runtime,
 };
 use super::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
+use crate::daemon::HOOK_EVENT_NOTIFY_TIMEOUT;
 use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookRouteMetadata, HookTerminalReceipt};
 use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
 };
+use tracedecay_private_fs::framed_log::sync_latency;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
@@ -163,6 +165,70 @@ async fn hook_watch_policy_refusal_is_not_scheduler_unavailable() {
     }
     server.run_startup_catch_up_sync().await;
     assert!(server.startup_catch_up_done());
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_saves_are_delivered_within_the_hook_budget_on_a_slow_fsync_disk() {
+    const SAVES: usize = 8;
+    let (cg, project, authority) = init_indexed_repo().await;
+    let spool = TempDir::new().unwrap();
+    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
+        .unwrap()
+        .0;
+    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let context = with_broker(
+        registered_context(cg, &authority),
+        Arc::clone(&broker),
+        success_reconcile_sink(),
+    )
+    .with_code_index_hook_sink(Arc::new(|_, _| {
+        Box::pin(async { super::CodeIndexDemandAdmissionV1::Queued })
+    }));
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .unwrap();
+    // A loaded disk: every spool durability barrier waits as long as the
+    // ~24 ms per fsync measured under load in #2659.
+    let slow_disk = sync_latency::inject(spool.path(), Duration::from_millis(20));
+
+    let saves = (0..SAVES)
+        .map(|index| {
+            let server = Arc::clone(&server);
+            let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
+                HostIntegrationIdV1::Codex,
+                vec![format!("src/saved_{index}.rs")],
+                project.path().to_path_buf(),
+            ))
+            .unwrap();
+            tokio::spawn(async move {
+                let started = Instant::now();
+                let mut routes = HookProjectRouteCache::default();
+                let outcome =
+                    Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes))
+                        .await;
+                (outcome.status, started.elapsed())
+            })
+        })
+        .collect::<Vec<_>>();
+    for save in saves {
+        let (status, elapsed) = save.await.unwrap();
+        assert!(
+            matches!(
+                status,
+                HostAdmissionStatus::Committed | HostAdmissionStatus::AcceptedForReplay
+            ),
+            "save outcome {status:?}"
+        );
+        assert!(
+            elapsed < HOOK_EVENT_NOTIFY_TIMEOUT,
+            "a concurrent save took {elapsed:?}, past the {HOOK_EVENT_NOTIFY_TIMEOUT:?} hook budget, \
+             after {} spool fsyncs",
+            slow_disk.syncs()
+        );
+    }
+    assert_eq!(broker.pending_count().await, 0);
+    drop(slow_disk);
     server.shutdown().await;
 }
 
