@@ -510,19 +510,15 @@ fn ruby_constant_calls_bind_through_require_relative_chains() {
     );
 }
 
-#[test]
-fn typescript_graph_keeps_its_bindings() {
-    let graph = CallGraphV1::new("typescript", typescript());
-    assert_eq!(graph.calls(), bindable_calls());
-}
-
-/// `main.rs` calls through a grouped crate-name
+/// Rust's `main.rs` calls through a grouped crate-name
 /// `use fixture::{compat, legacy, report, shapes}` inside `println!`
 /// arguments, which bind like the same calls outside a macro.
 #[test]
-fn rust_graph_keeps_its_bindings() {
-    let graph = CallGraphV1::new("rust", rust());
-    assert_eq!(graph.calls(), bindable_calls());
+fn typescript_and_rust_graphs_keep_their_bindings() {
+    for (language, symbols) in [("typescript", typescript()), ("rust", rust())] {
+        let graph = CallGraphV1::new(language, symbols);
+        assert_eq!(graph.calls(), bindable_calls(), "{language}");
+    }
 }
 
 /// The retained call sites the seal discloses as gaps inside `file`.
