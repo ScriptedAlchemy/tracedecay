@@ -1325,16 +1325,109 @@ impl GraphDb {
         )))
     }
 
-    /// The cold base a refresh replacing `locator` may layer over, when
-    /// `locator` serves from an installed sealed store that can be one.
+    /// The cold base a refresh replacing `locator` may layer over: from its
+    /// installed sealed store, or, when this process has not installed it
+    /// (a head recovered straight from its artifact), from its proven
+    /// artifact on disk.
     pub(crate) fn sealed_generation_base(
         &self,
         locator: &GenerationLocator,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Option<GraphSealedBaseV1>, GraphDbError> {
-        match self.sealed_generation_reader(locator) {
-            Some(store) => store.sealed_base(),
-            None => Ok(None),
+        if let Some(store) = self.sealed_generation_reader(locator) {
+            return store.sealed_base();
         }
+        if sealed_store_disabled() {
+            return Ok(None);
+        }
+        let Some(database_path) = self
+            .inner
+            .reopen
+            .as_ref()
+            .and_then(|reopen| reopen.config.path.clone())
+        else {
+            return Ok(None);
+        };
+        let physical_namespace = locator.physical_namespace()?;
+        let directory =
+            sealed_generation_directory(&sealed_store_root(&database_path), &physical_namespace);
+        let Some(receipt) = load_sealed_store_receipt(&directory)? else {
+            return Ok(None);
+        };
+        if receipt.version != SEALED_STORE_RECEIPT_VERSION
+            || receipt.graph_format != GraphFormatVersion::current().get()
+            || receipt.physical_namespace != physical_namespace.as_str()
+            || !sealed_store_check_matches(&directory, &receipt.recovered_digest)?
+        {
+            return Ok(None);
+        }
+        let projection = &locator.projection;
+        let (container, attachment, digest, counts, row_sum, identity) = match &receipt.base {
+            Some(base) => (
+                crate::sealed_layer::base_database_path(&directory),
+                crate::sealed_layer::layered_attachment(&directory),
+                base.recovered_digest.clone(),
+                (base.entities, base.relations),
+                GraphRowDigestSum::from_hex(&base.row_sum)?,
+                Some(base.identity(projection)?),
+            ),
+            None => {
+                let Some(row_sum) = receipt.row_sum.as_deref() else {
+                    return Ok(None);
+                };
+                (
+                    directory.join(SEALED_STORE_DATABASE_FILE),
+                    crate::sealed_layer::flat_attachment(&directory),
+                    receipt.recovered_digest.clone(),
+                    (receipt.entities, receipt.relations),
+                    GraphRowDigestSum::from_hex(row_sum)?,
+                    None,
+                )
+            }
+        };
+        let database = GraphDb::open_lazy_with_store_state(
+            sealed_artifact_database_options(container.clone()),
+            PersistentGraphStoreState::Existing,
+        )
+        .map_err(|error| sealed_store_failure("base reopen failed", error))?;
+        let identity = match identity {
+            Some(identity) => identity,
+            None => {
+                let guard = database.read_guard()?;
+                let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                let recovered =
+                    latest_projection(native, &physical_namespace, &projection.projection)?
+                        .ok_or_else(|| GraphDbError::GenerationMismatch {
+                            namespace: projection.namespace.to_string(),
+                            projection: projection.projection.to_string(),
+                            generation: locator.generation.to_string(),
+                            message: "sealed generation is missing its projection commit"
+                                .to_owned(),
+                        })?;
+                GraphGenerationManifestIdentity::new(
+                    projection.clone(),
+                    locator.generation.clone(),
+                    recovered.commit.source_generation,
+                    recovered.commit.watermark,
+                    Vec::new(),
+                )
+            }
+        };
+        let expected = GraphRecoveredGenerationDigestV1::new(digest.clone())
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        if recovered_digest_from_row_sum(&identity, row_sum, check)? != expected {
+            let _ = database.close();
+            return Ok(None);
+        }
+        if let Err(error) = sealed_copy_proof(&database, &identity, &expected, check) {
+            let _ = database.close();
+            return Err(sealed_store_failure("base verification failed", error));
+        }
+        database.mark_sealed_read_only();
+        GraphSealedBaseV1::new(
+            identity, digest, counts.0, counts.1, row_sum, container, attachment, database,
+        )
+        .map(Some)
     }
 
     /// A row spill for a delta of `projection` over `base`, pinning the

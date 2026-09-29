@@ -40,6 +40,8 @@ pub(super) use memory_runtime::{
 };
 pub(super) mod graph_attachment;
 #[cfg(test)]
+mod layered_refresh_tests;
+#[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
 use seals::{
@@ -1925,28 +1927,62 @@ impl RetainedCodeGraphRuntimeV1 {
                 }
                 None => Ok(()),
             };
-            let spill = self
-                .graph_registry
-                .generation_row_spill(registration(), prepared.identity.projection.clone())?;
             #[cfg(any(test, feature = "test-helpers"))]
             {
                 let overlapping =
                     PUBLICATION_PROJECTION_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
                 PUBLICATION_PROJECTION_OVERLAP_PEAK.fetch_max(overlapping, Ordering::AcqRel);
             }
-            let spilled = super::code_graph_manifest::spill_sealed_generation_graph_from_roots(
+            let projection = &prepared.identity.projection;
+            let layered_spill = |parent: &CodeGenerationId| {
+                let parent = tracedecay_code_index::graph_projection::code_graph_generation_id(
+                    parent,
+                    &prepared.projector_revision,
+                )
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                match self.graph_registry.sealed_generation_base(
+                    registration(),
+                    projection.clone(),
+                    parent,
+                    &check,
+                )? {
+                    Some(base) => self
+                        .graph_registry
+                        .layered_row_spill(registration(), projection.clone(), base)
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let cold_spill = || {
+                self.graph_registry
+                    .generation_row_spill(registration(), projection.clone())
+            };
+            let built = super::code_graph_manifest::graph_rows_from_roots(
                 &self.generations_root,
                 &self.replay_root,
                 &self.sealed_state_digest,
                 &self.generation_id,
-                prepared.identity.projection.clone(),
+                projection.clone(),
                 &prepared.projector_revision,
-                spill,
+                &layered_spill,
+                &cold_spill,
                 &check,
             );
             #[cfg(any(test, feature = "test-helpers"))]
             PUBLICATION_PROJECTION_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-            let rows = GraphGenerationRows::from(spilled?);
+            let (rows, layered) = built?;
+            if let Some(report) = layered {
+                tracing::info!(
+                    event = "code_graph_layered_refresh_built",
+                    generation = %self.generation_id,
+                    reextracted_files = report.reextracted_files,
+                    reused_files = report.reused_files,
+                    removed_files = report.removed_files,
+                    delta_entities = report.delta_rows.0,
+                    delta_relations = report.delta_rows.1,
+                    "sealed the refresh as a delta over its predecessor's graph"
+                );
+            }
             Ok(GraphGenerationRows::clone(built_rows.get_or_init(|| rows)))
         };
         let mut storage = self

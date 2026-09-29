@@ -251,6 +251,7 @@ fn publish_layered(
             registration(graph.binding.clone(), root),
             parent.projection.clone(),
             parent.generation.clone(),
+            &|| Ok(()),
         )
         .unwrap()
         .expect("a spilled cold generation is a layered base");
