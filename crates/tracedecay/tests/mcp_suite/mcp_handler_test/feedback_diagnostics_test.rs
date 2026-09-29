@@ -16,28 +16,16 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::support::{
-    handle_real_server_tool_call_raw, production_composition_fixture,
-    production_composition_fixture_with_sources, wait_for_current_graph,
+    application_surface_refusal_error, handle_real_server_tool_call_raw,
+    production_composition_fixture, production_composition_fixture_with_sources,
+    wait_for_current_graph,
 };
 
 const TOOL: &str = "tracedecay_feedback_diagnostics";
 const ADVISORY_CYCLE: &str = "tracedecay_feedback_advisory_cycle";
 
 fn invalid_request(detail: &str) -> Value {
-    json!({
-        "code": -32602,
-        "message": format!(
-            "tool project route failed: reason_code=application_surface_invalid_request retryable=false: {detail}"
-        ),
-        "data": {
-            "tool": TOOL,
-            "reason_code": "application_surface_invalid_request",
-            "retryable": false,
-            "detail": detail,
-            "kind": "invalid_request",
-            "code": "application_surface_invalid_request"
-        }
-    })
+    application_surface_refusal_error(TOOL, detail)
 }
 
 fn denied_problem(request_id: &str) -> Value {

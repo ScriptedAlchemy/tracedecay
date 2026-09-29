@@ -18,7 +18,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     ProductionCompositionFixture, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, production_composition_fixture_with_sources,
+    handle_real_server_tool_call_raw, production_composition_fixture_with_sources, refusal_problem,
     wait_for_current_graph,
 };
 
@@ -375,13 +375,17 @@ async fn tracedecay_callees_rejects_invalid_arguments() {
         "a non-integer maximum_depth",
     );
     let unknown = refuse(json!({"node_id": "symbol.absent-callee"})).await;
-    let unknown: Value = serde_json::from_str(extract_real_server_text(&unknown["result"]))
-        .unwrap_or_else(|error| panic!("unknown-occurrence callees JSON ({error}): {unknown}"));
-    let evidence = &unknown["outcome"]["value"];
+    assert!(unknown["error"].is_null(), "{unknown}");
+    let problem = refusal_problem(&unknown["result"]);
     assert_eq!(
-        (&evidence["execution"]["termination"], &evidence["payload"]),
-        (&json!("unavailable"), &Value::Null),
-        "an unknown occurrence is a typed unavailable read, not an empty callee list: {unknown}"
+        (&problem["kind"], &problem["code"], &problem["retryable"]),
+        (
+            &json!("not_found_or_not_authorized"),
+            &json!("not_found_or_not_authorized"),
+            &json!(false)
+        ),
+        "an unknown occurrence is not found, not a retryable outage or an empty callee list: \
+         {unknown}"
     );
     for retired in [json!({"max_depth": 1}), json!({"resolve_dispatch": false})] {
         let mut arguments = json!({"node_id": level_0});

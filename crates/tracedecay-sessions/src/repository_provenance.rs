@@ -954,4 +954,4 @@ mod remote_normalization_tests {
 
 #[cfg(test)]
 #[path = "repository_provenance_test.rs"]
-mod repository_provenance_test;
+pub(crate) mod repository_provenance_test;

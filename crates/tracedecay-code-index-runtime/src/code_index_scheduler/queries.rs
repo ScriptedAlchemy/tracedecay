@@ -29,8 +29,8 @@ use tracedecay_contracts::{
     LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, PageCursor, PageState, PhraseSearchRequest, QualifiedNameRequest,
     RequestAdmission, RequestContext, RequestCostReceiptV1, RetrievalEvidence,
-    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
-    TemporalState,
+    RetrievalPortContext, RetrievalPortOutcome, RetryDirective, SourceMetadataRecord,
+    SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
@@ -353,7 +353,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // longer held, so no later retry can serve it either.
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope(request.scope())
+                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope())
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else {
@@ -661,7 +661,11 @@ fn text_base_request(
 }
 
 fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOutcome<T> {
-    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+    RetrievalPortOutcome::Unavailable(unanswered_evidence(finished_at))
+}
+
+fn unanswered_evidence<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalEvidence<T> {
+    RetrievalEvidence {
         payload: None,
         temporal: TemporalState::current(finished_at),
         evidence_authorities: Vec::new(),
@@ -684,7 +688,7 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         budget: OperationBudgetUsage::default(),
         cancellation: None,
         cost: None,
-    })
+    }
 }
 
 fn unavailable_for_generation<T>(
@@ -701,6 +705,13 @@ fn unavailable_for_generation<T>(
         reason: OmissionReason::Unavailable,
     });
     RetrievalPortOutcome::Unavailable(evidence)
+}
+
+/// A relation or navigation seed the caller named that this generation cannot
+/// start from: a malformed id or one absent from the graph. Retrying the same
+/// seed returns the same answer.
+fn refused_start_symbol<T>(problem: ApplicationProblem) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Refused(unanswered_evidence(query_finished_at()), Box::new(problem))
 }
 
 fn rejected_cursor<T>(
@@ -1834,13 +1845,21 @@ macro_rules! prepare_graph_callable_query_or_return {
 macro_rules! resolve_graph_start_symbol {
     ($prepared:expr, $node_id:expr, $cancellation:expr) => {{
         let Ok(start) = typed::<SymbolOccurrenceId>($node_id.clone()) else {
-            return unavailable(query_finished_at());
+            return refused_start_symbol(ApplicationProblem::invalid_request(
+                "callable_code.node_id_invalid",
+                "node_id is not a symbol occurrence id",
+            ));
         };
         match $prepared
             .reader
             .symbol_summary(&start, Arc::clone(&$cancellation))
         {
             Ok(Some(summary)) if summary.binding.is_some() && summary.metadata.is_some() => start,
+            Ok(None) => {
+                return refused_start_symbol(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                ));
+            }
             _ => {
                 return unavailable_for_generation(
                     query_finished_at(),

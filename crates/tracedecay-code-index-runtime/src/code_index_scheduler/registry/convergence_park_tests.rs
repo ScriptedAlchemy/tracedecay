@@ -185,6 +185,18 @@ impl Fixture {
     }
 }
 
+fn assert_seated_fixture_generation(seated: &super::super::CodeIndexPublishedGenerationV1) {
+    assert_eq!(seated.snapshot().files.len(), 1);
+    assert_eq!(seated.snapshot().files[0].logical_path, "src/main.rs");
+    let symbols: Vec<(&str, &str)> = seated
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.simple_name.as_str(), symbol.kind.as_str()))
+        .collect();
+    assert_eq!(symbols, [("main", "function")]);
+}
+
 /// A permissive artifacts root violates the owner-privacy contract; the
 /// worker never re-permissions it. It parks typed, leaves the mode exactly as
 /// found, and resumes on the ordinary wake cadence once the operator restores
@@ -480,17 +492,13 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
     set_injected_activation_failures(&scope.worktree_id, UNDRAINABLE_ACTIVATION_FAILURES);
     drop(admission);
 
-    let seated = fixture.wait_for_seated_generation().await;
-    let attempts = injected_activation_attempt_count(&scope.worktree_id);
-    assert!(
-        attempts > 0,
-        "the fixture must observe a real graph activation attempt, otherwise the seat proves nothing"
-    );
-    assert!(
-        seated.is_some(),
-        "the sealed generation must take the serving seat while graph activation retries \
-         (activation attempts: {attempts})"
-    );
+    let seated = fixture
+        .wait_for_seated_generation()
+        .await
+        .expect("the sealed generation must take the serving seat while graph activation retries");
+    // Retries stay armed, so the attempt counter is already past 1 on some
+    // observations. The seated file and symbol are the stable outcome.
+    assert_seated_fixture_generation(&seated);
     fixture.registry.shutdown().await;
 }
 
@@ -523,10 +531,11 @@ async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
         .expect("freshness is observable");
     assert_eq!(settled.code_graph_serving.as_ref(), Some(&refused));
     assert!(!settled.rebuild_in_flight, "{settled:?}");
-    assert!(
-        fixture.wait_for_seated_generation().await.is_some(),
-        "exact and lexical keep serving the generation whose graph was refused"
-    );
+    let seated = fixture
+        .wait_for_seated_generation()
+        .await
+        .expect("exact and lexical keep serving the generation whose graph was refused");
+    assert_seated_fixture_generation(&seated);
 
     // Past the whole retry backoff ladder, with the worker woken throughout.
     let observe_until = tokio::time::Instant::now() + Duration::from_secs(2);

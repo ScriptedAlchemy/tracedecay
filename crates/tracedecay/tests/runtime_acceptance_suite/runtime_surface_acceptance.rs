@@ -327,6 +327,9 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
+    // Git reads answer a typed retryable `mounting` problem until project open
+    // installs the owner's authority; the journeys start from a served project.
+    await_published_code_index(environment.home(), &project);
 
     let handshake = tracedecay::daemon::handshake_for_current_client(
         environment.profile(),

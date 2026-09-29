@@ -104,7 +104,7 @@ fn validate_complete_wipe_profile_root(
     Ok(())
 }
 
-fn remove_fixed_profile_path(
+pub(super) fn remove_fixed_profile_path(
     profile_root: &Path,
     name: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -330,7 +330,7 @@ mod wipe_safety_tests {
         assert!(profile.contains("session temporal persisted shape requires reset"));
         assert!(profile.contains("refused authority: session temporal"));
         assert!(
-            profile.contains("\n  tracedecay wipe --all --yes"),
+            profile.contains("\n  tracedecay wipe --stale --yes"),
             "{profile}"
         );
 

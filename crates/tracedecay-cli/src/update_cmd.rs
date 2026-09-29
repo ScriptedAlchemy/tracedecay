@@ -840,7 +840,10 @@ mod tests {
             found_version: Some(5),
             required_version: 6,
         }
-        .store_reset_required("profile sessions")
+        .store_reset_required(
+            "profile sessions",
+            tracedecay_domain::errors::STALE_STORE_RESET_COMMAND,
+        )
         .expect("a versioned profile refusal is a reset-required store")
     }
 
@@ -866,7 +869,7 @@ mod tests {
             pending_reset_line(&reset),
             "  \x1b[33mpending operator action:\x1b[0m profile sessions requires reset \
              (git correlation profile schema 5 is incompatible with required schema 6; reset \
-             the profile); run `tracedecay wipe --all --yes`"
+             the profile); run `tracedecay wipe --stale --yes`"
         );
         let failed = update_completion(Some(PluginRefreshOutcome::Failed), &[reset])
             .expect_err("a failed refresh still fails `update`")

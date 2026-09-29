@@ -247,18 +247,12 @@ async fn unmounted_files_refuses_arguments_that_are_not_an_object() {
     let error = response
         .error
         .expect("non-object arguments are a tool error");
-    assert_eq!(error.code, -32603);
     assert_eq!(
-        error.message,
-        "tool execution failed: config error: invalid arguments: tracedecay_unmounted_files expects a JSON object"
-    );
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("tool"))
-            .and_then(Value::as_str),
-        Some(TOOL)
+        json!({"code": error.code, "message": error.message, "data": error.data}),
+        crate::support::application_invalid_request_error(
+            TOOL,
+            "invalid arguments: tracedecay_unmounted_files expects a JSON object"
+        )
     );
 
     fixture.harness.shutdown().await;

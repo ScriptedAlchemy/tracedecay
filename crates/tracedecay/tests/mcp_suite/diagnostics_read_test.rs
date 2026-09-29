@@ -573,14 +573,7 @@ fn published_records(result: &Value) -> Vec<Value> {
 }
 
 fn rejected_diagnostics_request(detail: &str) -> Value {
-    json!({
-        "code": -32603,
-        "message": format!("tool execution failed: config error: {detail}"),
-        "data": {
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool diagnostics ...` (`tracedecay tool diagnostics --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-            "tool": "tracedecay_diagnostics"
-        }
-    })
+    crate::support::application_surface_refusal_error("tracedecay_diagnostics", detail)
 }
 
 fn workspace_absent_detail() -> Value {

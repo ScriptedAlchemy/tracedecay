@@ -92,12 +92,20 @@ mod tests {
 
     #[test]
     fn forged_protection_prefixes_do_not_bypass_secret_scanning() {
-        for forged in [
-            format!("{PROTECTION_PREFIX_V1}sk-test-123456"),
-            format!("{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1}sk-test-123456"),
-        ] {
+        let cases = [
+            (
+                format!("{PROTECTION_PREFIX_V1}sk-test-123456"),
+                "privacy.structural-id.v1.ffa1e647b38b0edac27c24ddaac8940f10c9399949745412b6b4576ffa76c6e8",
+            ),
+            (
+                format!("{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1}sk-test-123456"),
+                "privacy.structural-id.v1.d7c35a12a51a3d498dd78997877d8904b1f203f5a1706f8359b86ba4ac162896",
+            ),
+        ];
+        for (forged, expected) in cases {
             assert!(!is_already_protected_structural_id(&forged));
             let protected = protect_sensitive_structural_id(&forged).unwrap();
+            assert_eq!(protected, expected);
             assert!(is_already_protected_structural_id(&protected));
             assert!(!protected.contains("sk-test-123456"));
         }

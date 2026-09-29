@@ -40,7 +40,7 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
         // daemon boots to serve that typed state, and every profile read,
         // including the account-active guard, meets the same refusal until
         // the operator's reset deletes the store.
-        Err(error) if error.store_reset_required("profile authority").is_some() => {
+        Err(error) if error.is_store_reset_required() => {
             log_daemon_event(
                 "remote_account_deletion_resume",
                 &[

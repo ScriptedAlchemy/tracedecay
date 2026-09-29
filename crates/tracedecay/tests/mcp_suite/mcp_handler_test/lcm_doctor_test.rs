@@ -9,8 +9,8 @@
 use serde_json::{Value, json};
 
 use crate::support::{
-    extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    real_mcp_server, setup_empty_project,
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call,
+    handle_real_server_tool_call_raw, real_mcp_server, setup_empty_project,
 };
 
 fn empty_project_doctor_report() -> Value {
@@ -95,12 +95,13 @@ async fn lcm_doctor_refuses_a_repair_argument_and_keeps_the_same_diagnosis() {
         json!({ "apply": true }),
     )
     .await;
-    assert_eq!(refused["error"]["code"], -32603);
     assert_eq!(
-        refused["error"]["message"],
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_doctor: apply: unknown field `apply`, there are no fields"
+        refused["error"],
+        application_invalid_request_error(
+            "tracedecay_lcm_doctor",
+            "apply: unknown field `apply`, there are no fields"
+        )
     );
-    assert_eq!(refused["error"]["data"]["tool"], "tracedecay_lcm_doctor");
 
     let after = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
     let after: Value =
@@ -128,12 +129,13 @@ async fn lcm_doctor_rejects_an_unknown_storage_scope() {
     )
     .await;
 
-    assert_eq!(refused["error"]["code"], -32603);
     assert_eq!(
-        refused["error"]["message"],
-        "tool execution failed: config error: storage_scope must be one of project, user"
+        refused["error"],
+        application_invalid_request_error(
+            "tracedecay_lcm_doctor",
+            "storage_scope must be one of project, user"
+        )
     );
-    assert_eq!(refused["error"]["data"]["tool"], "tracedecay_lcm_doctor");
 
     let after = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
     let after: Value =

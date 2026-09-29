@@ -630,9 +630,11 @@ fn main() -> ExitCode {
         Err(e) => {
             let code = if tracedecay_daemon_identity::daemon_unreachable(&e) {
                 ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
-            } else if e.project_route_context().is_some_and(|(code, _, _)| {
-                code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
-            }) {
+            } else if matches!(
+                &e,
+                tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal)
+                    if refusal.code.as_deref() == Some(tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT)
+            ) {
                 ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
             } else {
                 ExitCode::FAILURE
@@ -1309,7 +1311,10 @@ async fn dispatch_project_command(
         Commands::Storage { action } => {
             commands::handle_profile_storage_action(profile, action, assume_yes).await?;
         }
-        Commands::Wipe { all } => {
+        Commands::Wipe { stale: true, .. } => {
+            commands::handle_wipe_stale(profile, assume_yes).await?;
+        }
+        Commands::Wipe { all, stale: false } => {
             commands::handle_wipe(profile, all, assume_yes).await?;
         }
         Commands::List { all } => {

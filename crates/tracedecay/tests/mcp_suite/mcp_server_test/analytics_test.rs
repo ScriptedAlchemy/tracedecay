@@ -261,7 +261,10 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     )
     .await;
 
-    assert!(resp["error"].is_object(), "unknown tool should error");
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+    assert_eq!(resp["error"]["data"]["code"], "unknown_tool", "{resp}");
+    assert_eq!(resp["error"]["data"]["kind"], "invalid_request", "{resp}");
+    assert_eq!(resp["error"]["data"]["retryable"], false, "{resp}");
 
     server_handle.ledger_writes_settled().await;
     assert_eq!(

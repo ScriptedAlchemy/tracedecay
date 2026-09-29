@@ -1076,6 +1076,8 @@ async fn wal_reuse_updates_existing_parts_without_changing_file_headers() {
     );
 }
 
+const RETAINED_PROJECT_PAYLOAD: &str = r#"{"message":{"id":"msg_ses_project","role":"user","sessionID":"ses_project","time":{"created":1}},"parts":[{"id":"part_ses_project","text":"secret-ses_project","type":"text"}]}"#;
+
 #[tokio::test]
 async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
     use super::{
@@ -1110,7 +1112,6 @@ async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
     )
     .unwrap();
     assert_eq!(references.references.len(), 1);
-    // Reuse the selected rowid for another project's payload between the two reads.
     writer
         .execute_batch(
             "BEGIN;
@@ -1133,9 +1134,8 @@ async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
     .unwrap();
     assert_eq!(page.records.len(), 1);
     let payload = String::from_utf8(page.records[0].payload.clone()).unwrap();
-    assert!(payload.contains("secret-ses_project"));
-    assert!(!payload.contains("foreign-secret"));
-    assert_eq!(page.records[0].session_id, "ses_project");
+    assert_eq!(payload, RETAINED_PROJECT_PAYLOAD);
+    assert!(!payload.contains("foreign-secret") && page.records[0].session_id == "ses_project");
 }
 
 #[tokio::test]

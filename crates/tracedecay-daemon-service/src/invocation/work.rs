@@ -71,10 +71,18 @@ pub(super) fn missing_registered_owner_problem(
     publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     request_id: String,
 ) -> DaemonInvocationResponse {
-    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Failed) {
-        return runtime_publication_failed_problem(request_id);
+    match publication {
+        Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Failed) => {
+            runtime_publication_failed_problem(request_id)
+        }
+        Some(crate::project_runtime::ProjectRuntimePublicationStateV1::ResetRequired(refusal)) => {
+            application_problem(
+                request_id,
+                ApplicationProblem::from_detail(refusal.as_ref().clone()),
+            )
+        }
+        _ => runtime_mounting_problem(request_id),
     }
-    runtime_mounting_problem(request_id)
 }
 
 /// Dispatches one Work invocation through the product authority and publishes

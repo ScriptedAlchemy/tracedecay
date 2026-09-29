@@ -17,7 +17,11 @@ pub(super) fn missing_retained_runtime_problem(
 ) -> DaemonInvocationResponse {
     if matches!(
         publication,
-        Some(ProjectRuntimePublicationStateV1::Warming | ProjectRuntimePublicationStateV1::Failed)
+        Some(
+            ProjectRuntimePublicationStateV1::Warming
+                | ProjectRuntimePublicationStateV1::Failed
+                | ProjectRuntimePublicationStateV1::ResetRequired(_)
+        )
     ) {
         return missing_registered_owner_problem(publication, request_id);
     }

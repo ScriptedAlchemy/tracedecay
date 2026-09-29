@@ -21,8 +21,8 @@ use super::detect::{
 };
 use super::structured::StructuredTextFormatV1;
 use super::structured_text::{
-    CodeSourceShapeV1, sanitize_code_source_bytes, sanitize_lcm_payload_text,
-    sanitize_provider_metadata_text, sanitize_structured_text,
+    CodeSourceShapeV1, StructuredTextSanitizationV1, sanitize_code_source_bytes,
+    sanitize_lcm_payload_text, sanitize_provider_metadata_text, sanitize_structured_text,
 };
 
 mod code_shape;
@@ -324,6 +324,17 @@ fn yaml_decoy_comment_mentioning_the_key_does_not_redirect_the_redaction_span() 
     );
 }
 
+/// Sanitizes `raw` and asserts the result is still JSON, labelled JSON, and
+/// decodes to `expected`.
+fn assert_redacts_to_json(raw: &str, expected: Value) -> StructuredTextSanitizationV1 {
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Json));
+    let reparsed: Value =
+        serde_json::from_str(scanned.sanitized_text()).expect("sanitized JSON stays valid JSON");
+    assert_eq!(reparsed, expected);
+    scanned
+}
+
 #[test]
 fn json_decoy_key_mentioned_in_an_earlier_string_value_does_not_redirect_the_redaction_span() {
     // "note" is a decoy: it mentions the key name inside an earlier string
@@ -333,21 +344,19 @@ fn json_decoy_key_mentioned_in_an_earlier_string_value_does_not_redirect_the_red
     // location falls back to the key-line-tail heuristic. An unanchored
     // search would match the decoy inside "note" and redact only that line,
     // leaving the real secret on the next line completely untouched.
-    let raw = "{\n  \"note\": \"remember to rotate the vault_passphrase weekly\",\n  \"vault_passphrase\": \"line-one-marker\\nline-two-marker\"\n}\n";
+    let raw = "{\n  \"note\": \"remember to rotate the vault_passphrase weekly\",\n  \"vault_passphrase\": \"line-one-marker\\nline-two-marker\",\n  \"region\": \"us-east\"\n}\n";
 
-    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
-    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Json));
-    assert!(
-        !scanned.sanitized_text().contains("line-one-marker"),
-        "the decoy key mention must not redirect redaction away from the real secret: {}",
-        scanned.sanitized_text()
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!({
+            "note": "remember to rotate the vault_passphrase weekly",
+            "vault_passphrase": "TraceDecay-redacted-sensitive-field",
+            "region": "us-east",
+        }),
     );
-    assert!(
-        scanned
-            .sanitized_text()
-            .contains("rotate the vault_passphrase weekly"),
-        "the decoy string is not itself sensitive and must survive sanitization: {}",
-        scanned.sanitized_text()
+    assert_eq!(
+        scanned.sanitized_text(),
+        "{\n  \"note\": \"remember to rotate the vault_passphrase weekly\",\n  \"vault_passphrase\": \"TraceDecay-redacted-sensitive-field\",\n  \"region\": \"us-east\"\n}\n",
     );
     assert!(
         scanned
@@ -356,6 +365,34 @@ fn json_decoy_key_mentioned_in_an_earlier_string_value_does_not_redirect_the_red
             .any(|finding| finding.detector() == PrivacyDetectorV1::SensitiveField),
         "the real field must still be reported as a sensitive-field finding"
     );
+}
+
+#[test]
+fn json_numeric_sensitive_value_is_redacted_to_a_json_string() {
+    let raw = "{\n  \"vault_password\": 48151623,\n  \"region\": \"us-east\"\n}\n";
+
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!({
+            "vault_password": "TraceDecay-redacted-sensitive-field",
+            "region": "us-east",
+        }),
+    );
+    let replayed = sanitize_structured_text(scanned.sanitized_text()).expect("replay scan runs");
+    assert_eq!(replayed.sanitized_text(), scanned.sanitized_text());
+}
+
+#[test]
+fn json_redaction_that_breaks_the_document_is_not_labelled_json() {
+    // `1e3` decodes to `1000.0`, so the value is only located by the key-line
+    // tail, which also swallows the trailing comma: the result is no longer
+    // JSON and must not claim to be.
+    let raw = "{\n  \"vault_password\": 1e3,\n  \"region\": \"us-east\"\n}\n";
+
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert!(serde_json::from_str::<Value>(scanned.sanitized_text()).is_err());
+    assert_eq!(scanned.format(), None);
+    assert!(!scanned.sanitized_text().contains("1e3"));
 }
 
 #[test]

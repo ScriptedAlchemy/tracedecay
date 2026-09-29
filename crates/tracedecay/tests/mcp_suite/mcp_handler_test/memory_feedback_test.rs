@@ -208,14 +208,22 @@ async fn fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases() {
     for (refusal, expected) in refusals.iter().zip([
         "missing field `action`",
         "fact_id: invalid type: integer `41`, expected a string",
-        "helpful: unknown field `helpful`",
-        "source: unknown field `source`",
+        "helpful: unknown field `helpful`, expected one of `fact_id`, \
+         `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, \
+         `project_selector`",
+        "source: unknown field `source`, expected one of `fact_id`, \
+         `expected_last_event_id`, `action`, `source_label`, `reason`, `memory_scope`, \
+         `project_selector`",
     ]) {
-        assert!(
-            refusal.contains(&format!(
-                "invalid retained application request for tracedecay_fact_feedback: {expected}"
-            )),
-            "{refusal}"
+        let error: serde_json::Value = serde_json::from_str(
+            refusal
+                .strip_prefix("config error: ")
+                .unwrap_or_else(|| panic!("{refusal}")),
+        )
+        .unwrap_or_else(|error| panic!("{refusal}: {error}"));
+        assert_eq!(
+            error,
+            crate::support::application_invalid_request_error("tracedecay_fact_feedback", expected)
         );
     }
     invoke_production_tool(

@@ -2013,12 +2013,14 @@ async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
 #[test]
 fn uncataloged_tool_fails_before_handler_dispatch() {
     let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").unwrap_err();
-    let TraceDecayError::Config { message } = error else {
-        panic!("a tool with no dispatch contract must be a typed Config error: {error:?}");
-    };
     assert_eq!(
-        message,
-        "advertised MCP tool 'tracedecay_lcm_compress' has no dispatch contract"
+        error.project_route_context(),
+        Some((
+            "unknown_tool",
+            false,
+            "unknown tool: tracedecay_lcm_compress"
+        )),
+        "{error:?}"
     );
 }
 
@@ -2057,12 +2059,15 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "storage_scope=user is unavailable for non-retained tool `tracedecay_lcm_compress`"
-        ),
-        "a known-but-unavailable LCM effect must report its typed reason, got {message}"
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "application_surface_invalid_request",
+            false,
+            "application surface request does not match its reviewed schema: storage_scope=user \
+             is unavailable for non-retained tool `tracedecay_lcm_compress`"
+        )),
+        "a known-but-unavailable LCM effect must report its typed reason, got {error}"
     );
     assert!(
         !sessions_db.exists(),

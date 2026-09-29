@@ -1780,7 +1780,16 @@ async fn recent_test_results(
         .await
     {
         Ok(Some(record)) => record,
-        Ok(None) | Err(_) => return unavailable(context, operation),
+        // No managed test run is retained for this root. Retrying cannot
+        // produce one.
+        Ok(None) => {
+            return problem(
+                context,
+                operation,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            );
+        }
+        Err(_) => return unavailable(context, operation),
     };
     let current = match runtime.test_run_scope.current_identity().await {
         Ok(identity) => ManagedTestRunCurrentScope {

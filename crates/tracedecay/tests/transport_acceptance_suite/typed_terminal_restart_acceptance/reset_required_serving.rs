@@ -11,14 +11,11 @@
 //! still answer. After the named reset the same read serves.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::common::{
-    canonical_existing_path, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
-};
+use crate::common::{canonical_existing_path, spawn_tracedecay_daemon_with};
 
 /// Bound on waiting for the first sealed code generation of a two-line fixture.
 const CODE_INDEX_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -149,7 +146,7 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
             "required_version": 6,
             "reason": "git correlation profile schema 5 is incompatible with required schema 6; \
                        reset the profile",
-            "remedy": "tracedecay wipe --all --yes",
+            "remedy": "tracedecay wipe --stale --yes",
         }])
     );
     let refused = super::cli_problem_envelope(
@@ -166,28 +163,16 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
             "required_version": 6,
             "reason": "git correlation profile schema 5 is incompatible with required schema 6; \
                        reset the profile",
-            "remedy": "tracedecay wipe --all --yes",
+            "remedy": "tracedecay wipe --stale --yes",
         })
     );
     wait_for_code_index_hit(&home_path, &project_path, "probe");
 
-    // `tracedecay wipe --all --yes` takes the profile offline by stopping the
-    // managed service and restarts it afterwards; this unmanaged daemon is
-    // stopped and started around the same command.
-    daemon
-        .kill_and_wait()
-        .expect("stop the daemon for the profile reset");
-    let wipe = tracedecay_command_with_home(&home_path)
-        .args(["wipe", "--all", "--yes"])
-        .current_dir(&project_path)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run the named reset");
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
     assert!(
-        wipe.status.success(),
-        "tracedecay wipe --all --yes failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&wipe.stdout),
-        String::from_utf8_lossy(&wipe.stderr)
+        reset_status.success(),
+        "tracedecay wipe --stale --yes failed:\n{reset_output}"
     );
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
 

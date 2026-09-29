@@ -18,9 +18,10 @@ use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{
-    activate_test_temporal_generation, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, open_active_project_session_db, real_mcp_server,
-    seed_temporal_lcm_session_message, seed_temporal_lcm_tool_result_message, setup_empty_project,
+    activate_test_temporal_generation, application_invalid_request_error, extract_real_server_text,
+    handle_real_server_tool_call, handle_real_server_tool_call_raw, open_active_project_session_db,
+    real_mcp_server, seed_temporal_lcm_session_message, seed_temporal_lcm_tool_result_message,
+    setup_empty_project,
 };
 
 const SESSION: &str = "orchard-describe";
@@ -531,34 +532,23 @@ fn denied_document() -> Value {
     })
 }
 
-fn missing_provider_error() -> Value {
+fn describe_argument_error(detail: &str) -> Value {
     json!({
-        "error": {
-            "code": -32603,
-            "data": {
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool lcm_describe ...` (`tracedecay tool lcm_describe --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-                "tool": "tracedecay_lcm_describe"
-            },
-            "message": "tool execution failed: config error: invalid retained application request for tracedecay_lcm_describe: missing field `provider`"
-        },
+        "error": application_invalid_request_error("tracedecay_lcm_describe", detail),
         "id": 1,
         "jsonrpc": "2.0"
     })
 }
 
+fn missing_provider_error() -> Value {
+    describe_argument_error("missing field `provider`")
+}
+
 fn unknown_kind_error() -> Value {
-    json!({
-        "error": {
-            "code": -32603,
-            "data": {
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool lcm_describe ...` (`tracedecay tool lcm_describe --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-                "tool": "tracedecay_lcm_describe"
-            },
-            "message": "tool execution failed: config error: invalid retained application request for tracedecay_lcm_describe: target.kind: unknown variant `nope`, expected one of `session`, `summary_node`, `external_payload`"
-        },
-        "id": 1,
-        "jsonrpc": "2.0"
-    })
+    describe_argument_error(
+        "target.kind: unknown variant `nope`, expected one of `session`, `summary_node`, \
+         `external_payload`",
+    )
 }
 
 fn session_temporal() -> Value {

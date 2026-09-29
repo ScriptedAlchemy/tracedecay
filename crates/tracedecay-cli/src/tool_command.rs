@@ -69,6 +69,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tool_errors::project_route_problem;
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
@@ -145,7 +146,16 @@ pub(crate) async fn run(
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    run_inner(profile, project, name, args).await
+    let json_requested = args.iter().any(|arg| arg == "--json");
+    let tool_name = name.as_deref().map(canonical_tool_name);
+    let result = run_inner(profile, project, name, args).await;
+    if json_requested
+        && let (Err(error), Some(tool_name)) = (&result, tool_name.as_deref())
+        && let Some(problem) = project_route_problem(tool_name, error)
+    {
+        println!("{}", serde_json::json!({ "problem": problem }));
+    }
+    result
 }
 
 fn run_inner(
@@ -238,11 +248,8 @@ fn run_inner(
                 .await;
             }
             let (request, requested_format) =
-                cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+                cli_surface_invocation(tool_name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -282,11 +289,13 @@ fn run_inner(
             let suggestion = nearest_tool_name(&canonical, &defs)
                 .map(|name| format!(" Did you mean '{name}'?"))
                 .unwrap_or_default();
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_route(
+                "unknown_tool",
+                false,
+                format!(
                     "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
                 ),
-            });
+            ));
         };
 
         let parsed = parse_invocation(def, &args)?;
@@ -369,11 +378,8 @@ fn run_inner(
             && RetainedSurfaceOperation::from_application(operation).is_none()
         {
             let (request, requested_format) =
-                cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+                cli_surface_invocation(&def.name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -424,11 +430,8 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     let (request, requested_format) =
-        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json).map_err(
-            |error| TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )?;
+        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json)
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatch_cli_application_surface(
         profile,
         operation,
@@ -520,9 +523,7 @@ fn dispatch_cli_application_surface_inner(
                     )
                     .await;
                 }
-                return Err(TraceDecayError::Config {
-                    message: error.to_string(),
-                });
+                return Err(error.into_trace_decay_error());
             }
         };
         let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -542,11 +543,8 @@ fn dispatch_cli_application_surface_inner(
         let result = loop {
             let request = match next_request.take() {
                 Some(request) => request,
-                None => parse_application_surface_request(operation, tool_args.clone()).map_err(
-                    |error| TraceDecayError::Config {
-                        message: error.to_string(),
-                    },
-                )?,
+                None => parse_application_surface_request(operation, tool_args.clone())
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?,
             };
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -574,18 +572,7 @@ fn dispatch_cli_application_surface_inner(
                 Some(&client),
             )
             .await
-            .map_err(|error| match error {
-                // The same typed connect failure the compatibility tool path
-                // returns: one restart grace, then fail fast, never another
-                // dispatch attempt against a dead socket.
-                ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                } => TraceDecayError::project_route(reason_code, true, detail),
-                error => TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            })?;
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
                 break result;
             };
@@ -989,11 +976,13 @@ fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
 ) -> Result<()> {
-    let application_problem = result
-        .result
-        .as_ref()
-        .err()
-        .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
+    let application_problem = result.result.as_ref().err().map(|problem| {
+        TraceDecayError::tool_refused(
+            result.operation.mcp_tool_name(),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )
+    });
     let response_handle_root = cli_response_handle_root(profile, project)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
         response_handle_root.as_deref(),
@@ -1010,7 +999,7 @@ fn print_cli_application_surface(
         std::io::stdout().flush()?;
     }
     match application_problem {
-        Some(message) => Err(TraceDecayError::Config { message }),
+        Some(refusal) => Err(refusal),
         None => Ok(()),
     }
 }
@@ -1181,27 +1170,25 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         let wait: CodeIndexReadinessWaitOutcomeV1 = serde_json::from_value(wait.clone())?;
         let refusal = match wait {
             CodeIndexReadinessWaitOutcomeV1::Reached => None,
-            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                    true,
-                    format!(
-                        "{tool_name} wait_for timed out before the index reached the requested \
-                         state; last state: {last_state}"
-                    ),
-                ))
-            }
-            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-                    false,
-                    format!("{tool_name} wait_for cannot reach the requested state: {reason}"),
-                ))
-            }
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => Some((
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "wait_for timed out before the index reached the requested state; last \
+                     state: {last_state}"
+                ),
+            )),
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => Some((
+                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                format!("wait_for cannot reach the requested state: {reason}"),
+            )),
         };
-        if let Some(refusal) = refusal {
+        if let Some((code, reason)) = refusal {
             std::io::stdout().flush()?;
-            return Err(refusal);
+            return Err(TraceDecayError::tool_refused(
+                tool_name,
+                Some(code.to_owned()),
+                Some(reason),
+            ));
         }
     }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
@@ -1211,9 +1198,20 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     // returning the status-only error so the process boundary can drop its
     // profiling guard and then return the nonzero `ExitCode`.
     std::io::stdout().flush()?;
-    Err(TraceDecayError::Config {
-        message: format!("{tool_name} reported an application failure."),
-    })
+    let problem = result_value
+        .get("problem")
+        .or_else(|| result_value.pointer("/structuredContent/problem"));
+    let problem_text = |key: &str| {
+        problem
+            .and_then(|problem| problem.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    Err(TraceDecayError::tool_refused(
+        tool_name,
+        problem_text("code"),
+        problem_text("message"),
+    ))
 }
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {

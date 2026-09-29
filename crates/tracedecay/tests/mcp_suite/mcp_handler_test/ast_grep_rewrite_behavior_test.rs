@@ -572,7 +572,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     .await;
     assert_eq!(
         expect_tool_error(missing_arg),
-        "config error: missing required parameter: rewrite"
+        "project route error (application_surface_invalid_request): missing required parameter: rewrite"
     );
 
     let unpreviewed = call_rewrite(
@@ -586,7 +586,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     .await;
     assert_eq!(
         expect_tool_error(unpreviewed),
-        "config error: source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
+        "project route error (application_surface_invalid_request): source edit apply requires a fresh idempotency_key and the expected_state returned by a preview"
     );
     assert_file(&fixture, CHECKOUT, CHECKOUT_BEFORE);
 

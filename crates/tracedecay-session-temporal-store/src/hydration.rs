@@ -2409,8 +2409,7 @@ mod tests {
                 .await,
             Err(HydrationError::Unavailable)
         );
-        assert!(output.is_empty());
-        assert!(!String::from_utf8_lossy(&output).contains("canary"));
+        assert_eq!(output, b"");
     }
 
     #[tokio::test]
@@ -2853,6 +2852,9 @@ mod tests {
             byte_count: 1,
             content_hash: "hash".to_string(),
         };
-        assert!(!format!("{descriptor:?}").contains("private/canary"));
+        assert_eq!(
+            format!("{descriptor:?}"),
+            "PayloadDescriptor { source: External(<redacted>), byte_count: 1, content_hash: \"hash\" }"
+        );
     }
 }

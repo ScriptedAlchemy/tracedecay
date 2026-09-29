@@ -128,7 +128,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_branch_with_registered_configuration(
             project_root,

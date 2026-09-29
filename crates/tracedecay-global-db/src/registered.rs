@@ -32,6 +32,21 @@ type SessionRelationGraphStateV1 = RwLock<
     )>,
 >;
 
+/// An authority inside an admitted store whose persisted rows this binary
+/// refuses to read. The store serves its other authorities; every feature
+/// that reads the refused one gets [`Self::error`] until the store is reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefusedAuthorityV1 {
+    pub(crate) authority: &'static str,
+    pub(crate) reason: &'static str,
+}
+
+impl RefusedAuthorityV1 {
+    pub(crate) fn error(self) -> TraceDecayError {
+        TraceDecayError::reset_required(self.authority, self.reason)
+    }
+}
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -41,6 +56,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -53,6 +69,7 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Weak<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -81,13 +98,18 @@ impl RegisteredGlobalDbOwnerV1 {
     ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
+        let (_, refused_authority) =
+            super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
+        // A store refused for reset is never converged: its reset deletes it.
+        if refused_authority.is_none() {
+            super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
+        }
         drop(registered);
         Ok(Self {
             database,
             project_graph: Arc::new(OnceLock::new()),
             session_relation_graph: Arc::new(RwLock::new(None)),
+            refused_authority,
         })
     }
 
@@ -100,7 +122,7 @@ impl RegisteredGlobalDbOwnerV1 {
     {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        let convergence =
+        let (convergence, refused_authority) =
             super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         drop(registered);
         Ok((
@@ -108,6 +130,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
                 session_relation_graph: Arc::new(RwLock::new(None)),
+                refused_authority,
             },
             convergence,
         ))
@@ -122,8 +145,16 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                self.refused_authority,
             ),
         ))
+    }
+
+    /// The typed reset refusal of the authority this admitted store refuses
+    /// to read, `None` when every authority it holds is admissible.
+    #[must_use]
+    pub fn reset_required(&self) -> Option<TraceDecayError> {
+        self.refused_authority.map(RefusedAuthorityV1::error)
     }
 
     /// Issues a mode-reduced client that can never regain write authority.
@@ -133,6 +164,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_read_only_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                self.refused_authority,
             ),
         ))
     }
@@ -145,6 +177,7 @@ impl RegisteredGlobalDbOwnerV1 {
             database: self.database.weak_lease_issuer(),
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
+            refused_authority: self.refused_authority,
         }
     }
 
@@ -193,6 +226,7 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
+                self.refused_authority,
             ),
         ))
     }
@@ -260,6 +294,7 @@ pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 impl RegisteredGlobalDb {
@@ -306,6 +341,7 @@ impl RegisteredGlobalDb {
             database,
             Arc::new(OnceLock::new()),
             Arc::new(RwLock::new(None)),
+            None,
         )
     }
 
@@ -313,12 +349,21 @@ impl RegisteredGlobalDb {
         database: Database,
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
         session_relation_graph: Arc<SessionRelationGraphStateV1>,
+        refused_authority: Option<RefusedAuthorityV1>,
     ) -> Self {
         Self {
             database,
             project_graph,
             session_relation_graph,
+            refused_authority,
         }
+    }
+
+    /// The typed reset refusal of the authority the store behind this client
+    /// refuses to read, `None` when every authority it holds is admissible.
+    #[must_use]
+    pub fn reset_required(&self) -> Option<TraceDecayError> {
+        self.refused_authority.map(RefusedAuthorityV1::error)
     }
 
     /// Wraps an already-published guarded database for WAL maintenance tests.
