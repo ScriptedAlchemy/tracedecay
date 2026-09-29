@@ -4116,6 +4116,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let progress = git_tree_capture::CaptureProgressV1::new();
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates

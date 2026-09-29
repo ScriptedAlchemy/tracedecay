@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID;
 use tracedecay_contracts::catalog_composition::{
-    CatalogCompositionError, build_application_binding_snapshot, build_application_catalog_snapshot,
+    CatalogCompositionError, application_catalog_snapshot, build_application_binding_snapshot,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, BindingResolution, BindingResolver,
@@ -18,33 +18,21 @@ use tracedecay_tool_catalog::{
 
 use super::APPLICATION_PROTOCOL_REVISION;
 
-/// Process-immutable application catalog snapshot.
-///
-/// The catalog is composed entirely from `const` application specs, so nothing
-/// about it can change while the process runs. Composition still collects and
-/// sorts every contribution, validates the handler/contribution bijection, and
-/// derives all four profiles, so rebuilding it per call made a single dispatch
-/// pay for the whole pipeline twice: once to resolve the binding and again to
-/// re-validate it before execution. The full snapshot is built once here for
-/// discovery and schema checks. Dispatch borrows
-/// [`APPLICATION_BINDING_CATALOG`] instead, which keeps the same bindings
-/// without generating JSON Schema bodies.
-pub(super) static APPLICATION_SURFACE_CATALOG: LazyLock<
-    Result<CatalogSnapshotV1, CatalogCompositionError>,
-> = LazyLock::new(build_application_catalog_snapshot);
-
 /// Dispatch snapshot. Bindings and capability contracts, no JSON Schema bodies.
 ///
-/// The full snapshot above stays the authority for SDK projection, MCP
-/// discovery, configuration schema checks, and context-scout digest. Resolving
-/// one CLI call must not generate those bodies.
+/// The process-wide full snapshot ([`application_catalog_snapshot`]) stays
+/// the authority for SDK projection, MCP discovery, configuration schema
+/// checks, and context-scout digest. Resolving one CLI call must not generate
+/// those bodies.
 static APPLICATION_BINDING_CATALOG: LazyLock<Result<CatalogSnapshotV1, CatalogCompositionError>> =
     LazyLock::new(build_application_binding_snapshot);
 
 /// Borrow the process-wide catalog snapshot without recomposing it.
 pub fn application_surface_catalog_ref()
 -> Result<&'static CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
-    catalog_ref(&APPLICATION_SURFACE_CATALOG)
+    application_catalog_snapshot()
+        .map(|snapshot| &**snapshot)
+        .map_err(ApplicationSurfaceAdapterError::Catalog)
 }
 
 /// Borrow the schema-body-free snapshot used to resolve and execute a call.

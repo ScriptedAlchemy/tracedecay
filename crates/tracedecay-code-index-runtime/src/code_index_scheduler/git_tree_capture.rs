@@ -605,6 +605,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let registry = StaticLanguageRegistry::new();
         let progress = CaptureProgressV1::new();
         let mut roster = CapturedFileRosterV1::default();
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         visit(&mut |logical_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
             let outcome = self.capture_candidate_bytes_with_progress(

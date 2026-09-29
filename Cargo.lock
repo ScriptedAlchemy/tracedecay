@@ -6706,7 +6706,7 @@ dependencies = [
  "hex",
  "hotpath",
  "percent-encoding",
- "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "serde_yaml_ng",
