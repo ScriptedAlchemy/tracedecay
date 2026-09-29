@@ -1096,8 +1096,7 @@ impl CommandFamily {
             Commands::CurrentCounter { .. }
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
-            | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
+            | Commands::EnableUploadCounter => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Bench { .. }
