@@ -5,7 +5,7 @@ use std::{
 
 use tracedecay_domain::SessionId;
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{IntoParams, params};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
@@ -168,86 +168,16 @@ async fn discover_session(
     ))
 }
 
-/// Reads the output-producing effects past `cursor`, adding a request for
-/// every session they leave behind its projection frontier. Returns whether
-/// more effects may remain past the advanced cursor.
-async fn discover_pending_effects(
+/// One effect row: its rowid, observation, and session.
+type EffectRow = (i64, String, String);
+
+async fn effect_rows(
     conn: &impl crate::handle::SessionTemporalQuery,
-    pending_limit: usize,
-    cursor: &mut SessionTemporalRefreshDiscoveryCursor,
-    requests: &mut BTreeMap<String, SessionRefreshBeginOrJoinRequestV1>,
-) -> SessionStoreResult<bool> {
-    if let Some((rowid, observation_id)) = &cursor.effects_through {
-        let mut rows = conn
-            .query(
-                "SELECT observation_id = ?2
-                 FROM session_temporal_observation_effects WHERE rowid = ?1",
-                params![*rowid, observation_id.as_str()],
-            )
-            .await
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        let same_row = match rows
-            .next()
-            .await
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?
-        {
-            Some(row) => {
-                row.get::<i64>(0)
-                    .map_err(|error| storage(DISCOVER_REFRESH, error))?
-                    != 0
-            }
-            None => false,
-        };
-        if !same_row {
-            cursor.effects_through = None;
-        }
-    }
-    let after = cursor
-        .effects_through
-        .as_ref()
-        .map_or(0, |(rowid, _)| *rowid);
-    if pending_limit == 0 {
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM session_temporal_observation_effects
-                 WHERE rowid > ?1 AND output_count > 0
-                 LIMIT 1",
-                params![after],
-            )
-            .await
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        return Ok(rows
-            .next()
-            .await
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?
-            .is_some());
-    }
-    let mut decided = BTreeSet::new();
-    for session_id in std::mem::take(&mut cursor.running_sessions) {
-        if requests.len() >= pending_limit {
-            cursor.running_sessions.insert(session_id);
-            continue;
-        }
-        match discover_session(conn, &session_id).await? {
-            DiscoveredSession::Pending(request) => {
-                requests.insert(session_id.clone(), request);
-            }
-            DiscoveredSession::Running => {
-                cursor.running_sessions.insert(session_id.clone());
-            }
-            DiscoveredSession::Current => {}
-        }
-        decided.insert(session_id);
-    }
+    sql: &str,
+    params: impl IntoParams + Send,
+) -> SessionStoreResult<Vec<EffectRow>> {
     let mut rows = conn
-        .query(
-            "SELECT rowid, observation_id, session_id
-             FROM session_temporal_observation_effects
-             WHERE rowid > ?1 AND output_count > 0
-             ORDER BY rowid
-             LIMIT ?2",
-            params![after, DISCOVERY_EFFECT_PAGE],
-        )
+        .query(sql, params)
         .await
         .map_err(|error| storage(DISCOVER_REFRESH, error))?;
     let mut effects = Vec::new();
@@ -265,60 +195,137 @@ async fn discover_pending_effects(
                 .map_err(|error| storage(DISCOVER_REFRESH, error))?,
         ));
     }
-    drop(rows);
+    Ok(effects)
+}
+
+/// Collects discovered sessions for one page, deciding each at most once.
+struct PendingDiscovery<'a> {
+    pending_limit: usize,
+    requests: &'a mut BTreeMap<String, SessionRefreshBeginOrJoinRequestV1>,
+    running_sessions: &'a mut BTreeSet<String>,
+    decided: BTreeSet<String>,
+}
+
+impl PendingDiscovery<'_> {
+    fn is_full(&self) -> bool {
+        self.requests.len() >= self.pending_limit
+    }
+
+    async fn decide(
+        &mut self,
+        conn: &impl crate::handle::SessionTemporalQuery,
+        session_id: String,
+    ) -> SessionStoreResult<()> {
+        match discover_session(conn, &session_id).await? {
+            DiscoveredSession::Pending(request) => {
+                self.requests.insert(session_id.clone(), request);
+            }
+            DiscoveredSession::Running => {
+                self.running_sessions.insert(session_id.clone());
+            }
+            DiscoveredSession::Current => {}
+        }
+        self.decided.insert(session_id);
+        Ok(())
+    }
+}
+
+/// Reads the output-producing effects past `cursor`, adding a request for
+/// every session they leave behind its projection frontier. Returns whether
+/// more effects may remain past the advanced cursor.
+async fn discover_pending_effects(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    pending_limit: usize,
+    cursor: &mut SessionTemporalRefreshDiscoveryCursor,
+    requests: &mut BTreeMap<String, SessionRefreshBeginOrJoinRequestV1>,
+) -> SessionStoreResult<bool> {
+    if let Some((rowid, observation_id)) = &cursor.effects_through {
+        let same_row = effect_rows(
+            conn,
+            "SELECT rowid, observation_id, session_id
+             FROM session_temporal_observation_effects WHERE rowid = ?1",
+            params![*rowid],
+        )
+        .await?
+        .first()
+        .is_some_and(|(_, current, _)| current == observation_id);
+        if !same_row {
+            cursor.effects_through = None;
+        }
+    }
+    let after = cursor
+        .effects_through
+        .as_ref()
+        .map_or(0, |(rowid, _)| *rowid);
+    let effects = effect_rows(
+        conn,
+        "SELECT rowid, observation_id, session_id
+         FROM session_temporal_observation_effects
+         WHERE rowid > ?1 AND output_count > 0
+         ORDER BY rowid
+         LIMIT ?2",
+        params![
+            after,
+            if pending_limit == 0 {
+                1
+            } else {
+                DISCOVERY_EFFECT_PAGE
+            }
+        ],
+    )
+    .await?;
+    if pending_limit == 0 {
+        return Ok(!effects.is_empty());
+    }
     let page_full = i64::try_from(effects.len()).is_ok_and(|len| len >= DISCOVERY_EFFECT_PAGE);
+    let mut running_sessions = BTreeSet::new();
+    let mut discovery = PendingDiscovery {
+        pending_limit,
+        requests,
+        running_sessions: &mut running_sessions,
+        decided: BTreeSet::new(),
+    };
+    let rechecks = std::mem::take(&mut cursor.running_sessions);
+    for session_id in rechecks {
+        if discovery.is_full() {
+            discovery.running_sessions.insert(session_id);
+        } else {
+            discovery.decide(conn, session_id).await?;
+        }
+    }
     for (rowid, observation_id, session_id) in effects {
-        if !decided.contains(&session_id) {
-            if requests.len() >= pending_limit {
+        if !discovery.decided.contains(&session_id) {
+            if discovery.is_full() {
+                cursor.running_sessions = running_sessions;
                 return Ok(true);
             }
-            match discover_session(conn, &session_id).await? {
-                DiscoveredSession::Pending(request) => {
-                    requests.insert(session_id.clone(), request);
-                }
-                DiscoveredSession::Running => {
-                    cursor.running_sessions.insert(session_id.clone());
-                }
-                DiscoveredSession::Current => {}
-            }
-            decided.insert(session_id);
+            discovery.decide(conn, session_id).await?;
         }
         cursor.effects_through = Some((rowid, observation_id));
     }
+    cursor.running_sessions = running_sessions;
     if page_full {
         return Ok(true);
     }
     // History-only effects past the last output row need no refresh; move
     // the cursor over them so the next pass does not read them again.
-    let mut rows = conn
-        .query(
-            "SELECT rowid, observation_id
-             FROM session_temporal_observation_effects
-             ORDER BY rowid DESC
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(DISCOVER_REFRESH, error))?
+    let last = effect_rows(
+        conn,
+        "SELECT rowid, observation_id, session_id
+         FROM session_temporal_observation_effects
+         ORDER BY rowid DESC
+         LIMIT 1",
+        (),
+    )
+    .await?;
+    if let Some((rowid, observation_id, _)) = last.into_iter().next()
+        && rowid
+            > cursor
+                .effects_through
+                .as_ref()
+                .map_or(0, |(through, _)| *through)
     {
-        let rowid = row
-            .get::<i64>(0)
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
-        if cursor
-            .effects_through
-            .as_ref()
-            .is_none_or(|(through, _)| *through < rowid)
-        {
-            cursor.effects_through = Some((
-                rowid,
-                row.get::<String>(1)
-                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
-            ));
-        }
+        cursor.effects_through = Some((rowid, observation_id));
     }
     Ok(false)
 }
