@@ -764,12 +764,13 @@ mod tests {
         // item-list macro bodies and binds `#[cfg]` variants; v15 qualifies
         // calls through block-scoped `use` declarations; v16 qualifies calls
         // through inline-module and glob `use` declarations; v17 gives
-        // `const`/`static` initializers their calls. The revision is
+        // `const`/`static` initializers their calls; v18 binds calls inside
+        // macro arguments and in-file `self::`/`super::`/`crate::` paths. The revision is
         // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v17");
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v18");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:0e84ff25548b2c5d7139131f0c7d3308158db26dfb6fa6ec5dd636502c252b20"
+            "sha256:93171e1e4ff104d8313cc8efc2a2358897105973ca620bc67a610004aa4ba213"
         );
     }
 
