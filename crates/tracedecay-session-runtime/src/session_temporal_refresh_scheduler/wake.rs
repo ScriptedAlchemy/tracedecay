@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracedecay_domain::SessionId;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::history::SessionHistoricalIngestOutcome;
-use tracedecay_session_temporal_store::SessionRefreshRecoveryV1;
+use tracedecay_session_temporal_store::{
+    SessionRefreshRecoveryV1, SessionTemporalRefreshDiscoveryCursor,
+};
 use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
@@ -119,7 +120,7 @@ macro_rules! define_wake_state {
             pub(super) dirty: AtomicBool,
             pub(super) historical_dirty: AtomicBool,
             pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
-            pub(super) projection_discovery_after: std::sync::Mutex<Option<SessionId>>,
+            pub(super) projection_discovery: std::sync::Mutex<SessionTemporalRefreshDiscoveryCursor>,
             pub(super) projection_discovery_active_turn: AtomicBool,
             pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
             terminal_discovery_failures: std::sync::Mutex<HashMap<String, (u64, u64)>>,
@@ -151,7 +152,9 @@ impl Default for SessionTemporalRefreshWakeState {
             dirty: AtomicBool::new(false),
             historical_dirty: AtomicBool::new(false),
             requests: std::sync::Mutex::new(VecDeque::new()),
-            projection_discovery_after: std::sync::Mutex::new(None),
+            projection_discovery: std::sync::Mutex::new(
+                SessionTemporalRefreshDiscoveryCursor::default(),
+            ),
             projection_discovery_active_turn: AtomicBool::new(true),
             terminal_attempts: std::sync::Mutex::new(HashSet::new()),
             terminal_discovery_failures: std::sync::Mutex::new(HashMap::new()),
@@ -227,8 +230,8 @@ impl SessionTemporalRefreshWakeState {
         drained
     }
 
-    pub fn projection_discovery_after(&self) -> Option<SessionId> {
-        self.projection_discovery_after
+    pub fn projection_discovery_cursor(&self) -> SessionTemporalRefreshDiscoveryCursor {
+        self.projection_discovery
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -245,12 +248,12 @@ impl SessionTemporalRefreshWakeState {
         }
     }
 
-    pub fn update_projection_discovery_cursor(&self, active_after: Option<SessionId>) {
+    pub fn update_projection_discovery_cursor(&self, next: SessionTemporalRefreshDiscoveryCursor) {
         let mut cursor = self
-            .projection_discovery_after
+            .projection_discovery
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *cursor = active_after;
+        *cursor = next;
     }
 
     pub fn requeue_request(&self, request: SessionRefreshBeginOrJoinRequestV1) {
