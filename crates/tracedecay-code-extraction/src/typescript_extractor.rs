@@ -708,6 +708,13 @@ impl TypeScriptExtractor {
         }
 
         Self::extract_decorators(state, node, &id);
+        // `@Component({ … })` is called to wrap the declaration.
+        for decorator in node
+            .children(&mut node.walk())
+            .filter(|child| child.kind() == "decorator")
+        {
+            Self::extract_call_sites(state, decorator, &id);
+        }
 
         Self::extract_class_heritage(state, node, &id);
 
@@ -871,8 +878,11 @@ impl TypeScriptExtractor {
             });
         }
 
+        Self::extract_decorators(state, node, &id);
+
         // A field initializer (`onClick = () => this.save()`) runs as part of
-        // construction; the field is the named symbol that owns its calls.
+        // construction, and `@Input()` wraps the field; the field is the
+        // named symbol that owns both calls.
         Self::extract_owned_call_sites(state, node, &id);
     }
 
@@ -1318,7 +1328,8 @@ impl TypeScriptExtractor {
     // Helper extraction methods
     // ----------------------------
 
-    /// Extract decorators from a class or method declaration.
+    /// Extract the leading decorators of a class or field declaration. Their
+    /// call sites are left to the caller.
     fn extract_decorators(state: &mut ExtractionState<'_>, node: TsNode<'_>, parent_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -1379,8 +1390,6 @@ impl TypeScriptExtractor {
                         kind: EdgeKind::Annotates,
                         line: Some(start_line),
                     });
-                    // `@Component({ … })` is called to wrap the declaration.
-                    Self::extract_call_sites(state, child, parent_id);
                 }
                 if !cursor.goto_next_sibling() {
                     break;

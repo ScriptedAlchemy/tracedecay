@@ -3,6 +3,7 @@ use tracedecay_code_extraction::TypeScriptExtractor;
 use tracedecay_domain::*;
 
 include!("support/calls.rs");
+include!("support/edges.rs");
 
 #[test]
 fn test_ts_file_node_is_root() {
@@ -375,6 +376,27 @@ class Service {
         .filter(|n| n.kind == NodeKind::Class)
         .collect();
     assert_eq!(annotates[0].target, classes[0].id);
+}
+
+#[test]
+fn test_ts_field_decorator_annotates_the_field() {
+    let source = r#"
+class Card {
+    @Input() name: string;
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("card.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("Input", "name")]
+    );
+    assert_eq!(
+        calls_by_owner(&result),
+        [("field", "name", 2, vec!["Input"])]
+    );
 }
 
 #[test]
