@@ -3,16 +3,15 @@
 use std::collections::BTreeMap;
 
 use thiserror::Error;
-use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
     ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
@@ -29,6 +28,7 @@ use tracedecay_domain::configuration::{
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
@@ -58,6 +58,12 @@ pub enum ConfigurationRegistryError {
         minimum: u64,
         maximum: u64,
         actual: u64,
+    },
+    #[error("setting {key} pattern '{pattern}' is invalid: {message}")]
+    InvalidPathPattern {
+        key: SettingKey,
+        pattern: String,
+        message: String,
     },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
@@ -322,6 +328,36 @@ impl ConfigurationRegistry {
         Ok(())
     }
 
+    /// [`Self::validate_value`] plus the checks that gate only a new write.
+    ///
+    /// Stored snapshots are revalidated with `validate_value` on every read,
+    /// so a rule that may tighten across releases must not live there: an
+    /// `index.exclude.v1` pattern an earlier release accepted has to keep
+    /// loading (the runtime skips what no longer compiles) while a new
+    /// write of it is refused.
+    pub fn validate_written_value(
+        &self,
+        key: &SettingKey,
+        value: &ConfigurationValueV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        self.validate_value(key, value)?;
+        if let ConfigurationValueV1::StringList(patterns) = value
+            && matches!(
+                key.as_str(),
+                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
+            )
+        {
+            validate_index_path_patterns(patterns).map_err(|error| {
+                ConfigurationRegistryError::InvalidPathPattern {
+                    key: key.clone(),
+                    pattern: error.pattern,
+                    message: error.message,
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn validate_layer(
         &self,
         key: &SettingKey,
@@ -430,7 +466,6 @@ struct ProjectDefaults {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    git_ignore: bool,
     diagnostics_prewarm: bool,
     native_graph_activation: bool,
     telemetry_timings: bool,
@@ -485,7 +520,6 @@ impl Default for ProjectDefaults {
         let mut exclude: Vec<String> = vec![
             ".git/**".to_string(),
             ".tracedecay/**".to_string(),
-            "bin/**".to_string(),
             "**/*.min.*".to_string(),
         ];
         for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
@@ -498,7 +532,6 @@ impl Default for ProjectDefaults {
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            git_ignore: true,
             diagnostics_prewarm: false,
             native_graph_activation: true,
             telemetry_timings: true,
@@ -541,12 +574,6 @@ fn register_project_settings(
         (
             INDEX_TRACK_CALL_SITES_SETTING_KEY,
             ConfigurationValueV1::Boolean(defaults.track_call_sites),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            INDEX_GIT_IGNORE_SETTING_KEY,
-            ConfigurationValueV1::Boolean(defaults.git_ignore),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
@@ -725,6 +752,26 @@ mod proximity_threshold_tests {
                 &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod index_path_pattern_tests {
+    use super::*;
+
+    /// A stored pattern an earlier release never compiled must keep loading
+    /// while a new write of it is refused.
+    #[test]
+    fn a_malformed_index_pattern_loads_but_cannot_be_written() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).expect("key");
+        let value = ConfigurationValueV1::StringList(vec!["src/[abc".to_owned()]);
+
+        assert!(registry.validate_value(&key, &value).is_ok());
+        assert!(matches!(
+            registry.validate_written_value(&key, &value),
+            Err(ConfigurationRegistryError::InvalidPathPattern { .. })
         ));
     }
 }

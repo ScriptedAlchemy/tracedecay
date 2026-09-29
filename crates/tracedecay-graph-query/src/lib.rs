@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_runtime_core::db::Database;
 
 pub mod context;
@@ -46,16 +47,30 @@ pub struct SourceReadContext {
     db: Database,
     read_only: bool,
     project_id: String,
+    path_policy: IndexPathPolicyV1,
 }
 
 impl SourceReadContext {
-    pub fn new(project_root: PathBuf, db: Database, read_only: bool, project_id: String) -> Self {
+    pub fn new(
+        project_root: PathBuf,
+        db: Database,
+        read_only: bool,
+        project_id: String,
+        path_policy: IndexPathPolicyV1,
+    ) -> Self {
         Self {
             project_root,
             db,
             read_only,
             project_id,
+            path_policy,
         }
+    }
+
+    /// The project's index path policy, which source walks share with the
+    /// code index.
+    pub fn path_policy(&self) -> &IndexPathPolicyV1 {
+        &self.path_policy
     }
 
     pub fn project_root(&self) -> &Path {

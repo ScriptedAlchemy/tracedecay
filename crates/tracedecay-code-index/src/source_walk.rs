@@ -2,7 +2,8 @@
 //!
 //! Grep, ast-grep search, and the module-mount audit must all agree on what
 //! "a file in this project" means: the same `.gitignore` rules, the same
-//! generated-directory skips, the same refusal to follow links. A second walker
+//! `index.exclude.v1` / `index.include.v1` path policy the code index captures
+//! under, the same refusal to follow links. A second walker
 //! built next to this one would drift, and a scan that disagrees with the one
 //! the indexer used reports findings the rest of the product cannot see. The
 //! walk is therefore public rather than crate-private, the audit in the root
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{Walk, WalkBuilder};
+use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
 
 #[derive(Debug)]
 pub struct SourceWalkError {
@@ -20,6 +22,9 @@ pub struct SourceWalkError {
     pub message: String,
 }
 
+/// The directories a positive `path_glob` may descend into on its way to a
+/// match, so a scope such as `dist/**/*.js` or `*.js` reaches generated
+/// directories the default policy would otherwise prune before listing.
 struct GeneratedDirScope {
     literal_prefix: PathBuf,
     may_match_descendants: bool,
@@ -82,7 +87,11 @@ impl GeneratedDirScope {
 }
 
 #[hotpath::measure(label = "code_index.capture.source_walk")]
-pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk, SourceWalkError> {
+pub fn source_walk(
+    project_root: &Path,
+    path_glob: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
+) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
     let has_positive_override = overrides
         .as_ref()
@@ -90,6 +99,7 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
     let generated_dir_overrides = overrides.clone();
     let generated_dir_scope = path_glob.and_then(GeneratedDirScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
+    let path_policy = path_policy.clone();
 
     let mut builder = WalkBuilder::new(project_root);
     builder
@@ -107,8 +117,29 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
             if segment == ".git" || segment == ".tracedecay" {
                 return false;
             }
-            if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
-                return true;
+            let Ok(relative) = entry.path().strip_prefix(&filter_root) else {
+                return false;
+            };
+            let relative = forward_slash_path(relative);
+            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            // An entry the glob names, or a directory it must pass through,
+            // is judged without the generated-directory defaults: the scope
+            // is the operator asking for that noise. Every other exclusion
+            // still applies; only `index.include.v1` lifts those.
+            let explicitly_requested = has_positive_override
+                && (generated_dir_overrides.as_ref().is_some_and(|overrides| {
+                    overrides.matched(entry.path(), is_dir).is_whitelist()
+                }) || (is_dir
+                    && generated_dir_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.allows(&filter_root, entry.path()))));
+            let path_policy = if explicitly_requested {
+                path_policy.without_generated_dir_defaults()
+            } else {
+                &path_policy
+            };
+            if !is_dir {
+                return !path_policy.excludes(&relative);
             }
             // A directory with its own Git authority is another project, not
             // source owned by this one. This covers linked worktrees (`.git`
@@ -119,14 +150,7 @@ pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk,
             if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
                 return false;
             }
-            let explicitly_requested = has_positive_override
-                && (generated_dir_overrides
-                    .as_ref()
-                    .is_some_and(|overrides| overrides.matched(entry.path(), true).is_whitelist())
-                    || generated_dir_scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.allows(&filter_root, entry.path())));
-            explicitly_requested || !tracedecay_domain::is_generated_dir_segment(&segment)
+            !path_policy.excludes_directory(&relative)
         });
     if let Some(overrides) = overrides {
         builder.overrides(overrides);
@@ -171,8 +195,26 @@ mod tests {
     use std::path::PathBuf;
 
     use tempfile::TempDir;
+    use tracedecay_domain::IndexPathPolicyV1;
 
     use super::source_walk;
+
+    fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {
+        let mut files = source_walk(root, None, path_policy)
+            .expect("source walk")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("project-relative path")
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
 
     #[test]
     fn nested_repository_is_not_part_of_the_parent_source_tree() {
@@ -193,18 +235,10 @@ mod tests {
         fs::write(nested_clone.join("foreign.rs"), "pub fn cloned() {}\n")
             .expect("nested clone source");
 
-        let files = source_walk(root.path(), None)
-            .expect("source walk")
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(root.path())
-                    .expect("project-relative path")
-                    .to_path_buf()
-            })
-            .collect::<Vec<_>>();
+        let files = walked_files(
+            root.path(),
+            &IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy"),
+        );
 
         assert!(files.contains(&PathBuf::from("src/lib.rs")));
         assert!(files.contains(&PathBuf::from("plain/keep.rs")));
@@ -215,6 +249,146 @@ mod tests {
         assert!(
             !files.contains(&PathBuf::from("nested-clone/foreign.rs")),
             "a nested clone must not be indexed as parent source"
+        );
+    }
+
+    #[test]
+    fn explicit_glob_cannot_read_excluded_paths_without_policy_include() {
+        let root = TempDir::new().expect("project root");
+        fs::create_dir(root.path().join("secrets")).expect("secret directory");
+        fs::write(root.path().join("secrets/token.rs"), "secret_token\n").expect("secret source");
+        let walk = |policy: &IndexPathPolicyV1| {
+            source_walk(root.path(), Some("secrets/**"), policy)
+                .expect("source walk")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| {
+                    entry
+                        .path()
+                        .strip_prefix(root.path())
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>()
+        };
+        let excluded = IndexPathPolicyV1::new(vec!["secrets/**".into()], vec![]).unwrap();
+        assert!(
+            walk(&excluded).is_empty(),
+            "path_glob cannot bypass a configured exclusion"
+        );
+        let included =
+            IndexPathPolicyV1::new(vec!["secrets/**".into()], vec!["secrets/token.rs".into()])
+                .unwrap();
+        assert_eq!(walk(&included), vec![PathBuf::from("secrets/token.rs")]);
+    }
+
+    #[test]
+    fn explicit_glob_reaches_directories_only_the_generated_defaults_exclude() {
+        let root = TempDir::new().expect("project root");
+        for path in ["dist/bundle.js", "dist/secrets/token.js", "src/app.js"] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture directory");
+            fs::write(path, "generated\n").expect("fixture file");
+        }
+        let walk = |glob: &str, policy: &IndexPathPolicyV1| {
+            let mut files = source_walk(root.path(), Some(glob), policy)
+                .expect("source walk")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| {
+                    entry
+                        .path()
+                        .strip_prefix(root.path())
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>();
+            files.sort();
+            files
+        };
+        let defaults =
+            IndexPathPolicyV1::new(vec!["dist/**".into(), "**/dist/**".into()], vec![]).unwrap();
+        assert!(
+            walked_files(root.path(), &defaults)
+                .iter()
+                .all(|f| f.starts_with("src"))
+        );
+        assert_eq!(
+            walk("dist/**/*.js", &defaults),
+            vec![
+                PathBuf::from("dist/bundle.js"),
+                PathBuf::from("dist/secrets/token.js")
+            ],
+            "a scope naming a generated directory reaches it"
+        );
+        assert_eq!(
+            walk("*.js", &defaults),
+            vec![
+                PathBuf::from("dist/bundle.js"),
+                PathBuf::from("dist/secrets/token.js"),
+                PathBuf::from("src/app.js")
+            ],
+            "a slashless glob reaches generated descendants"
+        );
+
+        let with_operator_rule = IndexPathPolicyV1::new(
+            vec![
+                "dist/**".into(),
+                "**/dist/**".into(),
+                "**/secrets/**".into(),
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            walk("dist/**/*.js", &with_operator_rule),
+            vec![PathBuf::from("dist/bundle.js")],
+            "the same scope cannot lift an operator's exclusion beneath the generated directory"
+        );
+    }
+
+    #[test]
+    fn the_walk_honors_the_index_path_policy() {
+        let root = TempDir::new().expect("project root");
+        for (path, contents) in [
+            ("src/lib.rs", "pub fn kept() {}\n"),
+            ("generated-fixtures/gen.rs", "pub fn generated_only() {}\n"),
+            ("vendor/drop/lib.rs", "pub fn dropped() {}\n"),
+            ("vendor/kept/lib.rs", "pub fn vendored_kept() {}\n"),
+            ("assets/app.min.js", "export const minified = 1;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture directory");
+            fs::write(path, contents).expect("fixture file");
+        }
+        let policy = IndexPathPolicyV1::new(
+            vec![
+                "generated-fixtures/**".to_owned(),
+                "vendor/**".to_owned(),
+                "**/*.min.*".to_owned(),
+            ],
+            vec!["vendor/kept/**".to_owned()],
+        )
+        .expect("policy");
+        assert_eq!(
+            walked_files(root.path(), &policy),
+            vec![
+                PathBuf::from("src/lib.rs"),
+                PathBuf::from("vendor/kept/lib.rs")
+            ]
+        );
+        assert_eq!(
+            walked_files(
+                root.path(),
+                &IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy")
+            ),
+            vec![
+                PathBuf::from("assets/app.min.js"),
+                PathBuf::from("generated-fixtures/gen.rs"),
+                PathBuf::from("src/lib.rs"),
+                PathBuf::from("vendor/drop/lib.rs"),
+                PathBuf::from("vendor/kept/lib.rs"),
+            ]
         );
     }
 }

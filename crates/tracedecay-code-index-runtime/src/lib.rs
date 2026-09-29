@@ -59,6 +59,9 @@ pub(crate) use tracedecay_query as query;
 /// Same abort authority re-exported by `tracedecay-daemon-service`.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub use config::registry_default_index_path_policy;
+
 pub use code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };

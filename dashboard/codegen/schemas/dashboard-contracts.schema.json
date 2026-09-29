@@ -20417,9 +20417,6 @@
         "extract_docstrings": {
           "type": "boolean"
         },
-        "git_ignore": {
-          "type": "boolean"
-        },
         "include": {
           "items": {
             "type": "string"
@@ -20447,7 +20444,6 @@
         "max_file_size",
         "extract_docstrings",
         "track_call_sites",
-        "git_ignore",
         "telemetry",
         "sync",
         "context_scout"
@@ -20690,12 +20686,6 @@
           "type": "string"
         },
         "extract_docstrings": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "git_ignore": {
           "type": [
             "boolean",
             "null"

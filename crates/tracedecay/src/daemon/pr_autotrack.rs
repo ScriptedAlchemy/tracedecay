@@ -881,6 +881,7 @@ async fn activate_linked_worktree(
             tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,
             ),
+            graph.get_config().index_paths.clone(),
         )
         .await
         .map(|_| ())

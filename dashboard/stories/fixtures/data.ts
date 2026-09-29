@@ -3351,7 +3351,6 @@ const settingsPayload: Record<string, unknown> = {
       max_file_size: 1_048_576,
       extract_docstrings: true,
       track_call_sites: true,
-      git_ignore: true,
       context_scout: false,
       telemetry: { timings: false },
       sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },

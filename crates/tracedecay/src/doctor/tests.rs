@@ -295,6 +295,42 @@ fn denied_canonical_evidence_warns_instead_of_inventing_failure() {
 }
 
 #[test]
+fn a_live_ingest_refusal_is_reported_informationally_and_never_fails_the_exit() {
+    let finding = tracedecay_contracts::doctor::ingest_refusal_finding(
+        &tracedecay_contracts::doctor::IngestRefusalCensusReadV1::Observed {
+            refusals: vec![tracedecay_contracts::doctor::IngestRefusalV1 {
+                provider: "cursor".to_owned(),
+                session_id: "445777ad-0c9a-4c0e-bb98-7e8f7fb500ce".to_owned(),
+                reason: "observation_identity_collision".to_owned(),
+                start: 364_052,
+                end: 364_900,
+            }],
+        },
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    super::render_doctor_finding(&mut counters, &finding);
+
+    assert_eq!(
+        (counters.issues, counters.warnings, counters.pending_actions),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        counters.checks[0].message,
+        "observability: durable ingest coverage converged past 1 refused source record(s), \
+         informational, nothing needs doing: each was skipped by design and re-reading it would \
+         refuse it again; cursor session 445777ad-0c9a-4c0e-bb98-7e8f7fb500ce range \
+         364052..364900 observation_identity_collision (a different record with the same \
+         identity is already retained) (observability.ingest-coverage.refused-informational)"
+    );
+    assert_eq!(
+        super::doctor_result(&counters, &DatabaseHealth::Healthy, false),
+        super::DoctorCompletion::Healthy
+    );
+}
+
+#[test]
 fn canonical_doctor_unavailable_states_remain_typed_nonfatal_reads() {
     assert_eq!(
         super::canonical_daemon_doctor_report(&serde_json::json!({})).unwrap(),
@@ -463,13 +499,14 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
 
     assert_eq!(counters.issues, 1, "an unobserved store is not a warning");
     assert_eq!(counters.warnings, 0);
-    let error = super::doctor_result(
-        &counters,
-        &DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
-        true,
-    )
-    .unwrap_err();
-    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
+    assert_eq!(
+        super::doctor_result(
+            &counters,
+            &DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
+            true,
+        ),
+        super::DoctorCompletion::Issues(1)
+    );
 }
 
 #[test]
@@ -482,8 +519,7 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
                 reason: "canonical_doctor_report_unavailable".to_string(),
             },
             false,
-        )
-        .unwrap(),
+        ),
         super::DoctorCompletion::Healthy
     );
 }
@@ -494,7 +530,7 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
 fn doctor_result_reports_a_pending_reset_without_issues_as_pending() {
     let counters = DoctorCounters::new();
     assert_eq!(
-        super::doctor_result(&counters, &DatabaseHealth::unknown("reset_required"), true).unwrap(),
+        super::doctor_result(&counters, &DatabaseHealth::unknown("reset_required"), true),
         super::DoctorCompletion::PendingOperatorAction
     );
 }

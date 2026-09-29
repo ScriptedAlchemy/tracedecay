@@ -533,6 +533,8 @@ mod tests {
             database.clone(),
             true,
             "project.retrieval-primitives.other".to_owned(),
+            tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+                .expect("index path policy"),
         ));
         assert!(
             SourceReadAdapter::new_bound(
@@ -549,6 +551,8 @@ mod tests {
             database.clone(),
             true,
             scope.project_id.as_str().to_owned(),
+            tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+                .expect("index path policy"),
         ));
         assert!(
             SourceReadAdapter::new_bound(
@@ -568,6 +572,8 @@ mod tests {
                 database.clone(),
                 true,
                 scope.project_id.as_str().to_owned(),
+                tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+                    .expect("index path policy"),
             ))
         };
         let verbatim = SourceReadAdapter::new_bound(
@@ -594,6 +600,8 @@ mod tests {
             database,
             true,
             scope.project_id.as_str().to_owned(),
+            tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new())
+                .expect("index path policy"),
         ));
         assert!(SourceReadAdapter::new_bound(matching, projection, scope, &admitted_root,).is_ok());
     }

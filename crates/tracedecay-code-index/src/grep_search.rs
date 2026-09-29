@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
+use tracedecay_domain::IndexPathPolicyV1;
 
 use crate::source_walk::{forward_slash_relative, source_walk};
 
@@ -92,15 +93,17 @@ impl std::error::Error for GrepSearchError {}
 pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
+    path_policy: &IndexPathPolicyV1,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<GrepSearchResult, GrepSearchError> {
     let matcher = build_matcher(query)?;
-    let walker = source_walk(project_root, query.path_glob.as_deref()).map_err(|error| {
-        GrepSearchError::InvalidGlob {
-            glob: error.glob,
-            message: error.message,
-        }
-    })?;
+    let walker =
+        source_walk(project_root, query.path_glob.as_deref(), path_policy).map_err(|error| {
+            GrepSearchError::InvalidGlob {
+                glob: error.glob,
+                message: error.message,
+            }
+        })?;
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
     #[cfg(feature = "hotpath")]
@@ -306,6 +309,10 @@ fn looks_binary(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn no_exclusions() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap()
+    }
+
     fn query(pattern: &str) -> GrepSearchQuery {
         GrepSearchQuery {
             pattern: pattern.to_owned(),
@@ -327,9 +334,12 @@ mod tests {
         .unwrap();
         let checks = std::sync::atomic::AtomicUsize::new(0);
 
-        let result = search_tree_with_cancel(project.path(), &query("CANCEL_TOKEN"), || {
-            checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 10
-        })
+        let result = search_tree_with_cancel(
+            project.path(),
+            &query("CANCEL_TOKEN"),
+            &no_exclusions(),
+            || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 10,
+        )
         .unwrap();
 
         assert!(result.cancelled);
@@ -344,8 +354,13 @@ mod tests {
         std::fs::write(project.path().join("oversized.txt"), oversized).unwrap();
         std::fs::write(project.path().join("tracked.txt"), "FILE_CAP_TOKEN\n").unwrap();
 
-        let result =
-            search_tree_with_cancel(project.path(), &query("FILE_CAP_TOKEN"), || false).unwrap();
+        let result = search_tree_with_cancel(
+            project.path(),
+            &query("FILE_CAP_TOKEN"),
+            &no_exclusions(),
+            || false,
+        )
+        .unwrap();
 
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].file.as_ref(), "tracked.txt");
@@ -363,7 +378,8 @@ mod tests {
         let mut query = query("HIT_TOKEN");
         query.max_results = 1;
 
-        let result = search_tree_with_cancel(project.path(), &query, || false).unwrap();
+        let result =
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap();
 
         assert_eq!(result.hits.len(), 2);
         assert!(result.truncated);

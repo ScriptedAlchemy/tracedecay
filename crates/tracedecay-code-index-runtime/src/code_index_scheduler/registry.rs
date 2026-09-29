@@ -30,8 +30,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SanitizedCodeFileV1, WorktreeId,
-    host_cpu_target,
+    CodeGenerationId, IndexPathPolicyV1, ManifestDigest, ProjectId, RepositoryId,
+    SanitizedCodeFileV1, WorktreeId, forward_slash_path, host_cpu_target,
 };
 use tracedecay_lsp::LspRuntimeFailure;
 
@@ -706,6 +706,9 @@ pub struct MountedCodeIndexWorktreeV1 {
         Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
     )>,
     pub scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    /// The owner's path policy, readable without the scheduler mutex so hook
+    /// hints for excluded paths never wake it.
+    path_policy: IndexPathPolicyV1,
     /// Explicit same-store build/publication invariant shared by source
     /// reconcile, ignored-dependency publication, and historical generation
     /// minting. Async owners acquire this before entering blocking scheduler
@@ -3167,8 +3170,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Primary hint path: deliver the exact touched paths carried by a host
     /// after-file-edit hook into the mounted worktree's incremental queue.
     /// `rel_paths` are repository-relative; they are resolved against the
-    /// project root. Returns typed admission so terminal publication corruption
-    /// keeps its exact reason instead of collapsing through a bool facade.
+    /// project root. Paths the index path policy excludes are dropped here, and
+    /// a batch of only excluded paths is `NotApplicable` without a wake.
+    /// Returns typed admission so terminal publication corruption keeps its
+    /// exact reason instead of collapsing through a bool facade.
     pub async fn notify_hook_paths(
         &self,
         project_root: &Path,
@@ -3179,7 +3184,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
         };
-        let (hints, wake, epoch, pending_wake) = {
+        let (hints, wake, epoch, pending_wake, path_policy) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return CodeIndexDemandAdmissionV1::Unavailable(
@@ -3194,12 +3199,22 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
                 Arc::clone(&worktree.pending_wake),
+                worktree.path_policy.clone(),
             )
         };
         let absolute = rel_paths
             .iter()
             .map(|rel| project_root.join(rel))
+            .filter(|absolute| {
+                absolute
+                    .strip_prefix(&project_root)
+                    .ok()
+                    .is_none_or(|relative| !path_policy.excludes(&forward_slash_path(relative)))
+            })
             .collect::<Vec<_>>();
+        if absolute.is_empty() && !rel_paths.is_empty() {
+            return CodeIndexDemandAdmissionV1::NotApplicable;
+        }
         {
             let mut hints = hints
                 .lock()

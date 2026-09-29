@@ -7268,7 +7268,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   context_scout: z.ZodType<boolean, z.ZodTypeDef, unknown>;
   exclude: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
   extract_docstrings: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  git_ignore: z.ZodType<boolean, z.ZodTypeDef, unknown>;
   include: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
   max_file_size: z.ZodType<number, z.ZodTypeDef, unknown>;
   sync: z.ZodType<SyncSettingsV1, z.ZodTypeDef, unknown>;
@@ -7278,7 +7277,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   context_scout: z.boolean(),
   exclude: z.array(z.string()),
   extract_docstrings: z.boolean(),
-  git_ignore: z.boolean(),
   include: z.array(z.string()),
   max_file_size: z.number().int().safe().min(0),
   sync: z.lazy(() => SyncSettingsV1Schema),
@@ -7383,7 +7381,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   exclude: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
   expected_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
   extract_docstrings: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  git_ignore: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
   idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
   include: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
   max_file_size: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
@@ -7395,7 +7392,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   exclude: z.array(z.string()).nullable().optional(),
   expected_revision_id: z.string(),
   extract_docstrings: z.boolean().nullable().optional(),
-  git_ignore: z.boolean().nullable().optional(),
   idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
   max_file_size: z.number().int().safe().min(0).nullable().optional(),

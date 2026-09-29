@@ -1,7 +1,7 @@
 //! Canonical CLI/MCP wire contract for `tracedecay_admin_project`, the
 //! internal operation first-party commands use to maintain the bookkeeping
 //! the daemon keeps for a project or profile: its usage counter, registry
-//! token accounting, gitignore status, automatic-fact receipts, and
+//! token accounting, automatic-fact receipts, and
 //! automation scheduler reconciliation.
 //!
 //! Presentation-only transport keys such as `format` are removed before the
@@ -45,8 +45,6 @@ pub enum AdminProjectSurfaceRequestV1 {
     /// Record the project's saved-token total in the profile registry and
     /// read it back beside the other projects' total.
     StatusAccounting {},
-    /// Read whether the project's store is gitignored.
-    GitignoreStatus {},
     /// List terminal automatic-fact receipts.
     AutomaticFactReceiptList {
         /// Only receipts in this state (default: every state).
@@ -78,14 +76,6 @@ pub struct AdminProjectStatusAccountingV1 {
     pub tokens_saved: u64,
     /// Tokens the profile's other projects saved; null when they saved none.
     pub global_tokens_saved: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminProjectGitignoreStatusV1 {
-    pub git_ignore: bool,
-    /// The configuration revision the status was read at.
-    pub revision_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -211,7 +201,6 @@ pub enum AdminProjectResultV1 {
     Counter(AdminProjectCounterV1),
     CounterReset(AdminProjectCounterResetV1),
     StatusAccounting(AdminProjectStatusAccountingV1),
-    GitignoreStatus(AdminProjectGitignoreStatusV1),
     AutomaticFactReceiptList(AutomaticFactReceiptListV1),
     AutomaticFactReceiptView(Box<AutomaticFactReceiptViewV1>),
     ProjectAutomationReconcile(ProjectAutomationReconcileReport),

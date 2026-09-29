@@ -24,8 +24,8 @@ pub(crate) use profile_storage::handle_profile_storage_action;
 pub(crate) use scope::resolve_project_scope;
 pub(crate) use settings::{
     canonical_upload_enabled, current_configuration_revision, current_project_setting,
-    handle_gitignore, handle_upload_counter, mutate_project_configuration,
-    project_configuration_set, report_configuration_receipt,
+    handle_upload_counter, mutate_project_configuration, project_configuration_set,
+    report_configuration_receipt,
 };
 pub(crate) use stale_store_reset::handle_wipe_stale;
 pub(crate) use storage::{

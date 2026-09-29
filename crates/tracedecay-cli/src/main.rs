@@ -1093,8 +1093,7 @@ impl CommandFamily {
             Commands::CurrentCounter { .. }
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
-            | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
+            | Commands::EnableUploadCounter => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Gain { .. }
@@ -1890,9 +1889,6 @@ async fn dispatch_configuration_command(
         Commands::EnableUploadCounter => {
             commands::handle_upload_counter(profile, true).await?;
         }
-        Commands::Gitignore { path, action } => {
-            commands::handle_gitignore(profile, path, action).await?;
-        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -1913,10 +1909,16 @@ async fn dispatch_diagnostics_command(
                 label = "cli.doctor.run"
             )
             .await?;
-            if completion == tracedecay::doctor::DoctorCompletion::PendingOperatorAction {
-                return Ok(CommandOutcome::Exit(
-                    agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
-                ));
+            match completion {
+                tracedecay::doctor::DoctorCompletion::Healthy => {}
+                tracedecay::doctor::DoctorCompletion::PendingOperatorAction => {
+                    return Ok(CommandOutcome::Exit(
+                        agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
+                    ));
+                }
+                tracedecay::doctor::DoctorCompletion::Issues(_) => {
+                    return Ok(CommandOutcome::Exit(1));
+                }
             }
         }
         Commands::Cost {
@@ -2052,7 +2054,6 @@ impl CommandStartupPolicy {
                     },
             }
             | Commands::Channel { channel: None }
-            | Commands::Gitignore { action: None, .. }
             | Commands::Automation {
                 action:
                     AutomationAction::Config {

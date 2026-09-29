@@ -30,10 +30,10 @@ use tracedecay_contracts::{
     now_micros,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, TreeId, WorktreeId, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, IndexPathPolicyV1,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, TreeId, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
@@ -551,7 +551,7 @@ pub(super) struct SourceFreshnessFenceStateV1 {
 }
 
 impl SourceFreshnessFenceV1 {
-    fn unverified(source_epoch: Arc<AtomicU64>) -> Self {
+    fn unverified(source_epoch: Arc<AtomicU64>, path_policy: IndexPathPolicyV1) -> Self {
         Self {
             state: Arc::new(Mutex::new(SourceFreshnessFenceStateV1 {
                 git_metadata: identity::GitMetadataFingerprintV1::default(),
@@ -565,7 +565,7 @@ impl SourceFreshnessFenceV1 {
             })),
             last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
             source_epoch,
-            sweep_cache: Arc::default(),
+            sweep_cache: Arc::new(Mutex::new(SourceSweepCacheV1::new(path_policy))),
         }
     }
 
@@ -905,6 +905,10 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     pub(super) repository_id: RepositoryId,
     pub(super) worktree_id: WorktreeId,
     pub(super) policy: CodeIndexHintPolicyV1,
+    /// The project's `index.exclude.v1` / `index.include.v1` policy this owner
+    /// captures under. Fixed for the mount: both settings require a daemon
+    /// restart, and the next mount re-proves every sealed roster against it.
+    pub(super) path_policy: IndexPathPolicyV1,
     /// Independent source-freshness authority. Ready/status probes clone this
     /// handle from the mounted map and never wait for scheduler build state.
     freshness_fence: SourceFreshnessFenceV1,
@@ -1205,6 +1209,8 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    /// A standalone owner under the path policy a fresh profile resolves.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn open(
         project_id: ProjectId,
         project_root: &Path,
@@ -1217,6 +1223,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             store_root,
             byte_pool,
             CodeIndexHintPolicyV1::default(),
+            crate::config::registry_default_index_path_policy(),
         )
     }
 
@@ -1226,6 +1233,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
@@ -1270,7 +1278,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        let freshness_fence = SourceFreshnessFenceV1::unverified(Arc::clone(&epoch));
+        let freshness_fence =
+            SourceFreshnessFenceV1::unverified(Arc::clone(&epoch), path_policy.clone());
         // Nothing is decoded or served until the retained owner proves the
         // durable generation belongs to this exact identity and its freshness
         // frontier still matches the worktree.
@@ -1282,6 +1291,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             repository_id,
             worktree_id,
             policy,
+            path_policy,
             freshness_fence,
             byte_pool,
             #[cfg(test)]
@@ -1774,6 +1784,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self
             .observe_generation_compatibility(&generation)
             .is_reusable()
+            || !self.roster_follows_path_policy(&generation)
         {
             return Ok(None);
         }
@@ -4076,6 +4087,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .filter(|file| {
                         remembered_dirty_paths
                             .is_none_or(|paths| !paths.contains(&file.logical_path))
+                            && self.row_follows_path_policy(file)
                     })
                     .map(|file| (file.logical_path.as_str(), file))
                     .collect::<BTreeMap<_, _>>()

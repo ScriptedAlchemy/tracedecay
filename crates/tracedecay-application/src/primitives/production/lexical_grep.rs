@@ -48,6 +48,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     ));
                 }
                 let project_root = self.source_runtime.project_root().to_path_buf();
+                let path_policy = self.source_runtime.path_policy().clone();
                 let query = GrepSearchQuery {
                     pattern: request.pattern.clone(),
                     fixed_strings: request.fixed_strings,
@@ -60,7 +61,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     context.request.deadline(),
                     context.request.cancellation(),
                     move |cancelled| {
-                        lexical_search_tree_with_cancel(&project_root, &query, || {
+                        lexical_search_tree_with_cancel(&project_root, &query, &path_policy, || {
                             cancelled.load(std::sync::atomic::Ordering::Acquire)
                         })
                     },

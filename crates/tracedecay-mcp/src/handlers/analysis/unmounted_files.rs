@@ -13,6 +13,7 @@ use tracedecay_contracts::retrieval::{
     UnmountedEcosystemStatusV1, UnmountedEcosystemV1, UnmountedFileV1, UnmountedFilesResultV1,
     UnmountedFilesSurfaceRequestV1,
 };
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::handlers::graph::graph_tool_completion;
@@ -31,6 +32,7 @@ const UNMOUNTED_FILES_MAX_LIMIT: usize = 2_000;
 #[hotpath::measure(future = true, label = "mcp.analysis.unmounted_files.total")]
 pub(super) async fn compute_unmounted_files(
     project_root: &Path,
+    path_policy: &IndexPathPolicyV1,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<GraphToolCompletionV1> {
@@ -45,11 +47,12 @@ pub(super) async fn compute_unmounted_files(
     let ecosystem_filter = request.ecosystem.as_deref().map(str::to_ascii_lowercase);
 
     let scan_project_root = project_root.to_path_buf();
+    let scan_path_policy = path_policy.clone();
     // The walk reads every candidate source file, so it runs on a blocking
     // worker rather than holding the async dispatch thread through thousands
     // of synchronous reads.
     let audit = hotpath::future!(
-        tokio::task::spawn_blocking(move || audit_project(&scan_project_root)),
+        tokio::task::spawn_blocking(move || audit_project(&scan_project_root, &scan_path_policy)),
         label = "mcp.analysis.unmounted_files.scan"
     )
     .await

@@ -31,7 +31,7 @@ use tracedecay_code_extraction::ts_provider;
 
 use crate::grep_search::MAX_INTERACTIVE_SOURCE_BYTES;
 use crate::source_walk::{forward_slash_relative, source_walk};
-use tracedecay_domain::repository_path_matches_scope;
+use tracedecay_domain::{IndexPathPolicyV1, repository_path_matches_scope};
 
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
@@ -257,6 +257,7 @@ pub fn search_tree(
     lang: Option<&str>,
     path_glob: Option<&str>,
     max_results: usize,
+    path_policy: &IndexPathPolicyV1,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError> {
     search_tree_scoped_with_cancel(
         project_root,
@@ -265,10 +266,12 @@ pub fn search_tree(
         path_glob,
         max_results,
         None,
+        path_policy,
         || false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "code_index.search.ast_grep_cancel")]
 pub fn search_tree_scoped_with_cancel<F>(
     project_root: &Path,
@@ -277,6 +280,7 @@ pub fn search_tree_scoped_with_cancel<F>(
     path_glob: Option<&str>,
     max_results: usize,
     scope_prefix: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
     is_cancelled: F,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError>
 where
@@ -308,7 +312,7 @@ where
         }
     }
 
-    let walker = source_walk(project_root, path_glob)
+    let walker = source_walk(project_root, path_glob, path_policy)
         .map_err(|error| AstGrepSearchError::InvalidGlob(error.glob))?;
 
     let mut result = AstGrepSearchResult::default();
@@ -543,6 +547,10 @@ mod tests {
         fs::write(dir.join(name), body).unwrap();
     }
 
+    fn no_exclusions() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap()
+    }
+
     #[test]
     fn pre_process_rewrites_named_and_anonymous_metavars() {
         // Named single/double/triple -> expando; positional `$1` untouched.
@@ -564,6 +572,7 @@ mod tests {
             None,
             50,
             None,
+            &no_exclusions(),
             || true,
         )
         .unwrap();
@@ -581,7 +590,15 @@ mod tests {
         fs::write(dir.path().join("oversized.rs"), oversized).unwrap();
         write(dir.path(), "tracked.rs", "fn tracked() { target(2); }\n");
 
-        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
+        let result = search_tree(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            None,
+            50,
+            &no_exclusions(),
+        )
+        .unwrap();
 
         assert_eq!(result.files_scanned, 1);
         assert_eq!(result.matches.len(), 1);
@@ -592,7 +609,15 @@ mod tests {
     fn unknown_explicit_lang_is_hard_error() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "fn f() {}\n");
-        let err = search_tree(dir.path(), "g($A)", Some("klingon"), None, 50).unwrap_err();
+        let err = search_tree(
+            dir.path(),
+            "g($A)",
+            Some("klingon"),
+            None,
+            50,
+            &no_exclusions(),
+        )
+        .unwrap_err();
         assert!(matches!(err, AstGrepSearchError::UnknownLang(_)));
     }
 
@@ -600,7 +625,7 @@ mod tests {
     fn empty_pattern_rejected() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
-            search_tree(dir.path(), "   ", None, None, 50).unwrap_err(),
+            search_tree(dir.path(), "   ", None, None, 50, &no_exclusions()).unwrap_err(),
             AstGrepSearchError::EmptyPattern
         ));
     }
@@ -616,7 +641,15 @@ mod tests {
         body.push_str("}\n");
         write(dir.path(), "dense.rs", &body);
 
-        let result = search_tree(dir.path(), "target($A)", Some("rust"), None, 1).unwrap();
+        let result = search_tree(
+            dir.path(),
+            "target($A)",
+            Some("rust"),
+            None,
+            1,
+            &no_exclusions(),
+        )
+        .unwrap();
 
         assert_eq!(result.matches.len(), 1);
         assert!(result.truncated);

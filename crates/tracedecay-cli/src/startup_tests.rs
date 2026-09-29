@@ -496,7 +496,6 @@ fn nested_inspection_commands_skip_agent_install_check() {
         &["branch", "list"][..],
         &["branch", "autotrack", "status"][..],
         &["channel"][..],
-        &["gitignore"][..],
         &["automation", "config", "get", "--json"][..],
     ];
 
@@ -517,7 +516,6 @@ fn nested_inspection_commands_skip_agent_install_check() {
 fn mutating_inspection_families_keep_full_startup_policy() {
     for args in [
         &["channel", "beta"][..],
-        &["gitignore", "on"][..],
         &["automation", "config", "enable"][..],
         &["automation", "config", "disable"][..],
         &["automation", "config", "set", "--timeout-secs", "60"][..],
