@@ -1475,8 +1475,15 @@ impl CSharpExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "attribute_list" {
-                    Self::visit_attribute_list_for_target(state, child, target_id);
+                match child.kind() {
+                    "attribute_list" => {
+                        Self::visit_attribute_list_for_target(state, child, target_id);
+                    }
+                    // `#if`/`#elif`/`#else` around an attribute nest its `attribute_list`.
+                    "preproc_if_in_attribute_list" | "preproc_elif" | "preproc_else" => {
+                        Self::extract_attributes_from_declaration(state, child, target_id);
+                    }
+                    _ => {}
                 }
                 if !cursor.goto_next_sibling() {
                     break;
