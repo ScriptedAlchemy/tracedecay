@@ -143,7 +143,7 @@ impl RecoveryCancelProbe {
 /// stage distinguishes a still-mounting owner from a finished publication
 /// that will never grow the missing slot, so a permanent composition error
 /// is not reported as endless retryable pre-admission.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ProjectRuntimePublicationStateV1 {
     /// Owner registration is still in progress, or no explicit terminal has
     /// been recorded yet.
@@ -153,6 +153,10 @@ pub enum ProjectRuntimePublicationStateV1 {
     Ready,
     /// Project-open publication failed. Missing owners stay missing.
     Failed,
+    /// Project-open publication stopped at a store held in its typed
+    /// reset-required state. Missing owners stay missing and answer this
+    /// refusal until the store is reset.
+    ResetRequired(Arc<tracedecay_contracts::ApplicationProblemDetailV1>),
 }
 
 /// Exact project-open publication attempt.
@@ -272,7 +276,11 @@ impl ProjectRuntime {
     /// like a missing runtime again instead of a finished failure.
     fn retain_after_reservation_release(&self) -> bool {
         self.has_components()
-            || matches!(self.publication, ProjectRuntimePublicationStateV1::Failed)
+            || matches!(
+                self.publication,
+                ProjectRuntimePublicationStateV1::Failed
+                    | ProjectRuntimePublicationStateV1::ResetRequired(_)
+            )
     }
 }
 
@@ -1322,7 +1330,7 @@ impl ProjectRuntimeRegistryV1 {
         let canonical = canonical_existing_identity(project_root).ok();
         let runtimes = self.lock_runtimes();
         runtime_for_lookup(&runtimes, project_root, canonical.as_deref())
-            .map(|runtime| runtime.publication)
+            .map(|runtime| runtime.publication.clone())
     }
 
     /// Begin mandatory owner publication for an exact registered root.
@@ -1385,7 +1393,7 @@ impl ProjectRuntimeRegistryV1 {
         let runtime = runtimes.get(project_root);
         (
             runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
-            runtime.map(|runtime| runtime.publication),
+            runtime.map(|runtime| runtime.publication.clone()),
             changed,
         )
     }
@@ -1393,6 +1401,19 @@ impl ProjectRuntimeRegistryV1 {
     /// Record terminal owner failure only for the attempt that is still current.
     pub fn mark_publication_failed(&self, attempt: &ProjectRuntimePublicationAttemptV1) -> bool {
         self.finish_publication(attempt, ProjectRuntimePublicationStateV1::Failed)
+    }
+
+    /// Record that the current attempt stopped at a store held reset-required;
+    /// every owner it left missing answers `refusal`.
+    pub fn mark_publication_reset_required(
+        &self,
+        attempt: &ProjectRuntimePublicationAttemptV1,
+        refusal: tracedecay_contracts::ApplicationProblemDetailV1,
+    ) -> bool {
+        self.finish_publication(
+            attempt,
+            ProjectRuntimePublicationStateV1::ResetRequired(Arc::new(refusal)),
+        )
     }
 
     /// Record successful mandatory owner publication for the current attempt.

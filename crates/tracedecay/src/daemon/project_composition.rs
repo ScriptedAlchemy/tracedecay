@@ -1734,11 +1734,21 @@ impl ProjectOpenInputs<'_> {
             mutation.mark_failed();
         }
         if core_retained {
+            let reset_refusal =
+                tracedecay_mcp::reset_required_context(&error).and_then(|(authority, _)| {
+                    tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
+                        &error,
+                        tracedecay_mcp::reset_required_command(&authority, None),
+                    )
+                });
             if let Some(attempt) = &activation.publication_attempt {
-                self.invocation
-                    .service
-                    .project_runtimes
-                    .mark_publication_failed(attempt);
+                let project_runtimes = &self.invocation.service.project_runtimes;
+                match &reset_refusal {
+                    Some(refusal) => {
+                        project_runtimes.mark_publication_reset_required(attempt, refusal.clone())
+                    }
+                    None => project_runtimes.mark_publication_failed(attempt),
+                };
             }
             if let Some(failed_full_server) = failed_full_server {
                 failed_full_server.revoke_project_server_responses();
@@ -1753,7 +1763,7 @@ impl ProjectOpenInputs<'_> {
             // A session store in its typed reset-required state keeps the
             // full upgrade refused until the operator resets it, so the
             // retained core serves the code index meanwhile.
-            if tracedecay_mcp::reset_required_context(&error).is_some() {
+            if reset_refusal.is_some() {
                 let code_index_status = self.activate_code_index(core);
                 self.log_phase(
                     "full_upgrade_reset_required",

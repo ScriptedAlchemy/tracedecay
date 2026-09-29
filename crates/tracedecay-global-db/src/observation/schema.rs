@@ -10,10 +10,18 @@ const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrem
 /// Marker proving `observations` was created by a binary that derives every
 /// provider's id on `tracedecay.observation.v1`. Recorded at creation. An
 /// existing store that already holds rows and lacks the marker keeps those
-/// rows unread: admission returns a typed reset instead of decoding them.
+/// rows unread: admission reports [`OBSERVATIONS_PREDATE_UNIFIED_IDENTITY`]
+/// instead of decoding them.
 const OBSERVATION_UNIFIED_IDENTITY_MIGRATION: &str = "observations-unified-identity-v1";
 
-const OBSERVATION_UNIFIED_IDENTITY_RESET_REASON: &str = "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts";
+/// The observation authority of a store written before the unified
+/// observation identity. The store's other authorities stay admissible; its
+/// session features are refused until the store is reset.
+pub(crate) const OBSERVATIONS_PREDATE_UNIFIED_IDENTITY: crate::registered::RefusedAuthorityV1 =
+    crate::registered::RefusedAuthorityV1 {
+        authority: "observations",
+        reason: "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts",
+    };
 
 /// Marker proving every `observation_repository_provenance` row references
 /// its repository capture through `observation_repository_captures` instead of
@@ -214,9 +222,12 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
         );";
 
+/// Installs the observation authority. Returns the refused authority, with
+/// the unified-identity marker and every observation-row rewrite skipped, when
+/// the store holds rows written before the unified identity.
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<Option<crate::registered::RefusedAuthorityV1>> {
     let table_preexisted = observation_table_exists(conn).await?;
     tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,
@@ -240,10 +251,7 @@ pub async fn ensure_observation_schema(
         }
     } else if !migration_recorded(conn, OBSERVATION_UNIFIED_IDENTITY_MIGRATION).await? {
         if observation_rows_exist(conn).await? {
-            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-                "observations",
-                OBSERVATION_UNIFIED_IDENTITY_RESET_REASON,
-            ));
+            return Ok(Some(OBSERVATIONS_PREDATE_UNIFIED_IDENTITY));
         }
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
@@ -263,7 +271,7 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -385,17 +393,35 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let Err(error) = reopen(&path).await else {
-            panic!("a store holding pre-unified Claude observations must be refused, not decoded");
-        };
-        let TraceDecayError::ResetRequired { authority, reason } = error else {
-            panic!("old observation rows must be a typed reset, got {error}");
-        };
-        assert_eq!(authority, "observations");
+        let (lease, owner) = reopen(&path)
+            .await
+            .expect("the store's other authorities stay admissible");
+        for refusal in [lease.reset_required(), owner.reset_required()] {
+            let Some(TraceDecayError::ResetRequired { authority, reason }) = refusal else {
+                panic!("old observation rows must be a typed reset, got {refusal:?}");
+            };
+            assert_eq!(authority, "observations");
+            assert_eq!(
+                reason,
+                "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts"
+            );
+        }
+        drop((lease, owner));
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM global_schema_migrations WHERE migration = ?1",
+                params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
+            )
+            .await
+            .unwrap();
+        let recorded: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(
-            reason,
-            "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts"
+            recorded, 0,
+            "a refused store never adopts the unified identity"
         );
+        drop(rows);
+        drop(conn);
 
         let conn = TestConnection::open(&path);
         let mut rows = conn

@@ -90,7 +90,7 @@ pub(super) async fn open_project_for_handshake(
         )?;
     }
     let configuration_database = Box::pin(
-        store_administration.registered_project_session_database(project_path, &store_layout),
+        store_administration.registered_project_configuration_database(project_path, &store_layout),
     )
     .await?;
     #[cfg(any(test, feature = "test-helpers"))]
