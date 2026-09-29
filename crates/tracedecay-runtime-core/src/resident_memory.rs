@@ -940,17 +940,39 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
-/// The Rust global allocator's release call, installed once by the composition
-/// root that chose the allocator. glibc's arenas are trimmed either way.
-static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<fn()> = OnceLock::new();
+/// The Rust global allocator's release calls, installed once by the
+/// composition root that chose the allocator.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessAllocatorReleaseV1 {
+    /// Return every pool worker's and the calling thread's freed pages.
+    pub release: fn(),
+    /// Return the calling thread's freed pages, including blocks other
+    /// threads freed into its heap. A thread-caching allocator hands those
+    /// back only when their owning thread next allocates or collects, which
+    /// an idle pool worker never does.
+    pub collect_calling_thread: fn(),
+}
 
-/// Install `release` as the call that returns the process allocator's freed
-/// pages to the kernel. The binary that selects a global allocator installs
-/// its release at startup; a second installation is refused.
-pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String> {
+/// glibc's arenas are trimmed whether or not a release is installed.
+static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<ProcessAllocatorReleaseV1> = OnceLock::new();
+
+/// Install the calls that return the process allocator's freed pages to the
+/// kernel. The binary that selects a global allocator installs them at
+/// startup; a second installation is refused.
+pub fn install_process_allocator_release_v1(
+    release: ProcessAllocatorReleaseV1,
+) -> Result<(), String> {
     PROCESS_ALLOCATOR_RELEASE_V1
         .set(release)
         .map_err(|_| "the process allocator release is already installed".to_owned())
+}
+
+/// Return the calling thread's freed allocator pages; a no-op without an
+/// installed release.
+pub fn collect_calling_thread_allocator_v1() {
+    if let Some(release) = PROCESS_ALLOCATOR_RELEASE_V1.get() {
+        (release.collect_calling_thread)();
+    }
 }
 
 /// Return freed-but-retained allocator pages to the kernel.
@@ -970,7 +992,7 @@ pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
     measured_trim(|| {
         let released = PROCESS_ALLOCATOR_RELEASE_V1
             .get()
-            .map(|release| release())
+            .map(|release| (release.release)())
             .is_some();
         glibc_trim() || released
     })

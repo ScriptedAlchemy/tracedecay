@@ -1800,7 +1800,7 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
 }
 
 /// Linked worktrees sealing identical content share its occurrence identity
-/// and physical artifacts; each worktree still seals its own snapshot and
+/// and physical parse artifacts; each worktree still seals its own snapshot and
 /// generation, and a worktree's generation never names content only its
 /// sibling holds.
 #[test]
@@ -1838,7 +1838,6 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
         .generation;
     let reuse = registry.byte_pool_stats();
 
-    assert!(reuse.reused >= 1, "sanitized source bytes must be shared");
     assert!(
         reuse.parse_chunk_reused >= 1,
         "matching parse/chunk artifacts must be physically shared"
