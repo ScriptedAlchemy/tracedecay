@@ -545,23 +545,37 @@ mod tests {
 
     #[test]
     fn same_range_conflict_requires_exact_handle() {
-        let conflict = FeedbackProximityRelationV1::ConfirmedConflict {
-            conflict_handle: FeedbackProximityConflictHandleV1 {
-                common_base_revision: CommitId::new("commit.base").expect("base"),
-                left_head_revision: CommitId::new("commit.left").expect("left"),
-                right_head_revision: CommitId::new("commit.right").expect("right"),
-                evidence_digest: digest('b'),
-                differences: vec![FeedbackProximityConflictDifferenceV1 {
-                    file: FileOccurrenceId::new("file.proximity").expect("file"),
-                    span: SourceSpan {
-                        start_byte: 4,
-                        end_byte: 12,
-                    },
-                    difference_digest: digest('c'),
-                }],
-            },
+        let conflict_handle = FeedbackProximityConflictHandleV1 {
+            common_base_revision: CommitId::new("commit.base").expect("base"),
+            left_head_revision: CommitId::new("commit.left").expect("left"),
+            right_head_revision: CommitId::new("commit.right").expect("right"),
+            evidence_digest: digest('b'),
+            differences: vec![FeedbackProximityConflictDifferenceV1 {
+                file: FileOccurrenceId::new("file.proximity").expect("file"),
+                span: SourceSpan {
+                    start_byte: 4,
+                    end_byte: 12,
+                },
+                difference_digest: digest('c'),
+            }],
         };
-        encounter(conflict).validate().expect("confirmed conflict");
+        let mut without_differences = conflict_handle.clone();
+        without_differences.differences.clear();
+
+        assert_eq!(
+            encounter(FeedbackProximityRelationV1::ConfirmedConflict { conflict_handle })
+                .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            encounter(FeedbackProximityRelationV1::ConfirmedConflict {
+                conflict_handle: without_differences,
+            })
+            .validate(),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity conflict differences",
+            })
+        );
     }
 
     #[test]
@@ -578,18 +592,40 @@ mod tests {
 
     #[test]
     fn shared_code_candidate_requires_clone_handle() {
-        let shared = encounter(FeedbackProximityRelationV1::SharedCodeCandidate {
-            warning_class: ProximityWarningClassV1::SharedDependency,
-            clone_handle: FeedbackProximityCloneHandleV1 {
-                source_generation: CodeGenerationId::new("generation.proximity")
-                    .expect("generation"),
-                source_symbol: SymbolOccurrenceId::new("symbol.proximity").expect("symbol"),
-                retrieval_anchor_ids: vec![
-                    RetrievalAnchorId::new("anchor.proximity").expect("anchor"),
-                ],
-            },
-        });
-        shared.validate().expect("shared-code candidate");
+        let clone_handle = FeedbackProximityCloneHandleV1 {
+            source_generation: CodeGenerationId::new("generation.proximity").expect("generation"),
+            source_symbol: SymbolOccurrenceId::new("symbol.proximity").expect("symbol"),
+            retrieval_anchor_ids: vec![RetrievalAnchorId::new("anchor.proximity").expect("anchor")],
+        };
+        let mut anchorless = clone_handle.clone();
+        anchorless.retrieval_anchor_ids.clear();
+        let shared = |warning_class, clone_handle| {
+            encounter(FeedbackProximityRelationV1::SharedCodeCandidate {
+                warning_class,
+                clone_handle,
+            })
+            .validate()
+        };
+
+        assert_eq!(
+            shared(
+                ProximityWarningClassV1::SharedDependency,
+                clone_handle.clone()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            shared(ProximityWarningClassV1::SharedDependency, anchorless),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity clone anchors",
+            })
+        );
+        assert_eq!(
+            shared(ProximityWarningClassV1::SameFile, clone_handle),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity shared-code relation",
+            })
+        );
     }
 
     #[test]
@@ -597,10 +633,11 @@ mod tests {
         let denied = FeedbackProximityReadResultV1::Denied {
             observed_at: UtcMicros(20),
         };
-        denied.validate().expect("denied result");
-        let encoded = serde_json::to_value(denied).expect("serialize denied result");
-        assert!(encoded.get("participants").is_none());
-        assert!(encoded.get("observations").is_none());
+        assert_eq!(denied.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_value(denied).expect("serialize denied result"),
+            serde_json::json!({ "state": "denied", "observed_at": 20 })
+        );
     }
 
     #[test]
@@ -618,17 +655,49 @@ mod tests {
         });
         shared.coverage = ProximityCoverageV1::Partial;
         let result = FeedbackProximityReadResultV1::Partial {
-            page: page(vec![shared]),
+            page: page(vec![shared.clone()]),
             omissions: vec![FeedbackProximityOmissionV1::CloneCoveragePartial],
         };
-        result.validate().expect("partial clone coverage");
+        assert_eq!(result.validate(), Ok(()));
+        let without_omission = FeedbackProximityReadResultV1::Partial {
+            page: page(vec![shared]),
+            omissions: Vec::new(),
+        };
+        assert_eq!(
+            without_omission.validate(),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity partial omissions",
+            })
+        );
     }
 
     #[test]
     fn complete_zero_encounters_is_an_explicit_state() {
-        let result = FeedbackProximityReadResultV1::CompleteZero {
+        let zero = FeedbackProximityReadResultV1::CompleteZero {
             page: page(Vec::new()),
         };
-        result.validate().expect("complete zero");
+        assert_eq!(zero.validate(), Ok(()));
+        let empty_complete = FeedbackProximityReadResultV1::Complete {
+            page: page(Vec::new()),
+        };
+        assert_eq!(
+            empty_complete.validate(),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity complete result",
+            })
+        );
+        let nonempty_zero = FeedbackProximityReadResultV1::CompleteZero {
+            page: page(vec![encounter(
+                FeedbackProximityRelationV1::OverlappingEdit {
+                    warning_class: ProximityWarningClassV1::SameFile,
+                },
+            )]),
+        };
+        assert_eq!(
+            nonempty_zero.validate(),
+            Err(ApplicationContractError::Inconsistent {
+                field: "feedback proximity complete-zero result",
+            })
+        );
     }
 }

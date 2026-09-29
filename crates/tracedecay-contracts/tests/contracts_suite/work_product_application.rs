@@ -22,13 +22,13 @@ use tracedecay_contracts::{
     WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId, ManifestDigest,
-    MilestoneId, PolicyRevisionId, ProjectId, ProjectionGenerationId, RepositoryId,
-    RetrievalAnchorId, SourceStoreId, TaskId, UserProfileId, UtcMicros, WorkCommandId,
-    WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
-    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventEvidenceV1,
-    WorkProductEventId, WorkProductEventInputV1, WorkProductEventPayloadV1,
-    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
+    ActorId, BrainId, CatalogGenerationId, ConfigurationRevisionId, CursorBindingMismatchV1,
+    InitiativeId, ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, ProjectionGenerationId,
+    RepositoryId, RetrievalAnchorId, SourceStoreId, TaskId, UserProfileId, UtcMicros,
+    WorkCommandId, WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1,
+    WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProductEventEvidenceV1, WorkProductEventId, WorkProductEventInputV1,
+    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
     WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1, WorkProjectionSequenceV1,
     WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkTaskEvidenceCoverageV1,
     WorkTaskEvidenceV1, WorktreeId,
@@ -590,13 +590,11 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
             } => WorkGraphReadV1::Evolution {
                 authorized_scope: scope,
                 selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
-                timeline: if self.paginate.load(Ordering::Relaxed) && request.continuation.is_none()
-                {
-                    WorkGraphTimelineV1::partial(
-                        vec![entry(1, from_valid_at, from_valid_at, request.observed_at)],
-                        OpaqueCursor::new("cursor.work.timeline.next").unwrap(),
-                    )
-                    .unwrap()
+                timeline: if self.paginate.load(Ordering::Relaxed) {
+                    WorkGraphTimelineV1::page(
+                        request,
+                        timeline_window(from_valid_at, request.observed_at),
+                    )?
                 } else {
                     WorkGraphTimelineV1::complete(vec![
                         entry(1, from_valid_at, from_valid_at, request.observed_at),
@@ -611,24 +609,53 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
             } => WorkGraphReadV1::Forensic {
                 authorized_scope: scope,
                 selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
-                timeline: WorkGraphTimelineV1::complete(vec![
-                    entry(
-                        1,
-                        UtcMicros(from_observed_at.0 - 1),
-                        from_observed_at,
-                        request.observed_at,
-                    ),
-                    entry(
-                        2,
-                        UtcMicros(through_observed_at.0 - 1),
-                        through_observed_at,
-                        request.observed_at,
-                    ),
-                ])
-                .unwrap(),
+                timeline: if self.paginate.load(Ordering::Relaxed) {
+                    WorkGraphTimelineV1::page(
+                        request,
+                        timeline_window(from_observed_at, request.observed_at),
+                    )?
+                } else {
+                    WorkGraphTimelineV1::complete(vec![
+                        entry(
+                            1,
+                            UtcMicros(from_observed_at.0 - 1),
+                            from_observed_at,
+                            request.observed_at,
+                        ),
+                        entry(
+                            2,
+                            UtcMicros(through_observed_at.0 - 1),
+                            through_observed_at,
+                            request.observed_at,
+                        ),
+                    ])
+                    .unwrap()
+                },
             },
         })
     }
+}
+
+/// Graph versions a paging read's window holds: two more than one page.
+const TIMELINE_WINDOW_VERSIONS: u64 = 514;
+
+/// Every published version in a timeline window, in graph-version order, with
+/// `valid_at = start + version % 11`: timeline order is not graph-version
+/// order, so a continuation keyed on the graph version alone would skip.
+fn timeline_window(start: UtcMicros, projected_at: UtcMicros) -> Vec<WorkGraphVersionEntryV1> {
+    (1..=TIMELINE_WINDOW_VERSIONS)
+        .map(|version| {
+            let at = UtcMicros(start.0 + i64::try_from(version % 11).unwrap());
+            entry(version, at, at, projected_at)
+        })
+        .collect()
+}
+
+fn graph_versions(read: &WorkGraphReadV1) -> Vec<u64> {
+    read.entries()
+        .iter()
+        .map(|entry| entry.verified_version().graph_version().get())
+        .collect()
 }
 
 #[test]
@@ -789,31 +816,95 @@ fn cancellation_and_deadline_fail_before_owner_or_topology_io() {
 }
 
 #[test]
-fn timeline_continuation_is_bounded_and_reauthorized_on_every_page() {
+fn timeline_continuation_is_bound_to_its_request_and_resumes_in_timeline_order() {
     let graph = RecordingGraphPort::default();
     graph.paginate.store(true, Ordering::Relaxed);
     let owner = RegisteredOwner::default();
     let service = WorkProductReadServiceV1::new(&graph, &owner, binding());
-    let mut first_request = WorkGraphReadRequestV1::evolution(
+    let request = WorkGraphReadRequestV1::evolution(
         repository_selection(),
         UtcMicros(10),
         UtcMicros(20),
         UtcMicros(100),
     )
     .unwrap();
-    let first = service
-        .read_graph(&context(true), first_request.clone())
-        .unwrap();
-    let WorkGraphReadV1::Evolution { timeline, .. } = first else {
+    let first = service.read_graph(&context(true), request.clone()).unwrap();
+    let WorkGraphReadV1::Evolution { timeline, .. } = &first else {
         panic!("expected evolution page");
     };
-    assert_eq!(timeline.entries().len(), 1);
-    first_request.continuation = timeline.continuation().cloned();
+    let continuation = timeline.continuation().cloned().expect("a capped page");
+    let first_versions = graph_versions(&first);
+    assert_eq!(first_versions.len(), 512);
+    assert_eq!(first_versions[..3], [11, 22, 33]);
+    assert_eq!(first_versions[511], 483);
 
-    let second = service.read_graph(&context(true), first_request).unwrap();
-    assert_eq!(second.entries().len(), 2);
-    assert_eq!(owner.selections.lock().unwrap().len(), 2);
-    assert_eq!(graph.calls.load(Ordering::Relaxed), 2);
+    let replay = |request: WorkGraphReadRequestV1| {
+        service.read_graph(
+            &context(true),
+            WorkGraphReadRequestV1 {
+                continuation: Some(continuation.clone()),
+                ..request
+            },
+        )
+    };
+    let refused = |parameter| {
+        Err(WorkProductApplicationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged { parameter },
+        ))
+    };
+    let evolution = |from, through, observed_at| {
+        WorkGraphReadRequestV1::evolution(
+            repository_selection(),
+            UtcMicros(from),
+            UtcMicros(through),
+            UtcMicros(observed_at),
+        )
+        .unwrap()
+    };
+    assert_eq!(replay(evolution(11, 20, 100)), refused("from_valid_at"));
+    assert_eq!(replay(evolution(10, 19, 100)), refused("through_valid_at"));
+    assert_eq!(replay(evolution(10, 20, 99)), refused("observed_at"));
+    assert_eq!(
+        replay(
+            WorkGraphReadRequestV1::forensic(
+                repository_selection(),
+                UtcMicros(10),
+                UtcMicros(20),
+                UtcMicros(100),
+            )
+            .unwrap()
+        ),
+        refused("mode")
+    );
+    for foreign in ["work-product-graph-version:512", "bc1.7b7d"] {
+        assert_eq!(
+            service.read_graph(
+                &context(true),
+                WorkGraphReadRequestV1 {
+                    continuation: Some(OpaqueCursor::new(foreign).unwrap()),
+                    ..request.clone()
+                },
+            ),
+            Err(WorkProductApplicationErrorV1::CursorRefused(
+                CursorBindingMismatchV1::Foreign
+            ))
+        );
+    }
+
+    let second = replay(request).unwrap();
+    let WorkGraphReadV1::Evolution { timeline, .. } = &second else {
+        panic!("expected evolution page");
+    };
+    assert!(timeline.continuation().is_none());
+    assert_eq!(graph_versions(&second), [494, 505]);
+    let mut every_version = first_versions;
+    every_version.extend(graph_versions(&second));
+    every_version.sort_unstable();
+    assert_eq!(
+        every_version,
+        (1..=TIMELINE_WINDOW_VERSIONS).collect::<Vec<_>>()
+    );
+    assert_eq!(graph.calls.load(Ordering::Relaxed), 8);
 }
 
 #[test]

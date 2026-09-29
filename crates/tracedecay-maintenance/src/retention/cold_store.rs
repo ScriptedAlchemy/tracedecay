@@ -1,4 +1,7 @@
-//! Bounded retention over profile-sharded stores that are not mounted.
+//! Bounded orphan-store collection and incident-debris sweeping over
+//! profile-sharded stores. Code-generation retention of registered projects,
+//! mounted or not, is a unit of the maintenance tick's store window
+//! (`store_maintenance::run_registered_code_generation_retention`).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,7 +55,7 @@ impl Default for ColdStorePageReportV1 {
     }
 }
 
-/// Applies one bounded retention page to unmounted profile stores.
+/// Applies one bounded orphan and debris page to profile stores.
 #[hotpath::measure(label = "maintenance.cold_store.page", future = true)]
 pub async fn run_cold_store_page(
     profile_root: &Path,

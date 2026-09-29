@@ -306,17 +306,11 @@ async fn fact_store_reason_returns_facts_that_name_every_entity() {
         observed_hit(&first[0]),
         connection(RELEASE_FACT, "project", 750_000, &["holographic", "memory"])
     );
-    assert_eq!(
-        including_tentative["next_after"]["score_millionths"],
-        750_000
-    );
-    assert_eq!(
-        including_tentative["next_after"]["fact_id"],
-        first[0]["fact"]["fact_id"]
-    );
-    assert_eq!(
-        including_tentative["next_after"]["updated_at"],
-        first[0]["fact"]["telemetry"]["updated_at"]
+    assert!(
+        including_tentative["next_after"]
+            .as_str()
+            .is_some_and(|cursor| cursor.starts_with("bc1.")),
+        "opaque continuation: {including_tentative}"
     );
 
     let second = reason_payload(

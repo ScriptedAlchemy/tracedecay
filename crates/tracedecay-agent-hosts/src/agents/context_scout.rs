@@ -1322,6 +1322,9 @@ pub enum ContextScoutDurableStartupOutcomeV1 {
         entries: Vec<ContextScoutDurableQueueEntryV1>,
         truncated: bool,
     },
+    /// The stored document predated delivery provenance. Startup replaced it
+    /// with an empty current document and did not replay its receipts.
+    Reset,
     Unavailable,
 }
 
@@ -1464,12 +1467,18 @@ impl<M> ContextScoutDurableRuntimeV1<M> {
         &mut self,
         startup: &ContextScoutDurableStartupOutcomeV1,
     ) -> Result<(), ContextScoutErrorV1> {
-        let ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } = startup else {
-            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        let entries = match startup {
+            ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } => {
+                if *truncated {
+                    return Err(ContextScoutErrorV1::CapacityExceeded);
+                }
+                entries
+            }
+            ContextScoutDurableStartupOutcomeV1::Reset => return Ok(()),
+            ContextScoutDurableStartupOutcomeV1::Unavailable => {
+                return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+            }
         };
-        if *truncated {
-            return Err(ContextScoutErrorV1::CapacityExceeded);
-        }
         for entry in entries {
             entry.validate()?;
             self.coalescer.restore(entry.work)?;
@@ -2412,6 +2421,7 @@ mod tests {
             .await
         {
             ContextScoutDurableStartupOutcomeV1::Ready { entries, .. } => entries,
+            ContextScoutDurableStartupOutcomeV1::Reset => Vec::new(),
             ContextScoutDurableStartupOutcomeV1::Unavailable => {
                 panic!("durable store should be readable")
             }

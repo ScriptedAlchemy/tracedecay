@@ -345,7 +345,7 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
         (
             "tracedecay_configuration_audit",
             ApplicationSurfaceOperation::ConfigurationAudit,
-            json!({"after_event_id": null, "limit": 10}),
+            json!({"cursor": null, "limit": 10}),
         ),
     ];
 

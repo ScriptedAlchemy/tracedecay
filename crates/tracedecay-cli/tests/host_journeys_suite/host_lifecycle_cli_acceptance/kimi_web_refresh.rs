@@ -284,7 +284,13 @@ fn update_plugin_refreshes_the_installed_kimi_plugin_through_kimi_web() {
         doctor.contains("Kimi Code CLI managed plugin matches its staged source"),
         "{doctor}"
     );
-    assert!(!doctor.contains("pending operator action"), "{doctor}");
+    // No daemon listens here, so `daemon_unavailable` is the one step left.
+    assert!(!doctor.contains("open Kimi Code and run"), "{doctor}");
+    assert!(
+        doctor.contains("daemon_unavailable: no TraceDecay daemon is listening")
+            && doctor.contains("1 pending operator action(s), "),
+        "{doctor}"
+    );
 }
 
 #[test]

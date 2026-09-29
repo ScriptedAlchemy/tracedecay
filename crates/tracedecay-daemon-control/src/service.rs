@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use sha2::Digest;
 
+use tracedecay_daemon_identity::DAEMON_AUTHORITY_UNAVAILABLE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -515,39 +516,77 @@ impl DaemonServiceState {
     }
 }
 
-pub fn unavailable_daemon_socket_advice(
+/// The literal connect failure for `socket_path`, then the managed service as
+/// observed on disk. They are separate facts: `TRACEDECAY_DAEMON_SOCKET` can
+/// name a socket the installed service never serves.
+pub fn unavailable_daemon_socket_message(profile: &ProfileRoot, socket_path: &Path) -> String {
+    let named_by =
+        if std::env::var_os(SOCKET_ENV).is_some_and(|path| Path::new(&path) == socket_path) {
+            format!(" named by {SOCKET_ENV}")
+        } else {
+            String::new()
+        };
+    format!(
+        "TraceDecay daemon socket '{}'{named_by} is not available. {}",
+        socket_path.display(),
+        observed_service_unit(profile, socket_path)
+    )
+}
+
+/// Completes a missing-authority refusal with the advice for `socket_path`,
+/// read from the boundary profile's managed service, so a held daemon is named
+/// as held rather than as one to start. Every other error is returned as is.
+pub fn with_unavailable_daemon_advice(
     profile: &ProfileRoot,
     socket_path: &Path,
-    state: Option<DaemonServiceState>,
-) -> String {
-    match state {
-        Some(DaemonServiceState::RunningEnabled | DaemonServiceState::RunningDisabled) => {
-            format!(
-                "The unit reports running, but socket '{}' is not available. Check `tracedecay daemon status`.",
-                socket_path.display()
+    error: TraceDecayError,
+) -> TraceDecayError {
+    match error.project_route_context() {
+        Some((code, true, detail)) if code == DAEMON_AUTHORITY_UNAVAILABLE => {
+            TraceDecayError::project_route(
+                code,
+                true,
+                format!("{detail} {}", observed_service_unit(profile, socket_path)),
             )
         }
-        Some(state) => state.lifecycle_operator_advice(),
-        None => match installed_service_unit_present(profile) {
-            Ok(true) => format!(
-                "TraceDecay daemon unit is installed but socket '{}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
-                socket_path.display()
-            ),
-            Ok(false) => {
-                "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
-                    .to_string()
-            }
-            Err(_) => "This client cannot see whether a managed TraceDecay daemon service is installed. Check `tracedecay daemon status` before starting or installing a daemon."
-                .to_string(),
-        },
+        _ => error,
     }
 }
 
-/// Unit-file presence only. Connect-path diagnosis must not spawn `systemctl`,
-/// which races tests that fake PATH and is slower than a socket miss.
-fn installed_service_unit_present(profile: &ProfileRoot) -> Result<bool> {
-    let service_path = service_unit_path(profile)?;
-    service_unit_exists(&service_path)
+/// Unit-file observation only. Connect-path diagnosis must not spawn
+/// `systemctl`, which races tests that fake PATH and is slower than a socket
+/// miss.
+fn observed_service_unit(profile: &ProfileRoot, socket_path: &Path) -> String {
+    let unit = service_unit_path(profile).and_then(|service_path| {
+        if service_unit_exists(&service_path)? {
+            Ok(Some((read_service_unit(&service_path)?, service_path)))
+        } else {
+            Ok(None)
+        }
+    });
+    match unit {
+        Err(error) => format!(
+            "This client cannot see whether a managed TraceDecay daemon service is installed ({error}). Check `tracedecay daemon status` before starting or installing a daemon."
+        ),
+        Ok(None) => "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+            .to_string(),
+        Ok(Some((unit_text, service_path))) => {
+            let served = socket_path_from_unit_text(&unit_text)
+                .unwrap_or_else(|| default_socket_path_for_profile(profile.data_dir()));
+            if served == socket_path {
+                format!(
+                    "The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+                    service_path.display()
+                )
+            } else {
+                format!(
+                    "The managed TraceDecay daemon service is installed at '{}' and serves '{}', not this socket.",
+                    service_path.display(),
+                    served.display()
+                )
+            }
+        }
+    }
 }
 
 impl DaemonServiceSpec {

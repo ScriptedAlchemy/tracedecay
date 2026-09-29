@@ -10,11 +10,19 @@ fn native_record_identity_is_stable_across_json_formatting() {
         r#"{ "message": { "content": "redacted fixture" }, "role": "assistant" }"#,
     )
     .unwrap();
+    let changed: Value =
+        serde_json::from_str(r#"{"role":"assistant","message":{"content":"changed fixture"}}"#)
+            .unwrap();
+    let compact_id = observation_native_record_id("session-redacted", &compact).unwrap();
     assert_eq!(
-        observation_native_record_id("session-redacted", &compact)
-            .unwrap()
-            .as_str(),
+        compact_id.as_str(),
         observation_native_record_id("session-redacted", &spaced)
+            .unwrap()
+            .as_str()
+    );
+    assert_ne!(
+        compact_id.as_str(),
+        observation_native_record_id("session-redacted", &changed)
             .unwrap()
             .as_str()
     );

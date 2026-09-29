@@ -284,9 +284,10 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const gaps: JourneyGap[] = [];
   const spawnEvents: JourneyEvent[] = [];
 
-  // Tool calls and pull requests the temporal read served for every lane, at
-  // the time the host recorded them. They share the transcript's message
-  // identity, so the selected transcript never draws the same record twice.
+  // Tool calls, pull requests, and managed test runs the temporal read served
+  // for every lane, at the time they were recorded. Transcript records share
+  // the transcript's message identity, so the selected transcript never draws
+  // the same record twice.
   const streamEvents: JourneyEvent[] = [];
   const streamed = new Set<string>();
   // Tool calls by the host's own tool-use id. A fork or an edit binds to one
@@ -307,26 +308,55 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   for (const event of temporal.events) {
     const laneId = keyOf(event.provider, event.session_id);
     if (!drafts.has(laneId)) continue;
-    const id = `msg:${laneId}:${event.message_id}`;
-    if (streamed.has(id)) continue;
-    streamed.add(id);
-    const toolUseId = event.tool_use_id?.trim() || null;
-    const pullRequest = event.kind === 'pull_request';
-    const label = event.label ?? (pullRequest ? 'reference unrecorded' : 'tool unrecorded');
-    streamEvents.push({
-      id,
-      laneId,
-      kind: pullRequest ? 'pull_request' : 'tool_call',
-      time: event.recorded_at,
-      sequence: 0,
-      grade: 'exact',
-      source: 'recorded_event',
-      label,
-      detail: pullRequest ? label : toolUseId === null ? null : `tool use ${toolUseId}`,
-      ref: event.message_id,
-    });
-    if (!pullRequest && toolUseId !== null) {
-      anchorToolCall(laneId, { eventId: id, toolUseId, label, time: event.recorded_at });
+    const recorded = { laneId, time: event.recorded_at, sequence: 0, grade: 'exact', source: 'recorded_event' } as const;
+    switch (event.kind) {
+      case 'test_run': {
+        const outcome = event.outcome ?? null;
+        streamEvents.push({
+          ...recorded,
+          id: `test:${laneId}:${event.operation_id}`,
+          kind: 'test_run',
+          label: outcome
+            ? `${outcome.passed} passed · ${outcome.failed} failed · ${outcome.ignored} ignored`
+            : 'no outcome recorded',
+          detail: outcome
+            ? [outcome.termination, outcome.exit_code == null ? null : `exit ${outcome.exit_code}`]
+                .filter(Boolean)
+                .join(' · ')
+            : `run ${event.operation_id} started; no outcome recorded`,
+          ref: event.operation_id,
+        });
+        break;
+      }
+      case 'pull_request':
+      case 'tool_call': {
+        const id = `msg:${laneId}:${event.message_id}`;
+        if (streamed.has(id)) break;
+        streamed.add(id);
+        if (event.kind === 'pull_request') {
+          const label = event.label ?? 'reference unrecorded';
+          streamEvents.push({ ...recorded, id, kind: 'pull_request', label, detail: label, ref: event.message_id });
+          break;
+        }
+        const toolUseId = event.tool_use_id?.trim() || null;
+        const label = event.label ?? 'tool unrecorded';
+        streamEvents.push({
+          ...recorded,
+          id,
+          kind: 'tool_call',
+          label,
+          detail: toolUseId === null ? null : `tool use ${toolUseId}`,
+          ref: event.message_id,
+        });
+        if (toolUseId !== null) {
+          anchorToolCall(laneId, { eventId: id, toolUseId, label, time: event.recorded_at });
+        }
+        break;
+      }
+      default: {
+        const exhaustive: never = event;
+        throw new Error(`unknown recorded event: ${JSON.stringify(exhaustive)}`);
+      }
     }
   }
   // A call the host recorded without a time is not served; the selected

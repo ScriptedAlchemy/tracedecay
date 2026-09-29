@@ -188,6 +188,10 @@ mod tests {
         assert!(parse_rfc3339_timestamp("2026-01-01T00:00:00+0200").is_none());
         assert!(parse_rfc3339_timestamp("2026-01-01T00:00:00Zjunk").is_none());
         assert!(parse_rfc3339_timestamp("2026-01-01T00:00:00.Z").is_none());
+        assert_eq!(
+            parse_rfc3339_timestamp("2026-01-01T00:00:00+02:00"),
+            Some(1_767_218_400)
+        );
     }
 
     #[test]
@@ -209,6 +213,7 @@ mod tests {
         assert!(parse_rfc3339_timestamp("1969-12-31T23:59:59Z").is_none());
         assert!(parse_rfc3339_timestamp("bad").is_none());
         assert!(parse_rfc3339_timestamp("").is_none());
+        assert_eq!(parse_rfc3339_timestamp("1970-01-01T00:00:00Z"), Some(0));
     }
 
     #[test]
@@ -257,5 +262,9 @@ mod tests {
         assert!(parse_cursor_human_timestamp("Jun 32, 2026, 9:11 AM (UTC+2)").is_none());
         assert!(parse_cursor_human_timestamp("Jun 10, 2026, 13:11 PM (UTC+2)").is_none());
         assert!(parse_cursor_human_timestamp("Jun 10, 2026, 9:11 AM (GMT+2)").is_none());
+        assert_eq!(
+            parse_cursor_human_timestamp("Jun 10, 2026, 9:11 AM (UTC+2)"),
+            Some(1_781_075_460)
+        );
     }
 }

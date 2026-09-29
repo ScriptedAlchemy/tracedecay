@@ -70,7 +70,8 @@ use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
     CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, PhysicalCodeArtifactPoolStatsV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, ComponentRevision, ContentDigest, FileOccurrenceId, FreshnessCompatibilityV1,
@@ -762,7 +763,7 @@ fn ingest_artifact(
     let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
         .map_err(|error| format!("create lexical artifact: {error}"))?;
     let mut progress = builder
-        .progress()
+        .progress(&UninterruptibleCodeIndexControlV1)
         .map_err(|error| format!("read artifact progress: {error}"))?;
     // The daemon offers a bounded window and lets the builder's own ledger
     // pick the admissible prefix. Fixed chunking only happens to fit the

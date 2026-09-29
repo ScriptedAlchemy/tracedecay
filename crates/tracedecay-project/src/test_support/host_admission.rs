@@ -568,6 +568,10 @@ impl HostAdmissionTestRuntimeV1 {
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "seed registered session message fixture".to_owned(),
+                message: error.to_string(),
+            })?
             .ok_or_else(|| TraceDecayError::Database {
                 operation: "seed registered session message fixture".to_owned(),
                 message: format!(
@@ -596,10 +600,13 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
     ) -> Result<Option<tracedecay_sessions::runtime::SessionRecord>> {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .get_session(provider, session_id)
-            .await)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "load registered session".to_owned(),
+                message: error.to_string(),
+            })
     }
 
     #[doc(hidden)]

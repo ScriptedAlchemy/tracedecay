@@ -1283,10 +1283,12 @@ fn narrow_pending_read_skips_unrelated_corrupt_current_object_but_writer_does_no
     .unwrap();
     let mut transaction = connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    assert!(
+    assert_eq!(
         ExternalSourceExecutor::default()
             .execute_projection_write(&savepoint, &projection)
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+        "Invalid parameter name: external source current object names a mutation absent from history",
         "a cold writer must still fully validate durable current state"
     );
 }
@@ -1470,7 +1472,13 @@ fn failed_source_cas_discards_verified_cache() {
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        assert!(writer.execute_write(&savepoint, &stale).is_err());
+        assert_eq!(
+            writer
+                .execute_write(&savepoint, &stale)
+                .unwrap_err()
+                .to_string(),
+            "Invalid parameter name: external source frontier compare-and-set failed"
+        );
     }
     connection
         .execute(
@@ -1482,8 +1490,12 @@ fn failed_source_cas_discards_verified_cache() {
         .unwrap();
     let mut transaction = connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    assert!(
-        writer.execute_write(&savepoint, &successor).is_err(),
+    assert_eq!(
+        writer
+            .execute_write(&savepoint, &successor)
+            .unwrap_err()
+            .to_string(),
+        "Invalid parameter name: external source current object names a mutation absent from history",
         "failed CAS must discard the cache so the next write validates durable rows"
     );
 }
@@ -1521,8 +1533,12 @@ fn external_commit_invalidates_verified_cache() {
 
     let mut transaction = writer_connection.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    assert!(
-        writer.execute_write(&savepoint, &successor).is_err(),
+    assert_eq!(
+        writer
+            .execute_write(&savepoint, &successor)
+            .unwrap_err()
+            .to_string(),
+        "Invalid parameter name: external source current object names a mutation absent from history",
         "SQLite data_version changes must invalidate connection-local verified state"
     );
 }
@@ -1561,10 +1577,12 @@ fn reopened_executor_fully_validates_historical_current_rows() {
     let mut reopened = rusqlite::Connection::open(&path).unwrap();
     let mut transaction = reopened.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
-    assert!(
+    assert_eq!(
         ExternalSourceExecutor::default()
             .execute_write(&savepoint, &successor)
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+        "Invalid parameter name: external source current object names a mutation absent from history",
         "a reopened writer must not inherit any prior process verification"
     );
 }

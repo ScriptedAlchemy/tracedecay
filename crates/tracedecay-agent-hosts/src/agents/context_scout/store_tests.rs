@@ -782,7 +782,7 @@ async fn recent_is_current_and_protected_session_scoped() {
 }
 
 #[tokio::test]
-async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it() {
+async fn legacy_delivery_provenance_resets_without_replaying_receipts() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];
     let delivered = entry(project_id, 1);
@@ -803,8 +803,9 @@ async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it(
         "receipts": [receipt],
         "feedback": [feedback],
     });
+    let legacy_json = legacy.to_string();
     database
-        .set_metadata("agents.context-scout.durable.v1", &legacy.to_string())
+        .set_metadata("agents.context-scout.durable.v1", &legacy_json)
         .await
         .expect("legacy Context Scout state");
     let store =
@@ -832,14 +833,40 @@ async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it(
                 &receipt,
             )
             .await,
-        ContextScoutDurableStoreOutcomeV1::Stored
+        ContextScoutDurableStoreOutcomeV1::Unavailable
     );
-    drop(store);
-
-    let restarted = ProjectContextScoutDurableStoreV1::from_project_database(database, project_id)
-        .expect("restarted project store");
     assert_eq!(
-        restarted
+        database
+            .get_metadata("agents.context-scout.durable.v1")
+            .await
+            .expect("legacy metadata read")
+            .as_deref(),
+        Some(legacy_json.as_str())
+    );
+
+    assert_eq!(
+        store.startup(UtcMicros(31), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Reset
+    );
+    let reset = database
+        .get_metadata("agents.context-scout.durable.v1")
+        .await
+        .expect("reset metadata read")
+        .expect("reset document");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reset).expect("reset json"),
+        serde_json::json!({
+            "project_id": project_id,
+            "entries": [],
+            "tombstones": [],
+            "receipts": [],
+            "feedback": [],
+            "delivery_addresses": [],
+            "delivery_provenance_complete": true,
+        })
+    );
+    assert_eq!(
+        store
             .recent(
                 delivered.work.address,
                 delivered.envelope.configuration_revision,
@@ -851,11 +878,30 @@ async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it(
             configuration_revision: delivered.envelope.configuration_revision,
             observed_at: UtcMicros(31),
             pending: Vec::new(),
-            deliveries: vec![ContextScoutRecentDeliveryV1 {
-                entry: delivered,
-                receipt,
-                feedback: Some(feedback),
-            }],
+            deliveries: Vec::new(),
+            omitted: 0,
+        })
+    );
+
+    let current = entry(project_id, 2);
+    assert_eq!(
+        store.enqueue(current.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    assert_eq!(
+        store
+            .recent(
+                current.work.address,
+                current.envelope.configuration_revision,
+                UtcMicros(1),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            configuration_revision: current.envelope.configuration_revision,
+            observed_at: UtcMicros(1),
+            pending: vec![current],
+            deliveries: Vec::new(),
             omitted: 0,
         })
     );

@@ -1258,15 +1258,30 @@ mod cache_tests {
         let database = tmp.path().join("sessions.db");
         std::fs::write(&database, b"database").expect("database");
         let initial = session_temporal_store_fingerprint(&database).expect("initial fingerprint");
+        assert_eq!(initial.database.bytes, 8);
+        assert_eq!(initial.wal, None);
+        assert_eq!(
+            session_temporal_store_fingerprint(&database).expect("unchanged fingerprint"),
+            initial
+        );
 
         let wal = tmp.path().join("sessions.db-wal");
         std::fs::write(&wal, b"wal").expect("wal");
         let with_wal = session_temporal_store_fingerprint(&database).expect("wal fingerprint");
-        assert_ne!(initial, with_wal);
+        assert_eq!(with_wal.database, initial.database);
+        assert_eq!(with_wal.wal.map(|wal| wal.bytes), Some(3));
 
         std::fs::write(&wal, b"wal-expanded").expect("expanded wal");
         let expanded = session_temporal_store_fingerprint(&database).expect("expanded fingerprint");
-        assert_ne!(with_wal, expanded);
+        assert_eq!(expanded.wal.map(|wal| wal.bytes), Some(12));
+
+        std::fs::remove_file(&database).expect("remove database");
+        assert_eq!(
+            session_temporal_store_fingerprint(&database)
+                .expect_err("absent database has no fingerprint")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }
 

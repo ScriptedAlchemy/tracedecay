@@ -331,41 +331,93 @@ mod tests {
 
     #[test]
     fn routing_description_requires_valid_authored_host_text() {
-        for description in ["", " ", " leading", "trailing ", "two\nlines", "two\rlines"] {
+        for (description, expected) in [
+            ("", "native description cannot be empty"),
+            (" ", "native description cannot be empty"),
+            (
+                " leading",
+                "native description cannot have leading or trailing whitespace",
+            ),
+            (
+                "trailing ",
+                "native description cannot have leading or trailing whitespace",
+            ),
+            ("two\nlines", "native description must be a single line"),
+            ("two\rlines", "native description must be a single line"),
+        ] {
+            let expected = format!("config error: managed skill {expected}");
             let mut draft = valid_draft();
             draft.routing_description = description.to_string();
-            assert!(draft.materialize().is_err(), "accepted {description:?}");
+            assert_eq!(
+                draft.materialize().unwrap_err().to_string(),
+                expected,
+                "draft {description:?}"
+            );
             let update = ManagedSkillUpdate {
                 routing_description: Some(description.to_string()),
                 ..Default::default()
             };
-            assert!(validate_managed_skill_update(&update).is_err());
+            assert_eq!(
+                validate_managed_skill_update(&update)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+                "update {description:?}"
+            );
         }
+        let too_long = "config error: native skill description cannot exceed 1024 characters";
         let mut draft = valid_draft();
         draft.routing_description = "é".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS);
         let skill = draft.clone().materialize().unwrap();
+        assert_eq!(
+            skill.metadata.routing_description.chars().count(),
+            MAX_NATIVE_SKILL_DESCRIPTION_CHARS
+        );
         skill.render_native_skill_markdown().unwrap();
         draft.routing_description.push('é');
-        assert!(draft.materialize().is_err());
+        assert_eq!(draft.materialize().unwrap_err().to_string(), too_long);
         let update = ManagedSkillUpdate {
             routing_description: Some("a".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS + 1)),
             ..Default::default()
         };
-        assert!(validate_managed_skill_update(&update).is_err());
+        assert_eq!(
+            validate_managed_skill_update(&update)
+                .unwrap_err()
+                .to_string(),
+            too_long
+        );
     }
 
     #[test]
     fn new_drafts_and_metadata_require_authored_routing_description() {
-        let mut draft = serde_json::to_value(valid_draft()).unwrap();
+        let complete = serde_json::to_value(valid_draft()).unwrap();
+        let decoded = serde_json::from_value::<ManagedSkillDraft>(complete.clone()).unwrap();
+        assert_eq!(
+            decoded.routing_description,
+            "Validate generated managed skill packages."
+        );
+        let mut draft = complete;
         draft.as_object_mut().unwrap().remove("routing_description");
-        assert!(serde_json::from_value::<ManagedSkillDraft>(draft).is_err());
+        let error = serde_json::from_value::<ManagedSkillDraft>(draft)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing field `routing_description`"),
+            "{error}"
+        );
 
         let mut skill = serde_json::to_value(valid_draft().materialize().unwrap()).unwrap();
         skill["metadata"]
             .as_object_mut()
             .unwrap()
             .remove("routing_description");
-        assert!(serde_json::from_value::<ManagedSkill>(skill).is_err());
+        let error = serde_json::from_value::<ManagedSkill>(skill)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing field `routing_description`"),
+            "{error}"
+        );
     }
 
     #[test]

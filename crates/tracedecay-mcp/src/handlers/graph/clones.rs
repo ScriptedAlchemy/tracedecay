@@ -8,9 +8,11 @@ use tracedecay_contracts::retrieval::{
     SimilarTargetV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{CursorBindingV1, decode_bound_cursor, encode_bound_cursor};
 
 use crate::McpToolContext;
 use crate::handlers::support::decode_primitive_request;
+use crate::tool_errors::cursor_refusal;
 
 use super::graph_tool_completion;
 
@@ -20,6 +22,15 @@ pub async fn compute_similar(
     args: Value,
 ) -> Result<GraphToolCompletionV1> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
+    // The target is bound through the source it resolves to, inside the
+    // clone cursor: a range and the occurrence it names page one family.
+    let cursor_binding = CursorBindingV1::builder("similar")
+        .parameter("match_classes", &request.match_classes)
+        .parameter("result_limit", &request.result_limit)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind tracedecay_similar cursor: {error}"),
+        })?;
     let project_id = request.project_id;
     let repository_id = request.repository_id;
     let target = match request.target {
@@ -47,11 +58,9 @@ pub async fn compute_similar(
     let cursor = request
         .cursor
         .as_deref()
-        .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::decode)
+        .map(|encoded| decode_bound_cursor(&cursor_binding, encoded))
         .transpose()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid tracedecay_similar cursor: {error}"),
-        })?;
+        .map_err(|mismatch| cursor_refusal(&mismatch))?;
     let executor = ctx.code_index_similar_executor().ok_or_else(|| {
         clone_lane_unavailable_error(
             "similarity",
@@ -126,7 +135,7 @@ pub async fn compute_similar(
             let next_cursor = group
                 .next_cursor
                 .as_ref()
-                .map(tracedecay_query::retrieval::lexical::CloneArtifactCursorV1::encode)
+                .map(|position| encode_bound_cursor(&cursor_binding, position))
                 .transpose()
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("failed to encode tracedecay_similar cursor: {error}"),
@@ -209,6 +218,22 @@ pub async fn compute_redundancy(
 ) -> Result<GraphToolCompletionV1> {
     let request: RedundancySurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_redundancy")?;
+    let cursor_binding = CursorBindingV1::builder("redundancy")
+        .parameter("match_classes", &request.match_classes)
+        .parameter("scope", &request.scope)
+        .parameter("include_generated_paths", &request.include_generated_paths)
+        .parameter("family_limit", &request.family_limit)
+        .parameter("member_limit", &request.member_limit)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind tracedecay_redundancy cursor: {error}"),
+        })?;
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(|encoded| decode_bound_cursor::<String>(&cursor_binding, encoded))
+        .transpose()
+        .map_err(|mismatch| cursor_refusal(&mismatch))?;
     if request.project_id != ctx.admitted_scope().project_id
         || request.repository_id != ctx.admitted_scope().repository_id
     {
@@ -266,7 +291,7 @@ pub async fn compute_redundancy(
             tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapabilityUnavailable,
         )
     })?;
-    let outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
+    let mut outcome = executor(tracedecay_query::code_search::CodeIndexRedundancyQueryV1 {
         project_root: ctx.project_root().to_path_buf(),
         project_id: request.project_id,
         repository_id: request.repository_id,
@@ -276,13 +301,21 @@ pub async fn compute_redundancy(
         family_limit: request.family_limit as usize,
         member_limit: request.member_limit as usize,
         work_limit: request.work_limit as usize,
-        cursor: request.cursor,
+        cursor,
         authority: ctx.code_index_search_authority().cloned(),
         deadline: ctx.deadline().cloned(),
         cancellation: ctx.cancellation().cloned(),
     })
     .await
     .map_err(|reason| clone_lane_unavailable_error("family", reason))?;
+    outcome.next_cursor = outcome
+        .next_cursor
+        .as_ref()
+        .map(|position| encode_bound_cursor(&cursor_binding, position))
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to encode tracedecay_redundancy cursor: {error}"),
+        })?;
     let mut touched_files = outcome
         .families
         .iter()

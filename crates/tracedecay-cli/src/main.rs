@@ -1098,7 +1098,7 @@ impl CommandFamily {
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
             | Commands::Gitignore { .. } => Self::Configuration,
-            Commands::Doctor
+            Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Bench { .. }
             | Commands::Gain { .. }
@@ -1904,9 +1904,13 @@ async fn dispatch_diagnostics_command(
     command: Commands,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
-        Commands::Doctor => {
+        Commands::Doctor { json } => {
             let completion = hotpath::future!(
-                tracedecay::doctor::run_doctor(profile, crate::cloud::doctor_network_probes(),),
+                tracedecay::doctor::run_doctor(
+                    profile,
+                    crate::cloud::doctor_network_probes(),
+                    json
+                ),
                 label = "cli.doctor.run"
             )
             .await?;
@@ -2018,7 +2022,7 @@ impl CommandStartupPolicy {
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
-            | Commands::Doctor
+            | Commands::Doctor { .. }
             | Commands::Analytics { .. }
             | Commands::Sessions {
                 action:

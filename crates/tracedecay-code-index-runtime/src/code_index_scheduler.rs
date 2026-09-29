@@ -165,6 +165,7 @@ mod cadence;
 mod classification;
 mod demand_admission;
 mod freshness_witness;
+pub use freshness_witness::sealed_source_bytes;
 mod git_tree_capture;
 pub use git_tree_capture::{
     ExactGitTreeSourceV1, NativeCandidateGenerationBindingsV1, NativeCandidateGenerationIdentityV1,
@@ -211,7 +212,7 @@ pub use registry::CodeIndexSchedulerRegistryV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
     CodeIndexOwnerActivityV1, CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1,
-    CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
+    CodeIndexRetainedSeatWaitV1, CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
     feedback_document_identity_from_generation,
     feedback_language_document_identity_from_generation,

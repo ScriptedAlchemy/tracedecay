@@ -1,9 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
@@ -160,11 +158,7 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
 
     assert_eq!(
         observation_id.as_str(),
-        "sha256:92fe6f78f68eb34153f865b770a7fed01b01425730796ac67bbc4973aad527a3"
-    );
-    assert_eq!(
-        idempotency_key.as_str(),
-        "sha256:92fe6f78f68eb34153f865b770a7fed01b01425730796ac67bbc4973aad527a3"
+        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5"
     );
     assert_eq!(observation_id, idempotency_key);
 
@@ -182,17 +176,19 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
 }
 
 #[test]
-fn claude_identity_wire_and_hash_remain_v1_compatible() {
+fn claude_source_identity_names_its_provider() {
     let material = profile_material();
     let wire = serde_json::to_value(&material).unwrap();
 
+    assert_eq!(wire["source"]["provider"], "claude");
+    assert_eq!(wire["source"]["session_id"], "session.fixture");
     assert!(wire.get("ordering_domain").is_none());
     assert!(wire.get("native_record_id").is_none());
     assert_eq!(
         CanonicalObservationIdV1::derive(&material)
             .unwrap()
             .as_str(),
-        "sha256:92fe6f78f68eb34153f865b770a7fed01b01425730796ac67bbc4973aad527a3"
+        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5"
     );
 }
 
@@ -252,8 +248,10 @@ fn positional_occurrence_disambiguation_binds_base_identity_and_exact_range() {
         ObservationPositionalOccurrenceV1::new(ObservationSourceRangeV1::new(30, 40).unwrap());
 
     assert_eq!(
-        first.disambiguate(&base).unwrap(),
-        first.disambiguate(&base).unwrap()
+        serde_json::to_value(first.disambiguate(&base).unwrap()).unwrap(),
+        serde_json::json!(
+            "sha256:5373fbe5d37c41b8b4c322477e57a866a77ad5450e82c6dcf4c5cf4d46a2d0d5"
+        )
     );
     assert_ne!(
         first.disambiguate(&base).unwrap(),
@@ -266,7 +264,7 @@ fn positional_occurrence_disambiguation_binds_base_identity_and_exact_range() {
 }
 
 #[test]
-fn claude_native_identity_survives_transcript_relocation() {
+fn claude_native_identity_binds_source_and_ignores_byte_position() {
     let native_record_id = ObservationId::new("message.fixture").unwrap();
     let identity = |source_key: &str, generation, start, end| {
         ObservationIdentityMaterialV1::for_native_record(
@@ -285,10 +283,24 @@ fn claude_native_identity_survives_transcript_relocation() {
     };
 
     let original = identity("source.original", 1, 10, 11);
-    let relocated = identity("source.relocated", 2, 40, 41);
+    let relocated = identity("source.original", 2, 40, 41);
     assert_eq!(
-        CanonicalObservationIdV1::derive(&original).unwrap(),
-        CanonicalObservationIdV1::derive(&relocated).unwrap()
+        CanonicalObservationIdV1::derive(&original)
+            .unwrap()
+            .as_str(),
+        "sha256:b50a6d51faec402da52063dd6aa39954006dcba28b61aa12055c3c40098ba795"
+    );
+    assert_eq!(
+        CanonicalObservationIdV1::derive(&relocated)
+            .unwrap()
+            .as_str(),
+        "sha256:b50a6d51faec402da52063dd6aa39954006dcba28b61aa12055c3c40098ba795"
+    );
+    assert_eq!(
+        CanonicalObservationIdV1::derive(&identity("source.relocated", 2, 40, 41))
+            .unwrap()
+            .as_str(),
+        "sha256:871c420c9ffff6b78a393028e621539619515009b90543e59e20d1341c6a4795"
     );
 
     let other_session = ObservationIdentityMaterialV1::for_native_record(
@@ -585,7 +597,7 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
 
     assert_eq!(
         receipt.receipt_id().as_str(),
-        "privacy.claude.v1.2ef774a1d81493c05616a42ac8cf08856f230c7aa4f4e9d8224512d05ded88a8"
+        "privacy.observation.v1.3add1af92e5b4ab3fa1cb2afc431570a5939c166d20001fc4e58df903e021623"
     );
     assert_eq!(receipt.sanitizer_version().as_str(), "sanitizer.fixture.v1");
 
@@ -624,23 +636,35 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
 }
 
 #[test]
-fn idempotency_wire_field_is_a_canonical_identity_alias() {
+fn durable_observation_wire_carries_one_identity_and_rejects_an_alias_field() {
     let observation = durable(profile_material(), json!({"message": "safe"}));
     let wire = serde_json::to_value(&observation).unwrap();
 
-    assert_eq!(observation.idempotency_key(), observation.observation_id());
-    assert_eq!(wire["idempotency_key"], wire["observation_id"]);
-
-    let mut legacy_wire = wire.clone();
-    legacy_wire["idempotency_key"] = Value::String(
-        "sha256:13b3a18339fe0dbf5a1ccc894e24cf1626ca88babef32869bf7dc85f6a626abb".to_owned(),
+    assert_eq!(
+        wire["observation_id"],
+        observation.observation_id().as_str()
     );
-    let decoded: DurableObservationV1 = serde_json::from_value(legacy_wire).unwrap();
-    assert_eq!(decoded.idempotency_key(), decoded.observation_id());
+    assert!(wire.get("idempotency_key").is_none());
+    let decoded: DurableObservationV1 = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(decoded.observation_id(), observation.observation_id());
 
-    let mut invalid_wire = wire;
-    invalid_wire["idempotency_key"] = Value::String(format!("sha256:{}", "0".repeat(64)));
-    assert!(serde_json::from_value::<DurableObservationV1>(invalid_wire).is_err());
+    let mut aliased = wire.clone();
+    aliased["idempotency_key"] = wire["observation_id"].clone();
+    let alias_error = serde_json::from_value::<DurableObservationV1>(aliased).unwrap_err();
+    assert!(
+        alias_error
+            .to_string()
+            .contains("unknown field `idempotency_key`"),
+        "{alias_error}"
+    );
+
+    let mut mismatched = wire;
+    mismatched["observation_id"] = json!(format!("sha256:{}", "0".repeat(64)));
+    let mismatch = serde_json::from_value::<DurableObservationV1>(mismatched).unwrap_err();
+    assert_eq!(
+        mismatch.to_string(),
+        "serialized observation identity does not match its source evidence"
+    );
 }
 
 #[test]
@@ -664,9 +688,20 @@ fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
         CanonicalObservationIdV1::derive(&profile).unwrap(),
         CanonicalObservationIdV1::derive(&project).unwrap()
     );
-    assert!(ObservationSourceGenerationV1::new(0).is_err());
-    assert!(ObservationSourceRangeV1::new(5, 5).is_err());
-    assert!(ObservationSourceRangeV1::new(6, 5).is_err());
+    assert_eq!(
+        ObservationSourceGenerationV1::new(0)
+            .unwrap_err()
+            .to_string(),
+        "observation source generation must be non-zero"
+    );
+    assert_eq!(
+        ObservationSourceRangeV1::new(5, 5).unwrap_err().to_string(),
+        "observation source range must be non-empty and increasing"
+    );
+    assert_eq!(
+        ObservationSourceRangeV1::new(6, 5).unwrap_err().to_string(),
+        "observation source range must be non-empty and increasing"
+    );
 }
 
 #[test]
@@ -772,50 +807,58 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
     let payload = json!({"message": "safe"});
     let payload_ref = PayloadReferenceV1::for_payload(&payload).unwrap();
 
-    assert!(
+    assert_eq!(
         SanitizationReceiptV1::new(
             receipt_ref(),
             SanitizerDispositionV1::Accepted,
             SensitivityV1::Unclassified,
             Some(payload_ref.clone()),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "unclassified content cannot cross the durable boundary"
     );
-    assert!(
+    assert_eq!(
         SanitizationReceiptV1::new(
             receipt_ref(),
             SanitizerDispositionV1::Accepted,
             SensitivityV1::Secret,
             Some(payload_ref.clone()),
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "secret content cannot be accepted without redaction"
     );
 
     for disposition in [
         SanitizerDispositionV1::Rejected,
         SanitizerDispositionV1::Quarantined,
     ] {
-        assert!(
+        assert_eq!(
             SanitizationReceiptV1::new(
                 receipt_ref(),
                 disposition,
                 SensitivityV1::Sensitive,
                 Some(payload_ref.clone()),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "rejected or quarantined content cannot carry a payload reference"
         );
 
         let receipt =
             SanitizationReceiptV1::new(receipt_ref(), disposition, SensitivityV1::Sensitive, None)
                 .unwrap();
-        assert!(
+        assert_eq!(
             DurableObservationV1::new(
                 profile_material(),
                 receipt,
                 RetentionClass::new("transcript.fixture").unwrap(),
                 payload.clone(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "rejected or quarantined content cannot carry a payload reference"
         );
     }
 
@@ -823,14 +866,16 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
         json!({"message": "nope"}),
         json!({"message": "longer value"}),
     ] {
-        assert!(
+        assert_eq!(
             DurableObservationV1::new(
                 profile_material(),
                 accepted_receipt(&payload),
                 RetentionClass::new("transcript.fixture").unwrap(),
                 mismatched,
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "sanitization receipt does not bind the durable payload"
         );
     }
 }
@@ -901,112 +946,21 @@ fn collision_classification_distinguishes_duplicates_collisions_and_new_identity
     );
 }
 
-/// Rows committed before native record ids joined default-provider derivation
-/// must still decode. Changing a derivation without accepting the previous one
-/// makes every such row permanently undecodable, and nothing downstream can
-/// quarantine an undecodable observation.
-#[test]
-fn durable_observations_written_before_native_identity_still_decode() {
-    let material = ObservationIdentityMaterialV1::for_native_record(
-        ObservationSourceIdentityV1::for_source(
-            SessionId::new("session.fixture").unwrap(),
-            SessionId::new("source.fixture").unwrap(),
-        )
-        .unwrap(),
-        ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(3).unwrap(),
-        ObservationSourceRangeV1::new(10, 11).unwrap(),
-        ObservationOrderingDomainV1::FileBytes,
-        ObservationId::new("message.fixture").unwrap(),
-    )
-    .unwrap();
-
-    let payload = json!({"text": "sanitized"});
-    let observation = durable(material.clone(), payload.clone());
-
-    // The derivation this row was written with: the whole material under the
-    // Claude domain, with no separate native-record-id structure.
-    let legacy_observation_id = domain_digest_id(b"tracedecay.claude.observation.v1\0", &material);
-
-    assert_ne!(
-        legacy_observation_id,
-        observation.observation_id().as_str(),
-        "fixture must exercise the derivation change, not agree with it"
-    );
-
-    // A real pre-change row carries the same digest in both fields, because the
-    // writer serialized one value under two names. Rewriting only
-    // `observation_id` here is what let the first fix look complete while the
-    // daemon still failed on `idempotency_key`.
-    let mut wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
-        .expect("durable observation serializes to an object");
-    wire["observation_id"] = json!(legacy_observation_id);
-    wire["idempotency_key"] = json!(legacy_observation_id);
-
-    let decoded: DurableObservationV1 =
-        serde_json::from_value(wire.clone()).expect("a pre-change row must still decode");
-    assert_eq!(decoded.identity(), observation.identity());
-    assert_eq!(decoded.payload(), &payload);
-
-    // Accepting the previous derivation must not accept an arbitrary id.
-    let arbitrary = json!(format!("sha256:{}", "0".repeat(64)));
-    for field in ["observation_id", "idempotency_key"] {
-        let mut forged = wire.clone();
-        forged[field] = arbitrary.clone();
-        assert!(
-            serde_json::from_value::<DurableObservationV1>(forged).is_err(),
-            "an id matching no derivation must still be rejected in {field}"
-        );
-    }
-}
-
-/// Rows committed before `idempotency_key` became an alias of `observation_id`
-/// carry their own domain-separated digest in that field, and rows committed
-/// between that change and the native-identity change carry the whole-material
-/// digest. Both predate the current derivation and both must still decode.
-#[test]
-fn durable_observations_decode_under_every_historical_derivation() {
-    let material = native_identity_fixture();
-    let observation = durable(material.clone(), json!({"text": "sanitized"}));
-    let wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
-        .expect("durable observation serializes to an object");
-
-    let historical = [
-        observation.observation_id().as_str().to_string(),
-        domain_digest_id(b"tracedecay.claude.observation.v1\0", &material),
-        domain_digest_id(b"tracedecay.claude.idempotency.v1\0", &material),
-    ];
-    assert_eq!(
-        historical.iter().collect::<BTreeSet<_>>().len(),
-        historical.len(),
-        "each historical derivation must produce a distinct digest for this fixture"
-    );
-
-    for id in &historical {
-        let mut row = wire.clone();
-        row["observation_id"] = json!(id);
-        row["idempotency_key"] = json!(id);
-        let decoded: DurableObservationV1 = serde_json::from_value(row)
-            .unwrap_or_else(|error| panic!("a row derived as {id} must decode: {error}"));
-        assert_eq!(decoded.identity(), observation.identity());
-    }
-}
-
-/// A change to the live derivation must not be able to land quietly.
-///
-/// Adding a derivation is legitimate; silently dropping the previous one from
-/// the accepted set is what took the daemon down twice, once per field. This
-/// pins the digest today's derivation produces for a fixed fixture, so any
-/// change to it fails here rather than in warm-up against a live profile. The
-/// fix when it fails is to add the new derivation to the front of the accepted
-/// list, keep this value in that list, and pin the new one here.
 #[test]
 fn the_live_observation_derivation_is_pinned() {
     let observation = durable(native_identity_fixture(), json!({"text": "sanitized"}));
     assert_eq!(
         observation.observation_id().as_str(),
-        "sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba",
-        "the live derivation changed; extend the accepted set before repinning"
+        "sha256:cac334f99addb831704dcb08e025e94b0a301afa447b8a827f7ef51939e1ff2d"
+    );
+
+    let mut historical = serde_json::to_value(&observation).unwrap();
+    historical["observation_id"] =
+        json!("sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba");
+    let error = serde_json::from_value::<DurableObservationV1>(historical).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "serialized observation identity does not match its source evidence"
     );
 }
 
@@ -1024,63 +978,6 @@ fn native_identity_fixture() -> ObservationIdentityMaterialV1 {
         ObservationId::new("message.fixture").unwrap(),
     )
     .unwrap()
-}
-
-/// A decoded row must report the identity it is stored under.
-///
-/// The storage audit compares `observations.observation_id` against the id on
-/// the decoded observation, and rows that join to an observation carry that
-/// same column value. Re-deriving the current form on decode makes a legacy row
-/// disagree with its own column, which is the
-/// "committed observation authority columns disagree with observation JSON"
-/// violation. Accepting a legacy digest is only correct if the object then
-/// carries it.
-#[test]
-fn decoded_observations_report_the_identity_they_are_stored_under() {
-    let material = native_identity_fixture();
-    let observation = durable(material.clone(), json!({"text": "sanitized"}));
-    let wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
-        .expect("durable observation serializes to an object");
-
-    for stored_id in [
-        observation.observation_id().as_str().to_string(),
-        domain_digest_id(b"tracedecay.claude.observation.v1\0", &material),
-        domain_digest_id(b"tracedecay.claude.idempotency.v1\0", &material),
-    ] {
-        let mut row = wire.clone();
-        row["observation_id"] = json!(stored_id);
-        row["idempotency_key"] = json!(stored_id);
-        let decoded: DurableObservationV1 =
-            serde_json::from_value(row).expect("a row under any accepted derivation must decode");
-
-        assert_eq!(
-            decoded.observation_id().as_str(),
-            stored_id,
-            "the decoded id must equal the stored column, or the audit rejects the row"
-        );
-        assert_eq!(
-            decoded.idempotency_key().as_str(),
-            stored_id,
-            "the aliased key must follow the stored id"
-        );
-
-        // Re-encoding must not restate the row's identity.
-        let reencoded: Value = serde_json::from_slice(&serde_json::to_vec(&decoded).unwrap())
-            .expect("a decoded observation re-serializes");
-        assert_eq!(reencoded["observation_id"], json!(stored_id));
-        assert_eq!(reencoded["idempotency_key"], json!(stored_id));
-    }
-}
-
-fn domain_digest_id(domain: &[u8], material: &ObservationIdentityMaterialV1) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(tracedecay_domain::canonical_json_bytes(material).unwrap());
-    let mut digest = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        write!(&mut digest, "{byte:02x}").unwrap();
-    }
-    format!("sha256:{digest}")
 }
 
 fn cline_transition_observation(
@@ -1319,13 +1216,15 @@ fn cline_native_transition_rejects_source_scope_and_native_identity_mismatches()
     );
     assert!(cline_native_source_successor_id(&new).unwrap().is_none());
     assert!(cline_task_native_observation_id(&old).unwrap().is_none());
-    assert!(
+    assert_eq!(
         ClineTranscriptStream::ApiHistory
             .source_identity(
                 ProviderId::new("codex").unwrap(),
                 SessionId::new("task.fixture").unwrap()
             )
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+        "observation source identity is invalid"
     );
 }
 

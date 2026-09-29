@@ -2006,6 +2006,240 @@ fn doctor_reports_an_unenrolled_project_without_recovery_guidance() {
     );
 }
 
+const INGEST_COVERAGE_FINDING: &str = "observability: durable ingest coverage records no refused \
+     source records (observability.ingest-coverage.converged)";
+const PROFILE_AUTHORITY_FINDING: &str = "storage_runtime: the exact registered profile and \
+     profile-session authorities are attached (profile.authority.registered)";
+
+fn doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let output = tracedecay_command_with_home(home)
+        .args(["doctor", "--json"])
+        .current_dir(project)
+        .output()
+        .expect("doctor --json should run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor --json stdout is not one JSON document ({error}):\n{}\nstderr:\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (output.status.code(), document, stderr)
+}
+
+/// The identity of each projected finding: family, state, and evidence.
+/// Statements carry live measurements (resident MiB), so equality across two
+/// reads is judged on identity plus the surrounding coverage record.
+fn doctor_finding_identities(payload: &Value) -> Vec<Value> {
+    payload["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings payload has no entries array: {payload}"))
+        .iter()
+        .map(|entry| {
+            json!([
+                entry["finding"]["family"],
+                entry["finding"]["state"],
+                entry["finding"]["evidence"],
+            ])
+        })
+        .collect()
+}
+
+fn doctor_route_findings(url: &str) -> Value {
+    ureq::get(url)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {url} failed: {error}"))
+        .into_body()
+        .read_json()
+        .unwrap_or_else(|error| panic!("GET {url} returned no JSON envelope: {error}"))
+}
+
+/// One doctor: the CLI asks the running daemon for its canonical findings and
+/// renders them with the daemon's own statements, and `--json` carries the
+/// findings `/api/doctor/findings` serves, projected by the same authority.
+#[test]
+fn doctor_renders_the_daemon_canonical_findings_the_dashboard_serves() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_committed_git_project_with_cli(&home_path, &project_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    // A freshly started daemon answers Doctor with the typed mounting state
+    // until the project runtime that owns the report has mounted.
+    wait_for_tool_status_server_tool_calls(&home_path, &project_path);
+
+    let doctor = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert_eq!(doctor.status.code(), Some(0), "doctor exit:\n{stderr}");
+    for statement in [INGEST_COVERAGE_FINDING, PROFILE_AUTHORITY_FINDING] {
+        assert!(
+            stderr.contains(statement),
+            "doctor omitted the daemon finding `{statement}`:\n{stderr}"
+        );
+    }
+    assert!(
+        stderr.contains(" language_server: "),
+        "doctor omitted the daemon's language-server finding:\n{stderr}"
+    );
+
+    // `lsp servers` takes the same runtime read Doctor does, so it resolves
+    // analyzer availability through the daemon instead of this shell's PATH.
+    let lsp = tracedecay_command_with_home(&home_path)
+        .args(["lsp", "servers", "--json"])
+        .current_dir(&project_path)
+        .output()
+        .expect("lsp servers should run");
+    let lsp_inventory: Value = serde_json::from_slice(&lsp.stdout).unwrap_or_else(|error| {
+        panic!(
+            "lsp servers --json printed no JSON ({error}):\n{}",
+            String::from_utf8_lossy(&lsp.stderr)
+        )
+    });
+    assert_eq!(
+        (
+            &lsp_inventory["resolution"],
+            &lsp_inventory["daemon_unavailable"]
+        ),
+        (&json!("daemon"), &Value::Null),
+        "{lsp_inventory}"
+    );
+
+    let dashboard = tracedecay_command_with_home(&home_path)
+        .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
+        .current_dir(&project_path)
+        .output()
+        .expect("dashboard should start");
+    let stdout = String::from_utf8_lossy(&dashboard.stdout);
+    let launch_url = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("tracedecay dashboard listening on "))
+        .unwrap_or_else(|| {
+            panic!(
+                "dashboard announced no URL:\n{stdout}\n{}",
+                String::from_utf8_lossy(&dashboard.stderr)
+            )
+        });
+    // The launch URL (`http://ADDR/?token=T`) carries the API token; as
+    // userinfo, ureq sends it as the Basic password.
+    let (origin, token) = launch_url
+        .trim()
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    let findings_url = format!("http://tracedecay:{token}@{authority}/api/doctor/findings");
+
+    // Live producers (table-growth sampling) may settle between reads, so the
+    // comparison is taken once the route answers the same identity on both
+    // sides of the CLI read.
+    for _ in 0..3 {
+        let before = doctor_route_findings(&findings_url);
+        let (code, document, stderr) = doctor_json(&home_path, &project_path);
+        let after = doctor_route_findings(&findings_url);
+        if doctor_finding_identities(&before["payload"])
+            != doctor_finding_identities(&after["payload"])
+        {
+            continue;
+        }
+        assert_eq!(code, Some(0), "doctor --json exit:\n{stderr}");
+        assert_eq!(document["outcome"], "healthy", "{document}");
+        let findings = &document["daemon_findings"];
+        assert_eq!(findings["state"], "observed", "{document}");
+        assert_eq!(findings["domain_state"], before["domain_state"]);
+        assert_eq!(findings["coverage"], before["coverage"]);
+        let (cli, route) = (&findings["payload"], &before["payload"]);
+        assert_eq!(
+            doctor_finding_identities(cli),
+            doctor_finding_identities(route)
+        );
+        for field in [
+            "family_filter",
+            "report_coverage",
+            "known_families",
+            "schema_convergences",
+            "storage_kind_statuses",
+            "note",
+        ] {
+            assert_eq!(cli[field], route[field], "`{field}` differs");
+        }
+        let ingest_statement = |payload: &Value| {
+            payload["entries"]
+                .as_array()
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry["finding"]["evidence"][0]["reference"]
+                            == "observability.ingest-coverage.converged"
+                    })
+                })
+                .map(|entry| entry["finding"]["coverage"]["statement"].clone())
+        };
+        assert_eq!(
+            ingest_statement(cli),
+            Some(json!(
+                "durable ingest coverage records no refused source records"
+            ))
+        );
+        assert_eq!(ingest_statement(cli), ingest_statement(route));
+        assert!(
+            document["checks"]
+                .as_array()
+                .is_some_and(|checks| checks.contains(&json!({
+                    "level": "pass",
+                    "message": INGEST_COVERAGE_FINDING,
+                }))),
+            "{document}"
+        );
+        return;
+    }
+    panic!("/api/doctor/findings never answered the same findings twice in a row");
+}
+
+/// With no daemon listening, Doctor still runs its binary-local checks and
+/// names the typed `daemon_unavailable` state as the operator's pending step.
+#[test]
+fn doctor_without_a_daemon_reports_daemon_unavailable_as_pending() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+
+    let output = tracedecay_command_with_home(&home_path)
+        .arg("doctor")
+        .current_dir(&project_path)
+        .output()
+        .expect("doctor should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(75), "doctor exit:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "daemon_unavailable: no TraceDecay daemon is listening for this profile, so the \
+             daemon's canonical Doctor findings were not read and only binary-local checks ran. \
+             Pending operator action: start the daemon (`tracedecay daemon start` for the \
+             managed service, or `tracedecay daemon run`), then re-run `tracedecay doctor`"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Version: "),
+        "binary-local checks must still run:\n{stderr}"
+    );
+
+    let (code, document, stderr) = doctor_json(&home_path, &project_path);
+    assert_eq!(code, Some(75), "doctor --json exit:\n{stderr}");
+    assert_eq!(document["outcome"], "pending_operator_action");
+    assert_eq!(
+        document["daemon_findings"],
+        json!({"state": "daemon_unavailable"})
+    );
+    assert_eq!(document["issues"], 0, "{document}");
+}
+
 #[test]
 fn daemon_project_handshake_uses_client_profile_identity() {
     let daemon_home = TempDir::new().unwrap();
@@ -2294,6 +2528,192 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
             "{probe:?}: expected explicit daemon-unavailable error, got:\n{stderr}"
         );
     }
+}
+
+/// A project-routed client reads the managed unit from the caller's own home,
+/// so a held daemon is named as held and a missing unit as not installed.
+#[cfg(target_os = "linux")]
+#[test]
+fn project_routed_tool_names_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    // The test command names the profile socket through TRACEDECAY_DAEMON_SOCKET.
+    let socket = home_path.join(".tracedecay/daemon.sock");
+    let socket = socket.display();
+    let not_installed = format!(
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let unit_dir = home_path.join(".config/systemd/user");
+    let held = format!(
+        "TraceDecay daemon socket '{socket}' named by TRACEDECAY_DAEMON_SOCKET is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        unit_dir.join("tracedecay.service").display()
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let search_probe = [
+        "tool",
+        "--project",
+        &project_arg,
+        "search",
+        "--args",
+        r#"{"query":"answer"}"#,
+    ];
+    let status_probe = ["tool", "--project", &project_arg, "status", "--json"];
+
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&search_probe, &status_probe],
+        &not_installed,
+        &held,
+    );
+}
+
+/// Runs each probe with no daemon, first without and then with a managed unit
+/// file, and requires the matching unreachable-daemon advice on stderr.
+#[cfg(target_os = "linux")]
+fn assert_unreachable_advice_follows_the_unit(
+    home_path: &Path,
+    project_path: &Path,
+    probes: &[&[&str]],
+    not_installed: &str,
+    held: &str,
+) {
+    let unit_dir = home_path.join(".config/systemd/user");
+    for (unit_installed, expected) in [(false, not_installed), (true, held)] {
+        if unit_installed {
+            std::fs::create_dir_all(&unit_dir).unwrap();
+            std::fs::write(
+                unit_dir.join("tracedecay.service"),
+                "[Service]\nExecStart=/bin/false\n",
+            )
+            .unwrap();
+        }
+        for probe in probes {
+            let output = tracedecay_command_with_home(home_path)
+                .current_dir(project_path)
+                .args(*probe)
+                .stdin(Stdio::null())
+                .output()
+                .expect("tracedecay client should run");
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(
+                    tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+                )),
+                "{probe:?}: {output:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(expected),
+                "{probe:?} (unit installed: {unit_installed}): expected\n{expected}\ngot:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn authority_routed_clients_name_a_held_managed_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let work_request = project_path.join("work-request.json");
+    std::fs::write(&work_request, r#"{"page_size":10}"#).unwrap();
+    let workflow_request = project_path.join("workflow-request.json");
+    std::fs::write(&workflow_request, "{}").unwrap();
+    let record = home_path.join(".tracedecay/daemon-authority.json");
+    let record = record.display();
+    let not_installed = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+    );
+    let held = format!(
+        "TraceDecay daemon is not available: no authority record at '{record}'. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+        home_path
+            .join(".config/systemd/user/tracedecay.service")
+            .display()
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let work_request_arg = work_request.to_string_lossy().to_string();
+    let workflow_request_arg = workflow_request.to_string_lossy().to_string();
+    let lsp_probe = ["lsp", "bridge", "--stdio", "--project", &project_arg];
+    let work_probe = [
+        "work",
+        "list-attempts",
+        "--request-file",
+        &work_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    let workflow_probe = [
+        "workflow",
+        "list-definitions",
+        "--request-file",
+        &workflow_request_arg,
+        "--project",
+        &project_arg,
+    ];
+    assert_unreachable_advice_follows_the_unit(
+        &home_path,
+        &project_path,
+        &[&lsp_probe, &work_probe, &workflow_probe],
+        &not_installed,
+        &held,
+    );
+}
+
+/// A missing `TRACEDECAY_DAEMON_SOCKET` is reported as that socket being
+/// unavailable, and the installed managed service is reported as observed
+/// beside it rather than denied.
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_cli_reports_a_missing_override_socket_apart_from_the_installed_service() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let unit = home_path.join(".config/systemd/user/tracedecay.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=/usr/local/bin/tracedecay daemon run\n",
+    )
+    .unwrap();
+    let missing_socket = socket_dir.path().join("missing.sock");
+
+    let output = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+        .args(["tool", "status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(
+            tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+        )),
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "TraceDecay daemon socket '{}' named by TRACEDECAY_DAEMON_SOCKET is not available. \
+         The managed TraceDecay daemon service is installed at '{}' and serves '{}', not this \
+         socket.",
+        missing_socket.display(),
+        unit.display(),
+        home_path.join(".tracedecay/daemon.sock").display(),
+    );
+    assert!(stderr.contains(&expected), "{stderr}");
 }
 
 #[test]

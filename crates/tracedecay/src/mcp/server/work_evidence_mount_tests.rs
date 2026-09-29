@@ -4,6 +4,7 @@ use tracedecay_application::work::{
     WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
 };
 use tracedecay_contracts::{RequestContext, ResolvedScope};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -75,11 +76,18 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
         .expect("the same mounted authority must keep binding new adapters");
 
     let (_, foreign_scope) = mounted_scope("project.work-evidence-foreign");
+    let Err(error) =
+        mounted.work_evidence_retrieval(&foreign_scope, Arc::new(MissingFederatedAuthority))
+    else {
+        panic!("a different project scope must not receive the mounted session authority");
+    };
     assert!(
-        mounted
-            .work_evidence_retrieval(&foreign_scope, Arc::new(MissingFederatedAuthority))
-            .is_err(),
-        "a different project scope must not receive the mounted session authority",
+        matches!(
+            &error,
+            TraceDecayError::Config { message }
+                if message == "Work evidence retrieval scope does not match the mounted project session authority"
+        ),
+        "unexpected refusal: {error:?}"
     );
 }
 

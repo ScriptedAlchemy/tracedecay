@@ -20,14 +20,14 @@ use tracedecay_dashboard_api::code_read_api::{
     RevisionPairSymbolRegionV1, RevisionPairSymbolV1, RevisionPairUnionLayoutV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, FileIdentityDigest, GitOidV1, SnapshotFileDispositionV1, SymbolIdentityDigest,
+    CodeGenerationId, CursorBindingV1, FileIdentityDigest, GitOidV1, SnapshotFileDispositionV1,
+    SymbolIdentityDigest, decode_bound_cursor, encode_bound_cursor,
 };
 use tracedecay_query::code_search::{
     CodeIndexBranchSymbolV1, CodeIndexSearchAuthorityV1, CodeIndexSearchUnavailableReasonV1,
     CodeIndexSimilarCompletedV1, CodeIndexSimilarExecutor, CodeIndexSimilarOutcomeV1,
     CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
 };
-use tracedecay_query::retrieval::lexical::CloneArtifactCursorV1;
 
 #[derive(Clone)]
 pub(super) struct DashboardCodeReadAdapter {
@@ -62,12 +62,18 @@ impl DashboardCodeReadPortV1 for DashboardCodeReadAdapter {
         request: DashboardSharedFamilyRequestV1,
     ) -> DashboardSharedFamilyReadFuture<'_> {
         Box::pin(async move {
+            let cursor_binding = CursorBindingV1::builder("shared_code_family")
+                .parameter("symbol_occurrence_id", &request.symbol_occurrence_id)
+                .parameter("match_class", &request.match_class)
+                .parameter("limit", &request.limit)
+                .build()
+                .map_err(|_| DashboardCodeReadErrorV1::Internal)?;
             let cursor = request
                 .cursor
                 .as_deref()
-                .map(CloneArtifactCursorV1::decode)
+                .map(|encoded| decode_bound_cursor(&cursor_binding, encoded))
                 .transpose()
-                .map_err(|_| DashboardCodeReadErrorV1::InvalidRequest)?;
+                .map_err(DashboardCodeReadErrorV1::CursorRefused)?;
             let match_class = match request.match_class {
                 SimilarMatchClassV1::ConservativeExact => {
                     tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
@@ -90,7 +96,7 @@ impl DashboardCodeReadPortV1 for DashboardCodeReadAdapter {
             .await;
             match outcome {
                 CodeIndexSimilarOutcomeV1::Complete(result) => {
-                    shared_family_result(&self.scope, *result)
+                    shared_family_result(&self.scope, *result, &cursor_binding)
                 }
                 CodeIndexSimilarOutcomeV1::NotFound => Err(DashboardCodeReadErrorV1::NotFound),
                 CodeIndexSimilarOutcomeV1::Unavailable(reason) => Err(map_unavailable(reason)),
@@ -200,7 +206,8 @@ fn map_unavailable(reason: CodeIndexSearchUnavailableReasonV1) -> DashboardCodeR
             DashboardCodeReadErrorV1::CapacityUnavailable
         }
         CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-        | CodeIndexSearchUnavailableReasonV1::GenerationUnverified => {
+        | CodeIndexSearchUnavailableReasonV1::GenerationUnverified
+        | CodeIndexSearchUnavailableReasonV1::GraphWarming => {
             DashboardCodeReadErrorV1::GenerationUnavailable
         }
         CodeIndexSearchUnavailableReasonV1::InvalidRequest => {
@@ -216,6 +223,7 @@ fn map_unavailable(reason: CodeIndexSearchUnavailableReasonV1) -> DashboardCodeR
 fn shared_family_result(
     scope: &ResolvedScope,
     result: CodeIndexSimilarCompletedV1,
+    cursor_binding: &CursorBindingV1,
 ) -> Result<SimilarResultV1, DashboardCodeReadErrorV1> {
     if result.source.occurrence.project_id != scope.project_id
         || result.source.occurrence.repository_id != scope.repository_id
@@ -252,7 +260,7 @@ fn shared_family_result(
             let next_cursor = group
                 .next_cursor
                 .as_ref()
-                .map(CloneArtifactCursorV1::encode)
+                .map(|position| encode_bound_cursor(cursor_binding, position))
                 .transpose()
                 .map_err(|_| DashboardCodeReadErrorV1::Internal)?;
             Ok(SimilarFamilyV1 {

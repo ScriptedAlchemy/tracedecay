@@ -178,7 +178,9 @@ fn participant_entries_with_canonical_bytes(
 #[test]
 fn participant_manifest_accepts_exact_canonical_byte_limit() {
     let entries = participant_entries_with_canonical_bytes(MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES);
-    assert!(TemporalParticipantManifest::new(entries).is_ok());
+    let manifest =
+        TemporalParticipantManifest::new(entries.clone()).expect("manifest at the byte limit");
+    assert_eq!(manifest.entries(), entries.as_slice());
 }
 
 #[test]

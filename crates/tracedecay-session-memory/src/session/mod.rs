@@ -19,8 +19,8 @@ pub use refresh_service::{
     utc_micros_value,
 };
 pub use retrieval::{
-    SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,
-    SessionTemporalQueryError, TaskSessionRetrievalOutcomeV1,
+    SessionCursorRequest, SessionRetrievalConfiguration, SessionRetrievalService,
+    SessionTemporalQuery, SessionTemporalQueryError, TaskSessionRetrievalOutcomeV1,
 };
 pub use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,

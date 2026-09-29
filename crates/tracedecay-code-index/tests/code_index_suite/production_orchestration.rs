@@ -3360,6 +3360,18 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/partitioned_pre_paging");
     let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+    let historical: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("historical manifest json");
+    let retired = u32::try_from(
+        historical["generation"]["format_revision"]
+            .as_u64()
+            .expect("historical format revision"),
+    )
+    .expect("historical format revision fits u32");
+    assert!(
+        retired < SEALED_GENERATION_FORMAT_REVISION_V1,
+        "the archival carrier must stay behind the revision this build serves"
+    );
     let expected =
         std::fs::read(fixture.join("expected-generation.json")).expect("historical generation");
     let provenance: serde_json::Value = serde_json::from_slice(
@@ -3447,7 +3459,8 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
         assert!(
             matches!(
                 error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == retired
             ),
             "retired carrier reached the wrong rejection: {error}"
         );
@@ -3591,6 +3604,9 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
 #[test]
 fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
     let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
 
     for census in [true, false] {
         let mut retired: serde_json::Value =
@@ -3598,7 +3614,7 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
         let payload = retired["generation"]
             .as_object_mut()
             .expect("generation payload");
-        payload.insert("format_revision".to_owned(), serde_json::json!(7));
+        payload.insert("format_revision".to_owned(), serde_json::json!(previous));
         if !census {
             payload
                 .remove("statistics")
@@ -3618,9 +3634,10 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
         assert!(
             matches!(
                 error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == previous
             ),
-            "a revision-seven manifest with census={census} reached the wrong rejection: {error}"
+            "the previous revision with census={census} reached the wrong rejection: {error}"
         );
     }
 }
@@ -3632,12 +3649,15 @@ fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
 #[test]
 fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
     let (_, manifest, _) = partitioned_codec_fixture();
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("the current revision opens");
+    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
     let mut retired: serde_json::Value =
         serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
     let payload = retired["generation"]
         .as_object_mut()
         .expect("generation payload");
-    payload.insert("format_revision".to_owned(), serde_json::json!(10));
+    payload.insert("format_revision".to_owned(), serde_json::json!(previous));
     retired["state_digest"] = serde_json::json!(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(
@@ -3652,9 +3672,10 @@ fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
     assert!(
         matches!(
             error,
-            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(10)
+            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                if revision == previous
         ),
-        "revision-10 reached the wrong rejection: {error}"
+        "the previous revision reached the wrong rejection: {error}"
     );
 }
 

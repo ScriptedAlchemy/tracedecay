@@ -1401,31 +1401,29 @@ mod tests {
             .validate()
             .expect("query fallback lanes are admissible");
 
-        let lane = RetrieverKind::Temporal;
-        let rejected = subpayload(&[lane]);
-        assert_eq!(
-            rejected.validate(),
-            Err(RetrievalContractError::FallbackLaneViolation),
-            "lane {lane:?} must not enter the query fallback subpayload"
-        );
+        for lane in [
+            RetrieverKind::Temporal,
+            RetrieverKind::TaskSession,
+            RetrieverKind::Diagnostic,
+        ] {
+            let rejected = subpayload(&[lane]);
+            assert_eq!(
+                rejected.validate(),
+                Err(RetrievalContractError::FallbackLaneViolation),
+                "lane {lane:?} must not enter the query fallback subpayload"
+            );
+        }
     }
 
     #[test]
     fn retriever_contract_names_every_runtime_lane() {
-        assert_eq!(
-            RetrieverKind::ALL_LANES,
-            [
-                RetrieverKind::ExactLiteral,
-                RetrieverKind::Lexical,
-                RetrieverKind::Graph,
-                RetrieverKind::Temporal,
-                RetrieverKind::TaskSession,
-                RetrieverKind::Diagnostic,
-            ],
-        );
+        let retired = serde_json::from_str::<RetrieverKind>("\"semantic\"")
+            .expect_err("the retired dense lane must not deserialize");
         assert!(
-            serde_json::from_str::<RetrieverKind>("\"semantic\"").is_err(),
-            "the retired dense lane must not deserialize"
+            retired
+                .to_string()
+                .starts_with("unknown variant `semantic`"),
+            "{retired}"
         );
         for (wire, expected) in [
             ("exact_literal", RetrieverKind::ExactLiteral),
@@ -1445,15 +1443,6 @@ mod tests {
                 format!("\"{wire}\""),
             );
         }
-        assert_eq!(
-            RetrieverKind::QUERY_FALLBACK_LANES,
-            [
-                RetrieverKind::ExactLiteral,
-                RetrieverKind::Lexical,
-                RetrieverKind::Graph,
-            ],
-            "task/session evidence must never broaden query fallback",
-        );
     }
 
     #[test]
@@ -1513,7 +1502,10 @@ mod tests {
             final_ordinal: 1,
         }];
         payload.digest = payload.compute_digest().unwrap();
-        assert!(payload.validate().is_err());
+        assert_eq!(
+            payload.validate().unwrap_err().to_string(),
+            "fallback candidate ordinals is not in canonical order"
+        );
     }
 
     #[test]
@@ -1581,7 +1573,10 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(batch.validate().is_err());
+        assert_eq!(
+            batch.validate().unwrap_err().to_string(),
+            "batch evidence is missing for a returned occurrence: retriever batch evidence"
+        );
 
         let candidate = &batch.candidates[0];
         let provenance = provenance(candidate);
@@ -1591,7 +1586,10 @@ mod tests {
         batch
             .evidence_by_occurrence
             .insert(id("occurrence.extra"), provenance);
-        assert!(batch.validate().is_err());
+        assert_eq!(
+            batch.validate().unwrap_err().to_string(),
+            "batch evidence has no returned occurrence: retriever batch evidence"
+        );
     }
 
     #[test]
@@ -1606,7 +1604,10 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(duplicate_batch.validate().is_err());
+        assert_eq!(
+            duplicate_batch.validate().unwrap_err().to_string(),
+            "retriever batch source occurrences contains a duplicate identity"
+        );
 
         let lexical = candidate("occurrence.lexical", RetrieverKind::Lexical, 0);
         let graph = candidate("occurrence.graph", RetrieverKind::Graph, 1);
@@ -1619,6 +1620,9 @@ mod tests {
             coverage: RetrieverCoverage::default(),
             continuation: None,
         };
-        assert!(mixed_batch.validate().is_err());
+        assert_eq!(
+            mixed_batch.validate().unwrap_err().to_string(),
+            "a retriever batch may contain candidates from only one lane"
+        );
     }
 }

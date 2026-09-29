@@ -55,7 +55,10 @@ fn duplicate_adjudication_binds_distinct_attempts_and_exact_generations() {
 
     let mut same_attempt = command.clone();
     same_attempt.second_attempt = same_attempt.first_attempt.clone();
-    assert!(same_attempt.validate().is_err());
+    assert_eq!(
+        same_attempt.validate().unwrap_err().to_string(),
+        "duplicate Work adjudication must bind two distinct attempts"
+    );
 }
 
 #[test]
@@ -169,20 +172,29 @@ fn duplicate_adjudication_receipt_pins_actor_revision_and_input_digest() {
 fn duplicate_adjudication_rejects_unknown_quantity_evidence() {
     let mut command = command();
     command.quantities.evidence = QuantityEvidenceClassV1::Unknown;
-    assert!(command.validate().is_err());
+    assert_eq!(
+        command.validate().unwrap_err().to_string(),
+        "duplicate Work adjudication quantities require known evidence"
+    );
 }
 
 #[test]
 fn duplicate_adjudication_does_not_turn_unknown_or_censored_evidence_into_a_verdict() {
     let mut unknown = command();
     unknown.verdict = DuplicateEffortKindV1::Unknown;
-    assert!(unknown.validate().is_err());
+    assert_eq!(
+        unknown.validate().unwrap_err().to_string(),
+        "duplicate Work adjudication evidence is invalid"
+    );
     unknown.quantities.coverage = CoverageStateV1::Unknown;
     assert!(unknown.validate().is_ok());
 
     let mut censored = command();
     censored.verdict = DuplicateEffortKindV1::Censored;
-    assert!(censored.validate().is_err());
+    assert_eq!(
+        censored.validate().unwrap_err().to_string(),
+        "duplicate Work adjudication evidence is invalid"
+    );
     censored.quantities.coverage = CoverageStateV1::Partial;
     assert!(censored.validate().is_ok());
 }

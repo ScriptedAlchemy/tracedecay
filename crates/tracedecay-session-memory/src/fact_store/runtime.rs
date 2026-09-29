@@ -554,36 +554,48 @@ mod tests {
         .unwrap()
     }
 
+    const OWNER_MISMATCH: &str = "fact owner does not match the mounted runtime binding";
+    const MOUNT_MISMATCH: &str =
+        "runtime binding or verified locator does not match the held database client";
+
+    fn storage_denial(result: FactStoreResult<()>) -> (&'static str, String) {
+        match result {
+            Err(FactStoreError::Storage { operation, source }) => (operation, source.to_string()),
+            other => panic!("expected a typed storage denial, got {other:?}"),
+        }
+    }
+
     #[test]
     fn mounted_runtime_requires_exact_owner_scope() {
         let project = ProjectId::new("project.fact-runtime").unwrap();
         let other = ProjectId::new("project.other").unwrap();
         let binding = binding(&project);
-        assert!(
-            validate_owner_binding(
-                &binding,
-                &FactOwnerV1::Project {
-                    project_id: project,
-                },
-                CURRENT_OPERATION,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_owner_binding(
+        validate_owner_binding(
+            &binding,
+            &FactOwnerV1::Project {
+                project_id: project,
+            },
+            CURRENT_OPERATION,
+        )
+        .expect("the bound project owner is admitted");
+        assert_eq!(
+            storage_denial(validate_owner_binding(
                 &binding,
                 &FactOwnerV1::Project { project_id: other },
                 CURRENT_OPERATION,
-            )
-            .is_err()
+            )),
+            (CURRENT_OPERATION, OWNER_MISMATCH.to_owned())
         );
-        assert!(
-            validate_owner_binding(&binding, &FactOwnerV1::Profile, CURRENT_OPERATION).is_err()
+        assert_eq!(
+            storage_denial(validate_owner_binding(
+                &binding,
+                &FactOwnerV1::Profile,
+                CURRENT_OPERATION
+            )),
+            (CURRENT_OPERATION, OWNER_MISMATCH.to_owned())
         );
-        assert!(
-            validate_owner_binding(&profile_binding(), &FactOwnerV1::Profile, CURRENT_OPERATION)
-                .is_ok()
-        );
+        validate_owner_binding(&profile_binding(), &FactOwnerV1::Profile, CURRENT_OPERATION)
+            .expect("the profile owner is admitted on the profile-memory shard");
     }
 
     #[test]
@@ -595,13 +607,22 @@ mod tests {
             binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
-        assert!(validate_mount_parts(&binding, &locator, &binding, &locator,).is_ok());
+        validate_mount_parts(&binding, &locator, &binding, &locator)
+            .expect("an identical client identity mounts");
         let different_locator = VerifiedStoreLocatorV1::new(
             binding.shard_id.clone(),
             binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        assert!(validate_mount_parts(&binding, &locator, &binding, &different_locator,).is_err());
+        assert_eq!(
+            storage_denial(validate_mount_parts(
+                &binding,
+                &locator,
+                &binding,
+                &different_locator,
+            )),
+            ("mount fact storage runtime", MOUNT_MISMATCH.to_owned())
+        );
 
         let profile_binding = profile_binding();
         let profile_locator = VerifiedStoreLocatorV1::new(
@@ -609,15 +630,13 @@ mod tests {
             profile_binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        assert!(
-            validate_mount_parts(
-                &profile_binding,
-                &profile_locator,
-                &profile_binding,
-                &profile_locator,
-            )
-            .is_ok()
-        );
+        validate_mount_parts(
+            &profile_binding,
+            &profile_locator,
+            &profile_binding,
+            &profile_locator,
+        )
+        .expect("a profile-memory shard mounts");
     }
 
     #[tokio::test]
@@ -714,9 +733,24 @@ mod tests {
                 ),
             ];
             for operation in operations {
-                assert!(build_read_request(&binding, operation, CURRENT_OPERATION).is_err());
+                assert_eq!(
+                    storage_denial(
+                        build_read_request(&binding, operation, CURRENT_OPERATION).map(|_| ())
+                    ),
+                    (CURRENT_OPERATION, OWNER_MISMATCH.to_owned())
+                );
             }
         }
+        let owner = FactOwnerV1::Project {
+            project_id: project,
+        };
+        let fact_id = fact_id(owner.clone());
+        build_read_request(
+            &binding,
+            FactReadOperationV1::Current(FactCurrentQuery::new(owner, fact_id).unwrap()),
+            CURRENT_OPERATION,
+        )
+        .expect("the bound project owner builds a read request");
     }
 
     #[test]

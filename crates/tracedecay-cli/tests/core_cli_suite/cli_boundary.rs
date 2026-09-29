@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use tracedecay_mcp::get_tool_definitions_with_budget;
+
 use crate::common::apply_isolated_profile_env;
 
 fn sandboxed_command(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
@@ -57,14 +59,18 @@ fn context_help_describes_the_tool_without_a_project_size() {
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let description = stdout.lines().nth(2).expect("description line");
+    let sized = get_tool_definitions_with_budget(6_000, 5)
+        .expect("budgeted definitions")
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_context")
+        .expect("context definition")
+        .description;
     assert_eq!(
-        description,
-        "Build an AI-ready context for a task description. Returns relevant symbols, \
-         relationships, up to three untracked project memory matches when available, and \
-         optionally code snippets. Use it for broad questions that need relationship synthesis \
-         across the code graph.",
+        sized,
+        format!("{description} This project (6000 nodes) allows 5 broad context calls."),
         "{stdout}"
     );
+    assert!(!description.contains("nodes"), "{stdout}");
 }
 
 #[cfg(not(feature = "hotpath"))]

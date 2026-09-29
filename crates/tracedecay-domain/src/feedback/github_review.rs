@@ -606,10 +606,12 @@ mod tests {
             next_cursor: None,
             rate_limit: None,
         };
-        assert!(
+        assert_eq!(
             missing
                 .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "github review rate-limit checkpoint is not canonical"
         );
 
         let checkpoint = GitHubReviewReadCheckpointV1 {
@@ -625,10 +627,12 @@ mod tests {
             .validate_for(GitHubReviewIngressProviderOutcomeV1::RateLimited)
             .unwrap();
 
-        assert!(
+        assert_eq!(
             checkpoint
                 .validate_for(GitHubReviewIngressProviderOutcomeV1::Complete)
-                .is_err(),
+                .unwrap_err()
+                .to_string(),
+            "complete github review cursor is not canonical",
             "complete coverage cannot retain a next-page cursor"
         );
     }

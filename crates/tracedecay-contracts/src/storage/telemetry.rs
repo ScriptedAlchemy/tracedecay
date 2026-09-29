@@ -625,13 +625,25 @@ mod tests {
             current_observed_at: UtcMicros(2_000),
         };
 
-        assert!(
-            table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
-                store: store(),
-                samples: vec![insignificant],
-                baseline_pending: Vec::new(),
+        let significant = TableGrowthSampleV1 {
+            table: TableNameV1::new("messages").expect("valid table"),
+            previous_bytes: StorageByteSizeV1(10 * 1024 * 1024),
+            current_bytes: StorageByteSizeV1(11 * 1024 * 1024),
+            ..insignificant.clone()
+        };
+
+        let evidence = table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
+            store: store(),
+            samples: vec![insignificant, significant],
+            baseline_pending: Vec::new(),
+        });
+        let tables: Vec<_> = evidence
+            .iter()
+            .map(|item| match item {
+                TableGrowthDoctorEvidenceV1::SignificantGrowth { table, .. } => table.clone(),
+                other => panic!("unexpected table growth evidence: {other:?}"),
             })
-            .is_empty()
-        );
+            .collect();
+        assert_eq!(tables, [TableNameV1::new("messages").expect("valid table")]);
     }
 }

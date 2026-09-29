@@ -10,9 +10,7 @@ use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 
 use crate::daemon::DaemonInvocationState;
 use crate::mcp::McpServer;
-use tracedecay_daemon_service::{
-    DaemonPrimitiveRuntimeRegistrationError, daemon_operation_event_authority,
-};
+use tracedecay_daemon_service::DaemonPrimitiveRuntimeRegistrationError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::SourceReadContext;
 use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
@@ -59,7 +57,6 @@ pub(super) async fn open_and_register_project_primitive_runtime(
                 temporal,
                 access,
                 admitted_root_uri.to_owned(),
-                daemon_operation_event_authority(),
             ),
         )
         .await

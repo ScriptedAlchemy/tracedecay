@@ -9,10 +9,10 @@ use tracedecay_contracts::{
     Deadline, DisclosureClass, RequestContext, RequestId, ResultContractRef,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId,
-    GenerationTestAttributionV1, ProjectId, ProviderEvaluationStateV1, RefId, RepositoryId,
-    SessionCursorKeyIdV1, SessionCursorVersionV1, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, WorktreeId,
+    ActorId, CodeGenerationId, ComponentVersion, ContentDigest, CursorBindingMismatchV1,
+    CursorBindingV1, FileOccurrenceId, GenerationTestAttributionV1, ProjectId,
+    ProviderEvaluationStateV1, RefId, RepositoryId, SessionCursorKeyIdV1, SessionCursorVersionV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -184,6 +184,7 @@ fn diagnostic_cursor_binds_scope_generation_and_lane() {
             &context,
             &current_generation,
             DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+            &diagnostics_binding(50),
         )
         .expect("encode");
 
@@ -194,6 +195,7 @@ fn diagnostic_cursor_binds_scope_generation_and_lane() {
                 &context,
                 &current_generation,
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                &diagnostics_binding(50),
             )
             .expect("decode"),
         query_cursor
@@ -205,6 +207,7 @@ fn diagnostic_cursor_binds_scope_generation_and_lane() {
                 &cursor_context("project.diagnostics.other"),
                 &current_generation,
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                &diagnostics_binding(50),
             )
             .is_err()
     );
@@ -215,6 +218,7 @@ fn diagnostic_cursor_binds_scope_generation_and_lane() {
                 &context,
                 &generation("generation.diagnostics.2"),
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                &diagnostics_binding(50),
             )
             .is_err()
     );
@@ -225,9 +229,37 @@ fn diagnostic_cursor_binds_scope_generation_and_lane() {
                 &context,
                 &current_generation,
                 "file.diagnostics",
+                &diagnostics_binding(50),
             )
             .is_err()
     );
+    assert_eq!(
+        authority.decode(
+            encoded.as_str(),
+            &context,
+            &current_generation,
+            DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+            &diagnostics_binding(10),
+        ),
+        Err(Some(CursorBindingMismatchV1::ParameterChanged {
+            parameter: "maximum_diagnostics"
+        }))
+    );
+}
+
+fn diagnostics_binding(maximum_diagnostics: u32) -> CursorBindingV1 {
+    CursorBindingV1::builder("diagnostics")
+        .parameter(
+            "scope",
+            &tracedecay_contracts::retrieval::DiagnosticsPrimitiveScope::Workspace,
+        )
+        .parameter("maximum_diagnostics", &maximum_diagnostics)
+        .build()
+        .expect("diagnostics binding")
+}
+
+fn lane(name: &'static str) -> CursorBindingV1 {
+    CursorBindingV1::new(name, Vec::new()).expect("lane binding")
 }
 
 fn symbol_graph_context(request_id: RequestId) -> RequestContext {
@@ -448,17 +480,17 @@ async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
 
     let observed_at = now_observed();
     let claim = adapter
-        .claim_page(&issuing, "search", None, observed_at)
+        .claim_page(&issuing, &lane("search"), None, observed_at)
         .await
         .expect("a production request must be able to claim a page");
     let cursor = adapter
-        .finish_page(&issuing, "search", &claim, 3, 8, true, observed_at)
+        .finish_page(&issuing, &lane("search"), &claim, 3, 8, true, observed_at)
         .await
         .expect("a production request must be able to issue a page cursor")
         .expect("a page with more to serve mints a continuation");
     assert_eq!(
         adapter
-            .claim_page(&resuming, "search", Some(&cursor), observed_at)
+            .claim_page(&resuming, &lane("search"), Some(&cursor), observed_at)
             .await
             .expect("the next production request must resume the page")
             .offset(),
@@ -466,7 +498,7 @@ async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
     );
     assert!(
         adapter
-            .claim_page(&resuming, "callers", Some(&cursor), observed_at)
+            .claim_page(&resuming, &lane("callers"), Some(&cursor), observed_at)
             .await
             .is_err(),
         "a cursor must not resume into another lane"
@@ -496,17 +528,17 @@ async fn a_cursor_minted_before_a_publication_does_not_resume_after_it() {
 
     let observed_at = now_observed();
     let claim = adapter
-        .claim_page(&context, "search", None, observed_at)
+        .claim_page(&context, &lane("search"), None, observed_at)
         .await
         .expect("claim page");
     let cursor = adapter
-        .finish_page(&context, "search", &claim, 3, 8, true, observed_at)
+        .finish_page(&context, &lane("search"), &claim, 3, 8, true, observed_at)
         .await
         .expect("finish page")
         .expect("continuation");
     assert_eq!(
         adapter
-            .claim_page(&context, "search", Some(&cursor), observed_at)
+            .claim_page(&context, &lane("search"), Some(&cursor), observed_at)
             .await
             .expect("the unchanged generation still resumes")
             .offset(),
@@ -515,7 +547,7 @@ async fn a_cursor_minted_before_a_publication_does_not_resume_after_it() {
 
     code_index.publish("generation.symbol-graph.code.12", 'd');
     let failure = adapter
-        .claim_page(&context, "search", Some(&cursor), observed_at)
+        .claim_page(&context, &lane("search"), Some(&cursor), observed_at)
         .await
         .expect_err("a superseded generation must refuse the cursor");
     assert_eq!(
@@ -531,7 +563,7 @@ async fn a_cursor_minted_before_a_publication_does_not_resume_after_it() {
     code_index.publish("generation.symbol-graph.code.11", '9');
     assert!(
         adapter
-            .claim_page(&context, "search", Some(&cursor), observed_at)
+            .claim_page(&context, &lane("search"), Some(&cursor), observed_at)
             .await
             .is_err(),
         "a republication at the same sequence must not serve the old page-set"
@@ -561,17 +593,17 @@ async fn read_only_graph_pages_bind_to_a_sealed_dirty_worktree_generation() {
 
     let observed_at = now_observed();
     let claim = adapter
-        .claim_page(&context, "search", None, observed_at)
+        .claim_page(&context, &lane("search"), None, observed_at)
         .await
         .expect("a sealed dirty generation serves read-only pages");
     let cursor = adapter
-        .finish_page(&context, "search", &claim, 3, 8, true, observed_at)
+        .finish_page(&context, &lane("search"), &claim, 3, 8, true, observed_at)
         .await
         .expect("finish page")
         .expect("continuation");
     assert_eq!(
         adapter
-            .claim_page(&context, "search", Some(&cursor), observed_at)
+            .claim_page(&context, &lane("search"), Some(&cursor), observed_at)
             .await
             .expect("the unchanged dirty generation still resumes")
             .offset(),
@@ -581,7 +613,7 @@ async fn read_only_graph_pages_bind_to_a_sealed_dirty_worktree_generation() {
     code_index.publish("generation.symbol-graph.code.12", 'd');
     assert_eq!(
         adapter
-            .claim_page(&context, "search", Some(&cursor), observed_at)
+            .claim_page(&context, &lane("search"), Some(&cursor), observed_at)
             .await
             .expect_err("a further edit supersedes the dirty generation")
             .kind,

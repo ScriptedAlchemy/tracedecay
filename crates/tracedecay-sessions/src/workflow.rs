@@ -275,8 +275,27 @@ mod tests {
             result_summary: None,
             agent_count: 0,
         };
-        let json = serde_json::to_value(&run).expect("workflow run serializes");
-        assert!(json.get("agent_count").is_none());
+        assert_eq!(
+            serde_json::to_value(&run).expect("workflow run serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "parent_session_id": "session.1",
+                "status": "running",
+            })
+        );
+        let counted = super::WorkflowRun {
+            agent_count: 3,
+            ..run
+        };
+        assert_eq!(
+            serde_json::to_value(&counted).expect("workflow run serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "parent_session_id": "session.1",
+                "status": "running",
+                "agent_count": 3,
+            })
+        );
 
         let agent = super::WorkflowAgent {
             run_id: "run.1".into(),
@@ -291,7 +310,28 @@ mod tests {
             started_ts: None,
             ended_ts: None,
         };
-        let json = serde_json::to_value(&agent).expect("workflow agent serializes");
-        assert!(json.get("tokens").is_none());
+        assert_eq!(
+            serde_json::to_value(&agent).expect("workflow agent serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "agent_label": "worker",
+                "agent_id": "agent.1",
+                "status": "running",
+            })
+        );
+        let counted = super::WorkflowAgent {
+            tokens: 42,
+            ..agent
+        };
+        assert_eq!(
+            serde_json::to_value(&counted).expect("workflow agent serializes"),
+            serde_json::json!({
+                "run_id": "run.1",
+                "agent_label": "worker",
+                "agent_id": "agent.1",
+                "status": "running",
+                "tokens": 42,
+            })
+        );
     }
 }

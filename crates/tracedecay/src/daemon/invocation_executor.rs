@@ -575,6 +575,11 @@ fn map_operation_event_invocation_error(
         tracedecay_application::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
             tracedecay_contracts::InvocationError::Denied
         }
+        tracedecay_application::operation_stream::OperationEventError::CursorRefused(mismatch) => {
+            tracedecay_contracts::InvocationError::Problem(Box::new(
+                tracedecay_contracts::ApplicationProblem::cursor_refused(&mismatch),
+            ))
+        }
         tracedecay_application::operation_stream::OperationEventError::RequestNotAdmitted => {
             tracedecay_contracts::InvocationError::DeadlineExceeded
         }

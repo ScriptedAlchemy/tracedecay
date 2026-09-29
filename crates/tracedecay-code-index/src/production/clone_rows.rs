@@ -521,9 +521,29 @@ mod tests {
     #[test]
     fn damaged_streams_are_refused() {
         let strings = vec!["identifier".to_owned()];
-        assert!(decode_tokens(&[CLOSE_INNERMOST], &strings).is_err());
-        assert!(decode_tokens(&[1 + TAG_SYNTAX], &strings).is_err());
-        assert!(decode_tokens(&[1 + (5 << 2)], &strings).is_err());
+        let refusal = |codes: &[u32]| match decode_tokens(codes, &strings) {
+            Err(CodeIndexProductionErrorV1::Contract(message)) => message,
+            other => panic!("expected a contract refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refusal(&[CLOSE_INNERMOST]),
+            "sealed clone token stream closes a structure it never opened"
+        );
+        assert_eq!(
+            refusal(&[1 + TAG_SYNTAX]),
+            "sealed clone syntax token is missing its text"
+        );
+        assert_eq!(
+            refusal(&[1 + (5 << 2)]),
+            "sealed clone token names a string outside its table"
+        );
+        assert_eq!(
+            decode_tokens(&[1 + TAG_SYNTAX, 0], &strings)
+                .expect("the same token with its text decodes")
+                .iter()
+                .collect::<Vec<_>>(),
+            [syntax("identifier", "identifier")]
+        );
     }
 
     #[test]

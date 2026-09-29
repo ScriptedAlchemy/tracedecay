@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::{CursorManifestLimitKindV1, UtcMicros};
+use tracedecay_domain::{CursorBindingMismatchV1, CursorManifestLimitKindV1, UtcMicros};
 
 use super::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
@@ -665,6 +665,10 @@ impl RetainedSurfaceExecutionErrorV1 {
             legal_actions: vec![LegalAction::RestartWithoutCursor],
             detail: None,
         })
+    }
+
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self::ApplicationProblem(ApplicationProblem::cursor_refused(mismatch))
     }
 
     /// Fail-closed structural budget refusal naming the boundary that refused.

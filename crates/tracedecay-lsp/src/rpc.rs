@@ -896,7 +896,19 @@ mod tests {
             DiagnosticSerializationCapabilities::all(),
         );
 
-        assert!(value.get("data").is_none());
+        assert_eq!(
+            value,
+            json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 1 },
+                },
+                "severity": null,
+                "code": null,
+                "source": "upstream",
+                "message": "upstream",
+            })
+        );
     }
 
     #[test]

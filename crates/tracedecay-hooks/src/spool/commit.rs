@@ -25,7 +25,7 @@ use super::checkpoint::{read_transition, records_identity};
 use super::lease::lock_member;
 use super::{HookSpoolError, records_path};
 
-const COMMIT_FILE: &str = "commit.v1.lock";
+pub(super) const COMMIT_FILE: &str = "commit.v1.lock";
 const IDENTITY_BYTES: usize = 32;
 const EXTENT_BYTES: usize = IDENTITY_BYTES + 8;
 const EXTENT_RECORD_BYTES: usize = EXTENT_BYTES + 32;

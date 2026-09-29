@@ -105,13 +105,17 @@ pub struct FeedbackExpandRequestV1 {
 }
 
 impl FeedbackExpandRequestV1 {
+    /// A feedback expansion is one bounded page and issues no continuation,
+    /// so a presented cursor is refused rather than silently ignored.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.finding_id.validate()?;
         self.expansion.anchor.validate()?;
-        PageRequest::new(
-            self.expansion.meta.page.page_size,
-            self.expansion.meta.page.cursor.clone(),
-        )?;
+        if self.expansion.meta.page.cursor.is_some() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "expansion.meta.page.cursor",
+            });
+        }
+        PageRequest::first(self.expansion.meta.page.page_size)?;
         Ok(())
     }
 }
@@ -225,17 +229,26 @@ pub struct TestResultProjectionV1 {
 
 /// Exact retained managed-test-run projection returned by `test_results`.
 ///
-/// The daemon resolves the admitted project, then verifies that the retained
-/// head and code generation are current before it serializes this payload.
-/// `result_offset` and `available_results` retain the authoritative page
-/// position, while `receipt` is present only after the managed run terminates.
+/// The daemon resolves the admitted project, reads its newest durable managed
+/// run, and verifies that the run's head and code generation are current
+/// before it serializes this payload. `result_offset` and `available_results`
+/// retain the authoritative page position. The outcome fields (`finished_at`,
+/// `exit_code`, the counts, `termination`, `receipt`) are present only after
+/// the managed run terminates.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TestResultsResultV1 {
     pub operation_id: String,
-    pub generation: u64,
+    /// The session the run was requested by; null when the request named none.
+    pub session_id: Option<String>,
     pub head_commit_id: Option<CommitId>,
     pub code_generation_id: Option<CodeGenerationId>,
+    pub started_at: UtcMicros,
+    pub finished_at: Option<UtcMicros>,
+    pub exit_code: Option<i32>,
+    pub passed: Option<u64>,
+    pub failed: Option<u64>,
+    pub ignored: Option<u64>,
     pub results: Vec<TestResultProjectionV1>,
     pub completed: u64,
     pub total: Option<u64>,
@@ -678,7 +691,9 @@ mod invocation_tests {
         FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackResultId,
         FeedbackScopeV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId};
+    use tracedecay_domain::{
+        CommitId, ProjectId, RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
+    };
 
     use super::{
         CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
@@ -731,9 +746,15 @@ mod invocation_tests {
         assert_unknown_field_rejected(&TestResultsSurfaceRequestV1::default());
         assert_unknown_field_rejected(&TestResultsResultV1 {
             operation_id: "operation.feedback-test-results".to_owned(),
-            generation: 1,
+            session_id: None,
             head_commit_id: None,
             code_generation_id: None,
+            started_at: UtcMicros(1),
+            finished_at: None,
+            exit_code: None,
+            passed: None,
+            failed: None,
+            ignored: None,
             results: Vec::new(),
             completed: 0,
             total: None,

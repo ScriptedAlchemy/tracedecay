@@ -534,12 +534,13 @@ mod tests {
                 if operation == "record transcript git evidence"
                     && source.to_string().contains("ProjectSessions")
         ));
-        assert!(
+        assert_eq!(
             harness
                 .registered
                 .get_session("codex", "profile-git-evidence")
                 .await
-                .is_none(),
+                .expect("load profile session"),
+            None,
             "scope rejection must happen before transcript rows commit"
         );
     }

@@ -41,19 +41,21 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
         .await
         .unwrap();
 
-    assert!(
-        store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(2),
-                    snapshot(&session_id, 1, 2),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
+    let error = store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
-            .await
-            .is_err()
+            .unwrap(),
+        )
+        .await
+        .expect_err("activation must refuse a graph missing its supersession lineage");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation activate session temporal generation failed: candidate omits canonical typed assertion lineage through the frozen frontier"
     );
 }
 

@@ -769,19 +769,28 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
     let mut caller_issued = issue.clone();
     caller_issued["issuer"] = serde_json::json!("actor.workflow.source");
     assert!(
-        serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued).is_err(),
+        serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `issuer`"),
         "issuance actor must come from authenticated context"
     );
     let mut caller_issued_at = issue.clone();
     caller_issued_at["issued_at"] = serde_json::json!(10);
     assert!(
-        serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued_at).is_err(),
+        serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued_at)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `issued_at`"),
         "issuance time must come from the daemon clock"
     );
     let mut caller_expires_at = issue;
     caller_expires_at["expires_at"] = serde_json::json!(60_000_010);
     assert!(
-        serde_json::from_value::<TaskHandoffIssueRequest>(caller_expires_at).is_err(),
+        serde_json::from_value::<TaskHandoffIssueRequest>(caller_expires_at)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `expires_at`"),
         "expiry must be derived from the fixed authority lifetime"
     );
 
@@ -793,13 +802,19 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
     let mut caller_redeemer = redeem.clone();
     caller_redeemer["redeemer"] = serde_json::json!("actor.workflow.target");
     assert!(
-        serde_json::from_value::<TaskHandoffRedeemRequest>(caller_redeemer).is_err(),
+        serde_json::from_value::<TaskHandoffRedeemRequest>(caller_redeemer)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `redeemer`"),
         "redeemer must come from authenticated context"
     );
     let mut caller_consumed_at = redeem;
     caller_consumed_at["consumed_at"] = serde_json::json!(11);
     assert!(
-        serde_json::from_value::<TaskHandoffRedeemRequest>(caller_consumed_at).is_err(),
+        serde_json::from_value::<TaskHandoffRedeemRequest>(caller_consumed_at)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `consumed_at`"),
         "consumption time must come from the daemon clock"
     );
 }

@@ -1731,7 +1731,8 @@ mod reconcile_tests {
             .registered
             .get_session(&original.provider, &original.session_id)
             .await
-            .unwrap();
+            .expect("load projected session")
+            .expect("projected session row");
         assert_eq!(persisted.project_key, project_id.as_str());
         assert_eq!(
             persisted.project_path,
@@ -1890,12 +1891,14 @@ mod reconcile_tests {
         let second = tmp.path().join("second");
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
-        assert!(
+        assert_eq!(
             reconcile_session_rows_detailed(
                 &record(&first.to_string_lossy()),
                 &record(&second.to_string_lossy()),
             )
-            .is_err(),
+            .unwrap_err()
+            .0,
+            "project_key",
             "distinct directories must never merge"
         );
     }

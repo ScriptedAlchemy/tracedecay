@@ -6,6 +6,7 @@
 //! replay); different bytes under one digest mean corrupted or forged
 //! evidence and fail closed before anything is certified durable.
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -105,6 +106,49 @@ pub(super) fn write_receipt<T: Serialize>(
     file.sync_all().map_err(storage)?;
     std::fs::rename(&temporary, &final_path).map_err(storage)?;
     sync_directory(&receipts_root)
+}
+
+/// Remove every committed receipt of this family whose digest `keep` does not
+/// name, and return how many were removed. The caller holds the store lock and
+/// has settled every journal, so `keep` is the complete set of readers.
+pub(super) fn prune_receipts(
+    store_root: &Path,
+    spec: &ReceiptStoreSpec,
+    keep: &BTreeSet<String>,
+) -> Result<usize, CodeGenerationRetentionErrorV1> {
+    let receipts_root = store_root.join(spec.directory);
+    let entries = match std::fs::read_dir(&receipts_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(storage)?;
+        let name = entry.file_name();
+        let Some(digest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("receipt-"))
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if keep.contains(digest) {
+            continue;
+        }
+        if !entry.file_type().map_err(storage)?.is_file() {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "{} '{digest}' is not a regular file",
+                spec.label
+            )));
+        }
+        std::fs::remove_file(entry.path()).map_err(storage)?;
+        removed += 1;
+    }
+    if removed > 0 {
+        sync_directory(&receipts_root)?;
+    }
+    Ok(removed)
 }
 
 /// Strip the canonical `sha256:` tag from a receipt digest for use as a file

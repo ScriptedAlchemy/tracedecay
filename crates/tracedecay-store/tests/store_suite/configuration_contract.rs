@@ -50,5 +50,8 @@ fn protected_plan_records_bind_the_redacted_plan_to_the_exact_operation() {
         target_revision_id: id("revision.other"),
         mode: RollbackModeV1::AllOrNothing,
     };
-    assert!(conflicting.validate().is_err());
+    assert_eq!(
+        conflicting.validate().unwrap_err().to_string(),
+        "configuration protected plan operation binding is not pinned to the required snapshot"
+    );
 }

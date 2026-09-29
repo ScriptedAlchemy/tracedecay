@@ -397,7 +397,10 @@ mod tests {
             SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
         );
 
-        assert!(request.admit_at(UtcMicros(20)).is_err());
+        assert_eq!(
+            request.admit_at(UtcMicros(20)).unwrap_err().to_string(),
+            "session sync deadline elapsed before admission"
+        );
     }
 
     #[test]

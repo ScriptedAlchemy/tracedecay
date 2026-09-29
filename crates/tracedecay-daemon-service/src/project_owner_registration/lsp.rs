@@ -121,12 +121,22 @@ mod tests {
         project_open_lsp_scope_grant(&access, UtcMicros(10)).expect("live LSP grant");
 
         access.effective_capabilities.clear();
-        assert!(project_open_lsp_scope_grant(&access, UtcMicros(10)).is_err());
+        assert_eq!(
+            project_open_lsp_scope_grant(&access, UtcMicros(10))
+                .unwrap_err()
+                .to_string(),
+            "project-open LSP workspace capability grant is inconsistent with the application contract"
+        );
 
         access.effective_capabilities.insert(
             CapabilityId::new(crate::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("LSP capability"),
         );
-        assert!(project_open_lsp_scope_grant(&access, access.grant_expires_at).is_err());
+        assert_eq!(
+            project_open_lsp_scope_grant(&access, access.grant_expires_at)
+                .unwrap_err()
+                .to_string(),
+            "project-open LSP workspace capability grant is inconsistent with the application contract"
+        );
     }
 
     fn source_access() -> ProjectSourceAccessSnapshot {

@@ -38,8 +38,12 @@ use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
 use tracedecay_code_index::is_test_file;
+use tracedecay_contracts::feedback::TestResultProjectionV1;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{
+    ManagedTestRunOutcomeV1, ManagedTestRunStartV1, RegisteredGlobalDbLeaseV1,
+};
 use tracedecay_project::project::TraceDecay;
 
 use crate::handlers::graph::graph_tool_completion;
@@ -49,12 +53,12 @@ use crate::handlers::unique_file_paths;
 mod affected_test_failure;
 
 use crate::workflow::refused_run;
+use crate::{
+    LibtestReport, RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput,
+    libtest_identity, parse_libtest_output, run_cargo_tests,
+};
 #[cfg(test)]
 use crate::{MAX_TEST_TIMEOUT_SECS, cargo_test_args};
-use crate::{
-    RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
-    parse_libtest_output, run_cargo_tests,
-};
 
 /// Bound concurrent reads while hashing changed files for a managed test run.
 /// Large edit sets must not serialize hundreds of awaited `fs::read` calls.
@@ -440,6 +444,13 @@ fn severity_wire(s: Severity) -> DiagnoseSeverityV1 {
     }
 }
 
+/// Where a managed run is durably recorded: the project sessions store, and
+/// the requesting session the run is attributed to when the request named one.
+pub struct ManagedTestRunRecording {
+    pub store: RegisteredGlobalDbLeaseV1,
+    pub session_id: Option<String>,
+}
+
 /// Computes `tracedecay_run_affected_tests` on the graph-tool owner's side:
 /// selects the tests covering the changed-path manifest, runs them once each,
 /// and reports every observed outcome.
@@ -447,6 +458,7 @@ pub async fn compute_run_affected_tests<F>(
     cg: &TraceDecay,
     graph: F,
     args: Value,
+    recording: ManagedTestRunRecording,
     cancellation: Option<CancellationSignal>,
 ) -> Result<GraphToolCompletionV1>
 where
@@ -454,7 +466,8 @@ where
 {
     let request: RunAffectedTestsSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_run_affected_tests")?;
-    run_affected_tests_with_runner(cg, graph, request, cancellation, run_cargo_tests).await
+    run_affected_tests_with_runner(cg, graph, request, recording, cancellation, run_cargo_tests)
+        .await
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
@@ -469,6 +482,7 @@ async fn run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
     graph: F,
     request: RunAffectedTestsSurfaceRequestV1,
+    recording: ManagedTestRunRecording,
     cancellation: Option<CancellationSignal>,
     runner: Runner,
 ) -> Result<GraphToolCompletionV1>
@@ -523,11 +537,16 @@ where
         ),
     ))
     .map_err(test_run_contract_error)?;
-    let emitter = begin_test_run(
+    let managed = begin_test_run(
         cg,
         &changed_paths,
-        effective_deadline.clone(),
-        graph.generation().clone(),
+        ManagedTestRunAdmission {
+            recording,
+            started_at,
+            deadline: effective_deadline,
+            code_generation_id: graph.generation().clone(),
+            requested_tests: test_names.len() as u64,
+        },
     )
     .await?;
 
@@ -543,7 +562,7 @@ where
         control.clone(),
     );
     tokio::pin!(run);
-    let cancellation = wait_for_test_run_cancellation(emitter.clone(), cancellation);
+    let cancellation = wait_for_test_run_cancellation(managed.emitter.clone(), cancellation);
     tokio::pin!(cancellation);
     let run_result = tokio::select! {
         result = &mut run => result,
@@ -556,9 +575,7 @@ where
         Ok(output) => output,
         Err(failure) => {
             return affected_test_failure::terminal_failure(
-                &emitter,
-                started_at,
-                &effective_deadline,
+                &managed,
                 run_args.timeout_secs,
                 failure,
                 &test_names,
@@ -569,14 +586,14 @@ where
         }
     };
 
-    let results = hotpath::measure_block!(
+    let report = hotpath::measure_block!(
         "mcp.workflow.affected_tests.parse",
         parse_libtest_output(&output.stdout)
     );
-    if let Some(test_name) = missing_requested_test(&test_names, &results) {
-        let any_requested_result = results
+    if let Some(test_name) = missing_requested_test(&test_names, &report) {
+        let any_requested_result = test_names
             .iter()
-            .any(|(observed, _)| test_names.iter().any(|requested| requested == observed));
+            .any(|requested| report.observed(requested));
         let failure = if !any_requested_result && output.exit_code != Some(0) {
             TestRunFailure::Harness {
                 exit_code: output.exit_code,
@@ -591,9 +608,7 @@ where
             }
         };
         return affected_test_failure::terminal_failure(
-            &emitter,
-            started_at,
-            &effective_deadline,
+            &managed,
             run_args.timeout_secs,
             failure,
             &test_names,
@@ -602,26 +617,26 @@ where
         )
         .await;
     }
-    emit_observed_test_results(&emitter, &results, test_names.len()).await?;
-    let receipt = finish_test_run(
-        &emitter,
-        started_at,
-        &effective_deadline,
-        OperationTermination::Completed,
-        output.output_bytes,
-    )
-    .await?;
+    emit_observed_test_results(&managed.emitter, &report, test_names.len()).await?;
+    let receipt = managed
+        .finish(
+            OperationTermination::Completed,
+            output.output_bytes,
+            output.exit_code,
+            &report,
+        )
+        .await?;
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
     let run = hotpath::measure_block!(
         "mcp.workflow.affected_tests.assemble",
         run_affected_tests_body(
             &output,
-            &results,
+            &report,
             &test_names,
             truncated,
             &selected_targets,
-            managed_test_terminal(&emitter, receipt)
+            managed.terminal(receipt)
         )
     );
     Ok(graph_tool_completion(
@@ -661,13 +676,107 @@ async fn wait_for_test_run_cancellation(
     }
 }
 
+/// What a managed run is admitted with: its durable recording, the time it
+/// started, and the source identity it runs against.
+struct ManagedTestRunAdmission {
+    recording: ManagedTestRunRecording,
+    started_at: UtcMicros,
+    deadline: Deadline,
+    code_generation_id: CodeGenerationId,
+    requested_tests: u64,
+}
+
+/// One admitted managed run: its live lifecycle stream and its durable record.
+pub(super) struct ManagedTestRun {
+    pub(super) emitter: OperationEmitter,
+    recording: ManagedTestRunRecording,
+    started_at: UtcMicros,
+    deadline: Deadline,
+}
+
+impl ManagedTestRun {
+    fn operation_id(&self) -> String {
+        self.emitter.binding().operation_id().to_string()
+    }
+
+    /// Records the admitted run durably. The live stream already admitted it,
+    /// so a refused record settles the stream first: no subscriber waits on a
+    /// run that will never execute.
+    async fn record_start(&self, start: &ManagedTestRunStartV1) -> Result<()> {
+        let Err(error) = self
+            .recording
+            .store
+            .record_managed_test_run_start(start)
+            .await
+        else {
+            return Ok(());
+        };
+        finish_test_run(
+            &self.emitter,
+            self.started_at,
+            &self.deadline,
+            OperationTermination::Failed,
+            0,
+        )
+        .await?;
+        Err(test_run_record_error(error))
+    }
+
+    /// Publishes the terminal receipt and settles the durable record with the
+    /// run's exit status and outcome counts.
+    #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
+    pub(super) async fn finish(
+        &self,
+        termination: OperationTermination,
+        bytes_consumed: u64,
+        exit_code: Option<i32>,
+        report: &LibtestReport,
+    ) -> Result<OperationReceipt> {
+        let receipt = finish_test_run(
+            &self.emitter,
+            self.started_at,
+            &self.deadline,
+            termination,
+            bytes_consumed,
+        )
+        .await?;
+        let outcome = ManagedTestRunOutcomeV1 {
+            receipt: receipt.clone(),
+            exit_code,
+            results: report
+                .results
+                .iter()
+                .map(|(test, passed)| TestResultProjectionV1 {
+                    test: test.clone(),
+                    passed: *passed,
+                })
+                .collect(),
+            ignored: report.ignored.len() as u64,
+        };
+        self.recording
+            .store
+            .record_managed_test_run_outcome(&self.operation_id(), &outcome)
+            .await
+            .map_err(test_run_record_error)?;
+        Ok(receipt)
+    }
+
+    pub(super) fn terminal(&self, receipt: OperationReceipt) -> ManagedTestTerminalV1 {
+        ManagedTestTerminalV1 {
+            operation_id: self.operation_id(),
+            result_tool: "tracedecay_test_results".to_owned(),
+            session_id: self.recording.session_id.clone(),
+            receipt,
+        }
+    }
+}
+
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.begin")]
 async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
-    deadline: Deadline,
-    code_generation_id: CodeGenerationId,
-) -> Result<OperationEmitter> {
+    admission: ManagedTestRunAdmission,
+) -> Result<ManagedTestRun> {
     let root = cg
         .project_root()
         .canonicalize()
@@ -688,17 +797,34 @@ async fn begin_test_run(
         })?;
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
-    operation_event_authority()
+    let emitter = operation_event_authority()
         .begin_managed_test_run(
-            root_uri,
+            root_uri.clone(),
             request_id,
-            head_commit_id,
-            Some(code_generation_id),
+            head_commit_id.clone(),
+            Some(admission.code_generation_id.clone()),
             document_content_digests,
-            deadline,
+            admission.deadline.clone(),
         )
         .await
-        .map_err(|error| test_run_event_error(&error))
+        .map_err(|error| test_run_event_error(&error))?;
+    let run = ManagedTestRun {
+        emitter,
+        recording: admission.recording,
+        started_at: admission.started_at,
+        deadline: admission.deadline,
+    };
+    let start = ManagedTestRunStartV1 {
+        operation_id: run.operation_id(),
+        root_uri,
+        session_id: run.recording.session_id.clone(),
+        head_commit_id,
+        code_generation_id: Some(admission.code_generation_id),
+        started_at: run.started_at,
+        requested_tests: admission.requested_tests,
+    };
+    run.record_start(&start).await?;
+    Ok(run)
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.digests")]
@@ -763,23 +889,25 @@ pub(crate) fn current_head_commit_id(root: &Path) -> Option<CommitId> {
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.emit")]
 async fn emit_observed_test_results(
     emitter: &OperationEmitter,
-    results: &[(String, bool)],
+    report: &LibtestReport,
     requested_total: usize,
 ) -> Result<()> {
-    for (test, passed) in results {
+    for (test, passed) in &report.results {
         emitter
             .test_result(test.clone(), *passed)
             .await
             .map_err(|error| test_run_event_error(&error))?;
     }
     emitter
-        .progress(results.len() as u64, Some(requested_total as u64))
+        .progress(
+            (report.results.len() + report.ignored.len()) as u64,
+            Some(requested_total as u64),
+        )
         .await
         .map(|_| ())
         .map_err(|error| test_run_event_error(&error))
 }
 
-#[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
 async fn finish_test_run(
     emitter: &OperationEmitter,
     started_at: UtcMicros,
@@ -819,6 +947,13 @@ async fn finish_test_run(
 fn test_run_event_error(error: &OperationEventError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("managed test-run lifecycle failed: {error}"),
+    }
+}
+
+fn test_run_record_error(message: String) -> TraceDecayError {
+    TraceDecayError::Database {
+        message,
+        operation: "record managed test run".to_owned(),
     }
 }
 
@@ -1044,29 +1179,28 @@ fn select_test_targets(
     (selected_targets, test_names, truncated)
 }
 
-fn missing_requested_test<'a>(
-    requested: &'a [String],
-    results: &[(String, bool)],
-) -> Option<&'a str> {
-    requested.iter().find_map(|requested| {
-        (!results.iter().any(|(observed, _)| observed == requested)).then_some(requested.as_str())
-    })
+fn missing_requested_test<'a>(requested: &'a [String], report: &LibtestReport) -> Option<&'a str> {
+    requested
+        .iter()
+        .find_map(|requested| (!report.observed(requested)).then_some(requested.as_str()))
 }
 
 fn run_affected_tests_body(
     output: &crate::TestRunOutput,
-    results: &[(String, bool)],
+    report: &LibtestReport,
     test_names: &[String],
     truncated: bool,
     selected_targets: &[TestTarget],
     terminal: ManagedTestTerminalV1,
 ) -> AffectedTestRunV1 {
+    let results = &report.results;
     let passed = results.iter().filter(|(_, ok)| *ok).count();
     AffectedTestRunV1 {
         exit_code: output.exit_code,
         passed: passed as u64,
         failed: (results.len() - passed) as u64,
-        total_observed: results.len() as u64,
+        ignored: report.ignored.len() as u64,
+        total_observed: (results.len() + report.ignored.len()) as u64,
         dispatched_tests: test_names.to_vec(),
         truncated,
         results: results
@@ -1081,17 +1215,6 @@ fn run_affected_tests_body(
         stdout_tail: tail(&output.stdout, 2000),
         terminal,
         error: None,
-    }
-}
-
-fn managed_test_terminal(
-    emitter: &OperationEmitter,
-    receipt: OperationReceipt,
-) -> ManagedTestTerminalV1 {
-    ManagedTestTerminalV1 {
-        operation_id: emitter.binding().operation_id().to_string(),
-        result_tool: "tracedecay_test_results".to_owned(),
-        receipt,
     }
 }
 
