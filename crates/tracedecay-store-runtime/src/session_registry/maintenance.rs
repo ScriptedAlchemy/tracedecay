@@ -639,16 +639,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             // reset deletes it.
             let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
-                let (database, convergence) =
-                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
-                (database, Some(convergence))
+                RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?
             } else {
                 (
                     RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
                     None,
                 )
             };
-            if long_lived && database.reset_required().is_none() {
+            if convergence.is_some() {
                 let lease = database.issue_lease().map_err(|error| {
                     session_registry_error(
                         "issue registered schema convergence client",

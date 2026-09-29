@@ -504,7 +504,7 @@ impl RegisteredGlobalDbHarness {
                 _directory,
                 _scope,
             },
-            convergence,
+            convergence.expect("an admissible store returns its convergence plan"),
         )
     }
 }

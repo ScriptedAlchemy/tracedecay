@@ -56,25 +56,27 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
     drop(connection);
     drop(database);
 
-    let error = match open_registered_test_database_fixture(
+    let (lease, owner) = open_registered_test_database_fixture(
         &database_path,
         TestDatabaseRuntimeScope::ProjectSessions {
             project_id: ProjectId::new("project.workflow-schema").unwrap(),
         },
     )
     .await
-    {
-        Ok(_) => panic!("malformed workflow schema must not be completed"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        TraceDecayError::ResetRequired {
-            ref authority,
-            ..
-        } if authority == "workflow"
-    ));
+    .expect("the store's other authorities stay admissible");
+    for refusal in [lease.reset_required(), owner.reset_required()] {
+        assert!(
+            matches!(
+                refusal,
+                Some(TraceDecayError::ResetRequired {
+                    ref authority,
+                    ..
+                }) if authority == "workflow"
+            ),
+            "a malformed workflow schema refuses session features: {refusal:?}"
+        );
+    }
+    drop((lease, owner));
     assert_eq!(
         fs::read(&database_path).unwrap(),
         before_bytes,
