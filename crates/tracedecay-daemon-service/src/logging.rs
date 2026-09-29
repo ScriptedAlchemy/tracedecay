@@ -479,58 +479,56 @@ mod stderr_tracing_tests {
 mod watcher_log_tests {
     use super::parse_watcher_log_line;
 
+    fn assert_absent(line: &str) {
+        match parse_watcher_log_line(line) {
+            None => {}
+            Some(event) => panic!("line was accepted as a watcher event: {event:?}"),
+        }
+    }
+
+    fn assert_event(line: &str, name: &str, project: Option<&str>, detail: Option<&str>) {
+        let event = parse_watcher_log_line(line).expect("marked git_watch line");
+        assert_eq!(event.event, name);
+        assert_eq!(event.project.as_deref(), project);
+        assert_eq!(event.detail.as_deref(), detail);
+    }
+
     #[test]
     fn journal_prefixed_daemon_lines_yield_watcher_events() {
-        let line = concat!(
-            "Jul 28 03:00:00 host tracedecay[1234]: ",
-            "[tracedecay] event=git_watch_degraded project=/tmp/project reason=\"watch limit reached\""
+        assert_event(
+            concat!(
+                "Jul 28 03:00:00 host tracedecay[1234]: ",
+                "[tracedecay] event=git_watch_degraded project=/tmp/project ",
+                "reason=\"watch limit reached\""
+            ),
+            "git_watch_degraded",
+            Some("/tmp/project"),
+            Some("watch limit reached"),
         );
-
-        let event = parse_watcher_log_line(line).expect("marked daemon line is a watcher event");
-
-        assert_eq!(event.event, "git_watch_degraded");
-        assert_eq!(event.project.as_deref(), Some("/tmp/project"));
-        assert_eq!(event.detail.as_deref(), Some("watch limit reached"));
     }
 
     #[test]
     fn tracing_formatted_lines_cannot_forge_watcher_events() {
-        // A `tracing` event carrying an `event` field renders `event=...` on
-        // stderr without the daemon marker. Accepting it would report watcher
-        // health the watcher never claimed.
-        let line = concat!(
+        assert_absent(concat!(
             "2026-07-28T03:00:00.000000Z  WARN tracedecay::daemon: ",
             "event=git_watch_started project=/tmp/project"
+        ));
+        assert_event(
+            "[tracedecay] event=git_watch_started project=/tmp/project",
+            "git_watch_started",
+            Some("/tmp/project"),
+            None,
         );
-
-        match parse_watcher_log_line(line) {
-            None => {}
-            Some(event) => panic!("tracing line forged a watcher event: {event:?}"),
-        }
-
-        let marked = "[tracedecay] event=git_watch_started project=/tmp/project";
-        let event = parse_watcher_log_line(marked).expect("marked git_watch line");
-        assert_eq!(event.event, "git_watch_started");
-        assert_eq!(event.project.as_deref(), Some("/tmp/project"));
-        assert_eq!(event.detail.as_deref(), None);
     }
 
     #[test]
     fn non_watcher_daemon_events_are_ignored() {
-        let line = "[tracedecay] event=scheduler_task task=memory_curator outcome=start";
-
-        match parse_watcher_log_line(line) {
-            None => {}
-            Some(event) => panic!("non-watcher daemon event was accepted: {event:?}"),
-        }
-
-        let marked = concat!(
-            "[tracedecay] event=git_watch_degraded project=/srv/repo ",
-            "reason=\"watch limit reached\""
+        assert_absent("[tracedecay] event=scheduler_task task=memory_curator outcome=start");
+        assert_event(
+            "[tracedecay] event=git_watch_degraded project=/srv/repo reason=\"watch limit reached\"",
+            "git_watch_degraded",
+            Some("/srv/repo"),
+            Some("watch limit reached"),
         );
-        let event = parse_watcher_log_line(marked).expect("marked git_watch line");
-        assert_eq!(event.event, "git_watch_degraded");
-        assert_eq!(event.project.as_deref(), Some("/srv/repo"));
-        assert_eq!(event.detail.as_deref(), Some("watch limit reached"));
     }
 }
