@@ -6212,7 +6212,7 @@ async fn pinned_query_bypasses_freshness_resolution() {
     registry.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generation_read_callers_install_exact_affected_test_attribution() {
     let fixture = GitFixture::new(&[(
         "tests/production.rs",
