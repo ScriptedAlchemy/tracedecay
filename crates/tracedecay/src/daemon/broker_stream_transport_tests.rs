@@ -547,9 +547,27 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
         response,
     )
     .await;
-    assert!(
-        write.is_err(),
-        "a disconnected peer must fail the response write instead of reporting delivery"
+    assert_eq!(
+        write.map_err(|error| error.kind()),
+        Ok(()),
+        "a response the peer abandoned is a dropped delivery, not a daemon transport failure"
+    );
+
+    let notification = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {"level": "info", "data": "never observed"}
+    }))
+    .expect("typed RMCP server notification");
+    let notify = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+        &mut transport,
+        notification,
+    )
+    .await;
+    assert_eq!(
+        notify.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::BrokenPipe),
+        "a daemon-initiated notification to a vanished peer must fail rather than report sent"
     );
 
     drop(transport);
