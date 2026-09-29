@@ -562,14 +562,21 @@ async fn plan_unreferenced(
                AND {MARK_SCOPE_SQL}"
         )
     };
-    let within_grace =
-        query_count(conn, &count(">"), params![provider, session_id, due_before]).await?;
-    let due_total = query_count(
-        conn,
-        &count("<="),
-        params![provider, session_id, due_before],
-    )
-    .await?;
+    let marks_count = |comparison| {
+        let sql = count(comparison);
+        async move {
+            util::fetch_i64(
+                conn,
+                &sql,
+                params![provider, session_id, due_before],
+                "payload GC mark count returned no row",
+            )
+            .await
+            .map(|count| count.max(0) as u64)
+        }
+    };
+    let within_grace = marks_count(">").await?;
+    let due_total = marks_count("<=").await?;
     let batch = i64::try_from(cfg.max_batch_size.max(1)).unwrap_or(i64::MAX);
     let mut rows = conn
         .query(
@@ -626,19 +633,6 @@ async fn plan_unreferenced(
         within_grace,
         beyond_batch: due_total.saturating_sub(examined),
     })
-}
-
-async fn query_count(
-    conn: &(impl QueryExecutor + ?Sized),
-    sql: &str,
-    query_params: impl tracedecay_runtime_core::db::engine::IntoParams,
-) -> Result<u64, LcmError> {
-    let mut rows = conn.query(sql, query_params).await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("payload GC count returned no row".to_string()))?;
-    Ok(row.get::<i64>(0)?.max(0) as u64)
 }
 
 /// Referenced payloads whose file is missing, and `missing` marks whose file
@@ -734,15 +728,14 @@ async fn plan_dangling(
         .ok_or_else(|| LcmError::Db("payload GC dangling scan cursor is missing".to_string()))?
         .parse::<i64>()
         .map_err(|error| LcmError::Db(format!("payload GC dangling scan cursor: {error}")))?;
-    let scanned_through = query_count(
+    let scanned_through = util::fetch_i64(
         conn,
         "SELECT COALESCE(MAX(store_id), 0) FROM lcm_raw_messages",
         (),
+        "payload GC raw row watermark returned no row",
     )
-    .await?;
-    let scanned_through = i64::try_from(scanned_through)
-        .unwrap_or(i64::MAX)
-        .max(after);
+    .await?
+    .max(after);
     let rows = scan_placeholder_text_rows_between(
         conn,
         PlaceholderScanScope::ProviderOrAll {
