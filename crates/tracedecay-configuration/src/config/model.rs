@@ -8,23 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::config::{ProfileRoot, is_generated_dir_segment};
-
-/// Returns `true` if any component of `path` is a generated/vendored
-/// directory segment, or `path` itself carries a minified-asset suffix
-/// (`app.min.js`, `app.min.css`, ...).
-///
-/// Path-level, including individual file paths, so callers can filter a flat
-/// list of file paths in one pass.
-pub fn is_generated_path_segment(path: &str) -> bool {
-    has_minified_suffix(path) || path.split('/').any(is_generated_dir_segment)
-}
-
-/// `true` for paths like `app.min.js` / `app.min.css.map`: a `.min.`
-/// component followed by at least one more character.
-fn has_minified_suffix(path: &str) -> bool {
-    path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
-}
+use tracedecay_runtime_core::config::ProfileRoot;
 
 fn default_thirty_day_retention() -> Option<u64> {
     Some(30)

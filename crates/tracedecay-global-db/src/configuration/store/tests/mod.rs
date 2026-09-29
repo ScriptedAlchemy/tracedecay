@@ -13,6 +13,7 @@ use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::contracts::ports::ConfigurationControlStore;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
+use crate::registered::RegisteredGlobalDbWriteTransaction;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ConfigurationCandidateV1,
@@ -75,22 +76,7 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
         )
         .await
         .unwrap();
-    transaction
-        .execute(
-            "UPDATE configuration_revisions
-             SET snapshot_id = ?2,
-                 effective_behavior_digest = ?3,
-                 resolution_provenance_digest = ?4
-             WHERE revision_id = ?1",
-            tracedecay_runtime_core::db::engine::params![
-                root.revision_id.as_str(),
-                historical_snapshot.snapshot_id.as_str(),
-                historical_snapshot.effective_behavior_digest.as_str(),
-                historical_snapshot.resolution_provenance_digest.as_str()
-            ],
-        )
-        .await
-        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
     transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
@@ -155,22 +141,7 @@ async fn a_changed_default_converges_when_the_setting_was_never_overridden() {
         )
         .await
         .unwrap();
-    transaction
-        .execute(
-            "UPDATE configuration_revisions
-             SET snapshot_id = ?2,
-                 effective_behavior_digest = ?3,
-                 resolution_provenance_digest = ?4
-             WHERE revision_id = ?1",
-            tracedecay_runtime_core::db::engine::params![
-                root.revision_id.as_str(),
-                historical_snapshot.snapshot_id.as_str(),
-                historical_snapshot.effective_behavior_digest.as_str(),
-                historical_snapshot.resolution_provenance_digest.as_str()
-            ],
-        )
-        .await
-        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
     transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
     assert_eq!(
@@ -257,22 +228,7 @@ async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationVal
         )
         .await
         .unwrap();
-    transaction
-        .execute(
-            "UPDATE configuration_revisions
-             SET snapshot_id = ?2,
-                 effective_behavior_digest = ?3,
-                 resolution_provenance_digest = ?4
-             WHERE revision_id = ?1",
-            tracedecay_runtime_core::db::engine::params![
-                root.revision_id.as_str(),
-                historical_snapshot.snapshot_id.as_str(),
-                historical_snapshot.effective_behavior_digest.as_str(),
-                historical_snapshot.resolution_provenance_digest.as_str()
-            ],
-        )
-        .await
-        .unwrap();
+    point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
     transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
 
@@ -285,6 +241,32 @@ async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationVal
     assert!(!converged.snapshot.effective_values.contains_key(&retired));
     assert!(!converged.snapshot.provenance.contains_key(&retired));
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
+}
+
+/// Rewrites a committed revision to carry `snapshot`, the shape a store
+/// written by an older release holds. The caller drops the immutability
+/// trigger first.
+async fn point_revision_at_snapshot(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    revision_id: &ConfigurationRevisionId,
+    snapshot: &ConfigurationSnapshotV1,
+) {
+    transaction
+        .execute(
+            "UPDATE configuration_revisions
+             SET snapshot_id = ?2,
+                 effective_behavior_digest = ?3,
+                 resolution_provenance_digest = ?4
+             WHERE revision_id = ?1",
+            tracedecay_runtime_core::db::engine::params![
+                revision_id.as_str(),
+                snapshot.snapshot_id.as_str(),
+                snapshot.effective_behavior_digest.as_str(),
+                snapshot.resolution_provenance_digest.as_str()
+            ],
+        )
+        .await
+        .unwrap();
 }
 
 async fn count(
