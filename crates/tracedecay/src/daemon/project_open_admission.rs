@@ -1213,6 +1213,42 @@ mod typed_failure_tests {
 }
 
 #[cfg(test)]
+fn assert_graph_schema_reset(error: &TraceDecayError) {
+    assert!(
+        matches!(
+            error,
+            TraceDecayError::ResetRequired { authority, reason }
+                if authority == "graph" && reason == "unsupported schema version 18"
+        ),
+        "reset-required opens must keep the typed refusal: {error}"
+    );
+}
+
+#[cfg(test)]
+fn assert_cached_graph_schema_reset(failure: &ProjectOpenFailure) {
+    assert!(
+        matches!(
+            failure.typed,
+            Some(ProjectOpenTypedFailure::ResetRequired { ref authority, ref reason })
+                if authority == "graph" && reason == "unsupported schema version 18"
+        ),
+        "an unchanged refused store must keep the typed reset refusal"
+    );
+}
+
+#[cfg(test)]
+fn assert_backed_off_database_refusal(error: &TraceDecayError, recorded: &str) {
+    let TraceDecayError::Config { message } = error else {
+        panic!("untyped database refusals are served as config errors: {error}");
+    };
+    let prefix = "project route open is backed off after an invariant rejection; retry after ";
+    assert!(
+        message.starts_with(prefix) && message.ends_with(&format!(" ms: {recorded}")),
+        "backed-off refusal must preserve the database error: {message}"
+    );
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod refused_store_invalidation_tests {
     use super::*;
@@ -1249,10 +1285,10 @@ mod refused_store_invalidation_tests {
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the first open must start a tracked task");
         };
-        assert!(
-            ProjectOpenTasks::wait_for_completion(state).await.is_err(),
-            "the scripted open must record its refusal"
-        );
+        let error = ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("the scripted open must record its refusal");
+        assert_graph_schema_reset(&error);
         // The watch publishes `Failed` just before the task itself finishes,
         // and staleness eviction only acts on finished tasks.
         while tasks.tracked_task_count() > 0 {
@@ -1279,10 +1315,10 @@ mod refused_store_invalidation_tests {
         // Unchanged store: the refusal stays cached and backed off.
         assert!(tasks.cached_failure(&route).is_some());
         let claim = tasks.start_cancellable(route.clone(), |_| async { Ok(()) });
-        assert!(
-            matches!(claim, ProjectOpenTaskClaim::Failed(_)),
-            "an unchanged refused store must keep declining reopen"
-        );
+        let ProjectOpenTaskClaim::Failed(failure) = claim else {
+            panic!("an unchanged refused store must keep declining reopen");
+        };
+        assert_cached_graph_schema_reset(&failure);
 
         // The operator reset deletes the refused graph DB on disk.
         std::fs::remove_file(&db_path).unwrap();
@@ -1319,14 +1355,22 @@ mod refused_store_invalidation_tests {
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the first open must start a tracked task");
         };
-        assert!(ProjectOpenTasks::wait_for_completion(state).await.is_err());
+        let recorded = TraceDecayError::Database {
+            operation: "ensure global database authority invariants".to_owned(),
+            message: "persisted row violates an invariant".to_owned(),
+        }
+        .to_string();
+        let error = ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("the scripted open must record its database refusal");
+        assert_backed_off_database_refusal(&error, &recorded);
 
         std::fs::remove_file(&db_path).unwrap();
 
-        assert!(
-            tasks.cached_failure(&route).is_some(),
-            "non-ResetRequired backoffs are time-based and must survive file churn"
-        );
+        let failure = tasks
+            .cached_failure(&route)
+            .expect("non-ResetRequired backoffs are time-based and must survive file churn");
+        assert!(failure.typed.is_none() && failure.message == recorded);
     }
 }
 
