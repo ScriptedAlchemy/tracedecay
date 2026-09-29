@@ -10,11 +10,10 @@ use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::time::Duration;
 
 use crate::code_index_journey::{
-    RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
-    stop_daemon_gracefully, wait_for_terminal_generation,
+    commit_all, exact_identity, git, initialize_tracedecay, stop_daemon_gracefully,
+    wait_for_open_phase, wait_for_terminal_generation,
 };
 use crate::common::{
     IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
@@ -62,19 +61,7 @@ async fn init_until_open_phase(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let init = std::thread::spawn(move || init.output());
-    let marker = format!("project={} phase={phase}", project.display());
-    let mut log = String::new();
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        loop {
-            log = fs::read_to_string(log_path).unwrap_or_default();
-            if log.contains(&marker) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("project open never reached {phase}; log={log}"));
+    wait_for_open_phase(log_path, project, phase).await;
     init
 }
 
