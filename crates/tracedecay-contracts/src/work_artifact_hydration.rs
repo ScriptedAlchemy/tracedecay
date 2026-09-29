@@ -19,8 +19,8 @@ use tracedecay_domain::{WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority}
 use crate::work::work_authority;
 use crate::work_attempt::{
     MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, WorkAttemptEvidenceRecordV1, WorkAttemptListCoverageV1,
-    WorkAttemptListCursorV1, WorkAttemptStorageError, WorkAttemptTopologyBindingV1,
-    WorkAttemptTopologyStateV1,
+    WorkAttemptListCursorV1, WorkAttemptListOperationV1, WorkAttemptListPagingV1,
+    WorkAttemptStorageError, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
 };
 use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
@@ -154,6 +154,11 @@ where
                 "The Work artifact hydration page size must be between 1 and 1000.",
             ));
         }
+        let paging = WorkAttemptListPagingV1::resolve(
+            WorkAttemptListOperationV1::HydrateArtifacts,
+            request.page_size,
+            request.cursor.as_ref(),
+        )?;
         let authority = work_authority(context)?;
         // Two distinct resources hide inside one hydration: the topology
         // resolution against the graph publication mount and the evidence
@@ -164,7 +169,7 @@ where
         )?;
         let binding = match topology_state {
             WorkAttemptTopologyStateV1::Absent => {
-                return if request.cursor.is_some() {
+                return if paging.has_cursor() {
                     // The snapshot the cursor was minted under no longer
                     // exists for this scope; resuming would fabricate a page.
                     Err(stale_cursor_problem())
@@ -174,18 +179,13 @@ where
             }
             WorkAttemptTopologyStateV1::Verified(binding) => binding,
         };
-        if let Some(cursor) = &request.cursor
-            && cursor.generation != binding.generation
-        {
+        if !paging.resumes_under(&binding.generation) {
             return Err(stale_cursor_problem());
         }
         let page = hotpath::measure_block!(
             "application.work.artifact.hydrate.page_read",
-            self.attempts.evidence_page(
-                &authority,
-                request.cursor.as_ref().map(|cursor| &cursor.start_after),
-                request.page_size,
-            )
+            self.attempts
+                .evidence_page(&authority, paging.start_after(), request.page_size)
         )
         .map_err(storage_problem)?;
         #[cfg(feature = "hotpath")]
@@ -209,14 +209,8 @@ where
         let coverage = if returned == page.remaining {
             WorkAttemptListCoverageV1::Complete { returned }
         } else {
-            let resume = page
-                .rows
-                .last()
-                .map(|row| WorkAttemptListCursorV1 {
-                    generation: binding.generation.clone(),
-                    start_after: row.identity.clone(),
-                })
-                .ok_or_else(page_contract_problem)?;
+            let last = page.rows.last().ok_or_else(page_contract_problem)?;
+            let resume = paging.resume(&binding.generation, &last.identity)?;
             WorkAttemptListCoverageV1::Capped {
                 returned,
                 remaining: page.remaining - returned,

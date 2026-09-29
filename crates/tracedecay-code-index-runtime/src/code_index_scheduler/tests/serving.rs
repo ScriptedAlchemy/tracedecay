@@ -5855,7 +5855,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         refusal
             .diagnostic()
             .map(|diagnostic| diagnostic.code.as_str()),
-        Some("callable_code.cursor_invalid"),
+        Some("cursor.invalid"),
         "MAC verification must precede expiry and other binding diagnostics"
     );
 

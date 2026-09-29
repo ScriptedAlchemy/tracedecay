@@ -12,10 +12,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CalibrationProfileId, ComponentRevision, ManifestDigest, ObservationSourceIdentityV1,
-    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId, TaskEvidenceLinkId,
-    TaskEvidenceLinkV1, TaskId, TemporalModeV1, UtcMicros, WorkArtifactRefV1,
-    WorkAttemptIdentityV1, WorkAuthority, WorkItemV1, WorkProductRelationV1,
+    CalibrationProfileId, ComponentRevision, CursorBindingMismatchV1, ManifestDigest,
+    ObservationSourceIdentityV1, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
+    SourceOccurrenceId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, TemporalModeV1, UtcMicros,
+    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkItemV1, WorkProductRelationV1,
     WorkProposalDecisionV1, WorkRelationReplanDecisionV1,
 };
 
@@ -44,6 +44,10 @@ pub struct WorkTaskSessionContinuationV1 {
     pub attempt: WorkAttemptIdentityV1,
     pub source: ObservationSourceIdentityV1,
     pub participant_epoch: ManifestDigest,
+    /// Binds the continuation to the retrieve-evidence operation and the
+    /// result-shaping request fields the envelope does not echo.
+    #[schemars(with = "String")]
+    pub binding: OpaqueCursor,
     #[schemars(with = "Option<String>")]
     pub temporal_cursor: Option<OpaqueCursor>,
     #[schemars(with = "Option<String>")]
@@ -348,6 +352,10 @@ pub enum WorkEvidenceHydrationErrorV1 {
     TimedOut,
     #[error("evidence hydration was structurally refused: {0:?}")]
     StructuralRefusal(SessionRetrievalStructuralRefusalV1),
+    /// The presented continuation was minted for another operation or
+    /// request, or cannot be verified.
+    #[error("evidence continuation was refused: {0}")]
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 pub type WorkTaskSessionFuture<'a> = Pin<
@@ -622,7 +630,7 @@ where
                                         );
                                     }
                                     Err(error) => {
-                                        omissions.push(hydration_omission("task_session", error))
+                                        omissions.push(hydration_omission("task_session", error)?)
                                     }
                                 }
                             } else if receipt.evidence.is_none() {
@@ -677,7 +685,7 @@ where
                             hydrated = hydrated.saturating_add(1);
                             sources.push(WorkEvidenceSourceV1::Anchor { link, hydration });
                         }
-                        Err(error) => omissions.push(hydration_omission("evidence_anchor", error)),
+                        Err(error) => omissions.push(hydration_omission("evidence_anchor", error)?),
                     }
                 }
             }
@@ -931,29 +939,35 @@ fn validate_request(
     if request.page_size == 0 || request.page_size > MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1 {
         return Err(WorkProductApplicationErrorV1::InvalidRequest);
     }
-    let continuation_matches = match (&request.expansion, &request.continuation) {
-        (_, None) => true,
+    let changed = match (&request.expansion, &request.continuation) {
+        (_, None) => None,
         (
             Some(WorkEvidenceExpansionSelectorV1::Anchor { link_id }),
             Some(WorkEvidenceContinuationV1::Anchor {
                 link_id: cursor_link,
                 ..
             }),
-        ) => link_id == cursor_link,
+        ) => (link_id != cursor_link).then_some("expansion"),
         (
             Some(WorkEvidenceExpansionSelectorV1::TaskSession { attempt }),
             Some(WorkEvidenceContinuationV1::TaskSession { continuation }),
         ) => {
-            attempt == &continuation.attempt
-                && request.task_id == *continuation.attempt.task_id()
-                && request.verified_version == continuation.verified_version
+            if request.task_id != *continuation.attempt.task_id() {
+                Some("task_id")
+            } else if request.verified_version != continuation.verified_version {
+                Some("verified_version")
+            } else {
+                (attempt != &continuation.attempt).then_some("expansion")
+            }
         }
-        _ => false,
+        _ => Some("expansion"),
     };
-    if !continuation_matches {
-        return Err(WorkProductApplicationErrorV1::InvalidRequest);
+    match changed {
+        Some(parameter) => Err(WorkProductApplicationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged { parameter },
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_root(
@@ -1069,6 +1083,7 @@ fn task_session_reauthorization_error(
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
         | WorkProductApplicationErrorV1::ProposalAuthorityUnavailable
+        | WorkProductApplicationErrorV1::CursorRefused(_)
         | WorkProductApplicationErrorV1::Cancelled
         | WorkProductApplicationErrorV1::TimedOut => {
             WorkTaskSessionReauthorizationErrorV1::Unavailable
@@ -1133,10 +1148,12 @@ fn merge_freshness(
     }
 }
 
+/// The omission a failed source read discloses. A refused continuation is not
+/// an omission: the caller presented it, so the whole read is refused.
 fn hydration_omission(
     relation: &str,
     error: WorkEvidenceHydrationErrorV1,
-) -> WorkEvidenceOmissionV1 {
+) -> Result<WorkEvidenceOmissionV1, WorkProductApplicationErrorV1> {
     let reason = match error {
         WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized => {
             WorkEvidenceOmissionReasonV1::NotFoundOrNotAuthorized
@@ -1149,11 +1166,14 @@ fn hydration_omission(
         WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal) => {
             WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal)
         }
+        WorkEvidenceHydrationErrorV1::CursorRefused(mismatch) => {
+            return Err(WorkProductApplicationErrorV1::CursorRefused(mismatch));
+        }
     };
-    WorkEvidenceOmissionV1 {
+    Ok(WorkEvidenceOmissionV1 {
         relation: relation.to_owned(),
         reason,
-    }
+    })
 }
 
 fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {

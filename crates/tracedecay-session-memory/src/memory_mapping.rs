@@ -11,21 +11,20 @@ use tracedecay_contracts::retained_surfaces::{
     FactContradictionV1, FactFeedbackActionV1, FactFeedbackDetailsAvailabilityV1,
     FactFeedbackRequestV1, FactFeedbackV1, FactIdentitySourceResultV1, FactPayloadAccessV1,
     FactProjectionV1, FactReadOptionsV1, FactRetrievalTelemetryDegradationV1,
-    FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1,
-    FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1, FactSourceLabelPatchV1,
-    FactStatusV1, FactStoreAddCommitV1, FactStoreAddRequestV1, FactStoreAddResultV1,
-    FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
-    FactStoreProbeResultV1, FactStoreReasonResultV1, FactStoreRelatedResultV1,
-    FactStoreRemoveRequestV1, FactStoreRemoveResultV1, FactStoreSearchRequestV1,
-    FactStoreSearchResultV1, FactStoreSupersedeRequestV1, FactStoreSupersedeResultV1,
-    FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1,
-    MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1, MemoryStatusV1,
-    RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    FactRetrievalTelemetryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1,
+    FactSearchHitV1, FactSearchScoresV1, FactSourceLabelPatchV1, FactStatusV1,
+    FactStoreAddCommitV1, FactStoreAddRequestV1, FactStoreAddResultV1, FactStoreContradictResultV1,
+    FactStoreGetResultV1, FactStoreListResultV1, FactStoreProbeResultV1, FactStoreReasonResultV1,
+    FactStoreRelatedResultV1, FactStoreRemoveRequestV1, FactStoreRemoveResultV1,
+    FactStoreSearchRequestV1, FactStoreSearchResultV1, FactStoreSupersedeRequestV1,
+    FactStoreSupersedeResultV1, FactStoreUpdateRequestV1, FactStoreUpdateResultV1, FactTelemetryV1,
+    FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1,
+    MemoryStatusV1, RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     TrustHistoryEntryV1,
 };
 use tracedecay_domain::{
-    ActorId, Confidence, FactId, FactIdentitySourceV1, FactOwnerV1, PayloadAccessState,
-    ProvenanceId,
+    ActorId, Confidence, CursorBindingV1, FactId, FactIdentitySourceV1, FactOwnerV1,
+    PayloadAccessState, ProvenanceId, UtcMicros, decode_bound_cursor, encode_bound_cursor,
 };
 use tracedecay_store::{
     FactCommitReceipt, FactStoreError, ProjectMemoryFactAddDispositionV1,
@@ -363,6 +362,7 @@ pub struct PreparedFactSearch<'a> {
     query: ProjectMemoryFactSearchQuery,
     min_trust: Confidence,
     request: &'a FactStoreSearchRequestV1,
+    binding: CursorBindingV1,
 }
 
 impl<'a> PreparedFactSearch<'a> {
@@ -377,19 +377,29 @@ impl<'a> PreparedFactSearch<'a> {
                 .unwrap_or(DEFAULT_SEARCH_MIN_TRUST),
         )
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+        let limit = fact_limit(request.options.limit)?;
+        let binding = fact_page_binding(
+            FactPageOperation::Search,
+            &request.query,
+            &request.options,
+            Some(min_trust.as_f64()),
+            limit,
+        )?;
         let query = fact_search_query(
             owner,
             ProjectMemoryFactSearchKindV1::Search,
             Some(request.query.clone()),
             request.options.category,
             Some(min_trust),
-            fact_limit(request.options.limit)?,
-            request.after.as_ref(),
+            limit,
+            request.after.as_deref(),
+            &binding,
         )?;
         Ok(Self {
             query,
             min_trust,
             request,
+            binding,
         })
     }
 
@@ -405,9 +415,109 @@ impl<'a> PreparedFactSearch<'a> {
         ))
     }
 
-    pub fn into_query(self) -> ProjectMemoryFactSearchQuery {
-        self.query
+    /// The store query and the binding its continuation is minted under.
+    pub fn into_parts(self) -> (ProjectMemoryFactSearchQuery, CursorBindingV1) {
+        (self.query, self.binding)
     }
+}
+
+/// A fact read that pages with a bound continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactPageOperation {
+    Search,
+    Probe,
+    Related,
+    Reason,
+    List,
+}
+
+impl FactPageOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Search => "fact_store_search",
+            Self::Probe => "fact_store_probe",
+            Self::Related => "fact_store_related",
+            Self::Reason => "fact_store_reason",
+            Self::List => "fact_store_list",
+        }
+    }
+
+    /// The request field naming what the read is about; a list has none.
+    const fn subject(self) -> Option<&'static str> {
+        match self {
+            Self::Search => Some("query"),
+            Self::Probe | Self::Related => Some("entity"),
+            Self::Reason => Some("entities"),
+            Self::List => None,
+        }
+    }
+}
+
+/// The operation and every result-shaping parameter a fact page continuation
+/// is minted for; `min_trust` and `limit` are the effective values.
+pub fn fact_page_binding<S: Serialize + ?Sized>(
+    operation: FactPageOperation,
+    subject: &S,
+    options: &FactReadOptionsV1,
+    min_trust: Option<f64>,
+    limit: usize,
+) -> Result<CursorBindingV1, RetainedSurfaceExecutionErrorV1> {
+    let binding = CursorBindingV1::builder(operation.name());
+    let binding = match operation.subject() {
+        Some(name) => binding.parameter(name, subject),
+        None => binding,
+    };
+    binding
+        .parameter("memory_scope", &options.memory_scope)
+        .parameter("project_selector", &options.project_selector)
+        .parameter("category", &options.category)
+        .parameter("min_trust", &min_trust)
+        .parameter("limit", &limit)
+        .build()
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)
+}
+
+/// Where a fact search page resumes: the store's ranked sort key.
+type FactSearchPosition = (u32, UtcMicros, FactId);
+
+fn decode_search_cursor(
+    binding: &CursorBindingV1,
+    after: Option<&str>,
+) -> Result<Option<ProjectMemoryFactSearchCursorV1>, RetainedSurfaceExecutionErrorV1> {
+    after
+        .map(|encoded| {
+            let (score_millionths, updated_at, fact_id) =
+                decode_bound_cursor::<FactSearchPosition>(binding, encoded).map_err(
+                    |mismatch| RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch),
+                )?;
+            ProjectMemoryFactSearchCursorV1::new(score_millionths, updated_at, fact_id)
+                .map_err(map_store_error)
+        })
+        .transpose()
+}
+
+/// The fact a list page resumes after, from a cursor minted for `binding`.
+pub fn decode_list_cursor(
+    binding: &CursorBindingV1,
+    after: Option<&str>,
+) -> Result<Option<FactId>, RetainedSurfaceExecutionErrorV1> {
+    after
+        .map(|encoded| {
+            decode_bound_cursor::<FactId>(binding, encoded)
+                .map_err(|mismatch| RetainedSurfaceExecutionErrorV1::cursor_refused(&mismatch))
+        })
+        .transpose()
+}
+
+fn encode_page_cursor<P: Serialize>(
+    binding: &CursorBindingV1,
+    position: &P,
+) -> Result<String, RetainedSurfaceExecutionErrorV1> {
+    encode_bound_cursor(binding, position).map_err(|_| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the fact page continuation could not be encoded",
+        )
+    })
 }
 
 pub fn search_query(
@@ -415,7 +525,8 @@ pub fn search_query(
     kind: ProjectMemoryFactSearchKindV1,
     query: Option<String>,
     options: &FactReadOptionsV1,
-    after: Option<&FactSearchCursorV1>,
+    after: Option<&str>,
+    binding: &CursorBindingV1,
 ) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
     fact_search_query(
         owner,
@@ -425,9 +536,14 @@ pub fn search_query(
         confidence(options.min_trust)?,
         fact_limit(options.limit)?,
         after,
+        binding,
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Maps each validated retained search field onto the store query."
+)]
 fn fact_search_query(
     owner: FactOwnerV1,
     kind: ProjectMemoryFactSearchKindV1,
@@ -435,20 +551,12 @@ fn fact_search_query(
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
     limit: usize,
-    after: Option<&FactSearchCursorV1>,
+    after: Option<&str>,
+    binding: &CursorBindingV1,
 ) -> Result<ProjectMemoryFactSearchQuery, RetainedSurfaceExecutionErrorV1> {
     let filter =
         ProjectMemoryFactSearchFilterV1::new(category, min_trust, None).map_err(map_store_error)?;
-    let after = after
-        .map(|cursor| {
-            ProjectMemoryFactSearchCursorV1::new(
-                cursor.score_millionths,
-                cursor.updated_at,
-                cursor.fact_id.clone(),
-            )
-        })
-        .transpose()
-        .map_err(map_store_error)?;
+    let after = decode_search_cursor(binding, after)?;
     ProjectMemoryFactSearchQuery::with_filter(owner, kind, query, filter, after, limit)
         .map_err(map_store_error)
 }
@@ -615,6 +723,7 @@ fn unavailable_fact(
 
 pub fn search_page(
     page: &ProjectMemoryFactSearchPageV1,
+    binding: &CursorBindingV1,
 ) -> Result<MappedSearchPageV1, RetainedSurfaceExecutionErrorV1> {
     Ok(MappedSearchPageV1 {
         owner: public_owner(page.owner()),
@@ -623,7 +732,19 @@ pub fn search_page(
             .iter()
             .map(search_hit)
             .collect::<Result<Vec<_>, _>>()?,
-        next_after: page.next_after().map(search_cursor),
+        next_after: page
+            .next_after()
+            .map(|cursor| {
+                encode_page_cursor::<FactSearchPosition>(
+                    binding,
+                    &(
+                        cursor.score_millionths(),
+                        cursor.updated_at(),
+                        cursor.fact_id().clone(),
+                    ),
+                )
+            })
+            .transpose()?,
         graph_coverage: graph_coverage(page.graph_coverage()),
     })
 }
@@ -631,7 +752,7 @@ pub fn search_page(
 pub struct MappedSearchPageV1 {
     pub owner: FactCommitOwnerV1,
     pub hits: Vec<FactSearchHitV1>,
-    pub next_after: Option<FactSearchCursorV1>,
+    pub next_after: Option<String>,
     pub graph_coverage: FactSearchGraphCoverageV1,
 }
 
@@ -751,14 +872,6 @@ fn search_hit(
     })
 }
 
-fn search_cursor(cursor: &tracedecay_store::ProjectMemoryFactSearchCursorV1) -> FactSearchCursorV1 {
-    FactSearchCursorV1 {
-        score_millionths: cursor.score_millionths(),
-        updated_at: cursor.updated_at(),
-        fact_id: cursor.fact_id().clone(),
-    }
-}
-
 fn graph_coverage(coverage: ProjectMemoryFactSearchGraphCoverageV1) -> FactSearchGraphCoverageV1 {
     match coverage {
         ProjectMemoryFactSearchGraphCoverageV1::NotApplicable => {
@@ -871,6 +984,7 @@ pub fn memory_status_result(status: &ProjectMemoryMemoryStatusV1) -> MemoryStatu
 
 pub fn list_page(
     page: &ProjectMemoryFactPageV1,
+    binding: &CursorBindingV1,
 ) -> Result<FactStoreListResultV1, RetainedSurfaceExecutionErrorV1> {
     Ok(FactStoreListResultV1 {
         owner: public_owner(page.owner()),
@@ -879,7 +993,10 @@ pub fn list_page(
             .iter()
             .map(projection)
             .collect::<Result<Vec<_>, _>>()?,
-        next_after_fact_id: page.next_after_fact_id().cloned(),
+        next_after: page
+            .next_after_fact_id()
+            .map(|fact_id| encode_page_cursor(binding, fact_id))
+            .transpose()?,
     })
 }
 
@@ -1168,9 +1285,9 @@ mod tests {
     use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
     use tracedecay_contracts::retained_surfaces::{
         FactCategoryV1, FactFeedbackActionV1, FactFeedbackRequestV1, FactReadOptionsV1,
-        FactSearchCursorV1, FactSourceLabelPatchV1, FactStoreRemoveRequestV1,
-        FactStoreSearchRequestV1, FactStoreSupersedeRequestV1, FactStoreUpdateRequestV1,
-        MemoryScopeV1, RetainedProjectSelectorV1,
+        FactSourceLabelPatchV1, FactStoreRemoveRequestV1, FactStoreSearchRequestV1,
+        FactStoreSupersedeRequestV1, FactStoreUpdateRequestV1, MemoryScopeV1,
+        RetainedProjectSelectorV1,
     };
     use tracedecay_domain::{
         ActorId, FactEventId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
@@ -1179,9 +1296,10 @@ mod tests {
     use tracedecay_store::FactStoreError;
 
     use super::{
-        FactRetrievalTelemetryDegradationV1, MAX_RETAINED_FACT_LIMIT, PreparedFactFeedback,
-        PreparedFactRemove, PreparedFactSearch, PreparedFactSupersede, PreparedFactUpdate,
-        confidence, fact_limit, map_store_error, retrieval_telemetry_degradation,
+        FactPageOperation, FactRetrievalTelemetryDegradationV1, FactSearchPosition,
+        MAX_RETAINED_FACT_LIMIT, PreparedFactFeedback, PreparedFactRemove, PreparedFactSearch,
+        PreparedFactSupersede, PreparedFactUpdate, confidence, encode_page_cursor, fact_limit,
+        fact_page_binding, map_store_error, retrieval_telemetry_degradation,
     };
 
     fn owner() -> FactOwnerV1 {
@@ -1374,22 +1492,31 @@ mod tests {
             "feedback",
         );
 
+        let explicit = FactReadOptionsV1 {
+            category: Some(FactCategoryV1::Project),
+            min_trust: Some(0.6),
+            limit: Some(5),
+            ..FactReadOptionsV1::default()
+        };
+        let explicit_cursor = encode_page_cursor::<FactSearchPosition>(
+            &fact_page_binding(
+                FactPageOperation::Search,
+                "canonical identity",
+                &explicit,
+                Some(0.6),
+                5,
+            )
+            .expect("binding"),
+            &(
+                750_000,
+                UtcMicros(1_700_000_000_000_000),
+                fact_id(&owner, "operation.mapping.search.cursor"),
+            ),
+        )
+        .expect("cursor");
         for (label, options, after) in [
             ("search.defaults", FactReadOptionsV1::default(), None),
-            (
-                "search.explicit",
-                FactReadOptionsV1 {
-                    category: Some(FactCategoryV1::Project),
-                    min_trust: Some(0.6),
-                    limit: Some(5),
-                    ..FactReadOptionsV1::default()
-                },
-                Some(FactSearchCursorV1 {
-                    score_millionths: 750_000,
-                    updated_at: UtcMicros(1_700_000_000_000_000),
-                    fact_id: fact_id(&owner, "operation.mapping.search.cursor"),
-                }),
-            ),
+            ("search.explicit", explicit, Some(explicit_cursor)),
         ] {
             let request = FactStoreSearchRequestV1 {
                 query: "canonical identity".to_owned(),

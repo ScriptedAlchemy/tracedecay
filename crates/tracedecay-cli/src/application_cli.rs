@@ -111,11 +111,7 @@ pub(crate) fn render(
     if json {
         return Ok(crate::cli::output::json::json_line(outcome)?);
     }
-    let outcome = outcome
-        .as_ref()
-        .map_err(|problem| TraceDecayError::Config {
-            message: format!("{}: {}", problem.problem.code, problem.problem.message),
-        })?;
+    let outcome = outcome.as_ref().map_err(problem_error)?;
     Ok(format!(
         "{} {}\nProject: {}\n{}\n",
         kind.0,
@@ -123,6 +119,18 @@ pub(crate) fn render(
         project_root.display(),
         serde_json::to_string_pretty(outcome)?
     ))
+}
+
+/// The process status of an outcome whose JSON line was already written: a
+/// typed problem still fails the command, as it does for `tracedecay tool`.
+pub(crate) fn outcome_status(outcome: &ApplicationResult<Value>) -> Result<()> {
+    outcome.as_ref().map(|_| ()).map_err(problem_error)
+}
+
+fn problem_error(problem: &ApplicationProblemEnvelope) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{}: {}", problem.problem.code, problem.problem.message),
+    }
 }
 
 pub(crate) fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
@@ -138,6 +146,7 @@ pub(crate) mod tests {
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };
+    use tracedecay_domain::CursorBindingMismatchV1;
     use tracedecay_tool_catalog::SchemaId;
 
     pub(crate) fn assert_json_problem(schema_id: &str, request_id: &str) {
@@ -157,5 +166,38 @@ pub(crate) mod tests {
         assert_eq!(problem["request_id"], request_id);
         assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
         assert_eq!(rendered.lines().count(), 1);
+    }
+
+    #[test]
+    fn a_json_rendered_cursor_refusal_still_fails_the_command() {
+        let outcome: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(
+                SchemaId::new("schema.work.list_attempts.result").unwrap(),
+                1,
+            )
+            .unwrap(),
+            RequestId::new("request.cli.work.cursor").unwrap(),
+            ApplicationProblem::cursor_refused(&CursorBindingMismatchV1::ParameterChanged {
+                parameter: "page_size",
+            }),
+        )
+        .expect("construct canonical cursor refusal fixture"));
+
+        let rendered = super::render(
+            super::WORK,
+            "list-attempts",
+            std::path::Path::new("/project"),
+            &outcome,
+            true,
+        )
+        .expect("the refusal renders as its JSON line");
+        let problem: Value = serde_json::from_str(rendered.trim_end()).unwrap();
+        assert_eq!(problem["problem"]["code"], "cursor.parameter_changed");
+        assert_eq!(
+            super::outcome_status(&outcome).unwrap_err().to_string(),
+            "config error: cursor.parameter_changed: The cursor was issued for a request \
+             with a different `page_size`. Repeat the request with the parameters that returned \
+             the cursor, or restart without it."
+        );
     }
 }

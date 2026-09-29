@@ -557,6 +557,8 @@ mod tests {
         .expect("provider scope");
         AuthorizedTemporalExecutionRequest::new(
             snapshot,
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
             "graph stale".to_string(),
             None,
             10,
@@ -585,6 +587,8 @@ mod tests {
         let snapshot = request.snapshot_request().clone();
         AuthorizedTemporalExecutionRequest::new(
             snapshot.with_execution_control(control),
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
             query.to_string(),
             None,
             10,
@@ -621,6 +625,8 @@ mod tests {
         .with_limits(limits);
         AuthorizedTemporalExecutionRequest::new(
             snapshot,
+            tracedecay_domain::CursorBindingV1::new("session_retrieval", Vec::new())
+                .expect("cursor binding"),
             query.to_string(),
             None,
             10,

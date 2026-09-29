@@ -81,6 +81,7 @@ describe('TaskSession evidence requests', () => {
       kind: 'task_session' as const,
       continuation: {
         attempt: { task_id: 'task.alpha', run_id: 'run.1', attempt_id: 'attempt.1' },
+        binding: 'bc1.binding',
         participant_epoch: 'digest.participants',
         ranking_cursor: 'ranking.cursor',
         source: { provider: 'codex', session_id: 'session.1' },
