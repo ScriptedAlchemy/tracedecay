@@ -153,41 +153,36 @@ mod tests {
 
     fn tracedecay_registration(bin: &str) -> serde_json::Value {
         json!({
-            "mcp": {
-                "tracedecay": {
-                    "type": "local",
-                    "command": [bin, "serve"]
-                }
-            },
-            "lsp": {
-                "tracedecay": {
-                    "command": [bin, "lsp", "bridge", "--stdio"],
-                    "extensions": super::super::TRACEDECAY_LSP_EXTENSIONS,
-                    "env": {
-                        "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"
-                    },
-                    "initialization": {
-                        "tracedecay": {
-                            "brokerUpstream": false,
-                            "duplicateAnalyzerAvoidance": true,
-                            "analyzerOwnership": {
-                                "mode": "projection_only",
-                                "retainedByExtension": {}
-                            }
-                        }
-                    }
-                }
-            }
+            "mcp": { "tracedecay": { "type": "local", "command": [bin, "serve"] } },
+            "lsp": { "tracedecay": {
+                "command": [bin, "lsp", "bridge", "--stdio"],
+                "extensions": super::super::TRACEDECAY_LSP_EXTENSIONS,
+                "env": { "TRACEDECAY_LSP_BROKER_UPSTREAM": "0" },
+                "initialization": { "tracedecay": {
+                    "brokerUpstream": false,
+                    "duplicateAnalyzerAvoidance": true,
+                    "analyzerOwnership": { "mode": "projection_only", "retainedByExtension": {} }
+                }}
+            }}
         })
     }
 
-    fn refused_plugin_change(path: &std::path::Path) -> String {
-        format!(
-            "refusing to change `{HOST_OWNED_PLUGIN_KEY}` in {}: that registration belongs to \
-             `opencode plugin`, which TraceDecay does not drive (the deployed plugin is loaded \
-             by OpenCode's own `{{plugin,plugins}}/*.{{ts,js}}` discovery instead)",
-            path.display()
-        )
+    fn assert_plugin_change_refused(before: serde_json::Value, after: serde_json::Value) {
+        let path = Path::new("/home/example/.config/opencode/opencode.json");
+        let error = ensure_host_owned_plugin_registration_untouched(Some(&before), &after, path)
+            .expect_err("changing the host plugin registration must refuse");
+        let TraceDecayError::Config { message } = error else {
+            panic!("the refusal must surface as a config error, got {error}");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "refusing to change `{HOST_OWNED_PLUGIN_KEY}` in {}: that registration belongs to \
+                 `opencode plugin`, which TraceDecay does not drive (the deployed plugin is loaded \
+                 by OpenCode's own `{{plugin,plugins}}/*.{{ts,js}}` discovery instead)",
+                path.display()
+            )
+        );
     }
 
     /// The global deployment path must stay one OpenCode discovers on its own.
@@ -269,39 +264,17 @@ mod tests {
         assert_eq!(config, tracedecay_registration("/usr/bin/tracedecay"));
     }
 
-    /// The guard itself refuses rather than writing, and names the host
-    /// command that owns the key.
     #[test]
     fn a_write_that_would_forge_the_host_plugin_registration_is_refused() {
-        let before = json!(["operator-plugin"]);
-        let forged = json!({ "plugin": ["operator-plugin", "tracedecay"] });
-
-        let path = Path::new("/home/example/.config/opencode/opencode.json");
-        let error = ensure_host_owned_plugin_registration_untouched(Some(&before), &forged, path)
-            .expect_err("a forged plugin registration must refuse, never write");
-
-        let TraceDecayError::Config { message } = error else {
-            panic!("the refusal must surface as a config error, got {error}");
-        };
-        assert_eq!(message, refused_plugin_change(path));
+        assert_plugin_change_refused(
+            json!(["operator-plugin"]),
+            json!({ "plugin": ["operator-plugin", "tracedecay"] }),
+        );
     }
 
-    /// A dropped registration is just as wrong as a forged one.
     #[test]
     fn a_write_that_would_drop_the_host_plugin_registration_is_refused() {
-        let before = json!(["operator-plugin"]);
-        let path = Path::new("/home/example/.config/opencode/opencode.json");
-        let error = ensure_host_owned_plugin_registration_untouched(
-            Some(&before),
-            &json!({ "mcp": {} }),
-            path,
-        )
-        .expect_err("dropping the host plugin registration must refuse");
-
-        let TraceDecayError::Config { message } = error else {
-            panic!("a dropped plugin registration must surface as a config error, got {error}");
-        };
-        assert_eq!(message, refused_plugin_change(path));
+        assert_plugin_change_refused(json!(["operator-plugin"]), json!({ "mcp": {} }));
     }
 
     /// An untouched key, the steady state, passes.
