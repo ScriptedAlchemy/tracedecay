@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Publish pending lane checks
-        uses: ScriptedAlchemy/cargo-hauler@7c2539a21d688cb50344d89c6d6cb97610801671
+        uses: ScriptedAlchemy/cargo-hauler@7782b2ffdfe3a1ab96252c99b2b7ccf3d6627f1e
         with:
           mode: enqueue
           pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
@@ -91,7 +91,7 @@ jobs:
           persist-credentials: false
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@7c2539a21d688cb50344d89c6d6cb97610801671
+        uses: ScriptedAlchemy/cargo-hauler@7782b2ffdfe3a1ab96252c99b2b7ccf3d6627f1e
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
