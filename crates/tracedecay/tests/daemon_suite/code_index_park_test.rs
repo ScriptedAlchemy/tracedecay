@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 
 use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, git, initialize_tracedecay, search, stop_daemon_gracefully, tool,
+    wait_for_open_phase,
 };
 use crate::common::{
     IsolatedHome, daemon_authority_path, daemon_socket_path, http_agent_with_timeout,
@@ -98,6 +99,11 @@ async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
         searched["detail"], parked_detail,
         "search must carry the park as typed detail: {searched}"
     );
+
+    // The core route answers search while the full server still mounts the
+    // application runtime that serves the symbol-search surfaces below; until
+    // then they truthfully refuse as `application.runtime.mounting`.
+    wait_for_open_phase(&log_path, &project, "full_published").await;
 
     let request = json!({
         "query": "alpha",
