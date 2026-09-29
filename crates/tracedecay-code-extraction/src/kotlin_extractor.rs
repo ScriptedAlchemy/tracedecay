@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{declaration_start, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -19,6 +19,9 @@ use crate::{
     },
     complexity::{KOTLIN_COMPLEXITY, count_complexity},
 };
+
+/// Annotation nodes a Kotlin declaration's `modifiers` may lead with.
+const KOTLIN_ANNOTATION_KINDS: &[&str] = &["annotation"];
 
 /// Extracts code graph nodes and edges from Kotlin source files using tree-sitter.
 pub struct KotlinExtractor;
@@ -380,9 +383,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -401,7 +403,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -449,9 +451,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -469,7 +470,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -517,9 +518,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -537,7 +537,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -584,9 +584,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -604,7 +603,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -654,9 +653,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
@@ -668,7 +666,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -735,9 +733,8 @@ impl KotlinExtractor {
             |n| state.node_text(n).to_string(),
         );
 
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -755,7 +752,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -795,9 +792,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -815,7 +811,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -863,9 +859,8 @@ impl KotlinExtractor {
             || "Companion".to_string(),
             |n| state.node_text(n).to_string(),
         );
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -883,7 +878,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -943,9 +938,8 @@ impl KotlinExtractor {
         let visibility = Self::extract_visibility(node, state);
         let docstring = Self::extract_kdoc(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -980,7 +974,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -1030,9 +1024,8 @@ impl KotlinExtractor {
         });
 
         let visibility = Self::extract_visibility(node, state);
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -1067,7 +1060,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -1100,9 +1093,8 @@ impl KotlinExtractor {
 
     /// Extract a secondary constructor.
     fn visit_secondary_constructor(state: &mut ExtractionState, node: TsNode<'_>) {
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, KOTLIN_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let name = "constructor".to_string();
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
@@ -1122,7 +1114,7 @@ impl KotlinExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -1438,7 +1430,7 @@ impl KotlinExtractor {
         node: TsNode<'_>,
         target_id: &str,
     ) {
-        scan_children_for_annotation_kinds(node, &["annotation"], |child| {
+        scan_children_for_annotation_kinds(node, KOTLIN_ANNOTATION_KINDS, |child| {
             emit_annotation_usage(state, child, target_id, child.start_position().row as u32);
         });
     }
