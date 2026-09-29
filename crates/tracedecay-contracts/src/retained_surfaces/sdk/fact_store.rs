@@ -187,60 +187,91 @@ mod tests {
 
     #[test]
     fn route_selected_fact_request_rejects_an_action_tag() {
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreSearchRequestV1>(json!({
                 "action": "search",
                 "query": "session"
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "unknown field `action`"
         );
     }
 
     #[test]
     fn exact_fact_requests_reject_legacy_aliases_and_numeric_ids() {
-        for alias in [
-            json!({"content": "remember", "entity": "compiler"}),
-            json!({"content": "remember", "source": "operator"}),
-            json!({"content": "remember", "project_id": "project.alpha"}),
-            json!({"content": "remember", "project_path": "/tmp/project"}),
-            json!({"content": "remember", "format": "json"}),
+        let assert_unknown_field = |error: serde_json::Error, field: &str| {
+            let error = error.to_string();
+            assert!(
+                error.starts_with(&format!("unknown field `{field}`, expected one of")),
+                "{error}"
+            );
+        };
+        for (field, value) in [
+            ("entity", json!("compiler")),
+            ("source", json!("operator")),
+            ("project_id", json!("project.alpha")),
+            ("project_path", json!("/tmp/project")),
+            ("format", json!("json")),
         ] {
-            assert!(serde_json::from_value::<FactStoreAddRequestV1>(alias).is_err());
+            let mut alias = json!({"content": "remember"});
+            alias[field] = value;
+            assert_unknown_field(
+                serde_json::from_value::<FactStoreAddRequestV1>(alias).unwrap_err(),
+                field,
+            );
         }
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreAddRequestV1>(json!({
                 "content": "remember",
                 "project_selector": {"path": "/tmp/project"}
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "unknown field `path`, expected `project_id`"
         );
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreSearchRequestV1>(json!({
                 "query": "remember",
                 "format": "json"
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "unknown field `format`"
         );
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreReasonRequestV1>(json!({
                 "entity": "compiler"
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "missing field `entities`"
         );
-        assert!(serde_json::from_value::<FactStoreGetRequestV1>(json!({"fact_id": 41})).is_err());
-        for ignored in [
-            json!({"fact_id": "fact.test", "category": "decision"}),
-            json!({"fact_id": "fact.test", "min_trust": 0.5}),
-            json!({"fact_id": "fact.test", "limit": 10}),
+        assert_eq!(
+            serde_json::from_value::<FactStoreGetRequestV1>(json!({"fact_id": 41}))
+                .unwrap_err()
+                .to_string(),
+            "invalid type: integer `41`, expected a string"
+        );
+        for (field, value) in [
+            ("category", json!("decision")),
+            ("min_trust", json!(0.5)),
+            ("limit", json!(10)),
         ] {
-            assert!(serde_json::from_value::<FactStoreGetRequestV1>(ignored).is_err());
+            let mut ignored = json!({"fact_id": "fact.test"});
+            ignored[field] = value;
+            assert_unknown_field(
+                serde_json::from_value::<FactStoreGetRequestV1>(ignored).unwrap_err(),
+                field,
+            );
         }
-        assert!(
+        assert_unknown_field(
             serde_json::from_value::<FactFeedbackRequestV1>(json!({
                 "fact_id": "fact.test",
                 "helpful": true
             }))
-            .is_err()
+            .unwrap_err(),
+            "helpful",
         );
     }
 

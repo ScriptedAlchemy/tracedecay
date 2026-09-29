@@ -726,7 +726,13 @@ mod session_refresh_request_tests {
     fn route_selected_refresh_request_rejects_an_action_tag() {
         let mut body = route_body();
         body["action"] = json!("status");
-        assert!(serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err());
+        let error = serde_json::from_value::<SessionRefreshActionRequestV1>(body)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unknown field `action`, expected one of"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -741,22 +747,43 @@ mod session_refresh_request_tests {
 
     #[test]
     fn scope_rejects_untyped_and_internal_owner_selectors() {
-        for scope in [
-            json!("profile"),
-            json!({ "kind": "profile", "profile_id": "profile.default" }),
-            json!({ "kind": "project", "project": {} }),
-            json!({ "kind": "user", "profile_id": "profile.default" }),
+        for (scope, expected) in [
+            (
+                json!("profile"),
+                "invalid type: string \"profile\", expected internally tagged enum SessionRefreshScopeV1",
+            ),
+            (
+                json!({ "kind": "profile", "profile_id": "profile.default" }),
+                "unknown field `profile_id`, there are no fields",
+            ),
+            (
+                json!({ "kind": "project", "project": {} }),
+                "unknown field `project`, there are no fields",
+            ),
+            (
+                json!({ "kind": "user", "profile_id": "profile.default" }),
+                "unknown variant `user`, expected `project` or `profile`",
+            ),
         ] {
             let mut body = route_body();
             body["scope"] = scope.clone();
-            assert!(
-                serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err(),
+            assert_eq!(
+                serde_json::from_value::<SessionRefreshActionRequestV1>(body)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
                 "scope {scope} must be refused"
             );
         }
         let mut body = route_body();
         body["profile"] = json!({ "id": "profile.default" });
-        assert!(serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err());
+        let error = serde_json::from_value::<SessionRefreshActionRequestV1>(body)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unknown field `profile`, expected one of"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -764,7 +791,13 @@ mod session_refresh_request_tests {
         for action in ["start", "join", "resume"] {
             let mut body = route_body();
             body["action"] = json!(action);
-            assert!(serde_json::from_value::<SessionRefreshRequestV1>(body).is_err());
+            let error = serde_json::from_value::<SessionRefreshRequestV1>(body)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!("unknown variant `{action}`, expected one of")),
+                "{error}"
+            );
         }
     }
 

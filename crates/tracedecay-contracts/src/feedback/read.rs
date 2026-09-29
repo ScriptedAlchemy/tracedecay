@@ -706,8 +706,14 @@ mod invocation_tests {
     #[test]
     fn invocation_handle_rejects_unbounded_or_noncanonical_feedback_reads() {
         assert!(FeedbackHandleRequestV1::new("feedback.handle.v1").is_ok());
-        assert!(FeedbackHandleRequestV1::new(" feedback.handle.v1").is_err());
-        assert!(FeedbackHandleRequestV1::new("x".repeat(257)).is_err());
+        for handle in [" feedback.handle.v1".to_owned(), "x".repeat(257)] {
+            assert_eq!(
+                FeedbackHandleRequestV1::new(handle)
+                    .unwrap_err()
+                    .to_string(),
+                "feedback request handle must be non-empty, trimmed, bounded, and control-character free"
+            );
+        }
     }
 
     #[test]
@@ -768,7 +774,11 @@ mod invocation_tests {
         })
         .expect("serialize feedback finding result");
         nested["finding"]["unexpected"] = serde_json::Value::Bool(true);
-        assert!(serde_json::from_value::<FeedbackGetResultV1>(nested).is_err());
+        assert_unexpected_field_error(
+            serde_json::from_value::<FeedbackGetResultV1>(nested)
+                .map(|_| ())
+                .unwrap_err(),
+        );
     }
 
     fn assert_unknown_field_rejected<T>(value: &T)
@@ -780,7 +790,16 @@ mod invocation_tests {
             .as_object_mut()
             .expect("feedback SDK result object")
             .insert("unexpected".to_owned(), serde_json::Value::Bool(true));
-        assert!(serde_json::from_value::<T>(encoded).is_err());
+        assert_unexpected_field_error(
+            serde_json::from_value::<T>(encoded)
+                .map(|_| ())
+                .unwrap_err(),
+        );
+    }
+
+    fn assert_unexpected_field_error(error: serde_json::Error) {
+        let error = error.to_string();
+        assert!(error.starts_with("unknown field `unexpected`"), "{error}");
     }
 
     fn diagnostics() -> FeedbackDiagnosticsReadResultV1 {
