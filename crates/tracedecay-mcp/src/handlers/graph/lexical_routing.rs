@@ -420,6 +420,7 @@ mod tests {
             final_ordinal: 0,
             node_id: None,
             display: None,
+            display_unavailable: None,
             lexical_routes: None,
         }
     }

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{declaration_start, local_node_id};
 use crate::extraction_artifact::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
 };
@@ -20,6 +20,9 @@ use crate::{
     complexity::{JAVA_COMPLEXITY, count_complexity},
     traversal::has_direct_child_kind,
 };
+
+/// Annotation nodes a Java declaration's `modifiers` may lead with.
+const JAVA_ANNOTATION_KINDS: &[&str] = &["marker_annotation", "annotation"];
 
 /// Extracts code graph nodes and edges from Java source files using tree-sitter.
 pub struct JavaExtractor;
@@ -401,9 +404,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -423,7 +425,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -473,9 +475,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -493,7 +494,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -544,9 +545,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
@@ -558,7 +558,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -614,9 +614,8 @@ impl JavaExtractor {
     /// Extract a single enum constant as an `EnumVariant` node.
     fn extract_single_enum_constant(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -634,7 +633,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -671,9 +670,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -691,7 +689,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -728,9 +726,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
@@ -759,7 +756,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -804,9 +801,8 @@ impl JavaExtractor {
         let visibility = Self::extract_java_visibility(node, state);
         let docstring = Self::extract_java_docstring(state, node);
         let signature = Some(Self::extract_declaration_signature(state, node));
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -825,7 +821,7 @@ impl JavaExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,
@@ -863,9 +859,8 @@ impl JavaExtractor {
     /// Extract field declarations. Each `variable_declarator` in the field becomes a Field node.
     fn visit_field(state: &mut ExtractionState, node: TsNode<'_>) {
         let visibility = Self::extract_java_visibility(node, state);
-        let start_line = node.start_position().row as u32;
+        let (start_line, start_column) = declaration_start(node, JAVA_ANNOTATION_KINDS);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let signature_text = state.node_text(node).trim().to_string();
 
@@ -900,7 +895,7 @@ impl JavaExtractor {
                         qualified_name,
                         file_path: state.file_path.clone(),
                         start_line,
-                        attrs_start_line: start_line,
+                        attrs_start_line: node.start_position().row as u32,
                         end_line,
                         start_column,
                         end_column,
@@ -1285,7 +1280,7 @@ impl JavaExtractor {
         node: TsNode<'_>,
         target_id: &str,
     ) {
-        scan_children_for_annotation_kinds(node, &["marker_annotation", "annotation"], |child| {
+        scan_children_for_annotation_kinds(node, JAVA_ANNOTATION_KINDS, |child| {
             emit_annotation_usage(state, child, target_id, child.start_position().row as u32);
         });
     }

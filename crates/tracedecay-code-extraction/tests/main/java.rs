@@ -469,3 +469,49 @@ public class App {
     assert!(methods[0].qualified_name.contains("App"));
     assert!(methods[0].qualified_name.contains("run"));
 }
+
+#[test]
+fn java_declaration_line_is_past_its_annotations() {
+    let source = "package app;\n\
+\n\
+@Deprecated\n\
+class Circle {\n\
+    @Deprecated\n\
+    private double r;\n\
+\n\
+    @Override\n\
+    public double area() {\n\
+        return r;\n\
+    }\n\
+\n\
+    @SuppressWarnings(\"unused\")\n\
+    @Override\n\
+    double perimeter() {\n\
+        return r;\n\
+    }\n\
+\n\
+    public String name() {\n\
+        return \"c\";\n\
+    }\n\
+}\n";
+    let result = JavaExtractor
+        .extract_artifact("app/Circle.java", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Field | NodeKind::Method))
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 3, 2),
+            ("r", 5, 4),
+            ("area", 8, 7),
+            ("perimeter", 14, 12),
+            ("name", 18, 18),
+        ]
+    );
+}
