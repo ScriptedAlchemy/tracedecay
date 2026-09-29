@@ -95,13 +95,12 @@ async fn production_codex_message_search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
-    // A `partial` generation is the store saying "still converging", the same
-    // not-ready contract as `stale`: re-read it. Every other outcome answers
-    // now, so an empty `complete_zero` still fails the assertions below.
+    // An empty partial or stale answer is not yet converged; a complete zero
+    // must still fail when the final Codex source has not appeared.
     let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let payload = production_codex_message_search_once(harness, project).await;
-            if payload["outcome"] != "partial"
+            if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
                 || payload["results"]
                     .as_array()
                     .is_some_and(|results| !results.is_empty())
@@ -889,6 +888,17 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
     );
     assert_eq!(completed["stats"]["messages_imported"], 0, "{completed}");
 
+    let initial = production_codex_message_search_once(&harness, &project).await;
+    if initial["results"].as_array().is_some_and(Vec::is_empty) {
+        assert!(
+            matches!(initial["outcome"].as_str(), Some("partial" | "stale")),
+            "empty search claimed convergence before the final source arrived: {initial}"
+        );
+        assert_ne!(
+            initial["temporal"]["freshness"]["state"], "fresh",
+            "{initial}"
+        );
+    }
     production_codex_message_search(&harness, &project).await;
     harness.shutdown().await;
 }
