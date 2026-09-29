@@ -360,7 +360,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 self.generation_for(request.scope(), requested)
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
@@ -430,7 +430,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
                     .map(|latest| latest.text_generation_handle())
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
@@ -503,7 +503,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 self.retained_graph_generation_for_scope(request.scope(), requested)
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
@@ -736,6 +736,14 @@ fn rejected_cursor<T>(
         CallableCodeCursorError::Unavailable => OmissionReason::Unavailable,
         CallableCodeCursorError::Invalid | CallableCodeCursorError::ParameterChanged { .. } => {
             return RetrievalPortOutcome::Refused(evidence, Box::new(cursor_refusal(&error)));
+        }
+        CallableCodeCursorError::GenerationNotHeld => {
+            return RetrievalPortOutcome::Refused(
+                evidence,
+                Box::new(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                )),
+            );
         }
     };
     evidence.omissions.push(Omission {

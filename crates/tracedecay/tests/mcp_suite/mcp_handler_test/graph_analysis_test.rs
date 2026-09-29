@@ -3067,6 +3067,53 @@ async fn typescript_typed_variables_reach_public_type_relation_queries() {
     close_test_graph(graph).await;
 }
 
+#[tokio::test]
+async fn navigation_pinned_to_a_generation_the_project_does_not_hold_is_not_found() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/types.ts"),
+        "export interface Greeter { greet(): string }\n",
+    )
+    .unwrap();
+    let graph = init_test_project(&project_root).await;
+    let greeter_id = find_node_id(&graph, "Greeter").await;
+
+    for generation in [
+        "sweep".to_owned(),
+        format!("generation.v1.00000000.00000001.{}", "0".repeat(64)),
+    ] {
+        for tool in [
+            "tracedecay_code_declaration",
+            "tracedecay_code_references",
+            "tracedecay_code_type_definition",
+        ] {
+            let result = call_production_tool(
+                &graph.harness,
+                &graph.project_root,
+                tool,
+                json!({
+                    "node_id": greeter_id,
+                    "scope": {"generation": generation, "path_prefix": Value::Null},
+                    "meta": {"projection": "summary", "order": "relevance", "cursor": Value::Null},
+                }),
+            )
+            .await;
+            let problem = expect_tool_refusal(result);
+            assert_refusal_problem(
+                &problem,
+                "not_found_or_not_authorized",
+                "not_found_or_not_authorized",
+                "The requested resource was not found or is not authorized",
+            );
+            assert_eq!(problem["retry"], "never", "{tool} {generation}: {problem}");
+        }
+    }
+
+    close_test_graph(graph).await;
+}
+
 /// Whether the type-hierarchy page reached `child` over a `relation` edge.
 fn hierarchy_has_child(hierarchy: &Value, relation: &str, child: &str) -> bool {
     hierarchy
