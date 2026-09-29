@@ -2717,7 +2717,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_contracts::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply observation retention");
@@ -2760,7 +2760,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_contracts::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply post-generation observation retention");

@@ -1653,20 +1653,18 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
 // ---------------------------------------------------------------------------
 // SQL batching regression coverage.
 //
-// These tests measure *work*: how many round trips a GC path issues, how many
-// rows those round trips visit, and which rows survive. Nothing here inspects
+// These tests measure *work*: how many round trips a GC path issues and which
+// rows survive. Nothing here inspects
 // statement text, so a query rewrite that preserves the work a pass does keeps
 // the gate green, while a regression back to per-row SQL breaks it. Elapsed
 // time is never asserted: a set-sized workload costing a fixed number of round
 // trips is a property of the access pattern, not of the machine.
 // ---------------------------------------------------------------------------
 
-/// Counts the work forwarded through it: one tick per round trip, plus the rows
-/// each query actually returned. It never retains statement text.
+/// Counts the round trips forwarded through it. It never retains statement text.
 #[derive(Default)]
 struct WorkCounter {
     round_trips: std::cell::Cell<usize>,
-    rows_visited: std::cell::Cell<usize>,
 }
 
 impl WorkCounter {
@@ -1674,18 +1672,9 @@ impl WorkCounter {
         self.round_trips.get()
     }
 
-    fn rows_visited(&self) -> usize {
-        self.rows_visited.get()
-    }
-
     fn tick(&self) {
         self.round_trips
             .set(self.round_trips.get().saturating_add(1));
-    }
-
-    fn add_rows(&self, rows: usize) {
-        self.rows_visited
-            .set(self.rows_visited.get().saturating_add(rows));
     }
 }
 
@@ -1704,28 +1693,8 @@ impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        use tracedecay_runtime_core::db::engine::{Row, Rows, Value};
-
         self.counter.tick();
-        let mut rows = self.inner.query(sql, params).await?;
-        // Drain and replay so the row count is measured, not estimated. The
-        // replayed `Rows` is indistinguishable to the caller: same column
-        // names, same values, same order.
-        let columns = (0..rows.column_count())
-            .map(|index| rows.column_name(index).unwrap_or_default().to_string())
-            .collect::<Vec<_>>();
-        let mut replay = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let mut values = Vec::new();
-            let mut column = 0_i32;
-            while let Ok(value) = row.get::<Value>(column) {
-                values.push(value);
-                column += 1;
-            }
-            replay.push(Row::from_values(values));
-        }
-        self.counter.add_rows(replay.len());
-        Ok(Rows::from_parts(columns, replay))
+        self.inner.query(sql, params).await
     }
 }
 
@@ -1969,8 +1938,8 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 ///
 /// Measured as a marginal, not read off the SQL: reap two batch sizes and
 /// compare. Each extra payload still pays for the work that is irreducibly its
-/// own, its metadata read, its owner-row check, its placeholder sweep, its row
-/// deletes. What must *not* be in the marginal is a pass-level query; if one
+/// own, its metadata read, its owner-row check, its owner-row placeholder
+/// rewrite read, its row deletes. What must *not* be in the marginal is a pass-level query; if one
 /// creeps back into the loop the marginal rises and this fails, whatever the
 /// statement text looks like.
 ///
@@ -1983,8 +1952,9 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
 async fn unreferenced_reap_pays_pass_level_reads_once_for_the_batch() -> Result<(), String> {
     /// Round trips one additional reaped payload adds, measured. It covers the
     /// work that is irreducibly that payload's own: loading its metadata row,
-    /// re-checking its owner row inside the delete, its residual-placeholder
-    /// sweep, its metadata-row delete, and its pending-delete tombstone write.
+    /// re-checking its owner row inside the delete, reading that owner row to
+    /// tombstone its placeholders, its metadata-row delete, and its
+    /// pending-delete tombstone write.
     /// Neither the marks read, the batched owner verification, nor the GC-mark
     /// delete is in there; each is paid once for the batch, and that is what
     /// this test guards.
@@ -2056,127 +2026,12 @@ async fn batched_delete_still_rejects_a_referenced_payload() -> Result<(), Strin
     Ok(())
 }
 
-/// Tombstones `PRIMARY_REF` in a store holding one live placeholder plus
-/// `decoys` inline-prose rows that merely name the ref, and returns how many
-/// rows the delete's queries visited.
-///
-/// The payload deliberately has no metadata row, which is the state the
-/// missing-metadata reap and the crash-recovery path both operate in, so what
-/// is counted is the residual-placeholder sweep's own selectivity.
-async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
-    let store = test_store().await?;
-    insert_session(&store.conn, &store.storage_root, "session-a").await?;
-    let live = format!("[externalized tool output: bytes=4 ref={PRIMARY_REF}; out]");
-    insert_raw_message(
-        &store.conn,
-        RawMessage {
-            session_id: "session-a",
-            message_id: "message-live",
-            storage_kind: "inline",
-            payload_ref: None,
-            content: Some(&live),
-            placeholder_text: None,
-            metadata_json: Some(&live),
-        },
-    )
-    .await?;
-
-    for index in 0..decoys {
-        let prose = format!("the operator mentioned {PRIMARY_REF} in note {index}");
-        insert_raw_message(
-            &store.conn,
-            RawMessage {
-                session_id: "session-a",
-                message_id: &format!("message-decoy-{index}"),
-                storage_kind: "inline",
-                payload_ref: None,
-                content: Some(&prose),
-                placeholder_text: None,
-                metadata_json: Some(&prose),
-            },
-        )
-        .await?;
-    }
-
-    let counter = WorkCounter::default();
-    let transaction = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|err| err.to_string())?;
-    {
-        let counting = CountingExecutor {
-            inner: &transaction,
-            counter: &counter,
-        };
-        payload::delete_external_payload_in_transaction(
-            &counting,
-            &store.storage_root,
-            PRIMARY_REF,
-            &payload::DeleteOpts {
-                rewrite_placeholders: true,
-                remove_file: false,
-                verify_hash: false,
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    }
-    transaction.commit().await.map_err(|err| err.to_string())?;
-
-    // The sweep must still have tombstoned the row that needed it, or a low
-    // row count would only mean the prefilter matched nothing at all.
-    let mut rows = store
-        .conn
-        .query(
-            "SELECT snippet_text FROM lcm_raw_messages WHERE message_id = 'message-live'",
-            (),
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "tombstoned row vanished".to_string())?;
-    let snippet: String = row.get(0).map_err(|err| err.to_string())?;
-    drop(rows);
-    assert!(
-        text_has_tombstoned_payload_ref(&snippet, PRIMARY_REF),
-        "sweep did not tombstone the live placeholder: {snippet}"
-    );
-
-    Ok(counter.rows_visited())
-}
-
-/// M2: the residual-placeholder sweep prefilters on live-prefix + ref rather
-/// than a bare `%ref%`, so its cost is set by the rows that can actually be
-/// rewritten, not by every row that happens to name the ref.
-///
-/// Measured as rows visited, not as `LIKE` terms counted in the statement text:
-/// a bare `%ref%` prefilter pulls inline prose that merely mentions the ref
-/// back into the sweep, so its row count grows with the decoys. The narrowed
-/// prefilter excludes them and the row count stays flat.
+/// A delete tombstones the payload's placeholders, and clears its stored ref,
+/// in its owner row only. A live placeholder quoted into another row, prose
+/// naming the ref, and an already-tombstoned placeholder are text, not
+/// references, and stay as they are.
 #[tokio::test]
-async fn residual_placeholder_sweep_prefilters_on_live_prefixes() -> Result<(), String> {
-    let without_decoys = residual_sweep_rows_visited(0).await?;
-    let with_decoys = residual_sweep_rows_visited(32).await?;
-
-    assert_eq!(
-        with_decoys, without_decoys,
-        "sweep visited {without_decoys} rows with no decoys and {with_decoys} with 32 of them: \
-         the prefilter is matching rows it can never rewrite, which is what a bare `%ref%` \
-         pattern does"
-    );
-    Ok(())
-}
-
-/// M2 equivalence: the narrowed prefilter must rewrite exactly the rows the bare
-/// `%ref%` form rewrote, live placeholders in every text column, plus the
-/// stored `payload_ref`, and must leave inline prose that merely mentions the
-/// ref, and already-tombstoned placeholders, untouched.
-#[tokio::test]
-async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
+async fn delete_tombstones_only_the_owner_row() -> Result<(), String> {
     let store = test_store().await?;
     let payload_ref = seed_payload(&store, "message-live", "body to tombstone").await?;
 
@@ -2271,11 +2126,8 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
                 assert!(text_has_tombstoned_payload_ref(&index_text, &payload_ref));
             }
             "message-other-live" => {
-                assert!(
-                    text_has_tombstoned_payload_ref(&snippet, &payload_ref),
-                    "live tool-output placeholder was not tombstoned: {snippet}"
-                );
-                assert!(text_has_tombstoned_payload_ref(&index_text, &payload_ref));
+                assert_eq!(snippet, live, "a quoted placeholder was rewritten");
+                assert_eq!(index_text, live);
             }
             "message-already-gcd" => {
                 assert_eq!(snippet, already_gcd, "already-tombstoned row was rewritten");

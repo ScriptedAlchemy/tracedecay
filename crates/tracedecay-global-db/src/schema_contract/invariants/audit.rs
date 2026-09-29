@@ -1878,7 +1878,8 @@ mod tests {
         validate_projection_authority_suffix,
     };
     use crate::tests::harness::{
-        RegisteredGlobalDbTestFixture, open_registered_test_fixture, writer_telemetry,
+        RegisteredGlobalDbTestFixture, open_registered_test_fixture, seed_projected_messages,
+        writer_telemetry,
     };
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{
@@ -2457,133 +2458,6 @@ mod tests {
         }
     }
 
-    /// One session's projected messages, committed and drained through the real
-    /// observation store so the audit sees production-shaped authority.
-    /// Commits and projects messages `indexes` of one session, continuing its
-    /// source cursor from the message before the first index.
-    async fn seed_projected_messages(
-        runtime: &crate::tests::harness::HostAdmissionTestRuntimeV1,
-        indexes: std::ops::Range<usize>,
-    ) -> Vec<DurableObservationV1> {
-        use tracedecay_domain::{
-            CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-            CanonicalObservationRelationsV1, ObservationSourceCursorV1, ProjectionGenerationId,
-            ProviderId, SessionId, UtcMicros,
-        };
-        use tracedecay_store::{
-            AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-            ObservationStore, ObservationWrite,
-        };
-
-        let store = runtime
-            .observation_store(crate::tests::harness::HostAdmissionScope::Profile)
-            .unwrap();
-        let provider = ProviderId::new("codex").unwrap();
-        let session_id = SessionId::new("session.audit-batch").unwrap();
-        let source =
-            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
-                .unwrap();
-        let mut expected_cursor = (indexes.start > 0).then(|| {
-            ObservationSourceCursorV1::for_ordering(
-                source.clone(),
-                ObservationScopeV1::Profile,
-                ObservationSourceGenerationV1::new(1).unwrap(),
-                ObservationOrderingDomainV1::FileBytes,
-                u64::try_from(indexes.start).unwrap() * 100,
-            )
-            .unwrap()
-        });
-        let mut observations = Vec::with_capacity(indexes.len());
-        for index in indexes {
-            let record_id = format!("record.audit-batch-{index}");
-            let record = ObservationId::new(record_id.clone()).unwrap();
-            let start = u64::try_from(index).unwrap() * 100;
-            let range = ObservationSourceRangeV1::new(start, start + 100).unwrap();
-            let relations = CanonicalObservationRelationsV1::new(session_id.clone())
-                .with_message_id(ObservationId::new(format!("message.{record_id}")).unwrap());
-            let envelope = CanonicalObservationEnvelopeV1::new(
-                provider.clone(),
-                "message",
-                record.clone(),
-                relations,
-                vec![CanonicalObservationFactV1::Message {
-                    role: CanonicalMessageRoleV1::Assistant,
-                    content: serde_json::json!({ "text": format!("audit batch {index}") }),
-                    model: None,
-                    timestamp: Some(1_750_000_000),
-                }],
-                CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
-            )
-            .unwrap();
-            let payload = serde_json::to_value(envelope).unwrap();
-            let receipt = SanitizationReceiptV1::new(
-                SanitizationReceiptRefV1::new(
-                    SanitizationReceiptId::new(format!("receipt.audit-batch-{index}")).unwrap(),
-                    ComponentVersion::new("sanitizer.audit-batch.v1").unwrap(),
-                )
-                .unwrap(),
-                SanitizerDispositionV1::Accepted,
-                SensitivityV1::NonSensitive,
-                Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
-            )
-            .unwrap();
-            let observation = DurableObservationV1::new(
-                ObservationIdentityMaterialV1::for_native_record(
-                    source.clone(),
-                    ObservationScopeV1::Profile,
-                    ObservationSourceGenerationV1::new(1).unwrap(),
-                    range,
-                    ObservationOrderingDomainV1::FileBytes,
-                    record,
-                )
-                .unwrap(),
-                receipt,
-                RetentionClass::new("retention.audit-batch").unwrap(),
-                payload,
-            )
-            .unwrap();
-            let next_cursor = ObservationSourceCursorV1::for_ordering(
-                observation.source().clone(),
-                observation.scope().clone(),
-                observation.identity().generation(),
-                observation.identity().ordering_domain(),
-                observation.identity().position().end(),
-            )
-            .unwrap();
-            let write = ObservationWrite::new(
-                observation.clone(),
-                expected_cursor.clone(),
-                next_cursor.clone(),
-            )
-            .unwrap();
-            let generation = ProjectionGenerationId::new("projection.audit-batch.v1").unwrap();
-            let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
-                write.observation(),
-                "audit-batch",
-            )
-            .unwrap();
-            let anchor = tracedecay_store::build_observation_retrieval_anchor(
-                write.observation(),
-                generation.clone(),
-                UtcMicros(1),
-                authorization,
-            )
-            .unwrap();
-            let anchored = AnchoredObservationWrite::new(write, anchor, generation).unwrap();
-            assert!(matches!(
-                store.persist_observation(anchored).await.unwrap(),
-                ObservationPersistOutcome::Committed(_)
-            ));
-            store
-                .project_observation(observation.observation_id())
-                .await
-                .unwrap();
-            expected_cursor = Some(next_cursor);
-            observations.push(observation);
-        }
-        observations
-    }
-
     const CURSOR_COLLISION_MESSAGE_ID: &str = "fixture-session:0:generation:5552477573209801791";
 
     async fn seed_projected_cursor_message(
@@ -2961,7 +2835,7 @@ mod tests {
             "projection audit issued {queries} queries for {OBSERVATIONS} projected messages"
         );
 
-        let effect = crate::observation_projection::derive_projection(&observations[0]).unwrap();
+        let effect = crate::observation_projection::derive_projection(&observations[0].0).unwrap();
         let projection = effect.message().expect("seeded message projection");
         let message = projection.message();
         let requested = BTreeSet::from([(message.provider.clone(), message.message_id.clone())]);
@@ -3067,8 +2941,8 @@ mod tests {
                  ) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     SESSION_MESSAGE_PROJECTOR_VERSION,
-                    audited[0].observation_id().as_str(),
-                    audited[0].receipt().receipt().receipt_id().as_str(),
+                    audited[0].0.observation_id().as_str(),
+                    audited[0].0.receipt().receipt().receipt_id().as_str(),
                     ProjectionSkipReason::OutputCollision.as_str()
                 ],
             )

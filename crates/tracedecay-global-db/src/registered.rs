@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use crate::schema_stages::RegisteredSchemaAttachmentV1;
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
     cancellation::CancellationToken,
@@ -658,7 +659,7 @@ impl RegisteredGlobalDb {
         generation: Option<&str>,
         config: &super::observation::retention::ObservationRetentionConfig,
         mode: super::observation::retention::RetentionMode,
-        now: i64,
+        now: UtcMicros,
     ) -> tracedecay_domain::errors::Result<super::observation::retention::ObservationRetentionReport>
     {
         if matches!(mode, super::observation::retention::RetentionMode::Apply) {
