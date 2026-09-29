@@ -7,6 +7,10 @@ description = "Cross-platform owner-private filesystem authority for TraceDecay 
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Fixture fsync latency injection (`framed_log::sync_latency`) for consumer tests.
+test-helpers = []
+
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"

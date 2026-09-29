@@ -69,6 +69,7 @@ fn partial_tail_is_truncated_but_mid_file_checksum_failure_is_corruption() {
     crash_meta.append_intent = Some(AppendIntentV1::new(
         2,
         first.framed_len as u64,
+        1,
         &unpublished,
     ));
     write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
@@ -110,6 +111,7 @@ fn torn_active_header_recovers_and_retry_remains_gap_free_across_restart() {
     crash_meta.append_intent = Some(AppendIntentV1::new(
         2,
         first.framed_len as u64,
+        1,
         &unpublished,
     ));
     write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
@@ -146,7 +148,7 @@ fn append_intent_without_frame_is_cleared_and_sequence_is_reused() {
     let (temp, spool) = open_temp();
     let frame = encode_frame(1, b"a", b"retry").unwrap();
     let mut crash_meta = spool.meta.clone();
-    crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, &frame));
+    crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, 1, &frame));
     write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
     drop(spool);
 
@@ -471,7 +473,7 @@ fn frame_sync_before_metadata_write_recovers_append_once() {
     let (temp, spool) = open_temp();
     let frame = encode_frame(1, b"a", b"crash-window").unwrap();
     let mut crash_meta = spool.meta.clone();
-    crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, &frame));
+    crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, 1, &frame));
     write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
     drop(spool);
     append_frame_durable(&temp.path().join(RECORDS_FILE), &frame).unwrap();
@@ -580,16 +582,17 @@ fn ambiguous_append_failure_blocks_every_mutation_until_reopen() {
     let records_path = temp.path().join(RECORDS_FILE);
     let meta_path = temp.path().join(META_FILE);
     let before_second = fs::read(&records_path).unwrap();
-    *FAIL_META_WRITE_FOR.lock().unwrap() = Some((meta_path.clone(), 1));
+    *FAIL_META_WRITE_FOR.lock().unwrap() = Some((meta_path.clone(), 0));
 
+    // The intent publish for the second batch fails; whether it reached disk
+    // is unknown to this process.
     assert_eq!(spool.append("b", b"two"), Err(SpoolError::Io));
     assert!(spool.recovery_required());
-    let ambiguous_bytes = fs::read(&records_path).unwrap();
-    assert!(ambiguous_bytes.len() > before_second.len());
+    assert_eq!(fs::read(&records_path).unwrap(), before_second);
     let persisted: SpoolMetaV1 = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
     assert_eq!(
         persisted.append_intent.as_ref().map(|intent| intent.seq),
-        Some(2)
+        Some(1)
     );
     assert_eq!(spool.ack(1), Err(SpoolError::AppendRecoveryRequired));
     assert_eq!(
@@ -600,26 +603,24 @@ fn ambiguous_append_failure_blocks_every_mutation_until_reopen() {
         spool.append("c", b"three"),
         Err(SpoolError::AppendRecoveryRequired)
     );
-    assert_eq!(fs::read(&records_path).unwrap(), ambiguous_bytes);
+    assert_eq!(
+        spool.publish_acknowledgements(),
+        Err(SpoolError::AppendRecoveryRequired)
+    );
+    assert_eq!(fs::read(&records_path).unwrap(), before_second);
     drop(spool);
 
     let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
-    assert_eq!(report.next_seq, 3);
-    assert_eq!(
-        spool
-            .pending_records()
-            .iter()
-            .map(|record| record.seq)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
+    assert_eq!(report.next_seq, 2);
+    assert_eq!(pending_seqs(&spool), vec![1]);
+    assert_eq!(spool.append("b", b"two").unwrap().seq, 2);
     assert_eq!(spool.ack_through(2).unwrap(), 2);
     assert_eq!(spool.committed_through(), 2);
     assert_eq!(spool.pending_count(), 0);
 }
 
 #[test]
-fn ack_through_validates_tail_then_publishes_once() {
+fn ack_through_validates_tail_and_is_durable_once_published() {
     let (temp, mut spool) = open_temp();
     spool.append("a", b"one").unwrap();
     spool.append("b", b"two").unwrap();
@@ -637,6 +638,22 @@ fn ack_through_validates_tail_then_publishes_once() {
     assert_eq!(spool.pending_records()[0].seq, 3);
     assert_eq!(spool.ack_through(1).unwrap(), 0);
     assert_eq!(spool.committed_through(), 2);
+    drop(spool);
+
+    // A crash before the watermark is published replays the acknowledged
+    // records once more; none is lost.
+    let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+    assert_eq!(report.committed_through, 0);
+    assert_eq!(
+        spool
+            .pending_records()
+            .iter()
+            .map(|record| record.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(spool.ack_through(2).unwrap(), 2);
+    spool.publish_acknowledgements().unwrap();
     drop(spool);
 
     let (spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
@@ -670,6 +687,7 @@ fn ack_watermark_defers_full_rewrite_until_waste_threshold() {
     let half = (N / 2) as u64;
     for seq in 1..=half {
         assert_eq!(spool.ack_through(seq).unwrap(), 1);
+        spool.publish_acknowledgements().unwrap();
         assert_eq!(file_len(&records).unwrap(), physical_after_append);
     }
     assert_eq!(spool.pending_count(), N / 2);
@@ -677,6 +695,7 @@ fn ack_watermark_defers_full_rewrite_until_waste_threshold() {
 
     // Crossing the waste multiplier triggers one batched compact.
     assert_eq!(spool.ack_through(half + 1).unwrap(), 1);
+    spool.publish_acknowledgements().unwrap();
     let after_batch = file_len(&records).unwrap();
     assert!(after_batch < physical_after_append);
     assert_eq!(after_batch, (frame_len * (N / 2 - 1)) as u64);
@@ -684,6 +703,7 @@ fn ack_watermark_defers_full_rewrite_until_waste_threshold() {
 
     // Drain remaining live records; empty pending must reclaim to zero.
     assert_eq!(spool.ack_through(N as u64).unwrap(), N / 2 - 1);
+    spool.publish_acknowledgements().unwrap();
     assert_eq!(spool.pending_count(), 0);
     assert_eq!(file_len(&records).unwrap(), 0);
     assert_eq!(spool.committed_through(), N as u64);
@@ -911,5 +931,178 @@ fn spool_tightens_directory_and_payload_file_permissions() {
             .mode()
             & 0o777,
         0o600
+    );
+}
+
+fn pending_seqs(spool: &HostAdmissionSpool) -> Vec<u64> {
+    spool
+        .pending_records()
+        .iter()
+        .map(|record| record.seq)
+        .collect()
+}
+
+fn batch_bytes(first_seq: u64, payloads: &[&[u8]]) -> Vec<u8> {
+    payloads
+        .iter()
+        .zip(first_seq..)
+        .flat_map(|(payload, seq)| encode_frame(seq, b"a", payload).unwrap())
+        .collect()
+}
+
+/// Publish an intent for a batch starting after the one durable record, as
+/// a crash leaves it before the batch's frames are fully written.
+fn crash_with_batch_intent(payloads: &[&[u8]]) -> (tempfile::TempDir, u64, Vec<u8>) {
+    let (temp, mut spool) = open_temp();
+    let first = spool.append("a", b"one").unwrap();
+    let batch = batch_bytes(2, payloads);
+    let mut crash_meta = spool.meta.clone();
+    crash_meta.append_intent = Some(AppendIntentV1::new(
+        2,
+        first.framed_len as u64,
+        payloads.len() as u64,
+        &batch,
+    ));
+    write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
+    drop(spool);
+    (temp, first.framed_len as u64, batch)
+}
+
+fn append_raw(path: &Path, bytes: &[u8]) {
+    let mut output = OpenOptions::new().append(true).open(path).unwrap();
+    output.write_all(bytes).unwrap();
+}
+
+#[test]
+fn a_batch_shares_one_intent_publish_and_one_frame_sync() {
+    let (temp, mut spool) = open_temp();
+    spool.append("a", b"one").unwrap();
+    let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(
+        temp.path(),
+        std::time::Duration::ZERO,
+    );
+
+    let appended = spool.append_batch(&[
+        ("a", b"two"),
+        ("b", &[0u8; 65]),
+        ("b", b"three"),
+        ("c", b"four"),
+    ]);
+
+    // Intent file sync, directory sync, and one frame sync for all three.
+    assert_eq!(barriers.syncs(), 3);
+    assert_eq!(
+        appended
+            .into_iter()
+            .map(|appended| appended.map(|record| (record.seq, record.payload)))
+            .collect::<Vec<_>>(),
+        vec![
+            Ok((2, b"two".to_vec())),
+            Err(SpoolError::Overflow(
+                SpoolOverflowDisposition::RecordTooLarge
+            )),
+            Ok((3, b"three".to_vec())),
+            Ok((4, b"four".to_vec())),
+        ]
+    );
+}
+
+#[test]
+fn an_acknowledged_batch_survives_a_crash_before_any_further_publish() {
+    let (temp, mut spool) = open_temp();
+    spool.append("a", b"one").unwrap();
+    for appended in spool.append_batch(&[("b", b"two"), ("c", b"three")]) {
+        appended.unwrap();
+    }
+    // Nothing after the batch's own barriers: the process dies here.
+    drop(spool);
+
+    let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+    assert_eq!(report.integrity, SpoolIntegrity::Healthy);
+    assert_eq!(report.next_seq, 4);
+    assert!(spool.meta.append_intent.is_none());
+    assert_eq!(
+        spool
+            .pending_records()
+            .iter()
+            .map(|record| (
+                record.seq,
+                record.source.as_str(),
+                record.payload.as_slice()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "a", b"one".as_slice()),
+            (2, "b", b"two".as_slice()),
+            (3, "c", b"three".as_slice()),
+        ]
+    );
+    assert_eq!(spool.append("d", b"four").unwrap().seq, 4);
+}
+
+#[test]
+fn a_torn_batch_keeps_its_complete_frames_and_truncates_the_torn_one() {
+    let (temp, durable_len, batch) = crash_with_batch_intent(&[b"two", b"three", b"four"]);
+    let second_len = encode_frame(2, b"a", b"two").unwrap().len();
+    let records = temp.path().join(RECORDS_FILE);
+    append_raw(&records, &batch[..second_len + FRAME_HEADER_BYTES + 1]);
+
+    let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+    assert_eq!(report.integrity, SpoolIntegrity::Healthy);
+    assert_eq!(
+        report.truncated_partial_tail_bytes,
+        (FRAME_HEADER_BYTES + 1) as u64
+    );
+    assert_eq!(file_len(&records).unwrap(), durable_len + second_len as u64);
+    assert_eq!(pending_seqs(&spool), vec![1, 2]);
+    assert_eq!(report.next_seq, 3);
+    assert_eq!(spool.append("a", b"three").unwrap().seq, 3);
+}
+
+#[test]
+fn a_frame_aligned_batch_prefix_recovers_without_truncation() {
+    let (temp, durable_len, batch) = crash_with_batch_intent(&[b"two", b"three", b"four"]);
+    let second_len = encode_frame(2, b"a", b"two").unwrap().len();
+    let records = temp.path().join(RECORDS_FILE);
+    append_raw(&records, &batch[..second_len]);
+
+    let (spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+    assert_eq!(report.integrity, SpoolIntegrity::Healthy);
+    assert_eq!(report.truncated_partial_tail_bytes, 0);
+    assert_eq!(file_len(&records).unwrap(), durable_len + second_len as u64);
+    assert_eq!(pending_seqs(&spool), vec![1, 2]);
+    assert_eq!(report.next_seq, 3);
+}
+
+#[test]
+fn a_torn_tail_whose_sequence_the_batch_does_not_name_is_forensic_corruption() {
+    let (temp, durable_len, batch) = crash_with_batch_intent(&[b"two", b"three", b"four"]);
+    let second_len = encode_frame(2, b"a", b"two").unwrap().len();
+    let records = temp.path().join(RECORDS_FILE);
+    let foreign = encode_frame(9, b"a", b"three").unwrap();
+    append_raw(&records, &batch[..second_len]);
+    append_raw(&records, &foreign[..=FRAME_HEADER_BYTES]);
+    let forensic = fs::read(&records).unwrap();
+
+    let (_spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+    assert_eq!(
+        report.integrity,
+        SpoolIntegrity::Corrupted {
+            at_offset: durable_len + second_len as u64
+        }
+    );
+    assert_eq!(report.truncated_partial_tail_bytes, 0);
+    assert_eq!(fs::read(&records).unwrap(), forensic);
+}
+
+#[test]
+fn a_complete_batch_that_differs_from_its_intent_is_metadata_corruption() {
+    let (temp, _, _) = crash_with_batch_intent(&[b"two", b"three"]);
+    let records = temp.path().join(RECORDS_FILE);
+    append_raw(&records, &batch_bytes(2, &[b"two", b"THREE"]));
+
+    assert_eq!(
+        HostAdmissionSpool::open(temp.path(), bounds()).unwrap_err(),
+        SpoolError::MetadataCorrupted
     );
 }

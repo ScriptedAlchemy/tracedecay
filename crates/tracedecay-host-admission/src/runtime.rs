@@ -74,23 +74,50 @@ impl HostAdmissionRuntime {
         Ok((runtime, report))
     }
 
-    /// Durably appends before returning acceptance to the daemon caller.
+    /// Durably appends one group-commit batch before returning acceptance to
+    /// each daemon caller, one result per item in order.
+    pub(crate) fn admit_batch(
+        &mut self,
+        items: &[(&str, &[u8])],
+    ) -> Vec<Result<DurableHostAdmission, HostAdmissionOutcome>> {
+        let appended = hotpath::measure_block!("usecases.admission.append_batch", {
+            self.spool.append_batch(items)
+        });
+        appended
+            .into_iter()
+            .map(|appended| {
+                let record = appended.map_err(|error| error.to_outcome())?;
+                hotpath::measure_block!("usecases.admission.schedule", {
+                    self.schedule_record(&record)
+                })?;
+                Ok(DurableHostAdmission {
+                    seq: record.seq,
+                    outcome: HostAdmissionOutcome::accepted_for_replay(),
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn admit(
         &mut self,
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let record = hotpath::measure_block!("usecases.admission.admit", {
-            self.spool.append(source, payload)
+        self.admit_batch(&[(source, payload)])
+            .pop()
+            .unwrap_or(Err(HostAdmissionOutcome::spool_corrupted()))
+    }
+
+    /// Durably publish acknowledgements made since the last metadata publish.
+    pub(crate) fn publish_acknowledgements(&mut self) -> Result<(), HostAdmissionOutcome> {
+        if !self.spool.acknowledgements_unpublished() {
+            return Ok(());
+        }
+        hotpath::measure_block!("usecases.admission.publish_acknowledgements", {
+            self.spool.publish_acknowledgements()
         })
-        .map_err(|error| error.to_outcome())?;
-        hotpath::measure_block!("usecases.admission.schedule", {
-            self.schedule_record(&record)
-        })?;
-        Ok(DurableHostAdmission {
-            seq: record.seq,
-            outcome: HostAdmissionOutcome::accepted_for_replay(),
-        })
+        .map_err(|error| error.to_outcome())
     }
 
     /// Lease one fair durable record without deleting it from the spool.
@@ -356,6 +383,7 @@ mod tests {
         assert!(runtime.lease_next().is_none());
         assert_eq!(runtime.commit(admitted.seq).unwrap(), 1);
         assert_eq!(runtime.pending_count(), 0);
+        runtime.publish_acknowledgements().unwrap();
         assert_eq!(
             HostAdmissionRuntime::open(temp.path(), bounds())
                 .unwrap()
@@ -832,6 +860,7 @@ mod tests {
         );
         assert_eq!(runtime.pending_count(), 0);
         assert_eq!(runtime.quarantine_count(), 1);
+        runtime.publish_acknowledgements().unwrap();
 
         let reopened = open(&temp);
         assert_eq!(reopened.pending_count(), 0);

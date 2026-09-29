@@ -9,7 +9,10 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
 # Forwards the sessions fixture surface for this crate's own tests.
-test-helpers = ["tracedecay-sessions/test-helpers"]
+test-helpers = [
+    "tracedecay-sessions/test-helpers",
+    "tracedecay-private-fs/test-helpers",
+]
 # Forwards the kernel test-transport seam for consumers that publish test
 # runtimes through this crate's feature graph.
 test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
@@ -32,6 +35,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 
 [dev-dependencies]
 tempfile = "3"
+tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }

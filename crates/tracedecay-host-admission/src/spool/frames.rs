@@ -6,7 +6,7 @@ use tracedecay_domain::framed_log::{self, checksum};
 
 use super::bounds::{SpoolBounds, SpoolOverflowDisposition};
 use super::fs_ops::{self, file_len, io_error};
-use super::meta::SpoolMetaV1;
+use super::meta::{AppendIntentV1, SpoolMetaV1};
 use super::quarantine::TerminalQuarantine;
 use super::types::{SpoolError, SpoolIntegrity, SpoolRecord};
 
@@ -270,10 +270,6 @@ pub(crate) fn is_proven_unpublished_active_tail(
         > bounds
             .max_records
             .saturating_add(bounds.max_quarantine_records) as u64
-        || scan
-            .records
-            .iter()
-            .any(|record| record.seq >= meta.next_seq)
         || quarantine.iter().any(|(seq, _)| *seq >= meta.next_seq)
     {
         return Ok(false);
@@ -292,10 +288,21 @@ pub(crate) fn is_proven_unpublished_active_tail(
     let Some(intent) = &meta.append_intent else {
         return Ok(false);
     };
-    let tail_len = scan.file_len - scan.truncate_to;
-    if intent.file_offset != scan.truncate_to || intent.framed_len <= tail_len {
+    // Frames past the published sequence must be a consecutive prefix of the
+    // intent's batch, and the torn tail must end inside that batch.
+    let Some(written) = intent.written_prefix(&scan.records) else {
+        return Ok(false);
+    };
+    let torn_offset = written.last().map_or(intent.file_offset, |last| {
+        last.file_offset + last.framed_len as u64
+    });
+    if written.len() as u64 >= intent.records
+        || torn_offset != scan.truncate_to
+        || scan.file_len >= intent.end_offset()
+    {
         return Ok(false);
     }
+    let tail_len = scan.file_len - scan.truncate_to;
     let mut input = File::open(path).map_err(io_error)?;
     input
         .seek(SeekFrom::Start(scan.truncate_to))
@@ -305,8 +312,26 @@ pub(crate) fn is_proven_unpublished_active_tail(
     input
         .read_exact(&mut header_prefix[..prefix_len])
         .map_err(io_error)?;
-    if header_prefix[..prefix_len] != intent.header[..prefix_len] {
-        return Ok(false);
+    Ok(torn_header_matches(
+        intent,
+        written.len() as u64,
+        &header_prefix[..prefix_len],
+    ))
+}
+
+/// The first frame's header is known exactly. A later frame's lengths are
+/// not recorded, so its magic, version, and sequence must match.
+fn torn_header_matches(intent: &AppendIntentV1, written: u64, prefix: &[u8]) -> bool {
+    if written == 0 {
+        return prefix == &intent.header[..prefix.len()];
     }
-    Ok(true)
+    let mut expected = [0u8; FRAME_HEADER_BYTES];
+    expected[0..4].copy_from_slice(FRAME_MAGIC);
+    expected[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    expected[12..20].copy_from_slice(&(intent.seq + written).to_le_bytes());
+    prefix
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .all(|(index, (byte, expected))| (6..12).contains(&index) || *byte == expected)
 }
