@@ -117,6 +117,19 @@ pub use observation::{
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };
 
+/// Project membership from a rollout's leading `session_meta` cwd.
+///
+/// `None` means the header could not be read. Callers may leave a rollout for
+/// a later pass only on a definitive [`ProjectMembership::NoMatch`]; an
+/// `Unknown` git timeout stays in the current pass.
+pub(crate) fn codex_rollout_project_membership(
+    path: &Path,
+    project_root: &Path,
+) -> Option<ProjectMembership> {
+    let meta = session_meta(path)?;
+    Some(TranscriptScopeMatcher::project(project_root).membership(Some(&meta.cwd)))
+}
+
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
 const MAX_SCAN_DEPTH: u8 = 6;
@@ -2115,7 +2128,6 @@ fn retained_scan_step(
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2129,7 +2141,12 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        // Rollout files are not structural work. Charging them
+                        // here spends the pass on names that are not child
+                        // directories, so the newest sessions are not emitted
+                        // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
+                            directory_work += 1;
                             if *depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",

@@ -24,6 +24,7 @@ use tracedecay_domain::{
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::serving::{SessionProjectionServingState, SessionProjectionStaleReason};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
@@ -1402,20 +1403,6 @@ async fn describe_without_a_refresh_worker_does_not_pretend_history_is_convergin
     }
 }
 
-struct CurrentRefreshServing;
-
-impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for CurrentRefreshServing {
-    fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
-        tracedecay_sessions::serving::SessionProjectionServingStatus {
-            state: tracedecay_sessions::serving::SessionProjectionServingState::Current,
-            last_progress_at_unix_micros: None,
-            backlog: 0,
-            blocker: None,
-            retry_class: None,
-        }
-    }
-}
-
 /// Profile catch-up mounts the real refresh worker's serving-status port. When
 /// that port reports current, `RequireFresh` must not be refused as
 /// `RefreshWorkerMissing`.
@@ -1444,7 +1431,9 @@ async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_mi
     let service = DaemonSessionRetrievalService::new_admitted_profile(
         harness.registered.clone(),
         root.identity().clone(),
-        Some(std::sync::Arc::new(CurrentRefreshServing)),
+        Some(std::sync::Arc::new(FixedRefreshServing(
+            SessionProjectionServingState::Current,
+        ))),
     )
     .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
@@ -1480,6 +1469,78 @@ async fn require_fresh_with_a_current_refresh_worker_is_not_refused_as_worker_mi
         | SessionRetrievalServiceOutcome::Partial { .. } => {}
         other => panic!("unexpected RequireFresh outcome with a current worker: {other:?}"),
     }
+}
+
+struct FixedRefreshServing(SessionProjectionServingState);
+
+impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for FixedRefreshServing {
+    fn serving_status(&self) -> tracedecay_sessions::serving::SessionProjectionServingStatus {
+        tracedecay_sessions::serving::SessionProjectionServingStatus {
+            state: self.0.clone(),
+            last_progress_at_unix_micros: None,
+            backlog: 0,
+            blocker: None,
+            retry_class: None,
+        }
+    }
+}
+
+/// An empty answer is complete only once historical catch-up is current.
+/// While catch-up is converging the same empty store must answer stale, or a
+/// search right after a scheduled import claims nothing matches (#2512).
+#[tokio::test]
+async fn empty_answer_is_stale_until_historical_catch_up_is_current() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-retrieval-empty-during-catch-up",
+    )
+    .await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let context = admitted_lookup_context(scope);
+    let answer = |state: SessionProjectionServingState| {
+        let service = DaemonSessionRetrievalService::new_admitted_profile(
+            harness.registered.clone(),
+            root.identity().clone(),
+            Some(std::sync::Arc::new(FixedRefreshServing(state))),
+        )
+        .expect("registered retrieval service");
+        let query = SessionTemporalQuery::new(
+            SessionId::new("session.empty.catch-up").expect("session identity"),
+            None,
+            "",
+            None,
+            TemporalModeV1::Current,
+            tracedecay_domain::RetrievalGrainV1::Occurrence,
+            1,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .expect("temporal query")
+        .with_execution_limits(admitted_execution_limits(1));
+        let context = &context;
+        async move { service.retrieve_admitted(context, query).await }
+    };
+
+    let current = answer(SessionProjectionServingState::Current).await;
+    assert!(
+        matches!(current, SessionRetrievalServiceOutcome::CompleteZero { .. }),
+        "a current empty store answers complete zero: {current:?}"
+    );
+    let converging = answer(SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalConvergence,
+    })
+    .await;
+    assert!(
+        matches!(converging, SessionRetrievalServiceOutcome::Stale { .. }),
+        "an empty store during catch-up must not claim completeness: {converging:?}"
+    );
 }
 
 /// yielding a continuation while records remain.
