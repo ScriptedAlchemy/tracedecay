@@ -14,6 +14,8 @@ use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::default_socket_path;
+#[cfg(unix)]
+use super::with_unavailable_daemon_advice;
 
 trait ProbeStream: Read + IoWrite {
     fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()>;
@@ -312,7 +314,9 @@ pub(super) fn daemon_readiness_probe(
             // asserting it is connectable.
             return (
                 daemon_socket_state(socket_path),
-                DaemonProtocolState::Unresponsive(error.to_string()),
+                DaemonProtocolState::Unresponsive(
+                    with_unavailable_daemon_advice(profile, socket_path, error).to_string(),
+                ),
             );
         }
     };

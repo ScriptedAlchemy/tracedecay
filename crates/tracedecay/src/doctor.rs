@@ -1225,7 +1225,7 @@ async fn configured_upload_enabled(
         false,
         false,
     )?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
         operation,

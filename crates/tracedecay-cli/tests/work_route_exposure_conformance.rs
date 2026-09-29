@@ -1601,7 +1601,7 @@ async fn inner_router(profile: &ProfileRoot, project: &Path) -> axum::Router {
         false,
     )
     .expect("production daemon handshake");
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)
+    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)
         .expect("production daemon client");
     http_application_router(
         client,
