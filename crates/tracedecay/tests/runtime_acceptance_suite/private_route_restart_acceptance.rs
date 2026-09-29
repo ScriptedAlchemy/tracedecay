@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 use tracedecay::daemon::call_default_tool;
 use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_runtime_core::config::ProfileRoot;
 
 fn initialize_project(home: &Path, project: &Path, marker: &str) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
@@ -66,12 +67,14 @@ fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> Daem
 }
 
 async fn assert_selected_target_source(
+    profile: &ProfileRoot,
     caller: &DaemonHandshake,
     target_project_id: &str,
     target_marker: &str,
     caller_marker: &str,
 ) {
     let result = call_default_tool(
+        profile,
         caller,
         "tracedecay_grep",
         json!({
@@ -117,7 +120,14 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
     assert_ne!(project_a_id, project_b_id);
     let caller = project_handshake(&environment, &project_a);
 
-    assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
+    assert_selected_target_source(
+        environment.profile(),
+        &caller,
+        &project_b_id,
+        TARGET_MARKER,
+        CALLER_MARKER,
+    )
+    .await;
 
     let first_pid = daemon.id();
     let stopped = daemon
@@ -141,7 +151,14 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
         "caller project identity changed after restart"
     );
     await_published_code_index(environment.home(), &project_b);
-    assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
+    assert_selected_target_source(
+        environment.profile(),
+        &caller,
+        &project_b_id,
+        TARGET_MARKER,
+        CALLER_MARKER,
+    )
+    .await;
 }
 
 /// Wait for the readiness a selected-source route depends on after a physical
@@ -151,7 +168,7 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
 /// `graph_ready`, not `fresh`, is the predicate: freshness also reports
 /// whether a reconcile pass is in flight, and this read admits a query that
 /// arms one, so a freshness wait would perturb the very state it samples.
-fn await_published_code_index(home: &Path, project: &Path) {
+pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
     let project_arg = project.to_string_lossy().into_owned();
     let output = common::tracedecay_command_with_home(home)
         .current_dir(project)

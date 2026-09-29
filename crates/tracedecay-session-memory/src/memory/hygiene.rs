@@ -108,72 +108,135 @@ pub fn detect_transient(content: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn secret_reason(content: &str) -> Option<&'static str> {
+        detect_secret_like(content).map(|reason| &*reason.leak())
+    }
+
     #[test]
     fn detects_pem_blocks_and_bearer_tokens() {
-        assert!(
-            detect_secret_like(concat!(
+        assert_eq!(
+            secret_reason(concat!(
                 "-----BEGIN ",
                 "PRIVATE KEY-----\nNOT-A-VALID-PRIVATE-KEY"
-            ))
-            .is_some()
+            )),
+            Some("PEM private-key block")
         );
-        assert!(detect_secret_like("-----BEGIN OPENSSH PRIVATE KEY-----").is_some());
-        assert!(
-            detect_secret_like("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")
-                .is_some()
+        assert_eq!(
+            secret_reason("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            Some("PEM private-key block")
+        );
+        assert_eq!(
+            secret_reason("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
+            Some("bearer token")
         );
     }
 
     #[test]
     fn detects_known_prefixes_and_credentialish_assignments() {
-        assert!(detect_secret_like("sk-proj1234567890abcdefghijklmn").is_some());
-        assert!(detect_secret_like("Deploys used sk-test-742913 before rotation").is_some());
-        assert!(detect_secret_like("ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ").is_some());
-        assert!(detect_secret_like("AKIA4S27TQXBVCZ5MJ6L is the access key").is_some());
-        assert!(detect_secret_like(concat!("api_", "key=", "0000000000000000")).is_some());
-        assert!(detect_secret_like("password: hunter2hunter2hunter2").is_some());
+        for content in [
+            "sk-proj1234567890abcdefghijklmn",
+            "Deploys used sk-test-742913 before rotation",
+            "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ",
+            "AKIA4S27TQXBVCZ5MJ6L is the access key",
+        ] {
+            assert_eq!(
+                secret_reason(content),
+                Some("known credential prefix"),
+                "{content}"
+            );
+        }
+        for content in [
+            concat!("api_", "key=", "0000000000000000"),
+            "password: hunter2hunter2hunter2",
+        ] {
+            assert_eq!(
+                secret_reason(content),
+                Some("credential-like key=value assignment"),
+                "{content}"
+            );
+        }
     }
 
     #[test]
     fn detects_high_entropy_blobs_but_not_git_shas() {
-        assert!(
-            detect_secret_like(
-                "value Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE"
-            )
-            .is_some()
+        assert_eq!(
+            secret_reason("value Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE"),
+            Some("high-entropy token")
         );
         // 40-char git SHA: hex-only, must NOT be flagged.
-        assert!(detect_secret_like("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5").is_none());
+        assert_eq!(
+            secret_reason("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"),
+            None
+        );
     }
 
     #[test]
     fn stays_quiet_on_ordinary_facts() {
-        assert!(detect_secret_like("Use pnpm rather than npm for installs in this repo").is_none());
-        assert!(
-            detect_secret_like("The token budget for LCM expansion defaults to 4000").is_none()
+        for content in [
+            "Use pnpm rather than npm for installs in this repo",
+            "The token budget for LCM expansion defaults to 4000",
+            "secret sauce of the planner is union-find",
+            "Use the sk-test fixture profile for dry runs",
+            "CamelCaseIdentifiersAreFineEvenWhenLong",
+        ] {
+            assert_eq!(secret_reason(content), None, "{content}");
+        }
+        assert_eq!(
+            secret_reason("Use the sk-test-742913 fixture profile for dry runs"),
+            Some("known credential prefix")
         );
-        assert!(detect_secret_like("secret sauce of the planner is union-find").is_none());
-        assert!(detect_secret_like("Use the sk-test fixture profile for dry runs").is_none());
-        assert!(detect_secret_like("CamelCaseIdentifiersAreFineEvenWhenLong").is_none());
     }
 
     #[test]
     fn pattern_compilation_errors_are_not_dropped() {
-        assert!(compile_patterns(&[("(", "invalid fixture")]).is_err());
-        assert!(compile_credential_patterns(CredentialPatternProfile::Memory).is_ok());
+        assert!(matches!(
+            compile_patterns(&[("(", "invalid fixture")]),
+            Err(regex::Error::Syntax(_))
+        ));
+        let compiled = compile_patterns(&[("a+", "valid fixture")]).unwrap();
+        assert_eq!(
+            compiled
+                .iter()
+                .map(|(regex, reason)| (regex.as_str(), *reason))
+                .collect::<Vec<_>>(),
+            vec![("a+", "valid fixture")]
+        );
     }
 
     #[test]
     fn transient_detection_flags_run_output() {
-        assert!(detect_transient("dashboard listening on http://127.0.0.1:43817").is_some());
-        assert!(detect_transient("server started with pid 48213").is_some());
-        assert!(detect_transient("wrote scratch file /tmp/tracedecay-aborted.json").is_some());
-        assert!(detect_transient("build finished in 12.4s with exit code 0").is_some());
+        assert_eq!(
+            detect_transient("dashboard listening on http://127.0.0.1:43817").as_deref(),
+            Some("ephemeral local port, run-log output")
+        );
+        assert_eq!(
+            detect_transient("server started with pid 48213").as_deref(),
+            Some("process id")
+        );
+        assert_eq!(
+            detect_transient("wrote scratch file /tmp/tracedecay-aborted.json").as_deref(),
+            Some("one-off /tmp path")
+        );
+        assert_eq!(
+            detect_transient("build finished in 12.4s with exit code 0").as_deref(),
+            Some("run-log output")
+        );
     }
 
     #[test]
     fn transient_detection_ignores_durable_facts() {
-        assert!(detect_transient("The dashboard binds 127.0.0.1 with an ephemeral port").is_none());
-        assert!(detect_transient("Curation hard-deletes losers; there is no archive").is_none());
+        assert_eq!(
+            detect_transient("The dashboard binds 127.0.0.1 with an ephemeral port"),
+            None
+        );
+        assert_eq!(
+            detect_transient("Curation hard-deletes losers; there is no archive"),
+            None
+        );
+        assert_eq!(
+            detect_transient("The dashboard binds 127.0.0.1:43817 with an ephemeral port")
+                .as_deref(),
+            Some("ephemeral local port")
+        );
     }
 }

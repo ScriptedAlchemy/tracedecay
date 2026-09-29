@@ -1428,9 +1428,11 @@ pub fn language_server_finding(
                     degraded_analyzers_statement(analyzers, *state)
                 )),
             ),
+            // An analyzer that is not installed is absent, not broken:
+            // installing it is the operator's choice, named with its step.
             LanguageServerStateV1::Unavailable => source_finding(
                 family,
-                DoctorEvidenceStateV1::Degraded,
+                DoctorEvidenceStateV1::Absent,
                 "language-server.analyzer.unavailable",
                 *coverage,
                 &bounded_statement(&format!(
@@ -2246,7 +2248,7 @@ mod tests {
             ),
         ]);
         let finding = language_server_finding(&read).expect("finding");
-        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Absent);
         assert_eq!(
             finding.coverage().statement(),
             "project analyzer executable not found on the daemon PATH: \

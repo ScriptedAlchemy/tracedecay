@@ -4,8 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ProjectionGenerationId, UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1,
-    WorkProductProjectionBundleV1, WorkRuntimeProjectionV1, canonical_sha256,
+    CursorBindingMismatchV1, CursorBindingV1, ProjectionGenerationId, UtcMicros,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
+    WorkRuntimeProjectionV1, canonical_sha256, decode_bound_cursor, encode_bound_cursor,
 };
 
 use crate::{
@@ -371,17 +372,9 @@ impl WorkGraphTimelineV1 {
         entries: Vec<WorkGraphVersionEntryV1>,
     ) -> Result<Self, WorkProductApplicationErrorV1> {
         if entries.len() > MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1
-            || entries.windows(2).any(|pair| {
-                (
-                    pair[0].valid_at(),
-                    pair[0].observed_at(),
-                    pair[0].verified_version().graph_version(),
-                ) >= (
-                    pair[1].valid_at(),
-                    pair[1].observed_at(),
-                    pair[1].verified_version().graph_version(),
-                )
-            })
+            || entries
+                .windows(2)
+                .any(|pair| timeline_key(&pair[0]) >= timeline_key(&pair[1]))
         {
             return Err(WorkProductApplicationErrorV1::InvalidRequest);
         }
@@ -405,6 +398,49 @@ impl WorkGraphTimelineV1 {
             continuation,
         };
         Ok(timeline)
+    }
+
+    /// One bounded page of a timeline read, in timeline order.
+    ///
+    /// `window` is every entry the request's mode and window select. The
+    /// continuation names the timeline key of the last entry the previous page
+    /// returned, so resuming is exact in the order the page is sorted by, and
+    /// it is bound to the request's selection, mode, window, and observation
+    /// instant, so a continuation presented with any of them changed is
+    /// refused rather than paging a different timeline.
+    pub fn page(
+        request: &WorkGraphReadRequestV1,
+        mut window: Vec<WorkGraphVersionEntryV1>,
+    ) -> Result<Self, WorkGraphReadPortErrorV1> {
+        let binding = timeline_binding(request)?;
+        window.sort_by_key(timeline_key);
+        if let Some(continuation) = &request.continuation {
+            let after =
+                decode_bound_cursor::<WorkGraphTimelinePositionV1>(&binding, continuation.as_str())
+                    .map_err(WorkGraphReadPortErrorV1::CursorRefused)?
+                    .key();
+            window.retain(|entry| timeline_key(entry) > after);
+        }
+        if window.len() <= MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1 {
+            return Self::complete(window).map_err(|_| WorkGraphReadPortErrorV1::Unavailable);
+        }
+        window.truncate(MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1);
+        let (valid_at, observed_at, graph_version) = window
+            .last()
+            .map(timeline_key)
+            .ok_or(WorkGraphReadPortErrorV1::Unavailable)?;
+        let continuation = encode_bound_cursor(
+            &binding,
+            &WorkGraphTimelinePositionV1 {
+                valid_at,
+                observed_at,
+                graph_version,
+            },
+        )
+        .ok()
+        .and_then(|cursor| OpaqueCursor::new(cursor).ok())
+        .ok_or(WorkGraphReadPortErrorV1::Unavailable)?;
+        Self::partial(window, continuation).map_err(|_| WorkGraphReadPortErrorV1::Unavailable)
     }
 
     pub fn entries(&self) -> &[WorkGraphVersionEntryV1] {
@@ -431,22 +467,74 @@ impl WorkGraphTimelineV1 {
         };
         if usize::try_from(returned).ok() != Some(self.entries.len())
             || self.entries.len() > MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1
-            || self.entries.windows(2).any(|pair| {
-                (
-                    pair[0].valid_at(),
-                    pair[0].observed_at(),
-                    pair[0].verified_version().graph_version(),
-                ) >= (
-                    pair[1].valid_at(),
-                    pair[1].observed_at(),
-                    pair[1].verified_version().graph_version(),
-                )
-            })
+            || self
+                .entries
+                .windows(2)
+                .any(|pair| timeline_key(&pair[0]) >= timeline_key(&pair[1]))
         {
             return Err(WorkProductApplicationErrorV1::InvalidRequest);
         }
         Ok(())
     }
+}
+
+/// The order a timeline is answered in.
+fn timeline_key(entry: &WorkGraphVersionEntryV1) -> (UtcMicros, UtcMicros, u64) {
+    (
+        entry.valid_at(),
+        entry.observed_at(),
+        entry.verified_version().graph_version().get(),
+    )
+}
+
+const WORK_GRAPH_TIMELINE_OPERATION: &str = "work_views";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkGraphTimelinePositionV1 {
+    valid_at: UtcMicros,
+    observed_at: UtcMicros,
+    graph_version: u64,
+}
+
+impl WorkGraphTimelinePositionV1 {
+    const fn key(&self) -> (UtcMicros, UtcMicros, u64) {
+        (self.valid_at, self.observed_at, self.graph_version)
+    }
+}
+
+fn timeline_binding(
+    request: &WorkGraphReadRequestV1,
+) -> Result<CursorBindingV1, WorkGraphReadPortErrorV1> {
+    let (mode, (from_name, from), (through_name, through)) = match request.mode {
+        WorkGraphReadModeV1::Evolution {
+            from_valid_at,
+            through_valid_at,
+        } => (
+            "evolution",
+            ("from_valid_at", from_valid_at),
+            ("through_valid_at", through_valid_at),
+        ),
+        WorkGraphReadModeV1::Forensic {
+            from_observed_at,
+            through_observed_at,
+        } => (
+            "forensic",
+            ("from_observed_at", from_observed_at),
+            ("through_observed_at", through_observed_at),
+        ),
+        WorkGraphReadModeV1::Current | WorkGraphReadModeV1::AsOf { .. } => {
+            return Err(WorkGraphReadPortErrorV1::Unavailable);
+        }
+    };
+    CursorBindingV1::builder(WORK_GRAPH_TIMELINE_OPERATION)
+        .parameter("selection", &request.selection)
+        .parameter("mode", mode)
+        .parameter(from_name, &from)
+        .parameter(through_name, &through)
+        .parameter("observed_at", &request.observed_at)
+        .build()
+        .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -567,6 +655,8 @@ pub enum WorkGraphReadPortErrorV1 {
     Cancelled,
     #[error("Work graph read timed out")]
     TimedOut,
+    #[error("Work graph continuation was refused: {0}")]
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
@@ -577,6 +667,7 @@ impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
             WorkGraphReadPortErrorV1::Unavailable => Self::GraphAuthorityUnavailable,
             WorkGraphReadPortErrorV1::Cancelled => Self::Cancelled,
             WorkGraphReadPortErrorV1::TimedOut => Self::TimedOut,
+            WorkGraphReadPortErrorV1::CursorRefused(mismatch) => Self::CursorRefused(mismatch),
         }
     }
 }

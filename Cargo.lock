@@ -5708,7 +5708,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5722,6 +5722,7 @@ dependencies = [
  "jsonschema",
  "keyring",
  "libc",
+ "notify",
  "regex",
  "rmcp 3.4.0",
  "rusqlite",
@@ -5980,7 +5981,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6123,7 +6124,6 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
- "tracedecay-store",
 ]
 
 [[package]]
@@ -6741,7 +6741,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.60"
+version = "1.0.0-beta.61"
 dependencies = [
  "hotpath",
  "rusqlite",
@@ -7059,6 +7059,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-graph-query",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-tool-catalog",

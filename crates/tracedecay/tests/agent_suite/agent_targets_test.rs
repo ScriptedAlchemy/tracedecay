@@ -59,6 +59,14 @@ fn managed_agent_removal_uses_manifest_and_preserves_user_files() {
     std::fs::write(home.join(".codex/agents/user-agent.toml"), "not tracedecay").unwrap();
 
     let installed = install_codex_managed_agents(&host_io(), home).unwrap();
+    assert!(!installed.exported.is_empty());
+    for entry in &installed.exported {
+        assert!(
+            entry.path.is_file(),
+            "{} must be installed",
+            entry.path.display()
+        );
+    }
     remove_managed_agents(&host_io(), &home.join(".codex/agents")).unwrap();
 
     for entry in installed.exported {

@@ -354,7 +354,10 @@ mod tests {
         let descriptor = GitHubRestDescriptorV1 {
             operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
         };
-        assert!(GitHubReadOnlyDescriptorSetV1::new(vec![descriptor, descriptor]).is_err());
+        let Err(error) = GitHubReadOnlyDescriptorSetV1::new(vec![descriptor, descriptor]) else {
+            panic!("duplicate descriptors must be refused");
+        };
+        assert_eq!(error, GitHubReadOnlyAdmissionError::DuplicateRestDescriptor);
     }
 
     #[tokio::test]

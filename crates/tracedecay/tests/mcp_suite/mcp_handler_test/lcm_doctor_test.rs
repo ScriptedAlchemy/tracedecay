@@ -48,6 +48,36 @@ async fn lcm_doctor_diagnoses_an_empty_project_store() {
     server.shutdown().await;
 }
 
+/// `tracedecay_status` serves the projection state the doctor diagnoses, so a
+/// projection that is converging, blocked, or without a worker is visible
+/// without running the doctor, alongside the project's Git evidence state.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn status_reports_the_projection_state_the_doctor_diagnoses() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let server = real_mcp_server(cg).await;
+
+    let doctor = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
+    let doctor: Value =
+        serde_json::from_str(extract_real_server_text(&doctor)).expect("doctor diagnosis");
+    let status =
+        handle_real_server_tool_call(&server, "tracedecay_status", json!({ "format": "json" }))
+            .await;
+    let status: Value =
+        serde_json::from_str(extract_real_server_text(&status)).expect("status JSON");
+
+    assert_eq!(
+        status["session_projection"],
+        empty_project_doctor_report()["projection"]
+    );
+    assert_eq!(status["session_projection"], doctor["projection"]);
+    assert_eq!(
+        status["session_git_evidence"],
+        json!({ "status": "unrecorded", "backfill_watermark": null })
+    );
+    server.shutdown().await;
+}
+
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_refuses_a_repair_argument_and_keeps_the_same_diagnosis() {

@@ -445,6 +445,11 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         hotpath::future!(
             async move {
                 let response_id = Self::outbound_response_id(&item);
+                let is_response = matches!(
+                    item,
+                    rmcp::model::JsonRpcMessage::Response(_)
+                        | rmcp::model::JsonRpcMessage::Error(_)
+                );
                 let request_key = Self::typed_response_request_key(&item, response_id.as_ref());
                 let mut bytes = serde_json::to_vec(&item)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -507,7 +512,32 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                         ),
                     }
                 }
-                write_result.map_err(RmcpResponseWriteFailure::into_io_error)
+                match write_result {
+                    // The client closed before its response, as a hook does
+                    // when it abandons the call at its own deadline and spools
+                    // the event for replay. A work delivery riding on the
+                    // response is settled above as `Disconnected`; nothing is
+                    // left to deliver and the daemon did not fail, so the
+                    // serve loop must not report a transport error. A request
+                    // or notification the daemon initiates still fails, so its
+                    // sender never believes a vanished peer received it.
+                    Err(RmcpResponseWriteFailure::Transport(error))
+                        if is_response
+                            && matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::NotConnected
+                            ) =>
+                    {
+                        tracing::debug!(
+                            %error,
+                            "client closed before its response; response dropped as disconnected"
+                        );
+                        Ok(())
+                    }
+                    result => result.map_err(RmcpResponseWriteFailure::into_io_error),
+                }
             },
             label = "daemon.broker.send"
         )

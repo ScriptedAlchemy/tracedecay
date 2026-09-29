@@ -1712,8 +1712,11 @@ fn protobuf_child_refs_rejects_overflowing_or_truncated_lengths() {
     let truncated_length = [0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f];
     assert!(protobuf_child_refs(&truncated_length).is_none());
 
-    let mut valid_then_truncated = vec![0x0a, 32];
-    valid_then_truncated.extend([0x42; 32]);
+    let mut valid = vec![0x0a, 32];
+    valid.extend([0x42; 32]);
+    assert_eq!(protobuf_child_refs(&valid), Some(vec!["42".repeat(32)]));
+
+    let mut valid_then_truncated = valid;
     valid_then_truncated.extend([0x09, 0x01]);
     assert!(
         protobuf_child_refs(&valid_then_truncated).is_none(),

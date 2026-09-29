@@ -66,9 +66,8 @@ pub use privacy_remediation::{
     run_at_rest_privacy_remediation, spawn_at_rest_privacy_remediation,
 };
 pub use sanitize::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    ObservationSanitizationOutcomeV1, PrivacySanitizerError, RecordSanitizerV1,
-    SanitizedClaudeRecordV1, SanitizedObservationRecordV1,
+    ClaudeSanitizerPolicyV1, ObservationSanitizationOutcomeV1, PrivacySanitizerError,
+    RecordSanitizerV1, SanitizedObservationRecordV1,
 };
 pub use structural_id::{
     protect_optional_sensitive_structural_id, protect_sensitive_structural_id,
@@ -77,8 +76,8 @@ pub use structured::{StructuredTextFormatV1, sanitize_provider_metadata_json};
 pub use structured_text::{
     CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, CodeSourceShapeV1,
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, bind_sanitized_lcm_payload_text,
-    lcm_payload_detector_revision, quarantine_lcm_payload_text, sanitize_code_source_bytes,
-    sanitize_lcm_payload_text, sanitize_provider_metadata_text,
+    declared_code_source_shape, lcm_payload_detector_revision, quarantine_lcm_payload_text,
+    sanitize_code_source_bytes, sanitize_lcm_payload_text, sanitize_provider_metadata_text,
 };
 pub use tracedecay_capture::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1, ParsedObservationRecordV1,

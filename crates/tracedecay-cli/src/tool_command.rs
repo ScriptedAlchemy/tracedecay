@@ -63,7 +63,8 @@ use tracedecay_daemon_protocol::{
     adapt_application_tool_request, parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{
-    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
+    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, requested_output_format,
+    tool_request_deadline,
 };
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
@@ -508,7 +509,7 @@ fn dispatch_cli_application_surface_inner(
                 if let Ok(handshake) =
                     crate::commands::client_handshake(profile, project.as_deref())
                     && let Ok(client) =
-                        tracedecay::daemon::invocation_client_for_current_client(handshake)
+                        tracedecay::daemon::invocation_client_for_current_client(profile, handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -531,7 +532,7 @@ fn dispatch_cli_application_surface_inner(
             false,
             false,
         )?;
-        let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
+        let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
         // that state out through its project-open retry loop; the typed
@@ -643,8 +644,10 @@ async fn dispatch_cli_retained(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client =
-        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(
+        profile,
+        dispatch.handshake(profile)?,
+    )?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -705,7 +708,7 @@ async fn dispatch_cli_source_edit(
         false,
         false,
     )?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -768,19 +771,40 @@ async fn dispatch_cli_graph_tool(
         false,
         false,
     )?;
-    let outcome = invoke_cli_graph_tool(handshake, operation, &tool_args, deadline).await?;
+    let outcome =
+        invoke_cli_graph_tool(profile, handshake, operation, &tool_args, deadline).await?;
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    let mut result = match outcome {
-        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-            response_handle_root.as_deref(),
-            &tool_args,
-            completion,
-        )?,
-        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
+    // `--format json` prints the whole typed result. The rendered body is
+    // bounded for agent contexts, so it feeds only the human view, `--json`'s
+    // exact tool-result object, the beside-result blocks, and the exit status.
+    let typed_format_json =
+        !raw_json && requested_output_format(&tool_args) == RequestedOutputFormat::Json;
+    let (mut result, typed_json) = match outcome {
+        Ok(completion) => {
+            let typed_json = typed_format_json
+                .then(|| completion.result.result_value())
+                .transpose()?;
+            let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                response_handle_root.as_deref(),
+                &tool_args,
+                completion,
+            )?;
+            (rendered, typed_json)
+        }
+        Err(refusal) => (
+            refusal.render(response_handle_root.as_deref(), &tool_args)?,
+            None,
+        ),
     };
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    match typed_json {
+        Some(typed_json) => {
+            println!("{typed_json}");
+            print_beside_result_blocks(&result.value);
+        }
+        None => print_tool_output(&result.value, raw_json),
+    }
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -838,6 +862,7 @@ async fn graph_tool_project_path(
 /// Run one graph-tool owner operation for `project` through the daemon and
 /// return its settled outcome.
 async fn invoke_cli_graph_tool(
+    profile: &ProfileRoot,
     handshake: DaemonHandshake,
     operation: ApplicationSurfaceOperation,
     tool_args: &Value,
@@ -847,7 +872,7 @@ async fn invoke_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(handshake)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -880,12 +905,13 @@ async fn invoke_cli_graph_tool(
 /// The typed result a first-party command asks the project's owner for; a
 /// refusal is the command's error.
 pub(crate) async fn owner_operation_result(
+    profile: &ProfileRoot,
     handshake: DaemonHandshake,
     operation: ApplicationSurfaceOperation,
     arguments: Value,
     deadline: Instant,
 ) -> Result<tracedecay_contracts::graph_tool::GraphToolResultV1> {
-    match invoke_cli_graph_tool(handshake, operation, &arguments, deadline).await? {
+    match invoke_cli_graph_tool(profile, handshake, operation, &arguments, deadline).await? {
         Ok(completion) => Ok(completion.result),
         Err(refusal) => Err(refusal.into_error()),
     }
@@ -908,8 +934,10 @@ async fn dispatch_cli_profile_registry(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client =
-        tracedecay::daemon::invocation_client_for_current_client(dispatch.handshake(profile)?)?;
+    let client = tracedecay::daemon::invocation_client_for_current_client(
+        profile,
+        dispatch.handshake(profile)?,
+    )?;
     let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
     let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Cli,

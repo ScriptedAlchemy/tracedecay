@@ -470,9 +470,9 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
     );
     for outcome in &receipt.outcomes {
         let status = match outcome.status {
-            tracedecay_store_runtime::ShutdownTaskStatus::Clean => continue,
-            tracedecay_store_runtime::ShutdownTaskStatus::Failed(_) => "failed",
-            tracedecay_store_runtime::ShutdownTaskStatus::TimedOut => "timed_out",
+            tracedecay_store_runtime::ShutdownStatus::Clean => continue,
+            tracedecay_store_runtime::ShutdownStatus::Failed(_) => "failed",
+            tracedecay_store_runtime::ShutdownStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
             "daemon_shutdown",
@@ -676,6 +676,8 @@ async fn run_foreground_unix(
         .with_maintenance_coordinator(maintenance)
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
+    let spooled_hook_opener =
+        hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
@@ -745,6 +747,7 @@ async fn run_foreground_unix(
     }
     engine.lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
+    spooled_hook_opener.abort();
     if let Some(rotation) = stderr_log_rotation {
         rotation.abort();
     }

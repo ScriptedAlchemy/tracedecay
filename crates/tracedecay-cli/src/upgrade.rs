@@ -24,6 +24,7 @@ use tempfile::TempDir;
 use self::attestation::{ReleaseProvenance, verify_release_attestation};
 use crate::cloud::{self, InstallMethod};
 use crate::macos_codesign::stabilize_installed_executable;
+use tracedecay_application::http_agent::http_agent;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
@@ -343,10 +344,11 @@ fn stage_release_in(
     download: &ReleaseDownload,
     members: &[ReleaseMember],
 ) -> Result<StagedRelease> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_mins(5)))
-        .build()
-        .into();
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_mins(5)))
+            .build(),
+    );
 
     eprint!("  Downloading...");
 
@@ -1306,6 +1308,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         use std::fs;
         use std::path::{Path, PathBuf};
+        use std::process::Command;
         use std::time::{Duration, Instant};
 
         use tracedecay_runtime_core::git::GitCommandError;
@@ -1395,9 +1398,24 @@ mod tests {
         fn a_wedged_binary_is_killed_and_reaped_at_the_deadline() {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
+            let never = dir.path().join("never");
+            assert!(
+                Command::new("mkfifo")
+                    .arg(&never)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            // Blocks in open(2) on a fifo nobody writes: no exec and no child,
+            // so the wedged process keeps this script's command line for as
+            // long as it lives.
             let wedged = script(
                 dir.path(),
-                &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+                &format!(
+                    "printf '%s\\n' $$ > '{}'; read _ < '{}'",
+                    pid_file.display(),
+                    never.display()
+                ),
             );
             let started = Instant::now();
 
@@ -1414,12 +1432,47 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(5));
             #[cfg(target_os = "linux")]
             {
-                let pid = fs::read_to_string(&pid_file).unwrap().trim().to_owned();
-                assert!(
-                    !Path::new("/proc").join(&pid).exists(),
+                // `Command::spawn` returns only after the child has exec'd, so
+                // a child the probe left behind is already this script, however
+                // far the scheduler has let it run.
+                assert_eq!(
+                    processes_running(&wedged),
+                    Vec::<String>::new(),
                     "the probe must not leave its child running"
                 );
+                // Under load the deadline can fire before the script writes its
+                // pid. When it did write one, that pid must be reaped, not a
+                // zombie.
+                let pid = fs::read_to_string(&pid_file).unwrap_or_default();
+                let pid = pid.trim();
+                assert!(
+                    pid.is_empty() || !Path::new("/proc").join(pid).exists(),
+                    "the probe must reap its child, but pid {pid} remains"
+                );
             }
+        }
+
+        /// Pids of live processes whose command line runs `script`.
+        #[cfg(target_os = "linux")]
+        fn processes_running(script: &Path) -> Vec<String> {
+            let script = script.as_os_str().as_encoded_bytes();
+            fs::read_dir("/proc")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .bytes()
+                        .all(|b| b.is_ascii_digit())
+                })
+                .filter(|entry| {
+                    fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                        cmdline.split(|byte| *byte == 0).any(|arg| arg == script)
+                    })
+                })
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
         }
 
         #[test]

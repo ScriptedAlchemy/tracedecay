@@ -365,6 +365,8 @@ fn request_with_key(
     )
     .expect("valid request");
     TemporalKernelRequest {
+        cursor_binding: tracedecay_domain::CursorBindingV1::new("temporal_kernel_test", Vec::new())
+            .expect("cursor binding"),
         snapshot: TemporalExecutionSnapshot::new_authorized(
             snapshot_request,
             TemporalWatermarks {
@@ -1615,10 +1617,16 @@ fn interleaved_hydration_preserves_ranked_results_omissions_and_cursor() {
             .as_deref()
             .expect("authorized cursor");
         assert_eq!(
-            verify_cursor(denied_cursor, &denied.snapshot, &cursor_authenticator),
+            verify_cursor(
+                denied_cursor,
+                &denied.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            ),
             verify_cursor(
                 authorized_cursor,
                 &authorized.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
                 &cursor_authenticator
             )
         );
@@ -1695,8 +1703,18 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         let restarted_cursor = restarted.next_cursor.as_deref().expect("restarted cursor");
         let cursor_authenticator = authenticator("key-1", 1, 7);
         assert_eq!(
-            verify_cursor(first_cursor, &first.snapshot, &cursor_authenticator),
-            verify_cursor(restarted_cursor, &restarted.snapshot, &cursor_authenticator)
+            verify_cursor(
+                first_cursor,
+                &first.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            ),
+            verify_cursor(
+                restarted_cursor,
+                &restarted.snapshot,
+                &request(TemporalModeV1::Current, 1).cursor_binding,
+                &cursor_authenticator
+            )
         );
         let mut first_without_cursor = first.clone();
         first_without_cursor.next_cursor = None;

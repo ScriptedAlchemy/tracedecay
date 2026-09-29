@@ -466,6 +466,7 @@ fn task_session_continuation_request() -> WorkEvidenceRetrieveRequestV1 {
             attempt,
             source: provider_session(),
             participant_epoch: digest('e'),
+            binding: OpaqueCursor::new("bc1.binding").unwrap(),
             temporal_cursor: None,
             ranking_cursor: None,
         }),
@@ -620,10 +621,10 @@ fn structural_budget_stage_survives_hydration_rendering() {
             "task_session",
             WorkEvidenceHydrationErrorV1::StructuralRefusal(refusal),
         ),
-        WorkEvidenceOmissionV1 {
+        Ok(WorkEvidenceOmissionV1 {
             relation: "task_session".to_owned(),
             reason: WorkEvidenceOmissionReasonV1::StructuralRefusal(refusal),
-        }
+        })
     );
 }
 
@@ -668,14 +669,58 @@ async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
             )
             .unwrap(),
             participant_epoch: digest('e'),
+            binding: OpaqueCursor::new("bc1.binding").unwrap(),
             temporal_cursor: Some(OpaqueCursor::new("cursor.not-authority").unwrap()),
             ranking_cursor: None,
         }),
     });
     assert_eq!(
         validate_request(&request),
-        Err(WorkProductApplicationErrorV1::InvalidRequest)
+        Err(WorkProductApplicationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "expansion"
+            }
+        ))
     );
+    let mut request = task_session_continuation_request();
+    request.task_id = id("task.work-evidence.other");
+    assert_eq!(
+        validate_request(&request),
+        Err(WorkProductApplicationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "task_id"
+            }
+        ))
+    );
+    assert_eq!(
+        validate_request(&task_session_continuation_request()),
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn refused_task_session_continuation_refuses_the_whole_read() {
+    let sessions = Sessions {
+        error: Some(WorkEvidenceHydrationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "page_size",
+            },
+        )),
+        ..Default::default()
+    };
+    let (service, _reads) = task_session_service(&sessions);
+
+    assert_eq!(
+        service
+            .retrieve(&context(), task_session_continuation_request())
+            .await,
+        Err(WorkProductApplicationErrorV1::CursorRefused(
+            CursorBindingMismatchV1::ParameterChanged {
+                parameter: "page_size"
+            }
+        )),
+    );
+    assert_eq!(sessions.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

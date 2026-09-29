@@ -62,8 +62,10 @@ class DevSkillMirrorTests(unittest.TestCase):
             extra = root / ".codex/skills/interface-cluster-development"
             extra.mkdir()
             (extra / "SKILL.md").write_text("only codex\n", encoding="utf-8")
-            errors = self.mirrors.check(root)
-            self.assertTrue(any("interface-cluster-development/SKILL.md" in error for error in errors))
+            self.assertEqual(
+                self.mirrors.check(root),
+                ["codex has shared file missing from claude: interface-cluster-development/SKILL.md"],
+            )
 
     def test_sync_copies_shared_files_and_leaves_host_private_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -88,8 +90,14 @@ class DevSkillMirrorTests(unittest.TestCase):
             self.assertFalse(stale.exists())
             self.assertEqual(private.read_text(encoding="utf-8"), "codex-only\n")
             self.assertFalse((root / ".claude/skills/demo/agents/openai.yaml").exists())
-            self.assertTrue(any(action.startswith("write claude/") for action in actions))
-            self.assertTrue(any(action.startswith("delete claude/") for action in actions))
+            self.assertEqual(
+                actions,
+                [
+                    "write claude/interface-cluster-development/SKILL.md",
+                    "write claude/interface-cluster-development/references/role-prompts.md",
+                    "delete claude/demo/stale.md",
+                ],
+            )
 
     def test_managed_agents_tree_is_not_a_host_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -112,13 +120,15 @@ class DevSkillMirrorTests(unittest.TestCase):
             claude_helper.chmod(0o755)
             codex_helper.chmod(0o644)
 
-            errors = self.mirrors.check(root)
-            self.assertTrue(any("executable mode differs" in error for error in errors))
+            self.assertEqual(
+                self.mirrors.check(root),
+                ["shared skill executable mode differs: demo/scripts/helper.sh (claude vs codex)"],
+            )
 
             actions = self.mirrors.sync(root, "claude")
             self.assertEqual(self.mirrors.check(root), [])
             self.assertEqual(stat.S_IMODE(codex_helper.stat().st_mode) & 0o111, 0o111)
-            self.assertIn("chmod codex/demo/scripts/helper.sh", actions)
+            self.assertEqual(actions, ["chmod codex/demo/scripts/helper.sh"])
 
 
 if __name__ == "__main__":

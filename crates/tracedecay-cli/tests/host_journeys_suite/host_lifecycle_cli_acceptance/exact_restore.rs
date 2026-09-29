@@ -178,16 +178,6 @@ elif name == "copilot":
         unedit(registry, pop_server("tracedecay"))
     else:
         fail()
-elif name == "kiro-cli":
-    registry = home / ".kiro/settings/mcp.json"
-    if args[:2] == ["mcp", "add"] and "--name" in args:
-        command = args[args.index("--command") + 1]
-        server_args = [args[i + 1] for i, arg in enumerate(args) if arg == "--args"]
-        edit(registry, set_server(args[args.index("--name") + 1], command, server_args))
-    elif args[:2] == ["mcp", "remove"] and "--name" in args:
-        unedit(registry, pop_server(args[args.index("--name") + 1]))
-    else:
-        fail()
 elif name == "droid":
     registry = home / ".factory/mcp.json"
     if args[:3] == ["mcp", "add", "tracedecay"] and args[4:] == ["--type", "stdio"]:
@@ -291,7 +281,7 @@ pub(super) fn seed_operator_home(home: &Path) {
 }
 
 pub(super) fn install_fake_native_hosts(bin_dir: &Path) {
-    for name in ["claude", "codex", "gemini", "copilot", "kiro-cli", "droid"] {
+    for name in ["claude", "codex", "gemini", "copilot", "droid", "kimi"] {
         write_executable_script(&bin_dir.join(name), FAKE_NATIVE_HOST).unwrap();
     }
 }

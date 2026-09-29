@@ -30,6 +30,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
+#[cfg(target_os = "linux")]
 fn refresh_in_quiesced_window(
     runner: ServiceRunner,
     spec: &DaemonServiceSpec,
@@ -2522,28 +2523,31 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
     let socket = profile.data_dir().join("daemon.sock");
 
     assert_eq!(
-        super::unavailable_daemon_socket_advice(&profile, &socket, None),
-        "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
+        super::unavailable_daemon_socket_message(&profile, &socket),
+        format!(
+            "TraceDecay daemon socket '{}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon.",
+            socket.display()
+        )
     );
 
     let unit_dir = home.path().join(".config/systemd/user");
     std::fs::create_dir_all(&unit_dir).unwrap();
     std::fs::write(unit_dir.join(crate::SERVICE_NAME), "[Service]\n").unwrap();
     assert_eq!(
-        super::unavailable_daemon_socket_advice(&profile, &socket, None),
+        super::unavailable_daemon_socket_message(&profile, &socket),
         format!(
-            "TraceDecay daemon unit is installed but socket '{}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
-            socket.display()
+            "TraceDecay daemon socket '{}' is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+            socket.display(),
+            unit_dir.join(crate::SERVICE_NAME).display()
         )
     );
 
     assert_eq!(
-        super::unavailable_daemon_socket_advice(
-            &ProfileRoot::new(profile.data_dir()),
-            &socket,
-            None
+        super::unavailable_daemon_socket_message(&ProfileRoot::new(profile.data_dir()), &socket),
+        format!(
+            "TraceDecay daemon socket '{}' is not available. This client cannot see whether a managed TraceDecay daemon service is installed (config error: could not determine XDG config directory). Check `tracedecay daemon status` before starting or installing a daemon.",
+            socket.display()
         ),
-        "This client cannot see whether a managed TraceDecay daemon service is installed. Check `tracedecay daemon status` before starting or installing a daemon.",
         "a profile with no home cannot see the unit, so it must not claim none is installed"
     );
 }

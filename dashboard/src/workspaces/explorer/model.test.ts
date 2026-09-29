@@ -138,6 +138,7 @@ describe('knowledgeHits', () => {
       [],
     );
 
+    expect(hit?.key).toBe(`knowledge:${canonicalFactId(43)}`);
     expect(hit?.signal).toBeUndefined();
   });
 });

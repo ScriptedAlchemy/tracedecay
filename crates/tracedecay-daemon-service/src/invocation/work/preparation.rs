@@ -52,6 +52,34 @@ pub(super) fn prepare_duplicate_adjudication(
 ) -> Result<tracedecay_domain::WorkDuplicateAdjudicationCommandV1, ApplicationProblem> {
     require_attempt(services, context, &request.first_attempt)?;
     require_attempt(services, context, &request.second_attempt)?;
+    let evidence = current_duplicate_adjudication_evidence(
+        registered,
+        context,
+        capability,
+        use_case,
+        observed_at,
+    )?;
+    let command_id =
+        tracedecay_domain::WorkCommandId::new(canonical_request_id.as_str().to_owned())
+            .map_err(|_| work_product_authority_unavailable())?;
+    services.duplicate_adjudications().prepare_adjudication(
+        context,
+        request,
+        evidence,
+        command_id,
+        observed_at,
+    )
+}
+
+/// The Work projection and attempt-topology generations a duplicate
+/// adjudication must cite, read from the registered owner.
+pub(super) fn current_duplicate_adjudication_evidence(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1, ApplicationProblem> {
     let snapshot =
         current_work_product_snapshot(registered, context, capability, use_case, observed_at)?;
     let topology_generation = match current_work_product_attempt_topology(
@@ -69,20 +97,11 @@ pub(super) fn prepare_duplicate_adjudication(
             return Err(work_product_authority_unavailable());
         }
     };
-    let command_id =
-        tracedecay_domain::WorkCommandId::new(canonical_request_id.as_str().to_owned())
-            .map_err(|_| work_product_authority_unavailable())?;
-    services.duplicate_adjudications().prepare_adjudication(
-        context,
-        request,
-        tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1 {
-            work_generation: tracedecay_contracts::work_product_projection_generation(&snapshot)
-                .map_err(work_product_problem)?,
-            topology_generation,
-        },
-        command_id,
-        observed_at,
-    )
+    Ok(tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1 {
+        work_generation: tracedecay_contracts::work_product_projection_generation(&snapshot)
+            .map_err(work_product_problem)?,
+        topology_generation,
+    })
 }
 
 fn require_attempt(

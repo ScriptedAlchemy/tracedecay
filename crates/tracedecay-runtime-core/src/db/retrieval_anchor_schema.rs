@@ -297,33 +297,45 @@ mod tests {
         .await
         .expect("insert owner-bound alias");
 
-        assert!(
-            conn.execute(
+        let foreign_owner = conn
+            .execute(
                 "INSERT INTO retrieval_anchor_aliases (
                     owner_json, alias_kind, locator_digest, anchor_id
                  ) VALUES (?1, 'fixture', 'digest-2', 'anchor-1')",
                 params!["{\"owner\":\"other\"}"],
             )
             .await
-            .is_err()
-        );
+            .unwrap_err()
+            .to_string();
         assert!(
-            conn.execute(
+            foreign_owner.contains("FOREIGN KEY constraint failed"),
+            "{foreign_owner}"
+        );
+        let rebound = conn
+            .execute(
                 "UPDATE retrieval_anchors
                  SET projection_generation = 'generation-2'
                  WHERE anchor_id = 'anchor-1'",
                 (),
             )
             .await
-            .is_err()
-        );
+            .unwrap_err()
+            .to_string();
         assert!(
-            conn.execute(
+            rebound.contains("retrieval anchors are immutable"),
+            "{rebound}"
+        );
+        let deleted = conn
+            .execute(
                 "DELETE FROM retrieval_anchor_aliases WHERE anchor_id = 'anchor-1'",
                 (),
             )
             .await
-            .is_err()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            deleted.contains("retrieval anchor aliases are immutable"),
+            "{deleted}"
         );
     }
 

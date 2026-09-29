@@ -5,8 +5,9 @@
 //! candidate → validated → active, so the published disposition is revision 3.
 //! An identical request replays that disposition, including the clock the
 //! first activation committed, instead of minting a new one. A stale revision
-//! and a later activation from `active` are journaled conflicts: both return
-//! the same runtime refusal, and neither replaces the committed disposition.
+//! is a journaled `stale` refusal naming the requested and current revisions;
+//! a later activation from `active` is a journaled `conflict` naming the
+//! current state. Neither replaces the committed disposition.
 
 #![cfg(feature = "test-transport")]
 
@@ -24,7 +25,7 @@ const STALE_CATALOG_ID: &str = "workflow.mcp-activate-stale-catalog";
 const STALE_POLICY_ID: &str = "workflow.mcp-activate-stale-policy";
 const UNKNOWN_STEP: &str = "step.activate-unknown";
 const UNKNOWN_OPERATION: &str = "operation.work.not_a_mounted_operation";
-const KNOWN_OPERATION: &str = "operation.work.start_attempt";
+pub(super) const KNOWN_OPERATION: &str = "operation.work.start_attempt";
 const UNPINNED: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const FAKE_CATALOG: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -33,13 +34,13 @@ const ACTIVATE_BINDING: &str = "binding.http.workflow.activate_definition";
 const ACTIVATE_SCHEMA: &str = "schema.workflow.activate_definition.result";
 const ADAPTER_SCHEMA: &str = "schema.tracedecay.http.adapter-problem.v1";
 
-struct LivePins {
-    policy: String,
-    configuration: String,
-    catalog: String,
+pub(super) struct LivePins {
+    pub(super) policy: String,
+    pub(super) configuration: String,
+    pub(super) catalog: String,
 }
 
-async fn call_tool(
+pub(super) async fn call_tool(
     server: &tracedecay::mcp::McpServer,
     tool: &str,
     arguments: Value,
@@ -68,7 +69,7 @@ async fn activate(
     .await
 }
 
-fn definition(
+pub(super) fn definition(
     definition_id: &str,
     project_id: &str,
     step_id: &str,
@@ -95,7 +96,7 @@ fn definition(
     })
 }
 
-async fn register(server: &tracedecay::mcp::McpServer, body: &Value) {
+pub(super) async fn register(server: &tracedecay::mcp::McpServer, body: &Value) {
     let (result, envelope) = call_tool(
         server,
         "tracedecay_workflow_register_definition",
@@ -117,7 +118,10 @@ async fn register(server: &tracedecay::mcp::McpServer, body: &Value) {
 
 /// The daemon publishes live pins only as validation denials. Repair each
 /// named pin until validation admits the definition.
-async fn discover_live_pins(server: &tracedecay::mcp::McpServer, project_id: &str) -> LivePins {
+pub(super) async fn discover_live_pins(
+    server: &tracedecay::mcp::McpServer,
+    project_id: &str,
+) -> LivePins {
     let mut policy = UNPINNED.to_owned();
     let mut configuration = UNPINNED.to_owned();
     let mut catalog = UNPINNED.to_owned();
@@ -184,19 +188,46 @@ fn problem_record(
     owning_layer: &str,
     legal_actions: Value,
 ) -> Value {
+    problem_record_with_retry(
+        kind,
+        code,
+        message,
+        diagnostic,
+        owning_layer,
+        "never",
+        Value::Null,
+        legal_actions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn problem_record_with_retry(
+    kind: &str,
+    code: &str,
+    message: &str,
+    diagnostic: Value,
+    owning_layer: &str,
+    retry: &str,
+    detail: Value,
+    legal_actions: Value,
+) -> Value {
     json!({
         "revision": 1,
         "kind": kind,
         "code": code,
         "message": message,
         "diagnostic": diagnostic,
-        "detail": null,
+        "detail": detail,
         "committed_receipt": null,
         "owning_layer": owning_layer,
         "terminality": "pre_admission",
-        "retryable": false,
-        "retry": "never",
-        "retry_scope": null,
+        "retryable": retry != "never",
+        "retry": retry,
+        "retry_scope": match retry {
+            "never" => Value::Null,
+            "after_revalidate" => json!("fresh_request"),
+            other => panic!("no pinned retry scope for {other}"),
+        },
         "retry_after_millis": null,
         "cancellation_stage": null,
         "unavailable_classification": null,
@@ -207,7 +238,7 @@ fn problem_record(
     })
 }
 
-fn assert_refusal(
+pub(super) fn assert_refusal(
     result: &Value,
     envelope: &Value,
     schema_id: &str,
@@ -266,25 +297,53 @@ fn assert_application_refusal(result: &Value, envelope: &Value, code: &str, mess
     );
 }
 
-/// Compare-and-swap conflicts that occur inside the effect journal are not the
-/// pre-journal catalog diagnostics. Both a stale `expected_revision` and an
-/// activation that is illegal from `active` come back as this runtime refusal.
-fn assert_journaled_lifecycle_refusal(result: &Value, envelope: &Value) {
+/// A stale compare-and-swap names the revision the caller sent and the one
+/// the disposition holds, so the caller can refresh and resend.
+fn assert_stale_revision_refusal(result: &Value, envelope: &Value, requested: u64, current: u64) {
+    let message = format!(
+        "expected_revision {requested} does not match the current value {current}; refresh and resend with expected_revision {current}."
+    );
     assert_refusal(
         result,
         envelope,
         ACTIVATE_SCHEMA,
         Some(ACTIVATE_BINDING),
-        problem_record(
-            "invalid_request",
-            "workflow.invalid_request",
-            "The Workflow application request is invalid",
+        problem_record_with_retry(
+            "stale",
+            "application.precondition-stale",
+            &message,
+            json!({ "code": "application.precondition-stale", "message": message }),
+            "application",
+            "after_revalidate",
             json!({
-                "code": "workflow.invalid_request",
-                "message": "The Workflow application request is invalid"
+                "kind": "stale_precondition",
+                "field": "expected_revision",
+                "requested": requested,
+                "current": current
             }),
-            "runtime",
-            json!(["correct_request"]),
+            json!(["refresh"]),
+        ),
+    );
+}
+
+/// An operation with no lifecycle edge from the current state is a conflict
+/// that names that state, not a request the caller should correct.
+fn assert_illegal_transition_refusal(result: &Value, envelope: &Value) {
+    let message = "the definition disposition is active at revision 3; this lifecycle operation has no transition from active";
+    assert_refusal(
+        result,
+        envelope,
+        ACTIVATE_SCHEMA,
+        Some(ACTIVATE_BINDING),
+        problem_record_with_retry(
+            "conflict",
+            "workflow.lifecycle.illegal_transition",
+            message,
+            json!({ "code": "workflow.lifecycle.illegal_transition", "message": message }),
+            "application",
+            "after_revalidate",
+            Value::Null,
+            json!(["refresh"]),
         ),
     );
 }
@@ -349,7 +408,7 @@ async fn activate_definition_publishes_active_revision_three() {
             "not_found_or_not_authorized",
             "The requested resource was not found or is not authorized",
             Value::Null,
-            "runtime",
+            "application",
             json!([]),
         ),
     );
@@ -438,8 +497,8 @@ async fn activate_definition_publishes_active_revision_three() {
         ),
     )
     .await;
-    let (conflict_result, conflict) = activate(&server, ACTIVE_ID, 1, 99).await;
-    assert_journaled_lifecycle_refusal(&conflict_result, &conflict);
+    let (stale_result, stale) = activate(&server, ACTIVE_ID, 1, 99).await;
+    assert_stale_revision_refusal(&stale_result, &stale, 99, 1);
 
     let (activated_result, activated) = activate(&server, ACTIVE_ID, 1, 1).await;
     assert_eq!(activated_result.get("isError"), None, "{activated}");
@@ -525,7 +584,7 @@ async fn activate_definition_publishes_active_revision_three() {
     );
 
     let (illegal_result, illegal) = activate(&server, ACTIVE_ID, 1, 3).await;
-    assert_journaled_lifecycle_refusal(&illegal_result, &illegal);
+    assert_illegal_transition_refusal(&illegal_result, &illegal);
 
     let (still_active_result, still_active) = activate(&server, ACTIVE_ID, 1, 1).await;
     assert_eq!(still_active_result.get("isError"), None, "{still_active}");

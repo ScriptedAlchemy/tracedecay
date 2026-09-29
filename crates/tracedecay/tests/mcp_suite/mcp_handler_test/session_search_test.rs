@@ -25,14 +25,14 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 /// the ambient `$HOME`, so a rollout written under the process home is
 /// invisible to it.
 #[cfg(feature = "test-transport")]
-fn composed_transcript_home(isolation: &Path) -> PathBuf {
+pub(super) fn composed_transcript_home(isolation: &Path) -> PathBuf {
     std::fs::create_dir_all(isolation).expect("production composition root");
     ProductionProjectCompositionHarnessV1::transcript_source_home(isolation)
         .expect("composed transcript source home")
 }
 
 #[cfg(feature = "test-transport")]
-fn write_production_codex_rollout(home: &Path, project: &Path) {
+pub(super) fn write_production_codex_rollout(home: &Path, project: &Path) {
     write_production_codex_rollouts(home, project, 1);
 }
 
@@ -224,7 +224,7 @@ async fn recovered_owner_payload(
 }
 
 #[cfg(feature = "test-transport")]
-async fn call_production_tool(
+pub(super) async fn call_production_tool(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     tool: &str,

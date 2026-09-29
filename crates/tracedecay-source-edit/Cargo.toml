@@ -29,6 +29,7 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 

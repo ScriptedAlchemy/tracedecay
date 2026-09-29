@@ -57,6 +57,8 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
 
 fn needs_session_stores(invocation: &GraphToolInvocationV1) -> bool {
     match invocation.operation {
+        // A managed test run is recorded in the project session store.
+        ApplicationSurfaceOperation::RunAffectedTests => true,
         ApplicationSurfaceOperation::HookRuntime => {
             hook_runtime_needs_session_stores(&invocation.arguments)
         }

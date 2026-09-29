@@ -520,83 +520,11 @@ fn single_pass_sweep_accounting_is_linear_on_thousands_of_shared_artifact_entrie
     );
 }
 
-#[derive(Clone)]
-struct FixtureGeneration {
-    id: CodeGenerationId,
-    file: String,
-    state_digest: String,
-    size_bytes: u64,
-}
+type FixtureGeneration = super::fixture::GenerationStoreFixtureV1;
 
 fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
     let store = tempfile::TempDir::new().expect("create generation store");
-    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
-    std::fs::create_dir_all(&generations_root).expect("create generation directory");
-    let mut generations = Vec::with_capacity(count);
-
-    for sequence in 0..count {
-        let generation_id = CodeGenerationId::new(format!("generation.v1.fixture.{sequence:08}"))
-            .expect("valid generation id");
-        let sealed_at = i64::try_from(sequence).expect("fixture sequence fits i64");
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
-            "manifest": {
-                "generation_id": generation_id.as_str(),
-                "seal": { "sealed_at": sealed_at },
-            },
-            "chunks": [],
-        }))
-        .expect("serialize generation fixture");
-        let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
-        let file = format!(
-            "generation-{}.json",
-            sha256_hex_suffix(&state_digest).expect("digest prefix")
-        );
-        let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
-        std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
-        generations.push(FixtureGeneration {
-            id: generation_id,
-            file,
-            state_digest,
-            size_bytes,
-        });
-    }
-
-    let active = generations.last().expect("at least one generation");
-    let active_entry = DurableGenerationIndexEntryV1 {
-        generation_id: active.id.as_str().to_owned(),
-        snapshot_content_identity: "snapshot.fixture".to_owned(),
-        sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
-        size_bytes: active.size_bytes,
-        segment_bytes: 0,
-        generation_file: active.file.clone(),
-        state_digest: active.state_digest.clone(),
-        source_reference: None,
-        source_revision: None,
-        source_tree: None,
-        cardinality: None,
-        text_artifact: None,
-    };
-    let generation_index = vec![active_entry];
-    let generation_index_digest =
-        durable_generation_index_digest(&generation_index, true).expect("index digest");
-    let pointer = DurablePublicationPointerV1 {
-        generation_id: active.id.as_str().to_owned(),
-        snapshot_content_identity: "snapshot.fixture".to_owned(),
-        publication_digest: "sha256:publication".to_owned(),
-        sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
-        generation_file: active.file.clone(),
-        state_digest: active.state_digest.clone(),
-        generation_index,
-        generation_index_truncated: true,
-        generation_index_digest: Some(generation_index_digest),
-    };
-    std::fs::write(
-        store.path().join(ACTIVE_POINTER_FILE),
-        serde_json::to_vec(&pointer).expect("serialize active pointer"),
-    )
-    .expect("write active pointer");
-
+    let generations = super::fixture::write_generation_store_fixture(store.path(), count);
     (store, generations)
 }
 
@@ -1407,28 +1335,256 @@ fn pad_generation_file(
     }
 }
 
+/// A superseded backlog drains in batch-count passes: one full digest
+/// verification per batch, never one per generation.
 #[test]
-fn next_retention_plan_limits_collection_to_one_generation() {
-    let (store, _generations) = fixture_store(8);
+fn superseded_backlog_drains_in_batch_count_passes() {
+    let (store, generations) = fixture_store(MAX_CODE_GENERATION_RETENTION_BATCH_V1 + 6);
+    let mut collected_per_pass = Vec::new();
+    loop {
+        let plan = prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            &|| false,
+            None,
+        )
+        .expect("plan retention batch");
+        if !plan.has_collectable_work() {
+            break;
+        }
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(20),
+            None,
+        )
+        .expect("apply retention batch");
+        collected_per_pass.push(report.deleted_generations.len());
+    }
 
+    assert_eq!(collected_per_pass, vec![32, 5]);
+    let remaining = std::fs::read_dir(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("list generations")
+        .map(|entry| entry.expect("generation entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![std::ffi::OsString::from(
+            &generations.last().expect("active generation").file
+        )],
+        "only the active generation survives the drained backlog"
+    );
+}
+
+/// A kill after part of a batch was quarantined leaves no half-collected
+/// batch: recovery restores every member and the durable index, and the next
+/// pass collects the whole batch again.
+#[test]
+fn a_batch_interrupted_mid_quarantine_recovers_whole_and_the_next_pass_converges() {
+    let (store, generations) = fixture_store(5);
+    let original = index_every_fixture_generation(&store, &generations);
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan retention batch");
+    assert_eq!(plan.collectable_generations.len(), 4);
+    let collected = plan.collectable_generations.clone();
+    let receipt =
+        build_receipt(&plan, collected.clone(), UtcMicros(30)).expect("build retention receipt");
+    let transaction = CodeGenerationRetentionTransactionV1 {
+        schema: TRANSACTION_SCHEMA.to_owned(),
+        active_pointer: Some(original.clone()),
+        receipt,
+    };
+    let rewritten = transaction
+        .rewritten_pointer()
+        .expect("rewrite the durable index")
+        .expect("the fixture index names the batch");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("journal the batch");
+    write_active_pointer(store.path(), RETENTION_POINTER_WRITE_CONTEXT, &rewritten)
+        .expect("publish the rewritten index");
+    // The kill lands after the second of four quarantine renames.
+    let mut partial = transaction.clone();
+    partial.receipt.deleted_generations.truncate(2);
+    stage_collectable_generations(store.path(), &partial).expect("quarantine half the batch");
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    let present = |batch: &[CodeGenerationRetentionGenerationV1]| {
+        batch
+            .iter()
+            .filter(|generation| generations_root.join(&generation.generation_file).is_file())
+            .count()
+    };
+    assert_eq!(present(&collected), 2);
 
-    assert_eq!(plan.collectable_generations.len(), 1);
-    assert_eq!(plan.superseded_generations.len(), 7);
+    let replanned = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("recover the interrupted batch and plan again");
+
+    assert_eq!(
+        present(&collected),
+        4,
+        "recovery restores every batch member"
+    );
+    assert_eq!(
+        read_active_pointer(store.path()).expect("read pointer"),
+        original,
+        "recovery restores the index entries the batch dropped"
+    );
+    assert!(!transaction_path(store.path()).exists());
+    assert_eq!(replanned.collectable_generations, collected);
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        replanned,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(31),
+        None,
+    )
+    .expect("apply the replanned batch");
+    assert_eq!(report.deleted_generations.len(), 4);
+    assert_eq!(present(&collected), 0);
+    assert!(
+        !prepare_next_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            &|| false,
+            None,
+        )
+        .expect("plan the converged store")
+        .has_collectable_work()
+    );
 }
 
-/// The bounded collection unit must name the OLDEST collectable generation.
+fn receipt_count(store: &Path, directory: &str) -> usize {
+    match std::fs::read_dir(store.join(directory)) {
+        Ok(entries) => entries
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .expect("receipt entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("receipt-")
+            })
+            .count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("list receipts: {error}"),
+    }
+}
+
+/// A generation receipt is read by pending-journal recovery and by the queued
+/// graph-replay releases it names; once the graph has consumed every one of
+/// them, the next pass removes it.
+#[test]
+fn generation_receipt_is_pruned_once_the_release_queue_no_longer_names_it() {
+    let (store, _) = fixture_store(3);
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("plan retention");
+    execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(40),
+        None,
+    )
+    .expect("apply retention");
+    let releases = code_generation_graph_replay_release_page(store.path(), None)
+        .expect("read queued releases")
+        .releases;
+    assert_eq!(releases.len(), 2);
+    assert_eq!(receipt_count(store.path(), RECEIPTS_DIRECTORY), 1);
+
+    complete_code_generation_graph_replay_release(store.path(), &releases[0])
+        .expect("consume one release");
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("pass with one release still queued");
+    assert_eq!(
+        receipt_count(store.path(), RECEIPTS_DIRECTORY),
+        1,
+        "a queued release still reads its receipt"
+    );
+
+    complete_code_generation_graph_replay_release(store.path(), &releases[1])
+        .expect("consume the last release");
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("pass after the queue drained");
+    assert_eq!(receipt_count(store.path(), RECEIPTS_DIRECTORY), 0);
+}
+
+/// A text-artifact receipt is read only by recovery of its own journal, so a
+/// committed sweep's receipt is removed by the next pass.
+#[test]
+fn text_artifact_receipt_is_pruned_after_its_sweep_commits() {
+    let (store, generations) = fixture_store(1);
+    let active = generations.last().expect("active generation");
+    attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let orphan = text_artifact_for_bytes(&active.id, b"unreferenced completed bytes");
+    let orphan_path = write_text_artifact(&store, &orphan, b"unreferenced completed bytes");
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("plan artifact retention");
+    execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(50),
+        None,
+    )
+    .expect("collect the orphan artifact");
+    assert!(!orphan_path.exists());
+    assert_eq!(
+        receipt_count(store.path(), TEXT_ARTIFACT_RECEIPTS_DIRECTORY),
+        1
+    );
+
+    prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("next pass");
+    assert_eq!(
+        receipt_count(store.path(), TEXT_ARTIFACT_RECEIPTS_DIRECTORY),
+        0
+    );
+}
+
+/// The bounded collection batch must start at the OLDEST collectable
+/// generation.
 ///
 /// Planning newest-first meant a store that publishes at least as fast as
-/// maintenance collects never reclaimed its floor: every single-unit plan
-/// named the generation sealed a moment ago, and the first generation ever
-/// sealed stayed on disk forever.
+/// maintenance collects never reclaimed its floor: every bounded plan named
+/// the generation sealed a moment ago, and the first generation ever sealed
+/// stayed on disk forever.
 #[test]
 fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
     let (store, generations) = fixture_store(5);
@@ -1439,15 +1595,18 @@ fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan one retention batch");
 
     assert_eq!(
         plan.collectable_generations
             .iter()
             .map(|generation| generation.generation_id.clone())
             .collect::<Vec<_>>(),
-        vec![generations[0].id.clone()],
-        "the bounded unit must reclaim the oldest superseded generation"
+        generations[..4]
+            .iter()
+            .map(|generation| generation.id.clone())
+            .collect::<Vec<_>>(),
+        "the batch reclaims oldest first"
     );
 }
 
@@ -1681,10 +1840,15 @@ fn collectable_maintenance_preparation_escalates_to_full_verification() {
         &|| false,
         None,
     )
-    .expect("prepare collectable retention unit");
+    .expect("prepare collectable retention batch");
 
     assert!(plan.has_collectable_work());
-    assert_eq!(plan.collectable_generations.len(), 1);
+    assert_eq!(plan.superseded_generations.len(), 7);
+    assert_eq!(
+        plan.collectable_generations.len(),
+        7,
+        "one verified plan batches every collectable generation"
+    );
     assert_eq!(plan.verification, GenerationDigestVerificationV1::Full);
 }
 
@@ -1709,7 +1873,7 @@ fn cancellable_maintenance_preparation_stops_during_generation_verification() {
 }
 
 #[test]
-fn executing_a_prevalidated_unit_collects_only_that_generation() {
+fn executing_a_prevalidated_batch_collects_exactly_its_generations() {
     let (store, _generations) = fixture_store(8);
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
@@ -1717,7 +1881,7 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
         &|| false,
         None,
     )
-    .expect("plan one retention unit");
+    .expect("plan one retention batch");
 
     let report = execute_code_generation_retention(
         store.path(),
@@ -1726,14 +1890,14 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
         UtcMicros(99),
         None,
     )
-    .expect("execute one retention unit");
+    .expect("execute one retention batch");
 
-    assert_eq!(report.deleted_generations.len(), 1);
+    assert_eq!(report.deleted_generations.len(), 7);
     assert_eq!(
         std::fs::read_dir(store.path().join(GENERATIONS_DIRECTORY))
             .expect("generation directory")
             .count(),
-        7
+        1
     );
 }
 
@@ -2151,40 +2315,13 @@ fn live_root_set() -> BTreeSet<PathBuf> {
     [PathBuf::from(LIVE_ROOT)].into_iter().collect()
 }
 
-fn authority_receipt(
-    revision: &str,
-    terminal_count: u64,
-    digest_byte: char,
-) -> ScopeRootAuthorityReceiptV1 {
-    ScopeRootAuthorityReceiptV1 {
-        revision: revision.to_owned(),
-        terminal_count,
-        digest: format!("sha256:{}", digest_byte.to_string().repeat(64)),
-    }
-}
-
-fn fixture_scope_liveness_proof(
-    live_scope_hash: String,
-    candidate_scope_hash: String,
-) -> ScopeRootLivenessProofV1 {
-    let source_scope = tracedecay_store::StoreShardIdV1::project(
-        tracedecay_domain::BrainId::new("brain.scope-retention").expect("fixture brain"),
-        tracedecay_domain::UserProfileId::new("profile.scope-retention").expect("fixture profile"),
-        tracedecay_domain::ProjectId::new("project.scope-retention").expect("fixture project"),
-    );
+fn fixture_scope_liveness_proof(live_scope_hash: String) -> ScopeRootLivenessProofV1 {
     ScopeRootLivenessProofV1::new(
         [live_scope_hash].into_iter().collect(),
-        authority_receipt("registry-r1", 1, '1'),
-        authority_receipt("git-r1", 1, '2'),
-        authority_receipt("mount-r1", 1, '3'),
-        authority_receipt("config-r1", 1, '4'),
-        authority_receipt("vector-r1", 2, '5'),
-        authority_receipt("dependency-r1", 1, '6'),
-        ScopeRootCandidateBindingV1 {
-            scope_hash: candidate_scope_hash,
-            source_scope,
-            vector_census_revision: "vector-r1".to_owned(),
-            live: false,
+        ScopeRootAuthorityReceiptV1 {
+            revision: "git-r1".to_owned(),
+            terminal_count: 1,
+            digest: format!("sha256:{}", "2".repeat(64)),
         },
     )
     .expect("valid fixture liveness proof")
@@ -2193,7 +2330,7 @@ fn fixture_scope_liveness_proof(
 #[test]
 fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live);
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2201,18 +2338,8 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
         AGED_NOW_SECS,
     )
     .expect("plan proof-bound scope reconciliation");
-    let completed_at = UtcMicros(10);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist exact proof-bound cleanup intent");
     let mut changed = proof;
-    changed.mounted_leases.revision = "mount-r2".to_owned();
+    changed.git_worktrees.revision = "git-r2".to_owned();
     changed
         .refresh_digest()
         .expect("refresh changed proof digest");
@@ -2223,7 +2350,7 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
         &changed,
         CodeGenerationRetentionModeV1::Apply,
         AGED_NOW_SECS,
-        completed_at,
+        UtcMicros(10),
     )
     .expect_err("pre-quarantine CAS must reject a changed root authority");
 
@@ -2236,9 +2363,9 @@ fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
 }
 
 #[test]
-fn cleanup_replay_preserves_exact_source_shard_and_liveness_proof() {
+fn scope_apply_collects_the_stranded_scope_and_keeps_the_live_one() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2246,32 +2373,31 @@ fn cleanup_replay_preserves_exact_source_shard_and_liveness_proof() {
         AGED_NOW_SECS,
     )
     .expect("plan proof-bound scope reconciliation");
-    let completed_at = UtcMicros(11);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist proof-bound cleanup intent");
-    execute_scope_root_retention(
+    let report = execute_scope_root_retention(
         store.path(),
         plan,
         &proof,
         CodeGenerationRetentionModeV1::Apply,
         AGED_NOW_SECS,
-        completed_at,
+        UtcMicros(11),
     )
     .expect("collect proof-bound stranded scope");
 
-    let replay = recover_scope_root_binding_cleanup(store.path())
-        .expect("read cleanup replay")
-        .expect("pending cleanup replay");
-    assert_eq!(replay.scope_hash, stranded);
-    assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
-    assert_eq!(replay.liveness_proof, proof);
+    assert_eq!(
+        report
+            .collected_scopes
+            .iter()
+            .map(|scope| scope.scope_hash.as_str())
+            .collect::<Vec<_>>(),
+        vec![stranded.as_str()]
+    );
+    let receipt = report.receipt.expect("durable collection receipt");
+    assert_eq!(receipt.liveness_proof, proof);
+    assert_eq!(receipt.reclaimed_bytes, "stranded".len() as u64);
+    assert!(scope_receipt_path(store.path(), &receipt).is_file());
+    assert!(!store.path().join(&stranded).exists());
+    assert!(store.path().join(&live).is_dir());
+    assert!(!scope_transaction_path(store.path()).exists());
 }
 
 #[test]
@@ -2363,7 +2489,7 @@ fn scope_plan_skips_the_stranding_age_when_the_recorded_root_is_gone() {
 #[test]
 fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2414,7 +2540,7 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
 #[test]
 fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2463,93 +2589,11 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     assert!(scope_receipt_path(store.path(), &receipt).is_file());
 }
 
-#[test]
-fn scope_apply_refuses_collection_without_exact_binding_cleanup_intent() {
-    let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
-    let plan = plan_scope_root_retention_with_liveness_proof(
-        store.path(),
-        proof.clone(),
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        AGED_NOW_SECS,
-    )
-    .expect("plan scope reconciliation");
-
-    let error = execute_scope_root_retention(
-        store.path(),
-        plan,
-        &proof,
-        CodeGenerationRetentionModeV1::Apply,
-        AGED_NOW_SECS,
-        UtcMicros(13),
-    )
-    .expect_err("physical collection must require a durable relational cleanup intent");
-
-    assert!(matches!(
-        error,
-        CodeGenerationRetentionErrorV1::UnsafeState(_)
-    ));
-    assert!(store.path().join(stranded).is_dir());
-    assert!(!scope_transaction_path(store.path()).exists());
-}
-
-#[test]
-fn scope_binding_cleanup_intent_replays_after_filesystem_collection_restart() {
-    let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
-    let plan = plan_scope_root_retention_with_liveness_proof(
-        store.path(),
-        proof.clone(),
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        AGED_NOW_SECS,
-    )
-    .expect("plan scope reconciliation");
-    let completed_at = UtcMicros(14);
-
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("journal relational cleanup before filesystem collection");
-    let report = execute_scope_root_retention(
-        store.path(),
-        plan,
-        &proof,
-        CodeGenerationRetentionModeV1::Apply,
-        AGED_NOW_SECS,
-        completed_at,
-    )
-    .expect("complete filesystem collection");
-    assert_eq!(report.collected_scopes[0].scope_hash, stranded);
-    assert!(!store.path().join(&stranded).exists());
-    assert!(store.path().join(&live).is_dir());
-
-    // Simulate restart exactly after durable filesystem completion and
-    // before the caller removes the semantic source-scope binding.
-    recover_scope_root_retention(store.path()).expect("recover filesystem transaction");
-    let replay = recover_scope_root_binding_cleanup(store.path())
-        .expect("replay binding cleanup intent")
-        .expect("pending replay");
-    assert_eq!(replay.scope_hash, stranded);
-    assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
-    assert_eq!(replay.liveness_proof, proof);
-    complete_scope_root_binding_cleanup(store.path(), &replay)
-        .expect("complete exact binding cleanup intent");
-    assert_eq!(
-        recover_scope_root_binding_cleanup(store.path()).expect("completed cleanup stays complete"),
-        None
-    );
-}
-
 #[cfg(windows)]
 #[test]
 fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof,
@@ -2624,7 +2668,7 @@ fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
 #[test]
 fn scope_collection_defers_an_external_generation_owner_then_retries() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let proof = fixture_scope_liveness_proof(live);
     let plan = plan_scope_root_retention_with_liveness_proof(
         store.path(),
         proof.clone(),
@@ -2633,15 +2677,6 @@ fn scope_collection_defers_an_external_generation_owner_then_retries() {
     )
     .expect("plan scope collection");
     let completed_at = UtcMicros(16);
-    prepare_scope_root_binding_cleanup(
-        store.path(),
-        &plan,
-        &stranded,
-        &proof.candidate_binding.source_scope,
-        &proof,
-        completed_at,
-    )
-    .expect("persist binding cleanup intent");
     let held = try_acquire_code_generation_store_lock(&store.path().join(&stranded))
         .expect("open external generation owner")
         .expect("take external generation owner");
@@ -2684,7 +2719,7 @@ fn scope_collection_defers_an_external_generation_owner_then_retries() {
 #[test]
 fn scope_transaction_never_journals_a_live_scope() {
     let (store, live, stranded) = fixture_scope_store();
-    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let proof = fixture_scope_liveness_proof(live.clone());
     let mut receipt = ScopeRootRetentionReceiptV1 {
         schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
         receipt_digest: String::new(),

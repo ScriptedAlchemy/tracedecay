@@ -178,31 +178,53 @@ fn empty_file_produces_only_file_node() {
     assert_eq!(result.nodes[0].kind, NodeKind::File);
 }
 
+/// Every `Uses` edge as `(source node name, imported module path id)`.
+fn uses_edges(result: &ExtractionResult) -> Vec<(&str, &str)> {
+    result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Uses)
+        .map(|e| {
+            let source = result
+                .nodes
+                .iter()
+                .find(|n| n.id == e.source)
+                .expect("uses edge source is an extracted node");
+            (source.name.as_str(), e.target.as_str())
+        })
+        .collect()
+}
+
+/// `expected` names each edge as `(source node name, imported module path)`.
+fn assert_uses(result: &ExtractionResult, expected: &[(&str, &str)]) {
+    let ids: Vec<String> = expected
+        .iter()
+        .map(|(_, path)| generate_node_id(path, &NodeKind::File, path, 0))
+        .collect();
+    let expected: Vec<(&str, &str)> = expected
+        .iter()
+        .zip(&ids)
+        .map(|((source, _), id)| (*source, id.as_str()))
+        .collect();
+    assert_eq!(uses_edges(result), expected);
+}
+
 #[test]
 fn import_from_clause_terminates_path() {
     // `import path.* from "spells"`. The `from` keyword should commit
     // the path before reaching the string literal. The `*` is an
     // operator, currently dropped (we only join identifiers and `.`).
     let source = "import basicSpells.* from \"spells/basicSpells\"\n\nmodule M { }\n";
-    let result = extract(source);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 1);
+    assert_uses(&extract(source), &[("spec.qnt", "basicSpells")]);
 }
 
 #[test]
 fn multiple_imports_produce_multiple_edges() {
     let source = "import a\nimport b.c\nimport d as e\n\nmodule M { }\n";
-    let result = extract(source);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 3);
+    assert_uses(
+        &extract(source),
+        &[("spec.qnt", "a"), ("spec.qnt", "b.c"), ("spec.qnt", "d")],
+    );
 }
 
 #[test]
@@ -210,26 +232,16 @@ fn import_inside_module_attributes_to_module() {
     // Quint allows imports inside a module body. The Uses edge should
     // come from the enclosing module, not the file.
     let source = "module M {\n  import Helpers\n  val x = 1\n}\n";
-    let result = extract(source);
-    let m = result.nodes.iter().find(|n| n.name == "M").unwrap();
-    let uses_from_module: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses && e.source == m.id)
-        .collect();
-    assert_eq!(uses_from_module.len(), 1);
+    assert_uses(&extract(source), &[("M", "Helpers")]);
 }
 
 #[test]
 fn bare_import_keyword_with_no_path_emits_nothing() {
     // Defensive: malformed `import` with no following identifier shouldn't
-    // panic or emit a phantom edge.
-    let source = "import\n\nmodule M { }\n";
-    let result = extract(source);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 0);
+    // panic or emit a phantom edge, while the same line with a path does.
+    assert_uses(&extract("import\n\nmodule M { }\n"), &[]);
+    assert_uses(
+        &extract("import Helpers\n\nmodule M { }\n"),
+        &[("spec.qnt", "Helpers")],
+    );
 }

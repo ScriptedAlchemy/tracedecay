@@ -366,6 +366,63 @@ fn append_ack_compact_and_reopen_are_exact() {
 }
 
 #[test]
+fn one_batch_acknowledgement_settles_every_valid_slot_and_reports_each_conflict() {
+    let root = TestDir::new("ack-many");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let first = spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+    let second = spool
+        .append(envelope(2, 10), &binding(), UtcMicros(10))
+        .unwrap();
+    let third = spool
+        .append(envelope(3, 11), &binding(), UtcMicros(10))
+        .unwrap();
+    let ack = |sequence, receipt| HookSpoolAckV1 {
+        sequence,
+        receipt_id: [receipt; 16],
+        disposition: HookSpoolAckDispositionV1::Committed,
+    };
+
+    let outcomes = spool
+        .acknowledge_many(
+            &[
+                ack(third.sequence, 33),
+                ack(first.sequence, 31),
+                // A second, different receipt for the same record conflicts.
+                ack(first.sequence, 99),
+                // The identical receipt repeated is a no-op.
+                ack(third.sequence, 33),
+                ack(42, 44),
+            ],
+            UtcMicros(10),
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![
+            Ok(true),
+            Ok(true),
+            Err(HookSpoolError::AckConflict),
+            Ok(false),
+            Err(HookSpoolError::AckConflict),
+        ]
+    );
+    drop(spool);
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
+    assert_eq!(report.committed_through, first.sequence);
+    assert_eq!(
+        spool
+            .pending
+            .iter()
+            .map(|record| record.sequence)
+            .collect::<Vec<_>>(),
+        vec![second.sequence]
+    );
+}
+
+#[test]
 fn replay_probe_is_false_until_a_record_is_appended() {
     let root = TestDir::new("replay-probe");
     assert!(!HookSpoolV1::has_records(&root.0).unwrap());

@@ -65,6 +65,9 @@ pub(super) fn fact_summary_json(summary: &ProjectMemoryDashboardFactSummaryV1) -
             if let Some(source_label) = fact.source_label() {
                 row.insert("source_label".into(), json!(source_label));
             }
+            if let Some(superseded_by) = fact.superseded_by() {
+                row.insert("superseded_by".into(), json!(superseded_by.as_str()));
+            }
             Value::Object(row)
         }
         ProjectMemoryFactProjectionV1::Unavailable(fact) => json!({

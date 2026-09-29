@@ -43,6 +43,20 @@ pub struct ReconcileReport {
     pub reset_stale: Vec<StaleManagedPr>,
 }
 
+/// Hex digits of a digest that name a branch or head in a worktree path or
+/// ref. Git for Windows refuses `git worktree add` once the new worktree's
+/// `.git` path passes `PATH_MAX - 40` (220) characters, and a full 64-digit
+/// digest per component spent most of that under an ordinary profile root.
+/// 64 bits keeps collisions negligible, and a collision is still refused:
+/// ownership checks compare every artifact against the exact head.
+const ARTIFACT_DIGEST_HEX_DIGITS: usize = 16;
+
+fn artifact_digest(value: &str) -> String {
+    let mut digest = sha256_hex(value.as_bytes());
+    digest.truncate(ARTIFACT_DIGEST_HEX_DIGITS);
+    digest
+}
+
 /// The exact Git and filesystem artifacts owned by one manually activated
 /// branch. The raw branch name remains the Git ref identity; only the
 /// filesystem path is hashed so distinct valid refs cannot alias on disk.
@@ -52,20 +66,21 @@ pub struct ManualBranchArtifactsV1 {
     pub worktree: PathBuf,
     pub tracking_ref: String,
     pub label: String,
-    /// Digest of the raw branch name, computed once at construction; both the
-    /// worktree directory and the lifecycle lock file derive from it.
+    /// Digest of the raw branch name, computed once at construction; it names
+    /// the lifecycle lock file, which is not a Git path.
     branch_digest: String,
 }
 
 impl ManualBranchArtifactsV1 {
     pub fn for_branch(data_root: &Path, branch: &str) -> Self {
-        let branch_digest = sha256_hex(branch.as_bytes());
         Self {
             branch: branch.to_owned(),
-            worktree: data_root.join("branch-worktrees").join(&branch_digest),
+            worktree: data_root
+                .join("branch-worktrees")
+                .join(artifact_digest(branch)),
             tracking_ref: format!("refs/tracedecay/branch/{branch}"),
             label: format!("tracedecay/track/{branch}"),
-            branch_digest,
+            branch_digest: sha256_hex(branch.as_bytes()),
         }
     }
 
@@ -73,10 +88,10 @@ impl ManualBranchArtifactsV1 {
     /// artifacts still named by the previously published branch provenance.
     pub fn for_head(data_root: &Path, branch: &str, head: &str) -> Self {
         let mut artifacts = Self::for_branch(data_root, branch);
-        let generation = sha256_hex(head.as_bytes());
+        let generation = artifact_digest(head);
         artifacts
             .worktree
-            .set_file_name(format!("{}-{generation}", artifacts.branch_digest));
+            .set_file_name(format!("{}-{generation}", artifact_digest(branch)));
         artifacts.tracking_ref = format!("{}-{generation}", artifacts.tracking_ref);
         artifacts.label = format!("{}-{generation}", artifacts.label);
         artifacts
@@ -1116,6 +1131,35 @@ mod tests {
     use crate::pr_tracking::default_pr_command_control;
     use std::path::Path;
     use std::time::Duration;
+
+    /// Git for Windows runs `git worktree add`'s checkout with `GIT_DIR` set to
+    /// the new worktree's `.git` and dies with "'$GIT_DIR' too big" past
+    /// `PATH_MAX - 40` = 220 characters. The data root is the Windows runner's
+    /// test profile that hit that limit; separators count one character on
+    /// every host, so the budget is checked the same way on Linux.
+    #[test]
+    fn manual_branch_worktree_git_dir_fits_git_for_windows_path_budget() {
+        let data_root = Path::new(
+            r"D:\a\_temp\tmp\.tracedecay-test-profile-proj_d64dd56beeefd50c\projects\proj_d64dd56beeefd50c",
+        );
+        let head = "dceb83b0b7e89a1bbb6aa6ecc6d06518545873e6";
+        let artifacts = ManualBranchArtifactsV1::for_head(data_root, "feature-manual", head);
+        let git_dir = artifacts.worktree.join(".git");
+
+        assert!(
+            git_dir.as_os_str().len() <= 220,
+            "{} is {} characters",
+            git_dir.display(),
+            git_dir.as_os_str().len()
+        );
+        assert_ne!(
+            artifacts.worktree,
+            ManualBranchArtifactsV1::for_head(data_root, "feature-manual", &"e".repeat(40))
+                .worktree,
+            "each head stages its own worktree"
+        );
+    }
+
     #[test]
     fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
         let repo = tempfile::tempdir().unwrap();

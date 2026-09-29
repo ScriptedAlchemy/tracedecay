@@ -351,6 +351,12 @@ export type ApplicationProblemDetailV1 =
     required_version: number | null;
   }
   | {
+    current: number;
+    field: string;
+    kind: "stale_precondition";
+    requested: number;
+  }
+  | {
     active: number;
     committed: number;
     kind: "stale_refresh_frontier";
@@ -857,7 +863,7 @@ export type CodeGraphServingReadinessV1 =
 
 export type CodeIndexBuildBlockedReasonV1 = "artifact_store_unavailable" | "publication_authority_corrupt" | "resident_memory" | "retry_backoff" | "source_unavailable";
 
-export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification";
+export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication";
 
 export type CodeIndexBuildProgressV1 = {
   blocked_reason: CodeIndexBuildBlockedReasonV1 | null;
@@ -3073,18 +3079,35 @@ export type LoomEditedFileV1 = {
   session_id: string;
 };
 
-export type LoomEventKindV1 = "pull_request" | "tool_call";
-
-export type LoomEventV1 = {
-  kind: LoomEventKindV1;
-  label?: string | null | undefined;
-  message_id: string;
-  ordinal: number;
-  provider: string;
-  recorded_at: number;
-  session_id: string;
-  tool_use_id?: string | null | undefined;
-};
+export type LoomEventV1 = 
+  | {
+    kind: "pull_request";
+    label?: string | null | undefined;
+    message_id: string;
+    ordinal: number;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+  }
+  | {
+    kind: "test_run";
+    operation_id: string;
+    outcome?: LoomTestRunOutcomeV1 | null | undefined;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+    started_at_micros: number;
+  }
+  | {
+    kind: "tool_call";
+    label?: string | null | undefined;
+    message_id: string;
+    ordinal: number;
+    provider: string;
+    recorded_at: number;
+    session_id: string;
+    tool_use_id?: string | null | undefined;
+  };
 
 export type LoomFileSessionProjectionV1 = {
   authority: string;
@@ -3154,6 +3177,15 @@ export type LoomTemporalRefreshV1 = {
   authority: string;
   latest_activated_at_micros: number | null;
   state: DashboardDomainStateV1;
+};
+
+export type LoomTestRunOutcomeV1 = {
+  exit_code?: number | null | undefined;
+  failed: number;
+  finished_at_micros: number;
+  ignored: number;
+  passed: number;
+  termination: string;
 };
 
 export type ManagedSkill = {
@@ -3440,6 +3472,7 @@ export type MemoryFactRowV1 = {
   retrieval_count: number | null;
   score_millionths?: number | null | undefined;
   source_label: string | null;
+  superseded_by?: FactId | null | undefined;
   tags: Array<string> | null;
   trust_score: number | null;
   unhelpful_count: number | null;
@@ -3886,7 +3919,7 @@ export type ObservabilityHorizonV1 = {
 };
 
 export type ObservationSourceIdentityV1 = {
-  provider?: ProviderId | undefined;
+  provider: ProviderId;
   session_id: SessionId;
   source_key?: SessionId | null | undefined;
 };
@@ -5423,10 +5456,7 @@ export type WorkAttemptListCoverageV1 =
     returned: number;
   };
 
-export type WorkAttemptListCursorV1 = {
-  generation: string;
-  start_after: WorkAttemptIdentityV1;
-};
+export type WorkAttemptListCursorV1 = string;
 
 export type WorkAttemptListRequestV1 = {
   cursor: WorkAttemptListCursorV1 | null;
@@ -7175,6 +7205,7 @@ export type WorkSynthesisSourceSetV1 = {
 
 export type WorkTaskSessionContinuationV1 = {
   attempt: WorkAttemptIdentityV1;
+  binding: string;
   participant_epoch: ManifestDigest;
   ranking_cursor: string | null;
   source: ObservationSourceIdentityV1;

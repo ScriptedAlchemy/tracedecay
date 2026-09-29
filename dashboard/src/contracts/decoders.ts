@@ -400,7 +400,6 @@ import type {
   LoomBranchSpanV1,
   LoomCommitV1,
   LoomEditedFileV1,
-  LoomEventKindV1,
   LoomEventV1,
   LoomFileSessionProjectionV1,
   LoomSessionModelV1,
@@ -409,6 +408,7 @@ import type {
   LoomSourceStatusV1,
   LoomTemporalPayloadV1,
   LoomTemporalRefreshV1,
+  LoomTestRunOutcomeV1,
   ManagedSkill,
   ManagedSkillMaterializationScope,
   ManagedSkillMetadata,
@@ -1519,6 +1519,11 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   remedy: z.string(),
   required_version: z.number().int().safe().nullable(),
 }).strict(), z.object({
+  current: z.number().int().safe().min(0),
+  field: z.string(),
+  kind: z.literal("stale_precondition"),
+  requested: z.number().int().safe().min(0),
+}).strict(), z.object({
   active: z.number().int().safe().min(0),
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),
@@ -2370,7 +2375,7 @@ export const CodeIndexBuildBlockedReasonV1Schema: z.ZodEnum<["artifact_store_una
 
 A phase is not inferred from scheduler state. The mounted registry publishes
 the exact phase that owns the active generation. */
-export const CodeIndexBuildPhaseV1Schema: z.ZodEnum<["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]> = z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]);
+export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication", z.ZodTypeDef, unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("graph_publication")]);
 
 /** The latest committed progress boundary for one active code-index generation.
 
@@ -5728,20 +5733,25 @@ export const LoomEditedFileV1Schema: z.ZodObject<{
   session_id: z.string(),
 });
 
-export const LoomEventKindV1Schema: z.ZodEnum<["pull_request", "tool_call"]> = z.enum(["pull_request", "tool_call"]);
-
-/** One event a host transcript recorded for a displayed session. */
-export const LoomEventV1Schema: z.ZodObject<{
-  kind: z.ZodType<LoomEventKindV1, z.ZodTypeDef, unknown>;
-  label: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  message_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ordinal: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  recorded_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  tool_use_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-}> = z.object({
-  kind: z.lazy(() => LoomEventKindV1Schema),
+/** One recorded event on a displayed session's lane. */
+export const LoomEventV1Schema: z.ZodType<LoomEventV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("pull_request"),
+  label: z.string().nullable().optional(),
+  message_id: z.string(),
+  ordinal: z.number().int().safe(),
+  provider: z.string(),
+  recorded_at: z.number().int().safe(),
+  session_id: z.string(),
+}), z.object({
+  kind: z.literal("test_run"),
+  operation_id: z.string(),
+  outcome: z.union([z.lazy(() => LoomTestRunOutcomeV1Schema), z.null()]).optional(),
+  provider: z.string(),
+  recorded_at: z.number().int().safe(),
+  session_id: z.string(),
+  started_at_micros: z.number().int().safe(),
+}), z.object({
+  kind: z.literal("tool_call"),
   label: z.string().nullable().optional(),
   message_id: z.string(),
   ordinal: z.number().int().safe(),
@@ -5749,7 +5759,7 @@ export const LoomEventV1Schema: z.ZodObject<{
   recorded_at: z.number().int().safe(),
   session_id: z.string(),
   tool_use_id: z.string().nullable().optional(),
-});
+})]);
 
 export const LoomFileSessionProjectionV1Schema: z.ZodObject<{
   authority: z.ZodType<string, z.ZodTypeDef, unknown>;
@@ -5875,6 +5885,23 @@ export const LoomTemporalRefreshV1Schema: z.ZodObject<{
   authority: z.string(),
   latest_activated_at_micros: z.number().int().safe().nullable(),
   state: z.lazy(() => DashboardDomainStateV1Schema),
+});
+
+/** The outcome a finished managed test run recorded. */
+export const LoomTestRunOutcomeV1Schema: z.ZodObject<{
+  exit_code: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
+  failed: z.ZodType<number, z.ZodTypeDef, unknown>;
+  finished_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
+  passed: z.ZodType<number, z.ZodTypeDef, unknown>;
+  termination: z.ZodType<string, z.ZodTypeDef, unknown>;
+}> = z.object({
+  exit_code: z.number().int().safe().nullable().optional(),
+  failed: z.number().int().safe().min(0),
+  finished_at_micros: z.number().int().safe(),
+  ignored: z.number().int().safe().min(0),
+  passed: z.number().int().safe().min(0),
+  termination: z.string(),
 });
 
 export const ManagedSkillSchema: z.ZodObject<{
@@ -6295,6 +6322,7 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
   retrieval_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   score_millionths: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
   source_label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  superseded_by: z.ZodOptional<z.ZodType<FactId | null, z.ZodTypeDef, unknown>>;
   tags: z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>;
   trust_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   unhelpful_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
@@ -6316,6 +6344,7 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
   retrieval_count: z.number().int().safe().min(0).nullable(),
   score_millionths: z.number().int().min(0).nullable().optional(),
   source_label: z.string().nullable(),
+  superseded_by: z.union([z.lazy(() => FactIdSchema), z.null()]).optional(),
   tags: z.array(z.string()).nullable(),
   trust_score: z.number().nullable(),
   unhelpful_count: z.number().int().safe().min(0).nullable(),
@@ -7061,11 +7090,11 @@ export const ObservabilityHorizonV1Schema: z.ZodObject<{
 The session identity is provider-native evidence. The physical file identity
 is represented separately by [`ObservationSourceGenerationV1`]. */
 export const ObservationSourceIdentityV1Schema: z.ZodObject<{
-  provider: z.ZodOptional<z.ZodType<ProviderId, z.ZodTypeDef, unknown>>;
+  provider: z.ZodType<ProviderId, z.ZodTypeDef, unknown>;
   session_id: z.ZodType<SessionId, z.ZodTypeDef, unknown>;
   source_key: z.ZodOptional<z.ZodType<SessionId | null, z.ZodTypeDef, unknown>>;
 }, "strict"> = z.object({
-  provider: z.lazy(() => ProviderIdSchema).optional(),
+  provider: z.lazy(() => ProviderIdSchema),
   session_id: z.lazy(() => SessionIdSchema),
   source_key: z.union([z.lazy(() => SessionIdSchema), z.null()]).optional(),
 }).strict();
@@ -9475,15 +9504,10 @@ export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV
   returned: z.number().int().min(0),
 }).strict()]);
 
-/** Resume point for the next attempt-list page, bound to the exact verified
-topology generation it was minted under. */
-export const WorkAttemptListCursorV1Schema: z.ZodObject<{
-  generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  start_after: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
-  generation: z.string(),
-  start_after: z.lazy(() => WorkAttemptIdentityV1Schema),
-}).strict();
+/** Opaque resume point for the next page of one attempt-list-family read,
+bound to the operation and `page_size` that minted it and pinned to the
+verified topology generation the page was read under. */
+export const WorkAttemptListCursorV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
 
 export const WorkAttemptListRequestV1Schema: z.ZodObject<{
   cursor: z.ZodType<WorkAttemptListCursorV1 | null, z.ZodTypeDef, unknown>;
@@ -12004,6 +12028,7 @@ export const WorkSynthesisSourceSetV1Schema: z.ZodObject<{
 
 export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
   attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
+  binding: z.ZodType<string, z.ZodTypeDef, unknown>;
   participant_epoch: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
   ranking_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
   source: z.ZodType<ObservationSourceIdentityV1, z.ZodTypeDef, unknown>;
@@ -12011,6 +12036,7 @@ export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
   verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
 }, "strict"> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  binding: z.string(),
   participant_epoch: z.lazy(() => ManifestDigestSchema),
   ranking_cursor: z.string().nullable(),
   source: z.lazy(() => ObservationSourceIdentityV1Schema),

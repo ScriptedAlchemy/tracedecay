@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tracedecay_application::http_agent::http_agent;
 
 use crate::agents::host_cli::{HostServerChild, require_host_cli, spawn_host_server};
 
@@ -83,7 +84,7 @@ pub(crate) fn refresh_installed_plugin(
     let source = staged.to_str().ok_or_else(|| {
         KimiWebRefreshError::StagedBundle(format!("{} is not UTF-8", staged.display()))
     })?;
-    let kimi = require_host_cli("kimi", "Kimi Code plugin refresh")
+    let kimi = require_host_cli(super::KIMI_CLI, "Kimi Code plugin refresh")
         .map_err(|error| KimiWebRefreshError::KimiUnavailable(error.to_string()))?;
     let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.local_addr())
@@ -153,13 +154,14 @@ fn refresh_through_server(
     staged: &Path,
     staged_version: &str,
 ) -> Result<KimiPluginRefreshV1, KimiWebRefreshError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(KIMI_WEB_REQUEST_TIMEOUT))
-        .http_status_as_error(false)
-        .proxy(None)
-        .max_redirects(0)
-        .build()
-        .into();
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(KIMI_WEB_REQUEST_TIMEOUT))
+            .http_status_as_error(false)
+            .proxy(None)
+            .max_redirects(0)
+            .build(),
+    );
     let deadline = Instant::now() + KIMI_WEB_READY_DEADLINE;
     let (authorization, listing) = loop {
         if let Some(status) = server

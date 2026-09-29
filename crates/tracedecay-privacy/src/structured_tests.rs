@@ -16,7 +16,10 @@ fn json_is_parsed_before_sensitive_values_are_redacted() {
     let rendered = serde_json::to_string(sanitized.payload()).expect("render safe payload");
 
     assert!(!rendered.contains(SECRET));
-    assert!(rendered.contains("kept"));
+    assert_eq!(
+        rendered,
+        r#"{"nested":{"api_key":"[TraceDecay redacted: sensitive field]"},"safe":"kept"}"#
+    );
     assert!(sanitized.was_structurally_parsed());
 }
 
@@ -28,6 +31,10 @@ fn malformed_json_is_scanned_without_claiming_structural_parse() {
     let rendered = serde_json::to_string(sanitized.payload()).expect("render safe payload");
 
     assert!(!rendered.contains(SECRET));
+    assert_eq!(
+        rendered,
+        r#""{\"[TraceDecay redacted: credential assignment]""#
+    );
     assert!(!sanitized.was_structurally_parsed());
 }
 

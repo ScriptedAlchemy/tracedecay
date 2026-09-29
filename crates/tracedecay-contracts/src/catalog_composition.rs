@@ -402,19 +402,23 @@ mod tests {
         let composition =
             compose_application_catalog(ParityDispatcher).expect("application composition");
         let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
-        let operation = SurfaceOperationName::new("git_apply").expect("surface operation");
-
-        assert!(
+        let dashboard_use_case = |operation: &str| {
             composition
                 .snapshot()
                 .resolve_binding(
                     &profile,
                     BindingSurface::Dashboard,
-                    &operation,
+                    &SurfaceOperationName::new(operation).expect("surface operation"),
                     1,
                     &BTreeSet::new(),
                 )
-                .is_none()
+                .map(|capability| capability.use_case_id().to_string())
+        };
+
+        assert_eq!(dashboard_use_case("git_apply"), None);
+        assert_eq!(
+            dashboard_use_case("diagnostics_read").as_deref(),
+            Some("use-case.application.primitive.diagnostics-read")
         );
     }
 }

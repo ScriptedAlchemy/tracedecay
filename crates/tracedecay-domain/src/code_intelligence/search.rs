@@ -1733,8 +1733,12 @@ mod tests {
         changes
             .validate_reused_complement_for_restore(Some(&parent), &current)
             .expect("arc-share restore proves corpus without pair-list");
-        assert!(
-            changes.validate_reused_complement(None, &current).is_err(),
+        assert_eq!(
+            changes
+                .validate_reused_complement(None, &current)
+                .unwrap_err()
+                .to_string(),
+            "manifest digest does not match its canonical domain-separated payload",
             "pair-list path must still reject an arc-share seal"
         );
     }
@@ -1805,12 +1809,18 @@ mod tests {
             grain: CodeSearchChunkGrainV1::SymbolBody,
             ordinal: 0,
         };
-        assert!(anchor.validate().is_err());
+        assert_eq!(
+            anchor.validate().unwrap_err().to_string(),
+            "symbol grain chunk without symbol occurrence references an unknown identity"
+        );
 
         let mut file_anchor = anchor.clone();
         file_anchor.grain = CodeSearchChunkGrainV1::FileWindow;
         file_anchor.symbol_occurrence_id = Some(id("symbol.fixture"));
-        assert!(file_anchor.validate().is_err());
+        assert_eq!(
+            file_anchor.validate().unwrap_err().to_string(),
+            "file grain chunk with symbol occurrence references an unknown identity"
+        );
 
         let mut symbol_anchor = anchor;
         symbol_anchor.symbol_occurrence_id = Some(id("symbol.fixture"));
@@ -1822,7 +1832,12 @@ mod tests {
     #[test]
     fn bounded_sanitized_text_enforces_the_chunk_bound() {
         assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES)).is_ok());
-        assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1)).is_err());
+        assert_eq!(
+            BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1))
+                .unwrap_err()
+                .to_string(),
+            "bounded sanitized chunk text violates the structural bounds for sanitized text"
+        );
     }
 
     #[test]
@@ -1860,22 +1875,26 @@ mod tests {
         .expect("whole exact term is inside the chunk");
 
         term.canonical_bytes.clear();
-        assert!(
+        assert_eq!(
             term.validate_within(&SourceSpan {
                 start_byte: 10,
                 end_byte: 30,
             })
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "exact technical term must not be empty"
         );
 
         term.canonical_bytes = b"module::symbol".to_vec();
         term.span.end_byte = 31;
-        assert!(
+        assert_eq!(
             term.validate_within(&SourceSpan {
                 start_byte: 10,
                 end_byte: 30,
             })
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "exact technical term span is not canonical"
         );
     }
 
@@ -1918,8 +1937,18 @@ mod tests {
                 b"arbitrary prose".as_slice(),
             ),
         ] {
-            assert!(
-                ExactTechnicalTermV1::technical(kind, value.to_vec(), span(value)).is_err(),
+            let expected = match kind {
+                ExactTechnicalTermKindV1::CompilerErrorText
+                | ExactTechnicalTermKindV1::RuntimeErrorText => {
+                    "contextual exact term authority is not canonical"
+                }
+                _ => "exact technical term kind is not canonical",
+            };
+            assert_eq!(
+                ExactTechnicalTermV1::technical(kind, value.to_vec(), span(value))
+                    .unwrap_err()
+                    .to_string(),
+                expected,
                 "{kind:?} accepted wrong-kind bytes"
             );
         }
@@ -2035,14 +2064,20 @@ mod tests {
             "span": { "start_byte": 6, "end_byte": 18 }
         }]);
 
-        assert!(
-            serde_json::from_value::<CodeSearchChunkV1>(wire.clone()).is_err(),
+        assert_eq!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire.clone())
+                .unwrap_err()
+                .to_string(),
+            "whole symbol exact term authority is not canonical",
             "serialized input cannot forge parser-owned WholeSymbol evidence"
         );
 
         wire["exact_terms"][0]["symbol_occurrence_id"] = serde_json::json!("symbol.forged");
-        assert!(
-            serde_json::from_value::<CodeSearchChunkV1>(wire).is_err(),
+        assert_eq!(
+            serde_json::from_value::<CodeSearchChunkV1>(wire)
+                .unwrap_err()
+                .to_string(),
+            "whole symbol chunk authority is not canonical",
             "serialized symbol evidence must match the chunk occurrence"
         );
     }
@@ -2290,6 +2325,9 @@ mod tests {
             stable_member_spans: true,
             capabilities: super::super::language::LanguageCapabilitySetV1::default(),
         };
-        assert!(descriptor.validate().is_err());
+        assert_eq!(
+            descriptor.validate().unwrap_err().to_string(),
+            "language descriptor extension order is not canonical"
+        );
     }
 }

@@ -469,6 +469,9 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
                         .to_owned(),
             })
         }
+        WorkProductApplicationErrorV1::CursorRefused(mismatch) => {
+            ApplicationProblem::cursor_refused(&mismatch)
+        }
         WorkProductApplicationErrorV1::IdempotencyConflict => ApplicationProblem::conflict(
             "application.work-attempt.product-idempotency-conflict",
             "The canonical Work product admission identity conflicts.",

@@ -11,10 +11,10 @@ use tracedecay_domain::UtcMicros;
 
 use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
-    NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
-    decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
-    hook_v2_spool_root,
+    HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError,
+    HookSpoolResetReasonV1, HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
+    OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_plugin_event,
+    hook_configuration_path, hook_v2_spool_root,
 };
 use tracedecay_domain::NativeHostIdentityV1;
 
@@ -37,16 +37,31 @@ impl NativeHookCaptureSourceV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeHookCaptureOutcomeV1 {
     Captured,
     Unsupported,
     Unbound,
     Rejected,
     Full,
-    ResetRequired,
-    Unavailable,
+    ResetRequired(HookSpoolResetReasonV1),
+    /// The spool refused the event for a cause other than capacity, reset, or
+    /// the writer admission deadline.
+    Unavailable(HookSpoolError),
+    /// The callback could not resolve the project scope it captures for (its
+    /// working directory, enrolled layout, worktree identity, or the clock).
+    ScopeUnavailable,
     AdmissionTimedOut,
+}
+
+impl std::fmt::Display for NativeHookCaptureOutcomeV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResetRequired(reason) => write!(formatter, "ResetRequired ({reason})"),
+            Self::Unavailable(cause) => write!(formatter, "Unavailable({cause:?}: {cause})"),
+            outcome => write!(formatter, "{outcome:?}"),
+        }
+    }
 }
 
 /// Single entry point for every native hook payload a host captures. This is
@@ -82,8 +97,10 @@ pub fn capture_native_event_for_replay(
             NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
             NativeHookCaptureOutcomeV1::Rejected => "hooks.capture.outcome.rejected",
             NativeHookCaptureOutcomeV1::Full => "hooks.capture.outcome.full",
-            NativeHookCaptureOutcomeV1::ResetRequired => "hooks.capture.outcome.reset_required",
-            NativeHookCaptureOutcomeV1::Unavailable => "hooks.capture.outcome.unavailable",
+            NativeHookCaptureOutcomeV1::ResetRequired(_) => "hooks.capture.outcome.reset_required",
+            NativeHookCaptureOutcomeV1::Unavailable(_) => "hooks.capture.outcome.unavailable",
+            NativeHookCaptureOutcomeV1::ScopeUnavailable =>
+                "hooks.capture.outcome.scope_unavailable",
         })
         .inc(1);
     }
@@ -132,29 +149,27 @@ fn capture_native_event_for_replay_inner(
         wait_budget,
     ) {
         Ok((spool, _)) => spool,
-        Err(HookSpoolError::AdmissionTimedOut) => {
-            return NativeHookCaptureOutcomeV1::AdmissionTimedOut;
-        }
-        Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired { .. }) => {
-            return NativeHookCaptureOutcomeV1::ResetRequired;
-        }
-        Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
+        Err(error) => return spool_refusal(error),
     };
     let envelope = redelivered_envelope(&mut spool, &snapshot.binding, envelope);
-    match spool.append(envelope, &snapshot.binding, now) {
-        Ok(_) => {}
-        Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired { .. }) => {
-            return NativeHookCaptureOutcomeV1::ResetRequired;
-        }
-        Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
+    if let Err(error) = spool.append(envelope, &snapshot.binding, now) {
+        return spool_refusal(error);
     }
     // The hook reports capture only once its batch is durable.
     match spool.commit() {
         Ok(()) => NativeHookCaptureOutcomeV1::Captured,
-        Err(HookSpoolError::AdmissionTimedOut) => NativeHookCaptureOutcomeV1::AdmissionTimedOut,
-        Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
+        Err(error) => spool_refusal(error),
+    }
+}
+
+fn spool_refusal(error: HookSpoolError) -> NativeHookCaptureOutcomeV1 {
+    match error {
+        HookSpoolError::AdmissionTimedOut => NativeHookCaptureOutcomeV1::AdmissionTimedOut,
+        HookSpoolError::SpoolFull => NativeHookCaptureOutcomeV1::Full,
+        HookSpoolError::ResetRequired { reason } => {
+            NativeHookCaptureOutcomeV1::ResetRequired(reason)
+        }
+        error => NativeHookCaptureOutcomeV1::Unavailable(error),
     }
 }
 

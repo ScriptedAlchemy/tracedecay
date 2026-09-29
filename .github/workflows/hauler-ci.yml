@@ -1,0 +1,131 @@
+name: Hauler CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_requests:
+        description: Comma-separated PR numbers; empty admits eligible open PRs
+        type: string
+        default: ''
+      max_minutes:
+        description: Lane lifetime in minutes (1–300)
+        type: number
+        default: 300
+      max_snapshots:
+        description: Maximum PR snapshots admitted per lane
+        type: number
+        default: 2
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions: {}
+
+jobs:
+  enqueue:
+    concurrency:
+      group: hauler-enqueue-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      github.event_name == 'pull_request_target' &&
+      vars.HAULER_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+      actions: read
+    steps:
+      # Only the trusted base commit is checked out; PR code never runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish pending lane checks
+        uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
+        with:
+          mode: enqueue
+          pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+
+  plan:
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      github.event_name != 'pull_request_target' &&
+      (github.event_name == 'workflow_dispatch' || vars.HAULER_CI_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select lanes with eligible work
+        id: plan
+        uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
+        with:
+          mode: plan
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+          pull-requests: ${{ inputs.pull_requests || '' }}
+
+  manage:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    name: Hauler pool / ${{ matrix.lane }}
+    concurrency:
+      group: hauler-ci-${{ matrix.lane }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    runs-on: ${{ matrix.lane == 'product' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Drain eligible PR snapshots
+        id: hauler
+        uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
+        with:
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          mode: drain
+          admission-workflow: ci.yml
+          lane: ${{ matrix.lane }}
+          pull-requests: ${{ inputs.pull_requests || '' }}
+          max-minutes: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_minutes) || '300' }}
+          max-snapshots: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_snapshots) || '2' }}
+      - name: Preserve timing and bounded test reports
+        if: always() && steps.hauler.outputs.evidence != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hauler-ci-${{ matrix.lane }}
+          path: ${{ steps.hauler.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 7

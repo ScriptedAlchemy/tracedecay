@@ -31,17 +31,15 @@ tracedecay_callers/callees or tracedecay_impact for relationships. Use native re
 files. Load a tracedecay skill only when its specific workflow matches the task; use \
 tracedecay_message_search or tracedecay_lcm_expand_query when prior conversation context matters.";
 
-/// Shipped Codex compatibility name for the shared Claude/Codex
-/// `hookSpecificOutput.additionalContext` stdout shape.
-pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
-    super::additional_context_json(event_name, additional_context)
-}
-
 /// Codex `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
 pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
+        "SessionStart"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
@@ -86,7 +84,11 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
 /// Resets the local counter and injects steering context for the new turn.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
 pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
+        "UserPromptSubmit"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
     // A compatibility prompt callback can run before TraceDecay is installed
@@ -206,7 +208,11 @@ async fn codex_user_prompt_submit_context_with_root(
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
 pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let started = Instant::now();
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
+        "PostToolUse"
+    );
     // One parse supplies exact scope and analytics attribution.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -252,7 +258,11 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 /// itself only forwards the boundary and fails open.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
 pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
+    let event = read_hook_event!(
+        runtime,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
+        "PostCompact"
+    );
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(

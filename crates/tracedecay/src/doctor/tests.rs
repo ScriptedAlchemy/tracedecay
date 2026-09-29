@@ -2,93 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use tracedecay_agent_hosts::agents::AgentIntegration;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
-
-#[test]
-fn supported_optional_host_absences_reach_doctor_without_host_directories() {
-    let home = tempfile::tempdir().expect("isolated home");
-    let reported = agents::all_integrations()
-        .into_iter()
-        .filter(|agent| {
-            should_run_host_healthcheck(
-                agent.as_ref(),
-                home.path(),
-                &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-            )
-        })
-        .map(|agent| agent.id())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    // Every host whose integration sets `reports_absence_to_doctor()`. Adding a
-    // host here is a deliberate product decision: an absent optional host stays
-    // an informational Doctor warning, and every other absent host stays quiet.
-    assert_eq!(
-        reported,
-        std::collections::BTreeSet::from(["antigravity", "devin", "kimi", "kiro", "vibe", "zed"]),
-        "supported optional-host absences must remain visible while unrelated absent hosts stay quiet"
-    );
-
-    let context = HealthcheckContext {
-        profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        home: home.path().to_path_buf(),
-        project_path: home.path().to_path_buf(),
-    };
-    let mut counters = DoctorCounters::new();
-    for agent in agents::all_integrations().into_iter().filter(|agent| {
-        should_run_host_healthcheck(
-            agent.as_ref(),
-            home.path(),
-            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        )
-    }) {
-        agent.healthcheck(&mut counters, &context);
-    }
-    assert_eq!(
-        counters.issues, 0,
-        "an absent optional host is a truthful Doctor warning, not a broken installation"
-    );
-    // One warning per absent host, plus one extra each for the two hosts that
-    // register two documents: Antigravity (IDE config and CLI plugin) and Vibe
-    // (MCP config and prompt rules).
-    assert_eq!(counters.warnings, 8);
-}
-
-#[test]
-fn detected_kiro_without_a_tracedecay_registration_is_optional_absence() {
-    let home = tempfile::tempdir().expect("isolated Kiro home");
-    let mcp_config = home.path().join(".kiro/settings/mcp.json");
-    std::fs::create_dir_all(mcp_config.parent().expect("Kiro settings parent"))
-        .expect("create Kiro settings");
-    std::fs::write(
-        &mcp_config,
-        br#"{"mcpServers":{"operator":{"command":"other"}}}"#,
-    )
-    .expect("write operator-owned Kiro config");
-
-    let kiro = agents::KiroIntegration;
-    assert!(
-        should_run_host_healthcheck(
-            &kiro,
-            home.path(),
-            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        ),
-        "Kiro remains a visible optional host"
-    );
-
-    let mut counters = DoctorCounters::new();
-    kiro.healthcheck(
-        &mut counters,
-        &HealthcheckContext {
-            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-            home: home.path().to_path_buf(),
-            project_path: home.path().to_path_buf(),
-        },
-    );
-
-    assert_eq!(counters.issues, 0);
-    assert_eq!(counters.warnings, 1);
-}
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
@@ -177,13 +91,16 @@ fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
 #[test]
 fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     let parsed = super::daemon_runtime_status(&serde_json::json!({
-        "content": [
-            {"type": "text", "text": "daemon notice"},
-            {
-                "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"doctor_report":{"kind":"unknown","table_growth_evidence":[]}}"#
-            }
-        ]
+        "tracedecay_version": "0.0.66",
+        "process": {"pid": 1234},
+        "database": {
+            "canonical_db_path": "/tmp/project.db",
+            "quick_check_ok": true,
+            "authority_audit_ok": true,
+            "authority_audit_error": null,
+            "dirty_marker": {"exists": false}
+        },
+        "doctor_report": {"kind": "unknown", "table_growth_evidence": []}
     }))
     .unwrap()
     .expect("published database telemetry is ready status");
@@ -309,12 +226,6 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         }),
         "{report}"
     );
-}
-
-#[test]
-fn daemon_runtime_parser_rejects_missing_json_payload() {
-    let error = super::daemon_runtime_status(&serde_json::json!({ "content": [] })).unwrap_err();
-    assert!(error.to_string().contains("returned no JSON payload"));
 }
 
 fn storage_runtime_finding(
@@ -490,19 +401,16 @@ fn canonical_doctor_revalidates_observed_report_wire_contract() {
 /// from an unreachable owner (an error) and from malformed telemetry (an error).
 #[test]
 fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
-    let pending = super::daemon_runtime_status(&serde_json::json!({
-        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
-    }))
-    .unwrap();
+    let pending =
+        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}})).unwrap();
     assert!(
         pending.is_none(),
         "absent telemetry is warming, not an error"
     );
 
-    let malformed = super::daemon_runtime_status(&serde_json::json!({
-        "content": [{"type": "text", "text": r#"{"process":{"pid":1234},"database":7}"#}]
-    }))
-    .unwrap_err();
+    let malformed =
+        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}, "database": 7}))
+            .unwrap_err();
     assert!(malformed.to_string().contains("was not an object"));
 }
 

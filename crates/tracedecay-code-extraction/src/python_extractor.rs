@@ -122,11 +122,14 @@ impl PythonExtractor {
         };
         let file_node_id = file_node.id.clone();
         state.nodes.push(file_node);
-        state.node_stack.push((file_path.to_string(), file_node_id));
+        state
+            .node_stack
+            .push((file_path.to_string(), file_node_id.clone()));
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
             Self::collect_import_evidence(&mut state, child);
+            Self::visit_module_scope_calls(&mut state, &file_node_id, child);
         });
 
         state.node_stack.pop();
@@ -279,6 +282,52 @@ impl PythonExtractor {
         }
     }
 
+    /// Give a module-scope statement's calls (`if __name__ == "__main__":
+    /// main()`, `register(handler)`) a `<module>` owner. Definitions,
+    /// imports, and `UPPER_CASE` constants own their calls.
+    fn visit_module_scope_calls(
+        state: &mut ExtractionState<'_>,
+        file_node_id: &str,
+        statement: TsNode<'_>,
+    ) {
+        match statement.kind() {
+            "function_definition"
+            | "class_definition"
+            | "decorated_definition"
+            | "import_statement"
+            | "import_from_statement"
+            | "future_import_statement"
+            | "comment" => return,
+            "expression_statement" if Self::declares_constant(state, statement) => return,
+            _ => {}
+        }
+        let (owner, contains) = crate::common::module_scope_init_block(
+            &state.file_path,
+            state.source,
+            file_node_id,
+            statement,
+            state.timestamp,
+        );
+        let before = state.unresolved_refs.len();
+        Self::extract_call_sites(state, statement, &owner.id);
+        if state.unresolved_refs.len() > before {
+            state.nodes.push(owner);
+            state.edges.push(contains);
+        }
+    }
+
+    /// Whether a module-level statement assigns an `UPPER_CASE` constant,
+    /// which [`Self::visit_assignment`] emits as a symbol.
+    fn declares_constant(state: &ExtractionState<'_>, statement: TsNode<'_>) -> bool {
+        let mut cursor = statement.walk();
+        statement.named_children(&mut cursor).any(|child| {
+            child.kind() == "assignment"
+                && child
+                    .child_by_field_name("left")
+                    .is_some_and(|left| Self::is_upper_snake_case(state.node_text(left)))
+        })
+    }
+
     /// Extract a function definition. If inside a class (`class_depth` > 0), it becomes a Method.
     fn visit_function(state: &mut ExtractionState<'_>, node: TsNode<'_>, is_async: bool) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
@@ -340,9 +389,9 @@ impl PythonExtractor {
             });
         }
 
-        if let Some(body) = find_direct_child_by_kind(node, "block") {
-            Self::extract_call_sites(state, body, &id);
-        }
+        // The body, and default values (`timeout=default_timeout()`), which
+        // run when the definition does.
+        Self::extract_call_sites(state, node, &id);
     }
 
     /// Extract a class definition.
@@ -406,11 +455,26 @@ impl PythonExtractor {
         }
 
         Self::extract_base_classes(state, node, &id);
+        // `class Rows(Base, metaclass=registry())` calls when it is defined.
+        if let Some(arguments) = node.child_by_field_name("superclasses") {
+            Self::extract_call_sites(state, arguments, &id);
+        }
 
-        state.node_stack.push((name.clone(), id));
+        state.node_stack.push((name.clone(), id.clone()));
         state.class_depth += 1;
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::visit_children(state, body);
+            // Class-body statements (`rows = field(default_factory=list)`)
+            // run when the class is defined; the class owns their calls.
+            let mut cursor = body.walk();
+            for statement in body.named_children(&mut cursor) {
+                if !matches!(
+                    statement.kind(),
+                    "function_definition" | "class_definition" | "decorated_definition"
+                ) {
+                    Self::extract_call_sites(state, statement, &id);
+                }
+            }
         }
         state.class_depth -= 1;
         state.node_stack.pop();
@@ -495,6 +559,8 @@ impl PythonExtractor {
                     state.nodes.push(graph_node);
 
                     if let Some(target_id) = inner_id.clone() {
+                        // `@app.route("/")` is called to wrap the definition.
+                        Self::extract_call_sites(state, child, &target_id);
                         state.edges.push(Edge {
                             source: dec_id,
                             target: target_id,
@@ -744,11 +810,12 @@ impl PythonExtractor {
                 if let Some(parent_id) = state.parent_node_id() {
                     state.edges.push(Edge {
                         source: parent_id.to_string(),
-                        target: id,
+                        target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
                     });
                 }
+                Self::extract_call_sites(state, node, &id);
             }
         }
     }
@@ -907,35 +974,29 @@ impl PythonExtractor {
         false
     }
 
-    /// Recursively find call nodes inside a given node and create unresolved Calls references.
+    /// Recursively find call nodes inside a given node and create unresolved
+    /// Calls references. A nested `def` or `class` inside a function body is
+    /// not a graph symbol, so calls in it (a decorator's `wrapper`, a closure)
+    /// belong to the enclosing function, as lambda calls do.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                match child.kind() {
-                    "call" => {
-                        let callee = child.named_child(0);
-                        if let Some(callee) = callee {
-                            let callee_name = state.node_text(callee).to_string();
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                                unmodeled_import: None,
-                            });
-                        }
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
-                    // Skip nested function definitions to avoid polluting call sites.
-                    "function_definition" | "class_definition" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                if child.kind() == "call"
+                    && let Some(callee) = child.named_child(0)
+                {
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: fn_node_id.to_string(),
+                        reference_name: state.node_text(callee).to_string(),
+                        reference_kind: EdgeKind::Calls,
+                        line: child.start_position().row as u32,
+                        column: child.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                    });
                 }
+                Self::extract_call_sites(state, child, fn_node_id);
                 if !cursor.goto_next_sibling() {
                     break;
                 }

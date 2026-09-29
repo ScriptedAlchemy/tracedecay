@@ -324,6 +324,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let (relative, root) = match case.host {
         HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
         HostKindV1::Devin => (".config/devin/mcp_config.json", "mcpServers"),
+        HostKindV1::Kiro => (".kiro/settings/mcp.json", "mcpServers"),
         HostKindV1::Zed => (ZED_SETTINGS_RELATIVE, "context_servers"),
         HostKindV1::Antigravity => (".gemini/antigravity/mcp_config.json", "mcpServers"),
         HostKindV1::RooCode => (
@@ -398,9 +399,11 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     );
     let theme = match case.host {
         HostKindV1::Zed => &config["theme"],
-        HostKindV1::Cline | HostKindV1::Devin | HostKindV1::Antigravity | HostKindV1::RooCode => {
-            &config["ui"]["theme"]
-        }
+        HostKindV1::Cline
+        | HostKindV1::Devin
+        | HostKindV1::Kiro
+        | HostKindV1::Antigravity
+        | HostKindV1::RooCode => &config["ui"]["theme"],
         HostKindV1::Kilo => &config["theme"],
         _ => unreachable!(),
     };
@@ -446,6 +449,16 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         HostKindV1::Zed => {
             assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
+        }
+        HostKindV1::Kiro => {
+            assert_eq!(
+                *entry,
+                serde_json::json!({
+                    "command": cli.installed_bin(),
+                    "args": ["serve"],
+                    "disabled": false
+                })
+            );
         }
         HostKindV1::RooCode => {
             assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
@@ -700,8 +713,8 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
 }
 
 /// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
-/// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`,
-/// `copilot mcp`, `droid mcp`) or defers activation to an interactive host flow (Kimi).
+/// (`claude plugin`, `codex mcp`, `gemini extensions`, `copilot mcp`,
+/// `droid mcp`) or defers activation to an interactive host flow (Kimi).
 ///
 /// This suite runs the production CLI against an isolated `HOME` that contains
 /// no host binaries at all, so for these hosts the lifecycle correctly refuses
@@ -714,7 +727,6 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
         HostKindV1::ClaudeCode
             | HostKindV1::Codex
             | HostKindV1::KimiCode
-            | HostKindV1::Kiro
             | HostKindV1::Gemini
             | HostKindV1::Copilot
             | HostKindV1::FactoryDroid
@@ -731,6 +743,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         HostKindV1::OpenCode,
         HostKindV1::Cline,
         HostKindV1::Devin,
+        HostKindV1::Kiro,
         HostKindV1::Zed,
         HostKindV1::Antigravity,
         HostKindV1::Vibe,
@@ -1134,7 +1147,7 @@ fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
 }
 
 /// Codex activation is part of the component transaction: without its CLI
-/// the transaction rolls back and leaves nothing staged out of band; with it,
+/// the install is skipped and stages nothing; with it,
 /// install and a stale-cache update both converge through `codex plugin add`.
 #[cfg(unix)]
 #[test]
@@ -1144,12 +1157,15 @@ fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let originals = seed_host(case, &cli);
     let home = cli.home.path();
 
-    let refused = cli.run(&["install", "--agent", case.id]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let skipped = cli.run(&["install", "--agent", case.id]);
+    let stderr = String::from_utf8_lossy(&skipped.stderr);
+    assert_eq!(skipped.status.code(), Some(0), "{stderr}");
     assert!(
-        stderr.contains("Install the `codex` CLI"),
-        "missing-CLI refusal must name the host CLI: {stderr}"
+        stderr.contains(
+            "  codex: skipped, not installed (host CLI `codex` is unavailable for codex MCP \
+             registry lifecycle; install it or add it to PATH and retry)\n"
+        ),
+        "{stderr}"
     );
     assert_seeded_bytes(&cli, &originals);
     assert!(
@@ -1371,8 +1387,8 @@ fn uninstall_keeps_preexisting_and_foreign_occupied_directories() {
 }
 
 /// Claude's marketplace source is receipt-owned from the first install: the
-/// transaction deploys it and then drives the stock `claude plugin` grammar,
-/// or rolls both back when that CLI is absent.
+/// transaction deploys it and then drives the stock `claude plugin` grammar;
+/// without that CLI the install is skipped and deploys nothing.
 #[cfg(unix)]
 #[test]
 fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
@@ -1383,12 +1399,15 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     let source_manifest =
         home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json");
 
-    let refused = cli.run(&["install", "--agent", case.id]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let skipped = cli.run(&["install", "--agent", case.id]);
+    let stderr = String::from_utf8_lossy(&skipped.stderr);
+    assert_eq!(skipped.status.code(), Some(0), "{stderr}");
     assert!(
-        stderr.contains("host CLI is unavailable"),
-        "missing-CLI refusal must name the host CLI: {stderr}"
+        stderr.contains(
+            "  claude: skipped, not installed (host CLI `claude` is unavailable for claude \
+             plugin lifecycle; install it or add it to PATH and retry)\n"
+        ),
+        "{stderr}"
     );
     assert!(
         !source_manifest.exists(),
@@ -1787,19 +1806,47 @@ fn assert_no_plugin_backups(root: &std::path::Path) {
     }
 }
 
+/// Kimi Code's own `kimi` executable. TraceDecay only resolves it, so the
+/// fake never runs.
+#[cfg(unix)]
+fn install_kimi_cli(cli: &IsolatedCli) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = cli.bin_dir.join("kimi");
+    fs::write(&path, "#!/bin/sh\nexit 64\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Without Kimi Code on `PATH` the install is skipped and stages nothing;
+/// with it, the lifecycle stages the source and defers activation to Kimi's
+/// own `/plugins install`.
+#[cfg(unix)]
 #[test]
 fn kimi_lifecycle_reports_official_activation_deferral() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::KimiCode);
-
-    let output = cli.run(&["install", "--agent", case.id]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
     let staged = cli
         .home
         .path()
         .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+
+    let absent = cli.run(&["install", "--agent", case.id]);
+    let absent_stderr = String::from_utf8_lossy(&absent.stderr);
+    assert_eq!(absent.status.code(), Some(0), "{absent_stderr}");
+    assert!(
+        absent_stderr.contains(
+            "  kimi: skipped, not installed (host CLI `kimi` is unavailable for Kimi Code \
+             plugin lifecycle; install it or add it to PATH and retry)\n"
+        ),
+        "{absent_stderr}"
+    );
+    assert!(!staged.exists(), "a skipped Kimi install staged its source");
+
+    install_kimi_cli(&cli);
+    let output = cli.run(&["install", "--agent", case.id]);
+
+    assert_eq!(output.status.code(), Some(75));
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(&format!("/plugins install {}", staged.display())),
         "Kimi deferral omitted its official activation boundary: {stderr}"
@@ -2187,6 +2234,7 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
     fs::remove_dir_all(&claude_dir).unwrap();
     let outside = tempfile::tempdir().unwrap();
     symlink(outside.path(), &claude_dir).unwrap();
+    install_current_claude_cli(cli.home.path(), &cli.bin_dir);
 
     let refused = cli.run(&["install", "--agent", case.id]);
     assert!(!refused.status.success());

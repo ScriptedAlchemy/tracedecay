@@ -304,7 +304,11 @@ dependencies, and affected tests; use `tracedecay_complexity`,
 focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
 feedback; and `tracedecay_run_affected_tests` for the focused test set when test
-execution is appropriate.
+execution is appropriate. Each managed run is recorded in the project session
+store against the session its request names (`session_id`), with its start and
+finish times, exit status, and passed/failed/ignored counts; `tracedecay_test_results`
+reads that record back, and the dashboard's Loom view draws it on the session's
+lane. A run whose request names no session is recorded unattributed.
 
 For LCM/session issues, pair `tracedecay_lcm_status` with the read-only LCM
 diagnostics (`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper).
@@ -320,10 +324,12 @@ gated unless the host explicitly forwards messages. The
 not stock Hermes API. Treat `compression.*` as built-in compressor config; only
 `compression.enabled` gates auto-compaction globally.
 
-Kiro setup registers the profile-wide `tracedecay` MCP server through
-`kiro-cli`. It does not create steering files, custom agents, default-agent
-settings, hooks, or workspace MCP registrations. See
-[Kiro integration](KIRO-INTEGRATION.md) for the exact lifecycle.
+Kiro setup registers the profile-wide `tracedecay` MCP server by editing
+Kiro's documented `~/.kiro/settings/mcp.json`; it never runs `kiro-cli`, so
+it works whether or not `kiro-cli` is installed or signed in. It does not
+create steering files, custom agents, default-agent settings, hooks, or
+workspace MCP registrations. See [Kiro integration](KIRO-INTEGRATION.md) for
+the exact lifecycle.
 
 The install is idempotent, safe to run again after upgrading tracedecay. You'll also be offered the option to set up an optional global git post-commit hint hook (more on that below).
 
@@ -644,13 +650,66 @@ capability and the supported install/update operation. Doctor only reports
 state; refresh, retention, recreation, and host-config changes are separate
 authorized daemon operations.
 
-To check only a specific agent:
+### Hosts that are not installed
 
-```bash
-tracedecay doctor
+A host TraceDecay tracks or finds leftover config for, but whose CLI is not on
+`PATH`, is reported as skipped with its reason and nothing else:
+
+```text
+Factory Droid integration
+  - droid: skipped, not installed (host CLI `droid` is unavailable for Factory Droid MCP registry lifecycle; install it or add it to PATH and retry)
 ```
 
-The accepted agent values are the same values supported by `tracedecay install --agent`.
+Hosts TraceDecay configures through their documented config files (Kiro,
+Cline, Devin, Zed, and others) need no host CLI and no host sign-in.
+
+A skipped host never counts as an issue, warning, or pending operator step, in
+`doctor`, `install`, `update-plugin`, `reinstall`, or `update`. Only defects in
+TraceDecay's own state, or in a host TraceDecay can reach, change the exit
+status.
+
+### One set of findings
+
+Doctor asks the running daemon for its canonical findings (storage, runtime,
+code index, ingest coverage, memory owners, GitHub source, and the rest) and
+prints each one under **Canonical Doctor findings** with the statement and
+evidence the dashboard's Doctor view shows, for example:
+
+```text
+✔ observability: durable ingest coverage records no refused source records (observability.ingest-coverage.converged)
+```
+
+When no daemon is listening for the profile, Doctor runs only its binary-local
+checks (binary, service unit, host integrations, external tools, release
+lookup) and reports the typed state in place of the findings:
+
+```text
+… daemon_unavailable: no TraceDecay daemon is listening for this profile, ...
+```
+
+Start the daemon and re-run Doctor to read the findings.
+
+### Exit status and JSON
+
+| Exit | `doctor` | `install`, `update-plugin`, `reinstall`, `update` |
+|------|----------|---------------------------------------------------|
+| `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable or `not installed` |
+| `1`  | an issue was found | a host's lifecycle ran and failed (or, for `update`, the upgrade failed) |
+| `75` | no issue, but an operator step is pending: `daemon_unavailable`, a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`) |
+
+A project runtime that is still mounting (`application.runtime.mounting`) is
+reported as pending with a wait remedy; it does not change the exit status.
+
+`tracedecay doctor --json` keeps the human report on stderr and prints one JSON
+document on stdout with `version`, `outcome` (`healthy`, `issue`, or
+`pending_operator_action`), the `issues` / `warnings` / `pending_actions`
+counts, every check line in `checks` (`level` and `message`), and
+`daemon_findings`. `daemon_findings.state` is `observed` (carrying the
+`/api/doctor/findings` `payload`, projected by the same code the dashboard route
+uses, plus its `domain_state`, `coverage`, and `freshness`),
+`daemon_unavailable` when no daemon listens, `mounting` while the project
+runtime that owns the report is still mounting, or `unread` with a `reason` when
+a daemon answered without an observed report.
 
 ---
 

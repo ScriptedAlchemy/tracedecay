@@ -354,11 +354,13 @@ fn test_fixture_python() {
         ["Base", "Connection"]
     );
 
-    // Call sites
+    // Call sites; `retry` owns the calls in its nested `wrapper`.
     assert_eq!(
         ref_names(&result, EdgeKind::Calls),
         [
             "print",
+            "range",
+            "func",
             "super",
             "super().__init__",
             "log",

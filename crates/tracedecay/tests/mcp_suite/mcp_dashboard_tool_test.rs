@@ -13,7 +13,7 @@ use crate::support::{extract_text, handle_real_server_tool_call, production_comp
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
-static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn dashboard_refusal(
     fixture: &crate::support::ProductionCompositionFixture,

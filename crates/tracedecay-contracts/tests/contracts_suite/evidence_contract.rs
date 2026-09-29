@@ -195,7 +195,10 @@ fn coverage_rejects_domain_states_for_unrequested_evidence() {
         }],
     };
 
-    assert!(coverage.validate().is_err());
+    assert_eq!(
+        coverage.validate().unwrap_err().to_string(),
+        "coverage requested domain states is inconsistent with the application contract"
+    );
 }
 
 #[test]

@@ -231,7 +231,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
                 SessionTemporalQuery::new(
                     SessionId::new("session.root.a").unwrap(),
                     None,
-                    "duplicate",
+                    "root-wide",
                     Some(cursor.clone()),
                     TemporalModeV1::Current,
                     RetrievalGrainV1::Occurrence,
@@ -242,7 +242,9 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
                 .unwrap(),
             )
             .await,
-        SessionRetrievalOutcome::WrongScope
+        SessionRetrievalOutcome::CursorRefused(
+            tracedecay_domain::CursorBindingMismatchV1::ParameterChanged { parameter: "scope" }
+        )
     ));
     let (other_context, other_binding) =
         request_context("root.other", "request.scope-drift", policy_digest);

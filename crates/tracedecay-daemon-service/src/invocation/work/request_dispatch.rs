@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_contracts::{CancellationContext, Deadline};
+use tracedecay_contracts::{CancellationContext, Deadline, WorkAttemptListOperationV1};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -414,15 +414,20 @@ pub(super) async fn dispatch_work_application(
                     operation_key,
                     use_case.clone(),
                     input_digest,
-                    services.attempts().list(&context, &request, || {
-                        preparation::current_work_product_attempt_topology(
-                            &registered,
-                            &context,
-                            capability,
-                            &use_case,
-                            observed_at,
-                        )
-                    }),
+                    services.attempts().list(
+                        &context,
+                        WorkAttemptListOperationV1::ListAttempts,
+                        &request,
+                        || {
+                            preparation::current_work_product_attempt_topology(
+                                &registered,
+                                &context,
+                                capability,
+                                &use_case,
+                                observed_at,
+                            )
+                        },
+                    ),
                     observed_at,
                     deadline,
                     WorkApplicationOutcomeV1::ListAttempts,
@@ -589,9 +594,18 @@ pub(super) async fn dispatch_work_application(
                         );
                     }
                 };
-                let adjudicated = services
-                    .duplicate_adjudications()
-                    .adjudicate(&context, command);
+                let adjudicated = preparation::current_duplicate_adjudication_evidence(
+                    &registered,
+                    &context,
+                    capability,
+                    &use_case,
+                    observed_at,
+                )
+                .and_then(|evidence| {
+                    services
+                        .duplicate_adjudications()
+                        .adjudicate(&context, command, evidence)
+                });
                 if let Ok(outcome) = &adjudicated {
                     let _observation =
                         tracedecay_application::observability::record_work_duplicate_observation(

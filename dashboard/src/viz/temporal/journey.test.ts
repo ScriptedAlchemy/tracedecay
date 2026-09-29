@@ -537,6 +537,54 @@ describe('projectJourney parentage', () => {
       ]);
     });
 
+    it('places a managed test run on the requesting lane with its recorded outcome', () => {
+      const recorded = {
+        ...rows({ parent_session_id: 'root', parent_tool_use_id: 'toolu_09' }),
+        events: [
+          {
+            provider: 'cursor', session_id: 'root', kind: 'test_run' as const, operation_id: 'request.test-run.a',
+            recorded_at: T0 + 40, started_at_micros: (T0 + 40) * 1_000_000 + 250,
+            outcome: { finished_at_micros: (T0 + 42) * 1_000_000, termination: 'completed', exit_code: 101, passed: 3, failed: 1, ignored: 2 },
+          },
+          {
+            provider: 'cursor', session_id: 'root', kind: 'test_run' as const, operation_id: 'request.test-run.b',
+            recorded_at: T0 + 70, started_at_micros: (T0 + 70) * 1_000_000,
+          },
+          {
+            provider: 'cursor', session_id: 'not-displayed', kind: 'test_run' as const, operation_id: 'request.test-run.c',
+            recorded_at: T0 + 80, started_at_micros: (T0 + 80) * 1_000_000,
+          },
+        ],
+      };
+      const projection = projectJourney(sources({ temporal: recorded }));
+      expect(projection.events.filter((event) => event.kind === 'test_run')).toEqual([
+        {
+          id: `test:${ROOT}:request.test-run.a`,
+          laneId: ROOT,
+          kind: 'test_run',
+          time: T0 + 40,
+          sequence: 1,
+          grade: 'exact',
+          source: 'recorded_event',
+          label: '3 passed · 1 failed · 2 ignored',
+          detail: 'completed · exit 101',
+          ref: 'request.test-run.a',
+        },
+        {
+          id: `test:${ROOT}:request.test-run.b`,
+          laneId: ROOT,
+          kind: 'test_run',
+          time: T0 + 70,
+          sequence: 3,
+          grade: 'exact',
+          source: 'recorded_event',
+          label: 'no outcome recorded',
+          detail: 'run request.test-run.b started; no outcome recorded',
+          ref: 'request.test-run.b',
+        },
+      ]);
+    });
+
     it('keeps the fork inferred at the child start when no loaded tool call carries the id', () => {
       const projection = projectJourney(
         sources({

@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
@@ -284,6 +285,18 @@ pub const RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1: u64 = 750;
 /// resident process, so it waits for pressure to fall.
 pub const RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1: u64 = 8 * 1024 * 1024;
 
+/// Shortest gap between two kernel reads taken by
+/// [`ResidentMemoryPressureV1::sample_for_checkpoint`].
+///
+/// Checkpoints are polled from per-row loops. One sample opens and formats
+/// `/proc/self/status` and every cgroup memory file up the hierarchy, which
+/// on a large, busy cgroup costs far more than the row it guards: a sealed
+/// graph build of a 200k-symbol repository spent most of its wall time in
+/// those reads and never finished inside its budget (#2505). Within this gap
+/// the standing observation answers, so a build can outgrow a sample by at
+/// most what it allocates in 10 ms.
+pub const RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1: Duration = Duration::from_millis(10);
+
 /// Resolve one watermark in bytes from a permille fraction of the limit.
 #[must_use]
 pub fn resident_memory_watermark_bytes_v1(limit_bytes: NonZeroU64, permille: u64) -> u64 {
@@ -299,8 +312,11 @@ pub struct ProcessResidentSampleV1 {
     pub resident_bytes: u64,
     /// Anonymous and shared-memory pages (`RssAnon + RssShmem`).
     pub unreclaimable_bytes: u64,
+    /// Anonymous pages the kernel moved to swap (`VmSwap`).
+    pub swapped_bytes: u64,
     /// Bytes the kernel charges toward a finite `memory.max`: `memory.current`
-    /// minus `inactive_file`, on the cgroup with the tightest finite ceiling.
+    /// minus `inactive_file`, plus `memory.swap.current`, on the cgroup with
+    /// the tightest finite ceiling.
     ///
     /// `None` when no cgroup has a finite `memory.max`. An unlimited cgroup's
     /// file cache is not a kill line, and inactive file pages are what the
@@ -312,17 +328,21 @@ pub struct ProcessResidentSampleV1 {
 impl ProcessResidentSampleV1 {
     /// Bytes admission compares with the watermark.
     ///
-    /// Unreclaimable pages are the floor. A finite cgroup ceiling also counts
-    /// its committed working set, so a build cannot be admitted while
-    /// `memory.current` is already at the kill line and only the anonymous
-    /// subset sits under the watermark.
+    /// The daemon's anonymous state is the floor, swapped pages included:
+    /// they are live heap the next touch faults back in, so a sample taken
+    /// while the kernel swaps under a cgroup ceiling must not read as room.
+    /// A finite cgroup ceiling also counts its committed working set, so a
+    /// build cannot be admitted while `memory.current` is already at the kill
+    /// line and only the anonymous subset sits under the watermark.
     #[must_use]
     pub fn admission_bytes(self) -> u64 {
         self.unreclaimable_bytes
+            .saturating_add(self.swapped_bytes)
             .max(self.cgroup_committed_bytes.unwrap_or(0))
     }
 }
 
+#[cfg(target_os = "linux")]
 fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
     status
         .lines()
@@ -334,16 +354,19 @@ fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
         .checked_mul(1_024)
 }
 
+#[cfg(target_os = "linux")]
 fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResidentSampleV1> {
     let anon = status_kib_field_bytes(status, "RssAnon")?;
     let shmem = status_kib_field_bytes(status, "RssShmem")?;
     Some(ProcessResidentSampleV1 {
         resident_bytes: status_kib_field_bytes(status, "VmRSS")?,
         unreclaimable_bytes: anon.checked_add(shmem)?,
+        swapped_bytes: status_kib_field_bytes(status, "VmSwap")?,
         cgroup_committed_bytes: None,
     })
 }
 
+#[cfg(target_os = "linux")]
 fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
     stat.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
@@ -355,11 +378,14 @@ fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
 }
 
 /// Working set a finite `memory.max` will kill for: `memory.current` minus
-/// `inactive_file` on the cgroup directory with the tightest finite ceiling.
+/// `inactive_file`, plus the cgroup's swapped anonymous pages
+/// (`memory.swap.current`), on the cgroup directory with the tightest finite
+/// ceiling.
 ///
 /// `None` when every `memory.max` is absent or `max`. Counting `memory.current`
 /// on an unlimited cgroup treats the machine's page cache as a kill line and
 /// refuses work the kernel can reclaim.
+#[cfg(target_os = "linux")]
 fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
     let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
     let mut chosen: Option<(std::path::PathBuf, u64)> = None;
@@ -389,7 +415,15 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
         .ok()
         .and_then(|stat| memory_stat_field_bytes(&stat, "inactive_file"))
         .unwrap_or(0);
-    Some(current.saturating_sub(inactive_file))
+    let swapped = std::fs::read_to_string(directory.join("memory.swap.current"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    Some(
+        current
+            .saturating_sub(inactive_file)
+            .saturating_add(swapped),
+    )
 }
 
 /// Sample this process's resident set directly from the kernel.
@@ -547,6 +581,10 @@ pub struct ResidentMemoryPressureV1 {
     over_budget: AtomicBool,
     state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
     sampler: Arc<ProcessResidentSamplerV1>,
+    checkpoint_epoch: Instant,
+    /// Microseconds after `checkpoint_epoch` before which a checkpoint keeps
+    /// the standing observation; `u64::MAX` while one checkpoint is reading.
+    next_checkpoint_sample_micros: AtomicU64,
 }
 
 impl fmt::Debug for ResidentMemoryPressureV1 {
@@ -616,6 +654,8 @@ impl ResidentMemoryPressureV1 {
                 label = "runtime_core.resident.pressure"
             ),
             sampler,
+            checkpoint_epoch: Instant::now(),
+            next_checkpoint_sample_micros: AtomicU64::new(0),
         }
     }
 
@@ -638,11 +678,36 @@ impl ResidentMemoryPressureV1 {
     /// thread once RSS crosses the watermark overflows that thread's stack.
     /// The latch is what stops the allocating pass. [`Self::sample_and_publish`]
     /// remains the path that reclaims, from admission and the maintenance sampler.
+    ///
+    /// At most one checkpoint per [`RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1`]
+    /// reads the process; the others, and any checkpoint racing that read,
+    /// answer the standing observation.
     pub fn sample_for_checkpoint(&self) -> Option<ResidentMemoryPressureStateV1> {
-        let sample = (self.sampler)()?;
-        self.publish_observation(sample.admission_bytes());
+        let now = self.checkpoint_micros();
+        let next = self.next_checkpoint_sample_micros.load(Ordering::Acquire);
+        if now < next
+            || self
+                .next_checkpoint_sample_micros
+                .compare_exchange(next, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return Some(self.state());
+        }
+        let sample = (self.sampler)();
+        hotpath::gauge!("daemon.memory.checkpoint_samples_total").inc(1_u64);
+        let interval = u64::try_from(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1.as_micros())
+            .unwrap_or(u64::MAX);
+        self.next_checkpoint_sample_micros.store(
+            self.checkpoint_micros().saturating_add(interval),
+            Ordering::Release,
+        );
+        self.publish_observation(sample?.admission_bytes());
         self.publish_over_budget_gauge();
         Some(self.state())
+    }
+
+    fn checkpoint_micros(&self) -> u64 {
+        u64::try_from(self.checkpoint_epoch.elapsed().as_micros()).unwrap_or(u64::MAX - 1)
     }
 
     /// [`Self::sample_and_publish`] reduced to the admission bytes: the

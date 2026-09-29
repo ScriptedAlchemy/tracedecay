@@ -12,6 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::ComplexityAnalysisV1;
 
+use crate::result::CoverageCompleteness;
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeadCodeSurfaceRequestV1 {
@@ -596,6 +598,37 @@ pub struct UnsafePatternsResultV1 {
     /// Match count per pattern kind, keyed by its wire spelling.
     pub by_kind: BTreeMap<String, u64>,
     pub matches: Vec<UnsafePatternMatchV1>,
+    /// `partial` exactly when `omissions` names a file whose sites are withheld.
+    pub coverage: CoverageCompleteness,
+    pub omissions: Vec<UnsafePatternFileOmissionV1>,
+}
+
+/// Why a file's risky-pattern sites are withheld from the verified result.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsafePatternOmissionReasonV1 {
+    /// Whether a site is test-only cannot be decided for this file.
+    TestScopeUnclassified,
+}
+
+/// What prevented the file from being classified.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsafePatternOmissionCauseV1 {
+    /// The Rust grammar parsed the file with error nodes. Valid Rust it only
+    /// partly parses (heavy `macro_rules!`) lands here.
+    SyntaxErrors,
+}
+
+/// One scanned file whose sites are not reported as verified matches.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnsafePatternFileOmissionV1 {
+    pub file: String,
+    pub reason: UnsafePatternOmissionReasonV1,
+    pub cause: UnsafePatternOmissionCauseV1,
+    /// Sites of the requested kinds found in the file and withheld.
+    pub withheld_match_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

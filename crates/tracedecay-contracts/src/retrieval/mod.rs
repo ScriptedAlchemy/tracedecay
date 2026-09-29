@@ -111,8 +111,9 @@ pub use analysis_report_surface::{
     LargestSurfaceRequestV1, RankDirectionV1, RankEdgeKindV1, RankEntryV1, RankResultV1,
     RankSurfaceRequestV1, RecursionCycleV1, RecursionResultV1, RecursionSurfaceRequestV1,
     RecursionSymbolV1, UnmountedEcosystemStatusV1, UnmountedEcosystemV1, UnmountedFileV1,
-    UnmountedFilesResultV1, UnmountedFilesSurfaceRequestV1, UnsafePatternKindV1,
-    UnsafePatternMatchV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
+    UnmountedFilesResultV1, UnmountedFilesSurfaceRequestV1, UnsafePatternFileOmissionV1,
+    UnsafePatternKindV1, UnsafePatternMatchV1, UnsafePatternOmissionCauseV1,
+    UnsafePatternOmissionReasonV1, UnsafePatternsResultV1, UnsafePatternsSurfaceRequestV1,
 };
 pub use analytics_surface::{
     ANALYTICS_DEFAULT_WINDOW_DAYS, ANALYTICS_MAX_WINDOW_DAYS, ANALYTICS_MIN_WINDOW_DAYS,
@@ -255,7 +256,8 @@ pub use project_info_surface::{
     StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusMemoryOwnerV1,
     StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1,
     StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1, StatusServingConditionV1,
-    StatusServingFreshnessV1, StatusSurfaceRequestV1,
+    StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1,
+    StatusSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

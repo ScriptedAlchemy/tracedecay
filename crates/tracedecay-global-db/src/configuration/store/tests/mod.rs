@@ -39,7 +39,12 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     effective_values.remove(&missing_key);
     provenance.remove(&missing_key);
     let incomplete = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
-    assert!(validate_snapshot_registry_completeness(&incomplete).is_err());
+    assert_eq!(
+        validate_snapshot_registry_completeness(&incomplete)
+            .unwrap_err()
+            .to_string(),
+        "configuration store data is invalid: configuration snapshot does not contain the complete registry"
+    );
 }
 
 #[tokio::test]

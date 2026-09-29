@@ -27,6 +27,7 @@ use tracedecay_daemon_identity::profile_identity;
 
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Captures the daemon's exact native Git transaction precondition for
 /// transport-parity tests. This is not compiled into production builds.
@@ -266,15 +267,19 @@ fn isolate_production_composition_roots(
                 isolation_root.display()
             ),
         })?;
-        let isolation_root =
-            std::fs::canonicalize(&isolation_root).map_err(|error| TraceDecayError::Config {
+        // The plain spelling, not raw `canonicalize`'s Windows `\\?\` form: the
+        // shipped daemon roots `%USERPROFILE%\.tracedecay` plainly, and a
+        // verbatim root would hide every open that cannot reach a long path.
+        let isolation_root = canonical_existing_identity(&isolation_root).map_err(|error| {
+            TraceDecayError::Config {
                 message: format!(
                     "failed to canonicalize production-composition isolation root '{}': {error}",
                     isolation_root.display()
                 ),
-            })?;
+            }
+        })?;
         if let Some(live_profile_root) =
-            live_profile_root.and_then(|path| std::fs::canonicalize(path).ok())
+            live_profile_root.and_then(|path| canonical_existing_identity(&path).ok())
         {
             let overlaps_live_profile = isolation_root == live_profile_root
                 || isolation_root.starts_with(&live_profile_root)
@@ -303,11 +308,13 @@ fn isolate_production_composition_roots(
         let project_roots = project_roots
             .into_iter()
             .map(|project_root| {
-                std::fs::canonicalize(&project_root).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.display()
-                    ),
+                canonical_existing_identity(&project_root).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "failed to canonicalize production-composition project '{}': {error}",
+                            project_root.display()
+                        ),
+                    }
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -939,14 +946,46 @@ impl ProductionProjectCompositionHarnessV1 {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({"name": tool_name, "arguments": arguments}),
+        )
+        .await
+    }
+
+    /// [`Self::call_tool`] under a caller deadline, as an MCP client that
+    /// bounds its own call declares it in `_meta`.
+    pub async fn call_tool_with_deadline(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        expires_at: tracedecay_domain::UtcMicros,
+    ) -> Result<JsonRpcResponse> {
+        self.call_tool_with_params(
+            project_root,
+            tool_name,
+            json!({
+                "name": tool_name,
+                "arguments": arguments,
+                "_meta": tracedecay_mcp::tool_call_deadline_meta(expires_at),
+            }),
+        )
+        .await
+    }
+
+    async fn call_tool_with_params(
+        &self,
+        project_root: impl AsRef<Path>,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<JsonRpcResponse> {
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
+            "params": params,
         }))
         .map_err(|error| TraceDecayError::Config {
             message: format!("failed to construct production-composition tool request: {error}"),

@@ -53,14 +53,17 @@ fn fixture() -> TempDir {
     root
 }
 
-/// The automatic plan a scheduler builds against the default authority,
+/// The automatic plan for `logical_cpus` against `available_memory_bytes`,
 /// bound to `scheduler` so its reservations use exactly this plan.
-fn bind_default_worker_runtime(
+fn bind_automatic_worker_runtime(
     scheduler: &CodeIndexWorktreeSchedulerV1,
+    logical_cpus: usize,
+    available_memory_bytes: u64,
 ) -> CodeIndexWorkerRuntimeV1 {
     let runtime = CodeIndexWorkerRuntimeV1::build(
         CodeIndexWorkerSelectionV1::Automatic {},
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+        logical_cpus,
+        available_memory_bytes,
     )
     .expect("build automatic worker runtime");
     scheduler.bind_worker_runtime(runtime.clone());
@@ -254,6 +257,34 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
     );
 }
 
+/// A fixture scheduler's own runtime has the fixed fixture width on any host,
+/// so concurrent fixture owners never size their pools from the machine.
+#[test]
+fn fixture_scheduler_builds_on_the_fixture_width_not_the_host() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-fixture-width").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let _entered = scheduler
+        .ensure_worker_plan()
+        .expect("fixture worker runtime")
+        .expect("a fixture scheduler enters its own runtime");
+    let pool_threads =
+        tracedecay_code_index::parallelism::install(rayon::current_num_threads).expect("pool");
+    assert_eq!(
+        (
+            tracedecay_code_index::parallelism::indexing_workers(),
+            pool_threads
+        ),
+        (2, 2)
+    );
+}
+
 #[test]
 fn worker_memory_reservation_is_charged_and_released_by_raii() {
     let project = fixture();
@@ -266,7 +297,11 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -298,7 +333,7 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(&scheduler, 128, 128 * 1024 * 1024 * 1024);
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
     ));
@@ -340,7 +375,11 @@ fn worker_memory_reservation_refusal_is_typed() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    bind_default_worker_runtime(&scheduler);
+    bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let authority = Arc::new(ProcessResidentMemoryV1::new(
         NonZeroU64::new(
             tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1 - 1,
@@ -409,7 +448,11 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
 
     // A limit with ample room for the worker plan, so the only thing that can
     // refuse admission below is the injected measurement.
-    let runtime = bind_default_worker_runtime(&scheduler);
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let limit = NonZeroU64::new(worker_reservation_bytes(&runtime).saturating_mul(4))
         .expect("positive test limit");
     let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
@@ -468,6 +511,95 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
         scheduler
             .reserve_worker_memory()
             .expect("admission is retryable once measured pressure falls to the low watermark"),
+    );
+}
+
+/// Live heap no resident owner charges still fills the process, so the ledger
+/// claims room for the whole worker plan while measured RSS does not. A
+/// refresh after the cold index sizes its worker slab to the measured headroom
+/// and publishes, instead of asking for the full plan and being refused on
+/// every retry.
+#[test]
+fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-refresh-headroom").expect("valid project"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        8,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
+    let planned = u64::from(runtime.status().effective_workers);
+    assert!(
+        planned >= 2,
+        "the default plan must span more than one worker for the slab to narrow"
+    );
+    // Measured headroom fits half the planned slab. The limit keeps the
+    // observed bytes under the high watermark and leaves the ledger room for
+    // the whole plan.
+    let headroom =
+        (planned / 2) * tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1;
+    let limit = NonZeroU64::new(8 * headroom).expect("limit");
+    let observed = Arc::new(AtomicU64::new(0));
+    let sampled = Arc::clone(&observed);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let unreclaimable_bytes = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: unreclaimable_bytes,
+                unreclaimable_bytes,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(matches!(
+        scheduler.reconcile_now().expect("cold index publishes"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+
+    observed.store(limit.get() - headroom, Ordering::Release);
+    pressure.sample_and_publish();
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn retained_generation() -> u32 { 1 }\npub fn refreshed_generation() -> u32 { 2 }\n",
+    )
+    .expect("write source");
+    git(project.path(), &["commit", "-q", "-am", "refresh"]);
+    let refreshed = scheduler
+        .reconcile_now()
+        .expect("the refresh is admitted within measured headroom");
+    assert!(matches!(
+        refreshed,
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    let latest = scheduler.latest_complete().expect("refreshed generation");
+    let mut symbols = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    assert_eq!(
+        symbols,
+        [
+            "src/lib.rs::refreshed_generation",
+            "src/lib.rs::retained_generation"
+        ]
     );
 }
 
@@ -573,6 +705,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     let view = Arc::new(Mutex::new(ProcessResidentSampleV1 {
         resident_bytes: GIB,
         unreclaimable_bytes: GIB,
+        swapped_bytes: 0,
         cgroup_committed_bytes: None,
     }));
     let sampled = Arc::clone(&view);
@@ -596,6 +729,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: 2 * GIB,
+        swapped_bytes: 0,
         cgroup_committed_bytes: None,
     };
     let decoded = scheduler
@@ -621,6 +755,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     *view.lock().expect("view") = ProcessResidentSampleV1 {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: high_watermark - 1,
+        swapped_bytes: 0,
         cgroup_committed_bytes: None,
     };
     assert!(matches!(
@@ -661,6 +796,7 @@ fn reconcile_stops_when_resident_memory_crosses_the_watermark() {
             Some(ProcessResidentSampleV1 {
                 resident_bytes: unreclaimable_bytes,
                 unreclaimable_bytes,
+                swapped_bytes: 0,
                 cgroup_committed_bytes: None,
             })
         }),

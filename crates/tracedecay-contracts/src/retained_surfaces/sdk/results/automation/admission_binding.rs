@@ -23,11 +23,21 @@ fn unknown_skill_skip_reasons_fail_closed() {
         "no_skill_writer_evidence",
         "session_cursor_manifest_participants_limit_exceeded",
     ] {
-        assert!(AutomationSkipReasonV1::from_ledger_reason(reason).is_none());
+        assert_eq!(AutomationSkipReasonV1::from_ledger_reason(reason), None);
         let mut terminal = zero_terminal("skipped");
         terminal["terminal"]["reason"] = json!(reason);
-        assert!(serde_json::from_value::<AutomationRunResultV1>(terminal).is_err());
+        let error = serde_json::from_value::<AutomationRunResultV1>(terminal)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("unknown variant `{reason}`, expected one of")),
+            "{error}"
+        );
     }
+    assert_eq!(
+        AutomationSkipReasonV1::from_ledger_reason("skill_writer_disabled"),
+        Some(AutomationSkipReasonV1::SkillWriterDisabled)
+    );
 }
 
 #[test]
@@ -68,10 +78,6 @@ fn session_evidence_timeout_is_typed_for_only_session_backed_tasks() {
 
 #[test]
 fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
-    assert_eq!(
-        SESSION_EVIDENCE_BUDGET_SUPPRESSED,
-        "session_evidence_budget_suppressed"
-    );
     let reason = AutomationSkipReasonV1::from_ledger_reason(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
         .expect("known session-evidence budget suppression skip");
     assert_eq!(

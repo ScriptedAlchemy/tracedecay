@@ -21,9 +21,11 @@ pub use workflow::WorkflowInvocationArgs;
 
 const WORK_LONG_ABOUT: &str = "\
 Invokes exactly one typed, daemon-owned Work application operation from the \
-closed catalog (proposal generation and review, work creation, dependency \
-replanning, attempt start/status/cancel/resume, run pause/resume/control, and \
-projection snapshot/delta/views reads). The strict typed request is read as \
+closed catalog (proposal generation, review, and comparison; work creation and \
+prepared graph mutations; execution admission and placement; attempt \
+start/status/cancel/resume/retry and history; duplicate and leak adjudication; \
+run pause/resume/control; and current, as-of, evolution, and forensic views). \
+The strict typed request is read as \
 JSON from --request-file (`-` reads stdin); the daemon admits the selected \
 project and answers through the same catalogued application surface used by \
 agent hosts. Use it when driving or inspecting work items and attempts from \
@@ -31,8 +33,8 @@ scripts or hooks; `--json` emits the one canonical application envelope.";
 
 const WORK_AFTER_HELP: &str = "\
 Examples:
-  tracedecay work snapshot --request-file request.json      Read the work projection
-  tracedecay work delta --request-file - --json             Typed delta read from stdin
+  tracedecay work views --request-file views.json --json    Read the current Work projection
+  tracedecay work prepare-graph-mutation --request-file - --json
   tracedecay work create --request-file create.json --json  Create work items
   tracedecay work start-attempt --request-file attempt.json --project /path/to/project
   tracedecay work attempt-status --request-file status.json --json
@@ -45,7 +47,8 @@ const WORKFLOW_LONG_ABOUT: &str = "\
 Invokes exactly one typed, daemon-owned Workflow application operation from \
 the closed catalog: registering, validating, activating, rejecting, or \
 retiring workflow definitions, reading a definition or its history, listing \
-and diffing definitions, and issuing or redeeming workflow handoffs. The \
+and diffing definitions, issuing or redeeming workflow handoffs, and starting, \
+pausing, resuming, cancelling, or reading workflow runs. The \
 strict typed request is read as JSON from --request-file (`-` reads stdin); \
 the daemon admits the selected project and answers through the same \
 catalogued application surface used by agent hosts. `--json` emits the one \
@@ -571,7 +574,12 @@ pub enum Commands {
     },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
-    Doctor,
+    Doctor {
+        /// Also print one JSON document on stdout: every check line plus the
+        /// daemon's canonical findings in the `/api/doctor/findings` shape
+        #[arg(long)]
+        json: bool,
+    },
     /// Token cost summary from Claude Code sessions
     #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {

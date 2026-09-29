@@ -1,7 +1,7 @@
 //! One bounded, schema-validated crash journal shared by every retention
 //! transaction family.
 //!
-//! Each family (generation, text artifact, scope, binding-cleanup intent)
+//! Each family (generation, text artifact, scope)
 //! describes itself with a [`BoundedJournalSpec`]; the persist/load/clear
 //! machinery is written once so a hardening fix can never drift between
 //! copies again.

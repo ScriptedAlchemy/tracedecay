@@ -129,17 +129,26 @@ mod tests {
 
     #[test]
     fn route_selected_session_refresh_rejects_embedded_action() {
-        assert!(
-            decode_retained_request(
-                RetainedSurfaceOperation::SessionRefreshStatus,
-                json!({ "action": "status" }),
-            )
-            .is_err()
+        let error = decode_retained_request(
+            RetainedSurfaceOperation::SessionRefreshStatus,
+            json!({ "action": "status" }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "action: unknown field `action`, expected one of `scope`, `session`, `source`, `target`, `handle`"
         );
     }
 
     #[test]
     fn fact_store_curate_rejects_caller_owned_authority() {
+        assert!(matches!(
+            decode_retained_request(
+                RetainedSurfaceOperation::FactStoreCurate,
+                json!({ "fact_review_limit": 5 }),
+            ),
+            Ok(RetainedSurfaceRequestV1::FactStoreCurate(_))
+        ));
         for forbidden in [
             "operations",
             "proposal_id",
@@ -150,12 +159,16 @@ mod tests {
         ] {
             let mut value = serde_json::Map::new();
             value.insert(forbidden.to_owned(), serde_json::Value::Bool(true));
-            assert!(
-                decode_retained_request(
-                    RetainedSurfaceOperation::FactStoreCurate,
-                    serde_json::Value::Object(value),
+            let error = decode_retained_request(
+                RetainedSurfaceOperation::FactStoreCurate,
+                serde_json::Value::Object(value),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "{forbidden}: unknown field `{forbidden}`, expected `fact_review_limit` or `min_confidence_millionths`"
                 )
-                .is_err()
             );
         }
     }

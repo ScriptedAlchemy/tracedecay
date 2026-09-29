@@ -157,7 +157,10 @@ describe('familyVerdict', () => {
     ).toBeNull();
   });
 
-  it('has nothing to say about an empty family list', () => {
+  it('summarizes an unflagged family list, and has nothing to say about an empty one', () => {
+    expect(familiesSummary(live)).toBe(
+      'No family is flagged: 2 of 4 have a substitute detector at all, and it fired zero times in this window. The other 2 cannot be flagged by construction.',
+    );
     expect(familiesSummary([])).toBeNull();
   });
 });

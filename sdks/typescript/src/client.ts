@@ -242,6 +242,12 @@ function isProblemDetail(value: unknown): boolean {
         isSafeUnsignedInteger(value.committed) &&
         isSafeUnsignedInteger(value.active)
       );
+    case "stale_precondition":
+      return (
+        typeof value.field === "string" &&
+        isSafeUnsignedInteger(value.requested) &&
+        isSafeUnsignedInteger(value.current)
+      );
     case "lock_deadline":
       return typeof value.resource === "string" && isSafeUnsignedInteger(value.deadline_ms);
     case "diagnostics_unsupported":

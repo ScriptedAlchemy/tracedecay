@@ -56,8 +56,9 @@ use tracedecay_runtime_core::db::Database;
 use super::concrete::{
     FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,
 };
-use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
+use super::diagnostics::DiagnosticStoreFeedbackProvider;
 use super::observations::FeedbackObservationEmitterV1;
+use crate::diagnostics_store::DiagnosticsStore;
 
 const FEEDBACK_IMPACT_DEPTH_V1: u32 = 3;
 const FEEDBACK_IMPACT_MAX_SYMBOLS_V1: usize = 1_000;
@@ -247,7 +248,7 @@ impl FeedbackCycleRuntimeError {
 type ProductionFeedbackCycleService = FeedbackCycleService<
     Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     GenerationBoundFeedbackDiagnosticsAdapter<
-        DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>,
+        DiagnosticStoreFeedbackProvider<DiagnosticsStore<'static>>,
     >,
     DirectFeedbackImpactAdapter,
     ProjectFeedbackStore,
@@ -262,7 +263,7 @@ pub struct FeedbackCycleRuntime {
     publications: ProjectFeedbackStore,
     service: Arc<ProductionFeedbackCycleService>,
     lsp_input: FeedbackCycleLspInput,
-    publication_selector: Arc<DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>>,
+    publication_selector: Arc<DiagnosticStoreFeedbackProvider<DiagnosticsStore<'static>>>,
     provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
@@ -294,10 +295,10 @@ pub fn open_feedback_cycle_runtime(
     let publications = feedback.publication_store();
     let source_observations = feedback.source_observation_port();
     let publication_selector = Arc::new(DiagnosticStoreFeedbackProvider::new(
-        DatabaseDiagnosticStore::new(database.clone()),
+        DiagnosticsStore::new(database.clone()),
     ));
     let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
-        DiagnosticStoreFeedbackProvider::new(DatabaseDiagnosticStore::new(database)),
+        DiagnosticStoreFeedbackProvider::new(DiagnosticsStore::new(database)),
         provider_admissions.clone(),
     )?;
     let source_lsp_input = lsp_input;

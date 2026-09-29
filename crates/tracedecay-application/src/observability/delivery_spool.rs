@@ -213,25 +213,36 @@ impl DeliveryRecorderSpoolV1 {
         Ok(state.receipt_paths.len())
     }
 
-    pub fn acknowledge(&self, receipt_id: [u8; 16]) -> Result<bool, DeliveryRecorderSpoolError> {
+    /// Removes settled receipts and syncs the spool directory once for all of
+    /// them. A removal lost before that sync only replays a settled receipt,
+    /// which settlement answers idempotently.
+    pub fn acknowledge(
+        &self,
+        receipt_ids: &[[u8; 16]],
+    ) -> Result<usize, DeliveryRecorderSpoolError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| DeliveryRecorderSpoolError::LockPoisoned)?;
-        let path = self.receipt_path(receipt_id);
-        if !state.receipt_paths.contains(&path) {
-            if validate_regular_or_missing(&path).map_err(map_read_error)? {
+        let mut removed = 0;
+        for receipt_id in receipt_ids {
+            let path = self.receipt_path(*receipt_id);
+            let tracked = state.receipt_paths.contains(&path);
+            if validate_regular_or_missing(&path).map_err(map_read_error)? != tracked {
                 return Err(DeliveryRecorderSpoolError::Corrupt);
             }
-            return Ok(false);
+            if !tracked {
+                continue;
+            }
+            fs::remove_file(&path).map_err(|_| DeliveryRecorderSpoolError::Io)?;
+            state.receipt_paths.remove(&path);
+            removed += 1;
         }
-        if !validate_regular_or_missing(&path).map_err(map_read_error)? {
-            return Err(DeliveryRecorderSpoolError::Corrupt);
+        if removed > 0 {
+            sync_directory(&self.root, DIRECTORY_POLICY)
+                .map_err(|_| DeliveryRecorderSpoolError::Io)?;
         }
-        fs::remove_file(&path).map_err(|_| DeliveryRecorderSpoolError::Io)?;
-        state.receipt_paths.remove(&path);
-        sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| DeliveryRecorderSpoolError::Io)?;
-        Ok(true)
+        Ok(removed)
     }
 
     fn receipt_path(&self, receipt_id: [u8; 16]) -> PathBuf {
@@ -406,6 +417,45 @@ mod tests {
             receipt.validate(),
             Err(DeliveryRecorderSpoolError::InvalidReceipt)
         );
+    }
+
+    #[test]
+    fn acknowledging_a_page_removes_exactly_its_tracked_receipts() {
+        let root = tempfile::tempdir().expect("spool root");
+        let spool = DeliveryRecorderSpoolV1::open(root.path().to_path_buf()).expect("open");
+        let receipts = (0..3)
+            .map(|index| {
+                let mut settlement = settlement();
+                settlement.attempt.channel.channel_ref = format!("mcp:delivery-spool:{index}");
+                let receipt =
+                    DeliveryRecorderSourceReceiptV1::new(settlement, identity()).expect("receipt");
+                assert!(spool.append(&receipt).expect("append receipt"));
+                receipt.receipt_id
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            spool.acknowledge(&[receipts[0], receipts[2], receipts[0]]),
+            Ok(2)
+        );
+        let pending = spool.pending(8).expect("pending receipts");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|receipt| receipt.receipt_id)
+                .collect::<Vec<_>>(),
+            vec![receipts[1]]
+        );
+        assert_eq!(spool.acknowledge(&[receipts[0]]), Ok(0));
+
+        std::fs::remove_file(spool.receipt_path(receipts[1])).expect("remove tracked receipt");
+        assert_eq!(
+            spool.acknowledge(&[receipts[1]]),
+            Err(DeliveryRecorderSpoolError::Corrupt)
+        );
+        drop(spool);
+        let reopened = DeliveryRecorderSpoolV1::open(root.path().to_path_buf()).expect("reopen");
+        assert_eq!(reopened.len(), Ok(0));
     }
 
     /// A publisher killed between staging and rename leaves its `.tmp` behind.

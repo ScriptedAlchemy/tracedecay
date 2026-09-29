@@ -133,10 +133,6 @@ impl AgentIntegration for AntigravityIntegration {
         uninstall_mcp_if_selected(components, &ctx.home)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         antigravity_registration_state(home, None) == HostBundleRegistrationStateV1::Current
     }

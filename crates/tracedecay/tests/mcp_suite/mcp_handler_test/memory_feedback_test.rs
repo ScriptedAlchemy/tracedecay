@@ -193,18 +193,38 @@ async fn fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases() {
     .expect("canonical fact add");
     let fact_id = committed_fact_id(&added);
 
+    let mut refusals = Vec::new();
     for invalid in [
         json!({"fact_id": fact_id.clone()}),
         json!({"fact_id": 41, "action": "helpful"}),
         json!({"fact_id": fact_id.clone(), "helpful": true}),
-        json!({"fact_id": fact_id, "action": "helpful", "source": "legacy"}),
+        json!({"fact_id": fact_id.clone(), "action": "helpful", "source": "legacy"}),
     ] {
+        let error = invoke_production_tool(&fixture, "tracedecay_fact_feedback", invalid.clone())
+            .await
+            .expect_err("a non-canonical feedback shape must be refused");
+        refusals.push(error.to_string());
+    }
+    for (refusal, expected) in refusals.iter().zip([
+        "missing field `action`",
+        "fact_id: invalid type: integer `41`, expected a string",
+        "helpful: unknown field `helpful`",
+        "source: unknown field `source`",
+    ]) {
         assert!(
-            invoke_production_tool(&fixture, "tracedecay_fact_feedback", invalid)
-                .await
-                .is_err()
+            refusal.contains(&format!(
+                "invalid retained application request for tracedecay_fact_feedback: {expected}"
+            )),
+            "{refusal}"
         );
     }
+    invoke_production_tool(
+        &fixture,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "action": "helpful"}),
+    )
+    .await
+    .expect("the canonical feedback shape must be accepted");
 
     close_test_graph(fixture).await;
 }

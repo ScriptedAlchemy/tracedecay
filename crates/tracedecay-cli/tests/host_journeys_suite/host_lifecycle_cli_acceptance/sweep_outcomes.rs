@@ -7,6 +7,8 @@ use std::process::Output;
 
 use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
 
+#[cfg(unix)]
+use super::install_kimi_cli;
 use super::{IsolatedCli, VERIFY_FAILURE_ENV, assert_success, host_case, seed_host};
 
 /// `EX_TEMPFAIL`: nothing failed, but a host needs an operator step.
@@ -25,10 +27,10 @@ fn install_cline(cli: &IsolatedCli) {
     );
 }
 
-/// A Kiro MCP registry that still names TraceDecay, as an older binary or a
-/// removed Kiro install leaves behind.
-fn seed_leftover_kiro_registration(cli: &IsolatedCli) {
-    let path = cli.home.path().join(".kiro/settings/mcp.json");
+/// A Factory Droid MCP registry that still names TraceDecay, as an older
+/// binary or a removed Droid install leaves behind.
+fn seed_leftover_droid_registration(cli: &IsolatedCli) {
+    let path = cli.home.path().join(".factory/mcp.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
@@ -81,86 +83,101 @@ pub(super) fn complete_kimi_plugins_install(cli: &IsolatedCli, staged: &Path) {
 fn update_plugin_skips_a_leftover_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
+    seed_leftover_droid_registration(&cli);
 
     let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("cline: refreshed"), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
-        stderr.contains("kiro: skipped, host CLI not installed"),
-        "{stderr}"
-    );
-    assert!(
-        !tracked_agents(&cli).contains("\"kiro\""),
+        !tracked_agents(&cli).contains("\"droid\""),
         "a skipped leftover host must not become tracked"
     );
 }
 
-fn track_kiro(cli: &IsolatedCli) {
+/// Tracks `agents` beside the installed Cline, as an earlier install would.
+fn track(cli: &IsolatedCli, agents: &[&str]) {
     let config = cli.profile.join("config.toml");
     let tracked = tracked_agents(cli);
+    let listed = agents
+        .iter()
+        .map(|agent| format!(", \"{agent}\""))
+        .collect::<String>();
     fs::write(
         &config,
         tracked.replace(
             "installed_agents = [\"cline\"]",
-            "installed_agents = [\"cline\", \"kiro\"]",
+            &format!("installed_agents = [\"cline\"{listed}]"),
         ),
     )
     .unwrap();
 }
 
-const KIRO_PENDING_HOST_CLI: &str = "  kiro: pending operator action: install the kiro CLI, or run \
-     `tracedecay uninstall --agent kiro` to stop tracking it\n      config error: host bundle \
-     lifecycle failed: Kiro host CLI is unavailable; install the host CLI or add it to PATH \
-     before retrying\n";
+const DROID_CLI_UNAVAILABLE: &str = "host CLI `droid` is unavailable for Factory Droid MCP \
+     registry lifecycle; install it or add it to PATH and retry";
+
+const DROID_NOT_INSTALLED: &str = "  droid: skipped, not installed (host CLI `droid` is \
+     unavailable for Factory Droid MCP registry lifecycle; install it or add it to PATH and \
+     retry)\n";
+
+/// A host CLI `program` on the isolated `PATH` running the shell `body`.
+#[cfg(unix)]
+fn install_host_cli(cli: &IsolatedCli, program: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = cli.bin_dir.join(program);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Kiro's CLI while signed out, as #2374 found it: it refuses every command
+/// and leaves a mark so a test can prove it never ran.
+#[cfg(unix)]
+const SIGNED_OUT_KIRO_CLI: &str = "touch \"$HOME/kiro-cli-ran\"\n\
+     echo 'error: You are not logged in, please log in with kiro-cli login' >&2\nexit 1";
 
 #[test]
-fn update_plugin_waits_on_the_operator_for_a_tracked_host_whose_cli_is_not_installed() {
+fn update_plugin_skips_a_tracked_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    seed_leftover_kiro_registration(&cli);
-    track_kiro(&cli);
+    seed_leftover_droid_registration(&cli);
+    track(&cli, &["droid"]);
 
     let output = cli.run(&["update-plugin"]);
 
     let stderr = stderr(&output);
-    assert_eq!(
-        output.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
-        "{stderr}"
-    );
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
-    assert!(stderr.contains(KIRO_PENDING_HOST_CLI), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     let tracked = tracked_agents(&cli);
     assert!(
-        tracked.contains("\"kiro\""),
-        "the pending host stays tracked until the operator decides: {tracked}"
+        tracked.contains("\"droid\""),
+        "a skipped host stays tracked for when it is installed: {tracked}"
     );
 
-    let untrack = cli.run(&["uninstall", "--agent", "kiro"]);
+    let untrack = cli.run(&["uninstall", "--agent", "droid"]);
     let untrack_stderr = self::stderr(&untrack);
     assert_eq!(untrack.status.code(), Some(0), "{untrack_stderr}");
     assert!(
-        untrack_stderr.contains(
-            "  kiro: no longer tracked; the host CLI is not installed, so its host-owned \
-             registration was left in place (config error: host bundle lifecycle failed: Kiro \
-             host CLI is unavailable; install the host CLI or add it to PATH before retrying)\n"
-        ),
+        untrack_stderr.contains(&format!(
+            "  droid: no longer tracked; the host is not installed, so its host-owned \
+             registration was left in place ({DROID_CLI_UNAVAILABLE})\n"
+        )),
         "{untrack_stderr}"
     );
     let tracked = tracked_agents(&cli);
     assert!(
-        !tracked.contains("\"kiro\"") && tracked.contains("\"cline\""),
-        "the printed uninstall stops tracking only that host: {tracked}"
+        !tracked.contains("\"droid\"") && tracked.contains("\"cline\""),
+        "the uninstall stops tracking only that host: {tracked}"
     );
 
     let after = cli.run(&["update-plugin"]);
     let after_stderr = self::stderr(&after);
     assert_eq!(after.status.code(), Some(0), "{after_stderr}");
     assert!(
-        after_stderr.contains("  kiro: skipped, host CLI not installed; only leftover"),
+        after_stderr.contains(DROID_NOT_INSTALLED),
         "the untracked leftover is skipped, not pending: {after_stderr}"
     );
 }
@@ -239,30 +256,29 @@ fn update_plugin_reports_registrations_already_in_place_as_unchanged() {
 }
 
 #[test]
-fn install_fails_an_untracked_named_host_whose_cli_is_not_installed() {
+fn install_skips_a_named_host_whose_cli_is_not_installed() {
     let cli = IsolatedCli::new();
 
-    let output = cli.run(&["install", "--agent", "kiro"]);
+    let output = cli.run(&["install", "--agent", "droid"]);
 
     let stderr = stderr(&output);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
-        stderr.contains(
-            "  kiro: failed, host CLI not installed: config error: host bundle lifecycle \
-             failed: Kiro host CLI is unavailable; install the host CLI or add it to PATH \
-             before retrying\n"
-        ),
-        "{stderr}"
+        !cli.profile.join("config.toml").exists() || !tracked_agents(&cli).contains("\"droid\""),
+        "a skipped host is not tracked"
     );
 }
 
 /// The operator's `tracedecay update` journey: a tracked host whose CLI is
-/// gone must not mask the pending Kimi step behind a failure exit.
+/// gone is skipped beside the pending Kimi step, which alone sets the exit.
+#[cfg(unix)]
 #[test]
-fn post_update_reports_a_tracked_host_without_its_cli_as_pending_beside_kimi() {
+fn post_update_skips_a_tracked_host_without_its_cli_beside_pending_kimi() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    track_kiro(&cli);
+    track(&cli, &["droid"]);
+    install_kimi_cli(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
 
     let output = cli.run(&["post-update"]);
@@ -274,12 +290,88 @@ fn post_update_reports_a_tracked_host_without_its_cli_as_pending_beside_kimi() {
         "{stderr}"
     );
     assert!(stderr.contains("  cline: refreshed\n"), "{stderr}");
-    assert!(stderr.contains(KIRO_PENDING_HOST_CLI), "{stderr}");
+    assert!(stderr.contains(DROID_NOT_INSTALLED), "{stderr}");
     assert!(
         stderr.contains("  kimi: pending operator action: `/plugins install"),
         "{stderr}"
     );
     assert!(!stderr.contains("reinstall failed for"), "{stderr}");
+}
+
+/// The operator's Kiro registry before TraceDecay touches it: a peer server
+/// and formatting TraceDecay does not own.
+const OPERATOR_KIRO_MCP: &str = "{\n  \"mcpServers\": {\n    \"operator\": {\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }\n  }\n}\n";
+
+/// `OPERATOR_KIRO_MCP` with TraceDecay registered beside the peer server.
+fn kiro_mcp_with_tracedecay(cli: &IsolatedCli) -> String {
+    format!(
+        "{{\n  \"mcpServers\": {{\n    \"operator\": {{\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }},\n    \"tracedecay\": {{\n      \"args\": [\n        \"serve\"\n      ],\n      \"command\": {},\n      \"disabled\": false\n    }}\n  }}\n}}\n",
+        serde_json::to_string(&cli.installed_bin()).unwrap()
+    )
+}
+
+/// #2374: Kiro's CLI installed but signed out. Kiro's MCP registry is the
+/// documented `~/.kiro/settings/mcp.json`, so `install`, `update-plugin`, the
+/// `post-update` refresh `update` runs, `doctor`, and `uninstall` all work on
+/// that file, exit 0, and never run `kiro-cli`.
+#[cfg(unix)]
+#[test]
+fn a_signed_out_kiro_cli_never_blocks_the_kiro_lifecycle() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    install_host_cli(&cli, "kiro-cli", SIGNED_OUT_KIRO_CLI);
+    let mcp = cli.home.path().join(".kiro/settings/mcp.json");
+    fs::create_dir_all(mcp.parent().unwrap()).unwrap();
+    fs::write(&mcp, OPERATOR_KIRO_MCP).unwrap();
+
+    let install = cli.run(&["install", "--agent", "kiro"]);
+    let install_stderr = stderr(&install);
+    assert_eq!(install.status.code(), Some(0), "{install_stderr}");
+    assert_eq!(
+        fs::read_to_string(&mcp).unwrap(),
+        kiro_mcp_with_tracedecay(&cli)
+    );
+
+    for refresh in [&["update-plugin"][..], &["post-update"][..]] {
+        let output = cli.run(refresh);
+        let output_stderr = stderr(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{refresh:?}: {output_stderr}"
+        );
+        assert!(
+            output_stderr.contains("  kiro: refreshed\n"),
+            "{output_stderr}"
+        );
+        assert_eq!(
+            fs::read_to_string(&mcp).unwrap(),
+            kiro_mcp_with_tracedecay(&cli)
+        );
+    }
+
+    // `post-update` refuses while an unmanaged daemon listens; Doctor reads
+    // the daemon's canonical report.
+    {
+        let _daemon = ProfileDaemon::start(&cli);
+        let doctor = cli.run(&["doctor"]);
+        let doctor_stderr = stderr(&doctor);
+        assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+        assert!(
+            doctor_stderr.contains(&format!("MCP server registered in {}\n", mcp.display())),
+            "{doctor_stderr}"
+        );
+        assert!(!doctor_stderr.contains("kiro: skipped"), "{doctor_stderr}");
+    }
+
+    let uninstall = cli.run(&["uninstall", "--agent", "kiro"]);
+    let uninstall_stderr = stderr(&uninstall);
+    assert_eq!(uninstall.status.code(), Some(0), "{uninstall_stderr}");
+    assert_eq!(fs::read_to_string(&mcp).unwrap(), OPERATOR_KIRO_MCP);
+    assert!(
+        !cli.home.path().join("kiro-cli-ran").exists(),
+        "the Kiro lifecycle ran kiro-cli"
+    );
 }
 
 /// The daemon serving the isolated profile while it is held: Doctor reads its
@@ -319,15 +411,17 @@ impl Drop for ProfileDaemon {
     }
 }
 
-/// Doctor classifies the same operator steps `update-plugin` does: Kimi's
-/// pending `/plugins install` and a tracked host without its CLI exit 75,
-/// and the run converges to 0 once the operator acts on both.
+/// Doctor classifies hosts the way `update-plugin` does: Kimi's pending
+/// `/plugins install` exits 75, a tracked host without its CLI is skipped as
+/// not installed, and the run converges to 0 once the operator installs
+/// Kimi's plugin while Droid stays tracked and absent.
 #[cfg(unix)]
 #[test]
-fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
+fn doctor_waits_only_on_real_operator_steps_and_skips_absent_hosts() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
-    track_kiro(&cli);
+    track(&cli, &["droid"]);
+    install_kimi_cli(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
     let _daemon = ProfileDaemon::start(&cli);
     let staged = cli
@@ -343,10 +437,7 @@ fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
         "{doctor_stderr}"
     );
     assert!(
-        doctor_stderr.contains(
-            "kiro: pending operator action: install the kiro CLI, or run `tracedecay \
-             uninstall --agent kiro` to stop tracking it"
-        ),
+        doctor_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{doctor_stderr}"
     );
     assert!(
@@ -356,16 +447,66 @@ fn doctor_waits_on_the_operator_for_the_steps_update_plugin_reports() {
         )),
         "{doctor_stderr}"
     );
+    assert!(
+        doctor_stderr.contains("1 pending operator action(s), "),
+        "only Kimi's step is pending: {doctor_stderr}"
+    );
 
     complete_kimi_plugins_install(&cli, &staged);
-    let untrack = cli.run(&["uninstall", "--agent", "kiro"]);
-    assert_eq!(untrack.status.code(), Some(0), "{}", stderr(&untrack));
     let converged = cli.run(&["doctor"]);
     let converged_stderr = stderr(&converged);
     assert_eq!(converged.status.code(), Some(0), "{converged_stderr}");
     assert!(
+        converged_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
+        "{converged_stderr}"
+    );
+    assert!(
         !converged_stderr.contains("pending operator action"),
         "{converged_stderr}"
+    );
+}
+
+/// A tracked Droid whose CLI is absent is skipped and exits 0; a tracked Kiro,
+/// which needs no CLI, with a malformed TraceDecay registration is an issue
+/// and exits 1 while Droid stays skipped.
+#[cfg(unix)]
+#[test]
+fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registration() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    track(&cli, &["droid", "kiro"]);
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let absent = cli.run(&["doctor"]);
+    let absent_stderr = stderr(&absent);
+    assert_eq!(absent.status.code(), Some(0), "{absent_stderr}");
+    assert!(
+        absent_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
+        "{absent_stderr}"
+    );
+    assert!(
+        !absent_stderr.contains("pending operator action"),
+        "{absent_stderr}"
+    );
+
+    let mcp = cli.home.path().join(".kiro/settings/mcp.json");
+    fs::create_dir_all(mcp.parent().unwrap()).unwrap();
+    fs::write(&mcp, "{ not valid JSON").unwrap();
+    let malformed = cli.run(&["doctor"]);
+    let malformed_stderr = stderr(&malformed);
+    assert_eq!(malformed.status.code(), Some(1), "{malformed_stderr}");
+    assert!(
+        malformed_stderr.contains(&format!(
+            "Kiro installation state is unreadable: config error: failed to parse Kiro MCP \
+             config {}",
+            mcp.display()
+        )),
+        "{malformed_stderr}"
+    );
+    assert!(
+        !malformed_stderr.contains("kiro: skipped")
+            && malformed_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
+        "{malformed_stderr}"
     );
 }
 
@@ -381,9 +522,44 @@ fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     assert!(stderr.contains("cline: failed:"), "{stderr}");
 }
 
+/// A reachable host CLI that refuses the registration: the install fails
+/// with the host CLI's own words, not a TraceDecay filesystem failure
+/// pointing at a source line. An absent host is skipped instead; this is a
+/// host TraceDecay can reach.
+#[cfg(unix)]
+#[test]
+fn install_reports_a_host_cli_refusal_in_the_host_clis_words() {
+    let cli = IsolatedCli::new();
+    install_host_cli(
+        &cli,
+        "droid",
+        r#"case "$1 $2" in
+  "mcp add") echo 'error: the MCP registry is locked by another droid' >&2; exit 1 ;;
+esac
+exit 0"#,
+    );
+
+    let output = cli.run(&["install", "--agent", "droid"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let droid_line = stderr
+        .lines()
+        .find(|line| line.starts_with("  droid: "))
+        .unwrap_or_else(|| panic!("no droid summary line: {stderr}"));
+    assert!(
+        droid_line.starts_with("  droid: failed: ")
+            && droid_line.ends_with("error: the MCP registry is locked by another droid"),
+        "{droid_line}"
+    );
+    assert!(!stderr.contains("filesystem operation failed"), "{stderr}");
+}
+
+#[cfg(unix)]
 #[test]
 fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
     let cli = IsolatedCli::new();
+    install_kimi_cli(&cli);
     let staged = cli
         .home
         .path()
@@ -424,8 +600,14 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
 
     complete_kimi_plugins_install(&cli, &staged);
 
+    // No daemon listens here, so `daemon_unavailable` is the one step left.
     let doctor = stderr(&cli.run(&["doctor"]));
-    assert!(!doctor.contains("pending operator action"), "{doctor}");
+    assert!(!doctor.contains("open Kimi Code and run"), "{doctor}");
+    assert!(
+        doctor.contains("daemon_unavailable: no TraceDecay daemon is listening")
+            && doctor.contains("1 pending operator action(s), "),
+        "{doctor}"
+    );
     let converged = cli.run(&["update-plugin"]);
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }
@@ -446,10 +628,12 @@ fn post_update_exits_nonzero_when_a_host_refresh_fails() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn post_update_reports_pending_operator_action_with_its_own_exit_code() {
     let cli = IsolatedCli::new();
     install_cline(&cli);
+    install_kimi_cli(&cli);
     let _ = cli.run(&["install", "--agent", "kimi"]);
 
     let output = cli.run(&["post-update"]);
@@ -465,4 +649,82 @@ fn post_update_reports_pending_operator_action_with_its_own_exit_code() {
         stderr.contains("kimi: pending operator action: `/plugins install"),
         "{stderr}"
     );
+}
+
+/// Copilot's own registry as `copilot mcp add` maintains it.
+#[cfg(unix)]
+const REGISTERING_COPILOT_CLI: &str = r#"case "$1 $2" in
+  "mcp add")
+    /bin/mkdir -p "$HOME/.copilot"
+    printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$5" > "$HOME/.copilot/mcp-config.json"
+    ;;
+esac
+exit 0"#;
+
+/// No TraceDecay lifecycle writes VS Code's `settings.json`, so after a
+/// completed Copilot install a VS Code profile without the server is an
+/// observation, not an issue whose remedy is a TraceDecay command.
+#[cfg(unix)]
+#[test]
+fn doctor_observes_copilots_vscode_settings_without_failing_on_them() {
+    let cli = IsolatedCli::new();
+    install_host_cli(&cli, "copilot", REGISTERING_COPILOT_CLI);
+    let vscode_settings =
+        tracedecay_agent_hosts::agents::vscode_data_dir(cli.home.path()).join("User/settings.json");
+    fs::create_dir_all(vscode_settings.parent().unwrap()).unwrap();
+    fs::write(&vscode_settings, "{}").unwrap();
+    assert_success(
+        "copilot",
+        "install",
+        cli.run(&["install", "--agent", "copilot"]),
+    );
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+    assert!(
+        doctor_stderr.contains(&format!(
+            "MCP server registered in {}\n",
+            cli.home.path().join(".copilot/mcp-config.json").display()
+        )),
+        "{doctor_stderr}"
+    );
+    assert!(
+        doctor_stderr.contains(&format!(
+            "    VS Code: no tracedecay MCP server in {}; `tracedecay install --agent copilot` \
+             registers Copilot CLI only\n",
+            vscode_settings.display()
+        )),
+        "{doctor_stderr}"
+    );
+    assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
+}
+
+/// Zed and Antigravity present on the machine without TraceDecay get the same
+/// "detected but not integrated" warning as every other host, never an issue.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
+    fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    let _daemon = ProfileDaemon::start(&cli);
+
+    let doctor = cli.run(&["doctor"]);
+
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(0), "{doctor_stderr}");
+    for (name, id) in [("Zed", "zed"), ("Antigravity", "antigravity")] {
+        assert!(
+            doctor_stderr.contains(&format!(
+                "{name} detected but tracedecay is not integrated, run `tracedecay install \
+                 --agent {id}`\n"
+            )),
+            "{doctor_stderr}"
+        );
+    }
+    assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
 }

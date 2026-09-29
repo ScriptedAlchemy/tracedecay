@@ -678,7 +678,11 @@ mod tests {
             };
             effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
         }
-        for schedule in ["60 * * * *", "*/0 * * * *", "5-1 * * * *"] {
+        for (schedule, detail) in [
+            ("60 * * * *", "value 60 is outside 0-59"),
+            ("*/0 * * * *", "step must be a positive integer"),
+            ("5-1 * * * *", "range start exceeds range end"),
+        ] {
             let patch = AutomationConfigPatch {
                 skill_writer: AutomationTaskPatch {
                     schedule: Some(Some(schedule.to_string())),
@@ -686,7 +690,14 @@ mod tests {
                 },
                 ..AutomationConfigPatch::default()
             };
-            assert!(effective_config(&AutomationConfig::default(), Some(&patch)).is_err());
+            assert_eq!(
+                effective_config(&AutomationConfig::default(), Some(&patch))
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "config error: skill_writer schedule is invalid: config error: invalid cron schedule '{schedule}': {detail}"
+                )
+            );
         }
     }
 
@@ -710,15 +721,29 @@ mod tests {
             timeout_secs: 0,
             ..AutomationConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        let rejection =
+            |config: &AutomationConfig| validate_config(config).unwrap_err().to_string();
+        assert_eq!(
+            rejection(&config),
+            "config error: automation timeout_secs must be greater than zero"
+        );
 
         config.timeout_secs = 60;
         config.scheduler_tick_secs = 0;
-        assert!(validate_config(&config).is_err());
+        assert_eq!(
+            rejection(&config),
+            "config error: automation scheduler_tick_secs must be greater than zero"
+        );
 
         config.scheduler_tick_secs = 60;
         config.tasks.memory_curator.interval_secs = Some(0);
-        assert!(validate_config(&config).is_err());
+        assert_eq!(
+            rejection(&config),
+            "config error: memory_curator interval_secs must be greater than zero"
+        );
+
+        config.tasks.memory_curator.interval_secs = Some(60);
+        validate_config(&config).unwrap();
     }
 
     #[test]

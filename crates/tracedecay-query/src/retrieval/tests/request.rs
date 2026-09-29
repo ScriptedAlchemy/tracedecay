@@ -6,6 +6,7 @@ use tracedecay_domain::{
 };
 
 use super::{digest_id, id};
+use crate::retrieval::ports::RetrievalPortError;
 use crate::retrieval::request::RawRetrievalRequestV1;
 
 fn raw_request(query: String) -> RawRetrievalRequestV1 {
@@ -62,14 +63,25 @@ fn raw_query_dto_sanitizes_immediately_without_leaking_into_request_or_debug() {
 
 #[test]
 fn raw_query_dto_rejects_oversized_input_before_execution_state_exists() {
-    let raw = raw_request("x".repeat(tracedecay_domain::MAX_EPHEMERAL_QUERY_VIEW_BYTES + 1));
-    assert!(
-        raw.sanitize(
+    let sanitize = |bytes: usize| {
+        raw_request("x".repeat(bytes)).sanitize(
             id::<SanitizerRevision>("query-sanitizer.v1"),
             id::<QueryNormalizationRevision>("query-normalization.v1"),
         )
-        .is_err()
-    );
+    };
+    let limit = tracedecay_domain::MAX_EPHEMERAL_QUERY_VIEW_BYTES;
+    match sanitize(limit + 1) {
+        Err(RetrievalPortError::Contract(message)) => assert_eq!(
+            message,
+            "ephemeral sanitized query view violates the structural bounds for sanitized text"
+        ),
+        other => panic!(
+            "oversized query must be a contract refusal: {:?}",
+            other.err()
+        ),
+    }
+    let at_limit = sanitize(limit).expect("a query at the byte limit is admitted");
+    assert_eq!(at_limit.query_view().as_str(), "x".repeat(limit));
 }
 
 #[test]

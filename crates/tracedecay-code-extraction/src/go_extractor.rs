@@ -1061,8 +1061,11 @@ impl GoExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "var_spec" {
-                    Self::visit_var_spec(state, child);
+                match child.kind() {
+                    "var_spec" => Self::visit_var_spec(state, child),
+                    // `var ( … )` groups its specs in a list.
+                    "var_spec_list" => Self::visit_var_declaration(state, child),
+                    _ => {}
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1124,11 +1127,14 @@ impl GoExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
         }
+        // `var registry = build()` runs at package initialization; the
+        // variable owns its initializer's calls.
+        Self::extract_call_sites(state, node, &id);
     }
 
     /// Extract the receiver type from a `method_declaration` and create a Receives edge.
@@ -1267,38 +1273,31 @@ impl GoExtractor {
         }
     }
 
-    /// Recursively find `call_expression` and `selector_expression` nodes inside a
-    /// given node and create unresolved Calls references.
+    /// Recursively find `call_expression` nodes inside a given node and create
+    /// unresolved Calls references. A `func_literal` is not a graph symbol, so
+    /// calls in its body (`go func() { work() }()`) belong to the enclosing
+    /// function.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                match child.kind() {
-                    "call_expression" => {
-                        // Get the callee: either an identifier or a selector_expression.
-                        let callee = child.named_child(0);
-                        if let Some(callee) = callee {
-                            let callee_name = state.node_text(callee);
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name.to_string(),
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                                unmodeled_import: None,
-                            });
-                        }
-                        // Also recurse into the call expression for nested calls.
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
-                    // Skip nested function literals to avoid polluting call sites.
-                    "func_literal" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                if child.kind() == "call_expression"
+                    && let Some(callee) = child.named_child(0)
+                    && callee.kind() != "func_literal"
+                {
+                    // The callee is an identifier or a selector_expression.
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: fn_node_id.to_string(),
+                        reference_name: state.node_text(callee).to_string(),
+                        reference_kind: EdgeKind::Calls,
+                        line: child.start_position().row as u32,
+                        column: child.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                        unmodeled_import: None,
+                    });
                 }
+                Self::extract_call_sites(state, child, fn_node_id);
                 if !cursor.goto_next_sibling() {
                     break;
                 }

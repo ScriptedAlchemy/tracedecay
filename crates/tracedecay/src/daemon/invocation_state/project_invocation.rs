@@ -78,6 +78,7 @@ impl DaemonInvocationState {
         {
             return super::super::profile_owner::invoke_profile_owner_operation(
                 store_administration,
+                Some(&self.code_index_schedulers),
                 project_path,
                 request.request_id,
                 surface_operation,

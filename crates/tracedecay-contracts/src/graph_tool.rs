@@ -193,6 +193,13 @@ impl GraphToolResultV1 {
         })
     }
 
+    /// Whether the body carries its own freshness verdict, read after the
+    /// result settled. The seat freshness recorded at graph open is then an
+    /// earlier, second reading and is not reported beside it.
+    pub fn carries_freshness_verdict(&self) -> bool {
+        matches!(self, Self::Search(_) | Self::Context(_))
+    }
+
     /// The result body alone, the shape its catalog result schema names.
     pub fn result_value(&self) -> serde_json::Result<serde_json::Value> {
         match self {

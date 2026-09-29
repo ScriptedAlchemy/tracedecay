@@ -83,10 +83,19 @@ pub enum HostBundleError {
     NativeUpdateRequired,
     #[error("host-native plugin removal is required before this lifecycle can complete")]
     NativeRemovalRequired,
-    #[error(
-        "{host:?} host CLI is unavailable; install the host CLI or add it to PATH before retrying"
-    )]
-    HostCliUnavailable { host: HostKindV1 },
+    /// The host itself is not reachable on this machine; see
+    /// [`tracedecay_domain::errors::HostAbsence`].
+    #[error("{host:?} is {}: {detail}", absence.reason())]
+    HostAbsent {
+        host: HostKindV1,
+        absence: tracedecay_domain::errors::HostAbsence,
+        detail: String,
+    },
+    /// The host integration refused or failed its native registration step.
+    /// The payload is the integration's own diagnosis, typically the host
+    /// CLI's stderr.
+    #[error("host-native registration failed: {0}")]
+    RegistrationFailed(String),
     #[error("bundle manifest schema version is unsupported")]
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]

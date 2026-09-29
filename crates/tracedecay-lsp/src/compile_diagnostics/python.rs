@@ -189,6 +189,15 @@ mod tests {
     fn parse_returns_empty_on_unparseable_input() {
         assert!(parse_pyright_output("not-json", Path::new("/")).is_empty());
         assert!(parse_pyright_output("", Path::new("/")).is_empty());
+        let parseable = r#"{"generalDiagnostics":[{"file":"/src/a.py","severity":"error","message":"boom","range":{"start":{"line":2},"end":{"line":2}}}]}"#;
+        let diags = parse_pyright_output(parseable, Path::new("/"));
+        assert_eq!(
+            diags
+                .iter()
+                .map(|diag| (diag.file.as_str(), diag.line_start, diag.message.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("src/a.py", 3, "boom")]
+        );
     }
 
     #[test]

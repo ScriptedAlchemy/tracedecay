@@ -31,9 +31,11 @@ use tracedecay_mcp::{
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
+use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 
 use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
+use crate::mcp::project_route::mcp_analytics_session_id;
 use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
@@ -330,7 +332,9 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             Ok(result) => result?,
             Err(_elapsed) => return Err(tool_dispatch_deadline_error(tool_name, budget)),
         };
-        completion.code_graph = options.served_code_graph.served();
+        if !completion.result.carries_freshness_verdict() {
+            completion.code_graph = options.served_code_graph.served();
+        }
         Ok(completion)
     })
 }
@@ -363,10 +367,16 @@ async fn compute_project_info(
             let project = admitted_project_authorities(cg, options)?;
             let snapshots = admitted_status_snapshots(options).await;
             let ctx = admitted_tool_context_for(options, &project, &snapshots)?;
+            let session_projection = options
+                .dashboard_session_retrieval_service
+                .as_ref()
+                .and_then(|retrieval| retrieval.projection_serving_status())
+                .unwrap_or_else(|| RefreshWorkerMissing.serving_status());
             portable_info::compute_status(
                 &ctx,
                 &request,
                 options.server_stats.clone(),
+                session_projection,
                 scope_prefix,
                 wait,
                 reached_freshness,
@@ -688,6 +698,34 @@ async fn compute_admin_cli(
     .await
 }
 
+/// Runs the affected tests and records the run in the project session store
+/// against the session the request names.
+async fn compute_run_affected_tests(
+    cg: &TraceDecay,
+    args: Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+    let store = options.registered_project_session_db.clone().ok_or_else(|| {
+        TraceDecayError::project_route(
+            "runtime_mounting",
+            true,
+            "managed test runs are recorded in the project session store, which is still mounting",
+        )
+    })?;
+    let recording = workflow::ManagedTestRunRecording {
+        store,
+        session_id: mcp_analytics_session_id(&args),
+    };
+    workflow::compute_run_affected_tests(
+        cg,
+        admitted_graph_query(options, "file_dependents"),
+        args,
+        recording,
+        options.application_cancellation.clone(),
+    )
+    .await
+}
+
 /// Runs one side-effecting owner operation under the owner's admitted
 /// authorities. The dashboard composes the daemon-owned readers and writers
 /// this owner carries; the test run admits the verified graph to select tests;
@@ -702,13 +740,7 @@ async fn compute_owner_side_effect(
 ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
     let result = match operation {
         ApplicationSurfaceOperation::RunAffectedTests => {
-            return workflow::compute_run_affected_tests(
-                cg,
-                admitted_graph_query(options, "file_dependents"),
-                args,
-                options.application_cancellation.clone(),
-            )
-            .await;
+            return compute_run_affected_tests(cg, args, options).await;
         }
         ApplicationSurfaceOperation::AdminSync => {
             let AdminSyncSurfaceRequestV1 {} =

@@ -437,10 +437,19 @@ mod tests {
         .expect("diagnostic finding");
 
         let wire = serde_json::to_value(finding).expect("serialize finding");
-        assert!(
-            wire.get("remediation").is_none(),
+        let fields: Vec<&str> = wire
+            .as_object()
+            .expect("finding object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            ["coverage", "evidence", "family", "state"],
             "Doctor findings must not expose action references: {wire}"
         );
+        assert_eq!(wire["family"], "configuration");
+        assert_eq!(wire["state"], "degraded");
     }
 
     #[test]

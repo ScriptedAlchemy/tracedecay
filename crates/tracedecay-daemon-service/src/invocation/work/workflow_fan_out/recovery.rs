@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_contracts::{
-    ApplicationContractError, CancellationContext, Deadline, RequestContext, RequestId,
+    ApplicationContractError, ApplicationProblem, CancellationContext, Deadline, RequestContext,
+    RequestId,
 };
 use tracedecay_domain::UtcMicros;
 
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
-
-use super::super::workflow_run_control::workflow_run_storage_problem;
+use super::super::workflow_run_control::{
+    workflow_run_storage_problem, workflow_runtime_unavailable,
+};
 use super::super::{RegisteredWorkRuntime, work_background_context};
 use super::reconcile_workflow_fan_out;
 use tracedecay_contracts::now_micros;
@@ -24,7 +25,7 @@ pub(crate) fn reconcile_active_workflow_fan_out(
     observability_producer: Option<
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     reconcile_active_workflow_fan_out_page(
         registered,
         attempt_processes,
@@ -43,12 +44,11 @@ fn reconcile_active_workflow_fan_out_page(
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
     cursor: Option<&tracedecay_contracts::WorkflowActiveRunRecoveryCursorV1>,
-) -> Result<Option<tracedecay_contracts::WorkflowActiveRunRecoveryCursorV1>, DaemonInvocationProblem>
-{
+) -> Result<Option<tracedecay_contracts::WorkflowActiveRunRecoveryCursorV1>, ApplicationProblem> {
     let services = tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
         &registered.database,
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let registered_authority = tracedecay_domain::WorkAuthority::new(
         registered.grant.scope.project_id.clone(),
         registered.grant.scope.repository_id.clone(),
@@ -56,7 +56,7 @@ fn reconcile_active_workflow_fan_out_page(
         registered.actor.clone(),
         registered.grant.digest.clone(),
     )
-    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    .map_err(|_| workflow_runtime_unavailable())?;
     let page = tracedecay_contracts::WorkflowRunStoragePort::active_projection_page(
         services.effects(),
         &registered_authority,
@@ -74,7 +74,7 @@ fn reconcile_active_workflow_fan_out_page(
             continue;
         };
         let context = work_background_context(registered, identity)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
         reconcile_workflow_fan_out(
             registered,
             &services,
@@ -92,9 +92,9 @@ fn reconcile_active_workflow_fan_out_page(
             &registered_authority,
             cursor,
         )
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+        .map_err(|_| workflow_runtime_unavailable())?;
     if census_page.continuation != page.continuation {
-        return Err(DaemonInvocationProblem::Unavailable);
+        return Err(workflow_runtime_unavailable());
     }
     for projection in census_page.projections {
         let Some(identity) = projection
@@ -104,10 +104,10 @@ fn reconcile_active_workflow_fan_out_page(
             .map(|child| &child.attempt_identity)
             .next()
         else {
-            return Err(DaemonInvocationProblem::Unavailable);
+            return Err(workflow_runtime_unavailable());
         };
         let context = work_background_context(registered, identity)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
         super::super::workflow_census::persist_workflow_fan_out_census(
             registered,
             &services,
@@ -123,7 +123,7 @@ fn reconcile_active_workflow_fan_out_page(
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
@@ -133,7 +133,7 @@ fn resume_work_attempts_for_workflow_recovery(
             stage = "work_application_services",
             "workflow fan-out startup recovery authority failed"
         );
-        DaemonInvocationProblem::Unavailable
+        workflow_runtime_unavailable()
     })?;
     // Restart recovery fences open attempts and retains their uncertain
     // outcome. It does not authorize dispatching an existing identity again.
@@ -150,21 +150,21 @@ fn resume_work_attempts_for_workflow_recovery(
                 stage = "resume_work_attempts",
                 "workflow fan-out startup recovery authority failed"
             );
-            DaemonInvocationProblem::Unavailable
+            workflow_runtime_unavailable()
         })?;
     Ok(())
 }
 
 fn recover_workflow_fan_out_startup(
     registered: &RegisteredWorkRuntime,
-) -> Result<(), DaemonInvocationProblem> {
+) -> Result<(), ApplicationProblem> {
     let context = workflow_fan_out_recovery_context(registered).map_err(|error| {
         tracing::error!(
             ?error,
             stage = "startup_context",
             "workflow fan-out startup recovery authority failed"
         );
-        DaemonInvocationProblem::Unavailable
+        workflow_runtime_unavailable()
     })?;
     resume_work_attempts_for_workflow_recovery(registered, &context)
 }
@@ -207,10 +207,10 @@ impl WorkflowFanOutRecoveryOwnerV1 {
             Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
         >,
         holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
-    ) -> Result<Self, DaemonInvocationProblem> {
+    ) -> Result<Self, ApplicationProblem> {
         let holder_root = project_root
             .canonicalize()
-            .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            .map_err(|_| workflow_runtime_unavailable())?;
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let registered = Arc::new(std::sync::Mutex::new(registered));

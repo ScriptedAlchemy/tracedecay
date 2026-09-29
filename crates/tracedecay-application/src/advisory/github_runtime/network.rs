@@ -28,6 +28,7 @@ use super::{
     GitHubReadNetworkResponseV1, GitHubReadNetworkStatusV1, GitHubReadOnlyNetworkAuthorityV1,
     GitHubRestReadRequestV1, MAX_GITHUB_READ_RESPONSE_BYTES_V1,
 };
+use crate::http_agent::http_agent;
 
 mod stack_network;
 #[cfg(test)]
@@ -839,7 +840,7 @@ impl GitHubReadOnlyClientV1 {
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
+        let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
         Some(Self {
             agent,
             target,
@@ -1358,7 +1359,7 @@ impl GitHubCiReadOnlyClientV1 {
             .https_only(true)
             .max_redirects(0)
             .http_status_as_error(false);
-        let agent: ureq::Agent = super::instrument_github_ureq_agent(builder).build().into();
+        let agent = http_agent(super::instrument_github_ureq_agent(builder).build());
         Some(Self {
             agent,
             target,

@@ -703,3 +703,119 @@ async fn owner_fact_storage_failure_rolls_back_the_entire_transaction() {
         );
     }
 }
+
+#[tokio::test]
+async fn owner_fact_run_resolves_repeats_claims_and_stored_events_within_one_write() {
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-run-resolution").await;
+    let project = "scope:owner-run-resolution";
+    harness
+        .registered
+        .claim_observability_emission(
+            project,
+            "owner:pending",
+            r#"{"owner":"pending"}"#,
+            r#"{"delivery":"pending"}"#,
+        )
+        .await
+        .expect("pending claim");
+    let adopted = harness
+        .registered
+        .append_observability_event(
+            &prepared_delivery(project, "owner:adopted", r#"{"delivery":"adopted"}"#).event,
+        )
+        .await
+        .expect("stored event without an outbox row");
+    harness
+        .registered
+        .append_observability_event(
+            &prepared_delivery(project, "owner:foreign", r#"{"delivery":"foreign"}"#).event,
+        )
+        .await
+        .expect("foreign stored event");
+
+    let run = [
+        owner_write(project, "owner:new", r#"{"owner":"new"}"#),
+        owner_write(project, "owner:new", r#"{"owner":"new"}"#),
+        owner_write(project, "owner:new", r#"{"owner":"changed"}"#),
+        owner_write(project, "owner:pending", r#"{"owner":"pending"}"#),
+        owner_write(project, "owner:pending", r#"{"owner":"changed"}"#),
+        owner_write(project, "owner:adopted", r#"{"owner":"adopted"}"#),
+        owner_write(project, "owner:foreign", r#"{"owner":"foreign"}"#),
+        owner_write(project, "", r#"{"owner":"invalid"}"#),
+    ];
+    let mut prepared = Vec::new();
+    let outcomes = harness
+        .registered
+        .claim_and_settle_observability_emissions(&run, |index| {
+            prepared.push(index);
+            let owner_event_id = run[index].owner_event_id.as_str();
+            let delivery = match owner_event_id {
+                "owner:adopted" => r#"{"delivery":"adopted"}"#.to_owned(),
+                _ => format!(r#"{{"delivery":"{owner_event_id}:run"}}"#),
+            };
+            Ok(prepared_delivery(project, owner_event_id, &delivery))
+        })
+        .await
+        .expect("owner fact run");
+
+    assert_eq!(prepared, vec![0, 5, 6]);
+    let new_id = harness
+        .registered
+        .read_observability_event(project, "owner:new")
+        .await
+        .expect("new lookup")
+        .expect("new delivery")
+        .id;
+    let rejected = |error: &str| ObservabilityOwnerEmissionWriteOutcomeV1::Rejected {
+        error: error.to_owned(),
+    };
+    assert_eq!(
+        outcomes,
+        vec![
+            ObservabilityOwnerEmissionWriteOutcomeV1::Settled {
+                analytics_event_id: new_id,
+            },
+            ObservabilityOwnerEmissionWriteOutcomeV1::Replayed,
+            rejected("observability owner fact conflict"),
+            ObservabilityOwnerEmissionWriteOutcomeV1::Replayed,
+            rejected("observability owner fact conflict"),
+            ObservabilityOwnerEmissionWriteOutcomeV1::Settled {
+                analytics_event_id: adopted,
+            },
+            rejected("observability idempotency conflict"),
+            rejected("invalid observability outbox input"),
+        ]
+    );
+    assert!(matches!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:adopted", r#"{"owner":"adopted"}"#)
+            .await
+            .expect("adopted claim"),
+        Some(ObservabilityEmissionClaimV1::Settled { .. })
+    ));
+    assert!(matches!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:pending", r#"{"owner":"pending"}"#)
+            .await
+            .expect("pending claim"),
+        Some(ObservabilityEmissionClaimV1::Pending { .. })
+    ));
+    assert_eq!(
+        harness
+            .registered
+            .observability_emission_claim(project, "owner:foreign", r#"{"owner":"foreign"}"#)
+            .await
+            .expect("foreign claim"),
+        None
+    );
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some(project), 0)
+            .await
+            .expect("event count"),
+        3
+    );
+}

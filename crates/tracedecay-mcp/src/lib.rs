@@ -78,8 +78,8 @@ pub use context_headings::{
 };
 pub use handlers::{
     decode_primitive_request, effective_path, generic_tool_result, handle_multi_root, handle_work,
-    handle_workflow, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
+    handle_workflow, rendered_tool_result, require_object_args, require_positive_limit,
+    text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
@@ -120,7 +120,7 @@ pub use tracedecay_mcp_catalog::{
     retain_host_available_tool_definitions, tool_defaults_to_markdown,
 };
 pub use workflow::{
-    MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,
-    TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args, libtest_identity,
-    libtest_module_prefix, parse_libtest_output, run_cargo_tests,
+    LibtestReport, MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile,
+    TestRunControl, TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args,
+    libtest_identity, libtest_module_prefix, parse_libtest_output, run_cargo_tests,
 };

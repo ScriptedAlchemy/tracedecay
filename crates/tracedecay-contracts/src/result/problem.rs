@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{CursorBindingMismatchV1, UtcMicros};
 
 use super::{ApplicationProblemDetailV1, CancellationStage, EffectReceipt, EffectTermination};
 use crate::context::{RequestAdmission, RequestContext};
@@ -802,6 +802,28 @@ impl ApplicationProblem {
         }
     }
 
+    /// A continuation cursor this request cannot redeem as presented: the
+    /// caller corrects the request or restarts paging without the cursor.
+    pub fn cursor_refused(mismatch: &CursorBindingMismatchV1) -> Self {
+        Self::cursor_refusal(SafeDiagnostic {
+            code: mismatch.code().to_owned(),
+            message: mismatch.message(),
+        })
+    }
+
+    /// [`Self::cursor_refused`] for a refusal an adapter carried as its
+    /// diagnostic.
+    pub fn cursor_refusal(diagnostic: SafeDiagnostic) -> Self {
+        Self::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![
+                LegalAction::CorrectRequest,
+                LegalAction::RestartWithoutCursor,
+            ],
+        }
+    }
+
     pub fn cancelled(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
         let problem = Self::Cancelled {
             stage,
@@ -872,7 +894,8 @@ impl ApplicationProblem {
     ///
     /// A parked code index cannot answer until the operator applies the
     /// park's remedy, so it is never retried and names reconcile. A stale
-    /// refresh frontier is revalidated from the committed frontier. A lock
+    /// refresh frontier or compare-and-swap precondition is revalidated from
+    /// the committed value. A lock
     /// deadline is capacity: the same request may succeed after a delay. A
     /// diagnostics scope no compiler owns is routed to publishing the
     /// project's own check; a pending producer answers after a delay.
@@ -889,7 +912,8 @@ impl ApplicationProblem {
                 legal_actions: vec![LegalAction::Reconcile],
                 detail: Some(Box::new(detail)),
             },
-            ApplicationProblemDetailV1::StaleRefreshFrontier { .. } => Self::Stale {
+            ApplicationProblemDetailV1::StaleRefreshFrontier { .. }
+            | ApplicationProblemDetailV1::StalePrecondition { .. } => Self::Stale {
                 diagnostic,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],

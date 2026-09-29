@@ -178,10 +178,6 @@ impl AgentIntegration for DevinIntegration {
         uninstall_mcp_if_selected(components, &config_path)
     }
 
-    fn reports_absence_to_doctor(&self) -> bool {
-        true
-    }
-
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
         super::mcp_config_has_tracedecay(&devin_mcp_config_path(home), "mcpServers", load_json_file)
     }
@@ -445,7 +441,13 @@ mod tests {
             project.path(),
         );
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!(
+                "config error: refusing to write project-local config through symlink: {}",
+                project.path().join(".devin").display()
+            )
+        );
         assert!(
             load_json_file(&external_config)
                 .pointer("/mcpServers/tracedecay")

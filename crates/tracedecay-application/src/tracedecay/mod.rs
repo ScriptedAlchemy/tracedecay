@@ -407,7 +407,19 @@ mod tests {
 
     #[test]
     fn project_memory_owner_requires_a_valid_authoritative_layout_id() {
-        assert!(project_memory_owner_from_layout_id(None).is_err());
-        assert!(project_memory_owner_from_layout_id(Some("")).is_err());
+        let Err(missing) = project_memory_owner_from_layout_id(None) else {
+            panic!("a missing layout id must not name a project memory owner");
+        };
+        assert_eq!(
+            missing.to_string(),
+            "config error: active project has no authoritative project_id for memory"
+        );
+        let Err(empty) = project_memory_owner_from_layout_id(Some("")) else {
+            panic!("an empty layout id must not name a project memory owner");
+        };
+        assert_eq!(
+            empty.to_string(),
+            "config error: invalid authoritative project_id for memory: ProjectId must not be empty"
+        );
     }
 }

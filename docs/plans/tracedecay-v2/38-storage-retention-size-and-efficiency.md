@@ -93,14 +93,16 @@ measurements, not inferred table sizes.
    7.2 GiB that no retention pass could reach and no report counted. Scope-root
    reconciliation now closes this: it collects a stranded scope through the same
    journal/quarantine/receipt ordering, only under the maintenance writer lease,
-   and only against one revision-bound, complete liveness proof. That proof joins
-   registered and `gix`-observed worktree scopes, every durable configuration
-   active/rollback vector root, pending/ready/published vector dependencies,
-   exact verified-generation leases, and the durable physical-scope-to-logical-
-   shard binding. Any missing, corrupt, stale, or unreadable authority collects
-   nothing and emits a named degradation. Collection starts only past a
-   seven-day minimum stranding age and never recursively removes anything
-   outside the journaled quarantine path.
+   and only against one liveness proof: the scopes of every worktree `gix`
+   registers for the repository and of every mounted worktree still on disk,
+   derived again immediately before quarantine and required to match. An
+   unreadable authority collects nothing and emits a named degradation. A scope
+   whose recorded checkout root is gone (a removed worktree) is collected on the
+   next full maintenance tick; any other unnamed scope waits out a seven-day
+   minimum stranding age. Collection never recursively removes anything outside
+   the journaled quarantine path, and the shared segments and text artifacts
+   only the collected scope named are swept by the next generation-retention
+   pass.
 
    A second, quieter failure sat beside it: the Doctor and storage-report
    entry points guarded this family with byte budgets (64 MiB and 32 MiB) that
@@ -230,7 +232,21 @@ measurements, not inferred table sizes.
   quarantine, and durable receipt, with crash replay on the next pass. It runs
   from the daemon maintenance cadence and semantic-runtime publication, under a
   lease and with the vector inventory pinned before any sweep. Doctor and the
-  storage report observe its state but never trigger a sweep.
+  storage report observe its state but never trigger a sweep. (Amended
+  2026-09-28, #2400/#2401.) Every registered project's scopes that no mounted
+  graph owns are a unit of the maintenance tick too, so a project nothing has
+  opened since a restart is collected within one cadence; its graph-replay
+  releases wait in the durable queue for the next mount. One fully verified
+  plan batches up to 32 superseded generations, so a backlog drains in
+  batch-count passes (measured on tree-sitter: 8 generations and their 8 text
+  artifacts, 167 MB, in two ticks one minute apart, unmounted). Generation and
+  text-artifact receipts are pruned once no pending journal or queued release
+  names them. Graph-replay tombstones stay for the life of the store, because
+  append and compare-and-swap refuse a retired key through them; they cost
+  about 2.4 KB per retired replay. The storage report sizes each store by
+  family (graph database, sealed graph, text artifacts, generation artifacts,
+  sessions, other) and lists the backlog against the daemon's resolved
+  protection set.
 - Code-index *scope-root* reconciliation is implemented and engaged. It is the
   only pass that reaches a scope directory whose canonical project root no
   longer exists. It runs beside generation retention on the maintenance cadence,

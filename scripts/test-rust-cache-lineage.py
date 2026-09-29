@@ -59,6 +59,10 @@ class RustCacheKeyLineageTests(unittest.TestCase):
             )
         )
         self.assertIsNone(self.lineage.lineage_of("v0-rust-slice-tests-Linux-x64-a68045c9"))
+        self.assertEqual(
+            self.lineage.lineage_of("v0-rust-slice-tests-Linux-x64-a68045c9-6447760f"),
+            "slice-tests-Linux-x64",
+        )
 
 
 class DropPrefixRestoredArtifactsTests(unittest.TestCase):

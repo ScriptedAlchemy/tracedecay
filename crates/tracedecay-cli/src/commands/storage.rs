@@ -391,20 +391,45 @@ mod wipe_safety_tests {
             .last()
             .expect("absolute path has a filesystem root");
 
-        for (candidate, home) in [
-            (Path::new("relative-profile"), None),
-            (profile.as_path(), Some(profile.as_path())),
+        let parent = profile.parent().expect("temporary profile has a parent");
+        for (candidate, home, expected) in [
             (
-                profile.parent().expect("temporary profile has a parent"),
-                Some(profile.as_path()),
+                Path::new("relative-profile"),
+                None,
+                "config error: complete profile wipe requires an absolute profile root, got \
+                 'relative-profile'"
+                    .to_owned(),
             ),
-            (filesystem_root, None),
+            (
+                profile.as_path(),
+                Some(profile.as_path()),
+                format!(
+                    "config error: complete profile wipe root '{}' must not be the user home or \
+                     one of its ancestors",
+                    profile.display()
+                ),
+            ),
+            (
+                parent,
+                Some(profile.as_path()),
+                format!(
+                    "config error: complete profile wipe root '{}' must not be the user home or \
+                     one of its ancestors",
+                    parent.display()
+                ),
+            ),
+            (
+                filesystem_root,
+                None,
+                format!(
+                    "config error: complete profile wipe root '{}' must be an exact canonical \
+                     non-filesystem-root directory",
+                    filesystem_root.display()
+                ),
+            ),
         ] {
-            assert!(
-                validate_complete_wipe_profile_root(candidate, home).is_err(),
-                "dangerous complete-wipe root was admitted: {}",
-                candidate.display()
-            );
+            let error = validate_complete_wipe_profile_root(candidate, home).unwrap_err();
+            assert_eq!(error.to_string(), expected);
         }
     }
 
@@ -421,9 +446,24 @@ mod wipe_safety_tests {
         symlink(&profile, &profile_link).expect("create profile symlink");
         symlink(parent.path().join("missing"), &dangling).expect("create dangling symlink");
 
-        assert!(validate_complete_wipe_profile_root(&profile_link, None).is_err());
-        assert!(
-            verify_store_path_absent(&dangling).is_err(),
+        assert_eq!(
+            validate_complete_wipe_profile_root(&profile_link, None)
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "config error: complete profile wipe root '{}' must be a regular directory, not a \
+                 symlink",
+                profile_link.display()
+            )
+        );
+        validate_complete_wipe_profile_root(&profile, None)
+            .expect("the symlink target is a real root");
+        assert_eq!(
+            verify_store_path_absent(&dangling).unwrap_err().to_string(),
+            format!(
+                "config error: store removal did not remove expected namespace entry '{}'",
+                dangling.display()
+            ),
             "a dangling symlink remains a namespace entry"
         );
     }

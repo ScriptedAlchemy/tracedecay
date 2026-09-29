@@ -416,27 +416,6 @@ fn doctor_warns_when_nothing_is_staged_or_installed() {
 
 #[cfg(unix)]
 #[test]
-fn doctor_only_treats_an_absent_gemini_cli_as_unobserved_state() {
-    let home = tempfile::tempdir().unwrap();
-    let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path =
-        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path_dir.path());
-
-    assert!(
-        host_reported_extensions(home.path())
-            .expect("an absent Gemini binary is the one optional host-report state")
-            .is_none()
-    );
-
-    let mut dc = DoctorCounters::new();
-    doctor_check_host_reported_extensions(&mut dc, home.path());
-
-    assert_eq!(dc.issues, 0);
-    assert_eq!(dc.warnings, 0);
-}
-
-#[cfg(unix)]
-#[test]
 fn doctor_fails_when_a_present_gemini_cli_is_not_executable() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
