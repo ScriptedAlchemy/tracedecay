@@ -9,7 +9,7 @@
 //! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use ignore::overrides::{Override, OverrideBuilder};
@@ -22,67 +22,6 @@ pub struct SourceWalkError {
     pub message: String,
 }
 
-struct GeneratedDirScope {
-    literal_prefix: PathBuf,
-    may_match_descendants: bool,
-}
-
-impl GeneratedDirScope {
-    fn from_path_glob(path_glob: &str) -> Option<Self> {
-        let path_glob = path_glob.trim();
-        if path_glob.is_empty() || path_glob.starts_with('!') {
-            return None;
-        }
-        let segments = path_glob
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        let matches_basename_at_any_depth = !path_glob.contains('/');
-        let wildcard_start = segments
-            .iter()
-            .position(|segment| {
-                segment.contains('*')
-                    || segment.contains('?')
-                    || segment.contains('[')
-                    || segment.contains('{')
-            })
-            .unwrap_or(segments.len());
-        let literal_prefix = if matches_basename_at_any_depth {
-            PathBuf::new()
-        } else {
-            segments[..wildcard_start]
-                .iter()
-                .fold(PathBuf::new(), |mut prefix, segment| {
-                    prefix.push(segment);
-                    prefix
-                })
-        };
-        let wildcard_suffix = &segments[wildcard_start..];
-        let may_match_descendants = matches_basename_at_any_depth
-            || wildcard_suffix
-                .iter()
-                .enumerate()
-                .any(|(index, segment)| index > 0 || *segment == "**");
-        Some(Self {
-            literal_prefix,
-            may_match_descendants,
-        })
-    }
-
-    fn allows(&self, project_root: &Path, path: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(project_root) else {
-            return false;
-        };
-        if self.literal_prefix.as_os_str().is_empty() {
-            return self.may_match_descendants;
-        }
-        self.literal_prefix.starts_with(relative)
-            || relative == self.literal_prefix
-            || (self.may_match_descendants && relative.starts_with(&self.literal_prefix))
-    }
-}
-
 #[hotpath::measure(label = "code_index.capture.source_walk")]
 pub fn source_walk(
     project_root: &Path,
@@ -90,11 +29,6 @@ pub fn source_walk(
     path_policy: &IndexPathPolicyV1,
 ) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
-    let has_positive_override = overrides
-        .as_ref()
-        .is_some_and(|overrides| overrides.num_whitelists() > 0);
-    let generated_dir_overrides = overrides.clone();
-    let generated_dir_scope = path_glob.and_then(GeneratedDirScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
     let path_policy = path_policy.clone();
 
@@ -119,15 +53,8 @@ pub fn source_walk(
             };
             let relative = forward_slash_path(relative);
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            let explicitly_requested = has_positive_override
-                && (generated_dir_overrides.as_ref().is_some_and(|overrides| {
-                    overrides.matched(entry.path(), is_dir).is_whitelist()
-                }) || (is_dir
-                    && generated_dir_scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.allows(&filter_root, entry.path()))));
             if !is_dir {
-                return explicitly_requested || !path_policy.excludes(&relative);
+                return !path_policy.excludes(&relative);
             }
             // A directory with its own Git authority is another project, not
             // source owned by this one. This covers linked worktrees (`.git`
@@ -138,7 +65,7 @@ pub fn source_walk(
             if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
                 return false;
             }
-            explicitly_requested || !path_policy.excludes_directory(&relative)
+            !path_policy.excludes_directory(&relative)
         });
     if let Some(overrides) = overrides {
         builder.overrides(overrides);
@@ -238,6 +165,36 @@ mod tests {
             !files.contains(&PathBuf::from("nested-clone/foreign.rs")),
             "a nested clone must not be indexed as parent source"
         );
+    }
+
+    #[test]
+    fn explicit_glob_cannot_read_excluded_paths_without_policy_include() {
+        let root = TempDir::new().expect("project root");
+        fs::create_dir(root.path().join("secrets")).expect("secret directory");
+        fs::write(root.path().join("secrets/token.rs"), "secret_token\n").expect("secret source");
+        let walk = |policy: &IndexPathPolicyV1| {
+            source_walk(root.path(), Some("secrets/**"), policy)
+                .expect("source walk")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| {
+                    entry
+                        .path()
+                        .strip_prefix(root.path())
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect::<Vec<_>>()
+        };
+        let excluded = IndexPathPolicyV1::new(vec!["secrets/**".into()], vec![]).unwrap();
+        assert!(
+            walk(&excluded).is_empty(),
+            "path_glob cannot bypass a configured exclusion"
+        );
+        let included =
+            IndexPathPolicyV1::new(vec!["secrets/**".into()], vec!["secrets/token.rs".into()])
+                .unwrap();
+        assert_eq!(walk(&included), vec![PathBuf::from("secrets/token.rs")]);
     }
 
     #[test]

@@ -62,8 +62,8 @@ pub async fn compute_analysis_report(
     // as input would answer the question with the very source under suspicion.
     let project_root = ctx.project_root();
     if operation == ApplicationSurfaceOperation::UnmountedFiles {
-        let path_policy = ctx.index_path_policy().await?;
-        return compute_unmounted_files(project_root, &path_policy, args, scope_prefix).await;
+        return compute_unmounted_files(project_root, ctx.index_path_policy(), args, scope_prefix)
+            .await;
     }
     let graph = open(read("health_read")?).await?;
     match operation {

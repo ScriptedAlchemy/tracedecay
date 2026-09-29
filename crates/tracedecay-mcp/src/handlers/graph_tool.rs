@@ -137,7 +137,7 @@ pub async fn compute_graph_tool(
             };
             compute_grep(
                 ctx.project_root(),
-                &ctx.index_path_policy().await?,
+                ctx.index_path_policy(),
                 graph.as_ref(),
                 args,
                 scope_prefix,
@@ -149,7 +149,7 @@ pub async fn compute_graph_tool(
         ApplicationSurfaceOperation::AstGrepSearch => {
             compute_ast_grep_search(
                 ctx.project_root(),
-                &ctx.index_path_policy().await?,
+                ctx.index_path_policy(),
                 args,
                 scope_prefix,
                 ctx.deadline().cloned(),
