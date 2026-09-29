@@ -18,8 +18,8 @@ use super::{
     QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
     cold_mount_open_controls, cold_mount_post_check_controls, graph_decode_gate,
-    published_text_projection_gate, query_admission_controls, serving_swap_gate,
-    unique_mounted_for_scope, wait_notified_if_unset,
+    published_text_projection_completion_gate, published_text_projection_gate,
+    query_admission_controls, serving_swap_gate, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -50,6 +50,39 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) async fn wait_for_published_text_projection_gate(project_root: &Path) {
         let gate = published_text_projection_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next published build task for `project_root` between its
+    /// completion wake and its exit. The first receiver resolves once the task
+    /// waits there; sending on the returned sender releases it.
+    #[cfg(test)]
+    pub async fn pause_next_published_text_projection_completion(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let replaced = published_text_projection_completion_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, WorkerStepGateV1 { entered, release });
+        assert!(
+            replaced.is_none(),
+            "one published text projection completion gate per worktree"
+        );
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_published_text_projection_completion_gate(project_root: &Path) {
+        let gate = published_text_projection_completion_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(project_root);

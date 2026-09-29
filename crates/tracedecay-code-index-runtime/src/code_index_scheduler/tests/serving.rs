@@ -66,7 +66,8 @@ use super::{
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, settled_owner_with_idle_admission, test_project_id,
     wait_for_live_complete_generation, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_settled_owner,
+    wait_for_queryable_text_generation_change, wait_for_settled_owner, wait_for_worker_phase,
+    wait_until_serving_seat,
 };
 use crate::{
     code_index::production::{
@@ -76,7 +77,8 @@ use crate::{
     code_index::provider::GenerationTestAttributionJoinReadPort,
     code_index_scheduler::{
         CodeIndexBuildProgressStateV1, CodeIndexCommittedProgressSampleV1,
-        CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
+        CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
+        SharedCodeIndexBytePoolV1,
     },
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -6775,5 +6777,121 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .any(|record| record.occurrence.path == "src/file_0000.rs"),
         "artifact-backed lexical hydration returns the canonical source path"
     );
+    registry.shutdown().await;
+}
+
+/// The held build's completion wake reaches the worker before the build's
+/// task exits. A deferred edit woken by it must still seal: the worker reads
+/// the build as finished from the wake, not from the task's `JoinHandle`,
+/// which only turns finished after the task's last statement. Reading the
+/// handle instead parks the edit with no further wake to recover it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_edit_seals_when_completion_wake_precedes_task_exit() {
+    use super::super::registry::PUBLISHED_PROJECTION_ABORT_BUDGET_V1;
+
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let first = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let mut previous_id = first.generation().manifest().generation_id.clone();
+    // Hold every build until an edit is deferred instead of aborting the held
+    // build. Each held build keeps its release; dropping one releases it, and
+    // an aborted build's sender is inert.
+    let mut releases = Vec::new();
+    let mut deferred = false;
+    for edit in 0..=PUBLISHED_PROJECTION_ABORT_BUDGET_V1 + 1 {
+        let (projection_started, release) = registry
+            .pause_next_published_text_projection(canonical_root.clone())
+            .await;
+        releases.push(release);
+        fixture.edit(
+            "src/lib.rs",
+            &format!("pub fn alpha() -> u32 {{ {} }}\n", edit + 2),
+        );
+        assert!(
+            matches!(
+                registry
+                    .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+                    .await,
+                super::super::CodeIndexDemandAdmissionV1::Queued
+            ),
+            "edit {edit} reaches the worker"
+        );
+        if tokio::time::timeout(Duration::from_secs(10), projection_started)
+            .await
+            .is_err()
+        {
+            // This edit waits for the held build: its own build never
+            // started, so the gate armed for it must not hold that build later.
+            drop(releases.pop());
+            deferred = true;
+            break;
+        }
+        let sealed = registry
+            .sealed_publication_identity(fixture.path(), Some(&previous_id))
+            .await
+            .expect("sealed identity read")
+            .expect("an edit within the abort budget seals while the previous build is held");
+        previous_id = sealed.generation_id().clone();
+    }
+    assert!(deferred, "an edit past the abort budget is deferred");
+
+    // Hold the held build's task between its completion wake and its exit, so
+    // the worker handles the wake while the task's `JoinHandle` still reports
+    // it running.
+    let (completion_reached, release_completion) = registry
+        .pause_next_published_text_projection_completion(canonical_root.clone())
+        .await;
+    let _ = releases
+        .pop()
+        .expect("the held build has a release")
+        .send(());
+    tokio::time::timeout(Duration::from_secs(10), completion_reached)
+        .await
+        .expect("the released build did not reach its completion wake")
+        .expect("completion gate stays armed");
+    // Let the worker consume the wake before the task may exit. It parks
+    // either after sealing the deferred edit or after deferring it again.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked),
+    )
+    .await;
+    let _ = release_completion.send(());
+
+    let sealed = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        Duration::from_secs(30),
+        || async {
+            registry
+                .sealed_publication_identity(fixture.path(), Some(&previous_id))
+                .await
+                .expect("sealed identity read")
+        },
+    )
+    .await;
+    // The deferred edit's generation becomes the lexical-ready one.
+    wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        super::SERVING_SEAT_FAILURE_CEILING,
+        || async {
+            registry
+                .latest_text_serving_for_root(fixture.path())
+                .await
+                .filter(|text| &text.metadata().manifest().generation_id == sealed.generation_id())
+        },
+    )
+    .await;
     registry.shutdown().await;
 }

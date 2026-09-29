@@ -688,6 +688,16 @@ impl CodeIndexSchedulerRegistryV1 {
             // the budget bounds how long edits can keep lexical serving from
             // converging.
             let mut published_projection_aborts: u32 = 0;
+            // Set by the detached build's task once its outcome is decided,
+            // after its completion wake is stamped pending and before the
+            // permit is posted. `JoinHandle::is_finished` turns true only
+            // after the task returns, so a worker woken by that wake could
+            // still read the build as running, defer the edit that woke it
+            // and park; the task then exits without another wake and the
+            // edit stays pending until an unrelated event. The handle still
+            // counts: a task that panicked or was aborted before the store
+            // never sets the flag.
+            let mut published_projection_finished = Arc::new(AtomicBool::new(false));
             loop {
                 let notified = worker_wake.notified();
                 tokio::pin!(notified);
@@ -1218,9 +1228,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // wakes it; the edit then seals against a published parent.
                 if published_projection_detached
                     && arrival.wake_micros().is_some()
-                    && retained_text_projection
-                        .as_ref()
-                        .is_some_and(|projection| !projection.is_finished())
+                    && retained_text_projection.as_ref().is_some_and(|projection| {
+                        !published_projection_finished.load(Ordering::Acquire)
+                            && !projection.is_finished()
+                    })
                 {
                     if published_projection_aborts >= PUBLISHED_PROJECTION_ABORT_BUDGET_V1 {
                         tracing::info!(
@@ -1469,7 +1480,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         if published_projection_detached {
                             // A finished build already published its artifact;
                             // only a running one counts against the budget.
-                            if previous_projection.is_finished() {
+                            if published_projection_finished.load(Ordering::Acquire)
+                                || previous_projection.is_finished()
+                            {
                                 published_projection_aborts = 0;
                             } else {
                                 published_projection_aborts += 1;
@@ -1581,6 +1594,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         let projection_memory_retry = Arc::clone(&worker_memory_retry);
                         #[cfg(test)]
                         let project_root = worker_project_root.clone();
+                        published_projection_finished = Arc::new(AtomicBool::new(false));
+                        let projection_finished = Arc::clone(&published_projection_finished);
                         retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             let outcome = Self::drive_text_projection(
@@ -1590,27 +1605,36 @@ impl CodeIndexSchedulerRegistryV1 {
                                 None,
                                 None,
                                 #[cfg(test)]
-                                project_root,
+                                project_root.clone(),
                             )
                             .await;
                             // Source verification and the decoded seat stay on the
                             // worker, which observes this outcome before it
                             // swaps. The wake is what brings a pass that
-                            // already moved on back to that observation.
+                            // already moved on back to that observation. Slot,
+                            // then flag, then permit: a worker that reads the
+                            // flag mid-pass sees the wake already pending, and
+                            // one the permit wakes reads the build as done even
+                            // if this task has not exited.
                             match outcome {
                                 PublishedTextProjectionOutcomeV1::Finished
                                 | PublishedTextProjectionOutcomeV1::Unfinished => {
-                                    Self::note_worker_continuation(
-                                        &projection_pending_wake,
-                                        &projection_wake,
-                                    );
+                                    Self::stamp_worker_continuation(&projection_pending_wake);
+                                    projection_finished.store(true, Ordering::Release);
+                                    projection_wake.notify_one();
                                 }
                                 PublishedTextProjectionOutcomeV1::WaitingForMemory => {
+                                    projection_finished.store(true, Ordering::Release);
                                     projection_memory_retry
                                         .schedule(&projection_pending_wake, &projection_wake);
                                 }
-                                PublishedTextProjectionOutcomeV1::Shutdown => {}
+                                PublishedTextProjectionOutcomeV1::Shutdown => {
+                                    projection_finished.store(true, Ordering::Release);
+                                }
                             }
+                            #[cfg(test)]
+                            Self::wait_for_published_text_projection_completion_gate(&project_root)
+                                .await;
                             outcome
                         }));
                         retained_projection_successor_only = false;
@@ -2536,9 +2560,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // seated in this pass. One still running must not be joined:
                 // that join is what kept the next edit behind the artifact.
                 if published_projection_detached
-                    && retained_text_projection
-                        .as_ref()
-                        .is_some_and(tokio::task::JoinHandle::is_finished)
+                    && retained_text_projection.as_ref().is_some_and(|projection| {
+                        published_projection_finished.load(Ordering::Acquire)
+                            || projection.is_finished()
+                    })
                 {
                     published_text_projection = retained_text_projection.take();
                     published_projection_detached = false;
@@ -3265,9 +3290,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // held the next reconcile for the whole artifact. Leave the
                 // task running; its completion already wakes the seat pass.
                 if published_projection_detached {
-                    let finished = retained_text_projection
-                        .as_ref()
-                        .is_some_and(tokio::task::JoinHandle::is_finished);
+                    let finished = retained_text_projection.as_ref().is_some_and(|projection| {
+                        published_projection_finished.load(Ordering::Acquire)
+                            || projection.is_finished()
+                    });
                     if finished {
                         drop(retained_text_projection.take());
                         published_projection_detached = false;
