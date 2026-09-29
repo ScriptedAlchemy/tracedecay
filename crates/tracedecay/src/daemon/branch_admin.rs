@@ -2187,15 +2187,7 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
-        let log_path = temp.path().join("bootstrap.log");
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(Arc::new(std::fs::File::create(&log_path).unwrap()))
-            .finish();
-        // This current-thread runtime also polls the spawned bootstrap worker
-        // under the ordinary daemon WARN filter.
-        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
         // The profile identity root must be a directory `load_or_create`
         // creates (and restricts to 0700) itself; a umask-default tempdir
         // trips the fail-closed private-root validation.
@@ -2250,7 +2242,7 @@ mod tests {
         );
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
-        let log = std::fs::read_to_string(&log_path).unwrap();
+        let log = capture.text();
         assert!(
             log.contains("profile_host_admission_bootstrap_stopped"),
             "{log}"
