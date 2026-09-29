@@ -82,7 +82,11 @@ use crate::{
             PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
             code_lexical_artifact_content_key,
         },
-        ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
+        ports::{
+            RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
+            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+        },
     },
 };
 
@@ -90,12 +94,6 @@ use super::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
 };
 
-/// Page bounds for streaming one sealed generation into the durable lexical
-/// text artifact. One page is one bounded unit of background build progress.
-pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
-const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
-const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1: usize = 64;
