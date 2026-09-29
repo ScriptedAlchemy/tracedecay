@@ -106,7 +106,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// re-deriving repository/worktree identity themselves.
     pub async fn serving_code_scope(&self, project_root: &Path) -> Option<CodeIndexServingScopeV1> {
         let project_root = canonical_existing_identity(project_root).ok()?;
-        let (repository_id, worktree_id, shutting_down, serving) = {
+        let (repository_id, worktree_id, shutting_down, serving, graph_generation) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
@@ -114,6 +114,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.serving_generation),
+                worktree.graph_activation.seated_graph_generation(),
             )
         };
         let serving_generation = serving
@@ -126,6 +127,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             shutting_down,
             serving_generation,
+            graph_generation,
         })
     }
 

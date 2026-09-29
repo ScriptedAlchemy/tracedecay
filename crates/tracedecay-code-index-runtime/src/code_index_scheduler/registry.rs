@@ -620,6 +620,9 @@ pub struct CodeIndexServingScopeV1 {
     pub worktree_id: WorktreeId,
     pub shutting_down: Arc<AtomicBool>,
     pub serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
+    /// The generation whose durable graph the worktree last seated, which
+    /// the serving slots stop naming once a newer text generation seats.
+    pub graph_generation: Option<CodeGenerationId>,
 }
 
 /// Mounted scope identity without consulting either serving-generation seat.

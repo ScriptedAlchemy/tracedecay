@@ -637,10 +637,14 @@ async fn serving_generation_pins(
     project_root: &Path,
 ) -> std::collections::BTreeSet<tracedecay_domain::CodeGenerationId> {
     let mut pins = std::collections::BTreeSet::new();
-    if let Some(scope) = schedulers.serving_code_scope(project_root).await
-        && let Some(serving) = scope.serving_generation
-    {
-        pins.insert(serving.manifest().generation_id.clone());
+    if let Some(scope) = schedulers.serving_code_scope(project_root).await {
+        if let Some(serving) = scope.serving_generation {
+            pins.insert(serving.manifest().generation_id.clone());
+        }
+        // The seated graph outlives both serving slots across a refresh: the
+        // successor's graph builds over its sealed store, so collecting it
+        // first turns an incremental publication into a full rebuild.
+        pins.extend(scope.graph_generation);
     }
     // A clean restart whose retained revision-7 head recovered serves through
     // the text projection and never seats a second copy of its sealed

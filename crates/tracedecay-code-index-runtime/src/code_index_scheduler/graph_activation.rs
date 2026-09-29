@@ -1,9 +1,9 @@
 use std::sync::{
-    Arc,
+    Arc, PoisonError, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
-use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix};
+use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_graph_db::GraphDbError;
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
@@ -320,6 +320,11 @@ pub enum CodeGraphActivationAuthorityV1 {
         runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         policy: Arc<AtomicBool>,
+        /// The generation whose durable graph this worktree last seated or
+        /// published. It stays a retention root until a successor graph
+        /// replaces it: the next refresh builds over its sealed graph, and
+        /// a yielded engine reopens from it.
+        seated: Arc<RwLock<Option<CodeGenerationId>>>,
     },
     #[cfg(any(test, feature = "test-helpers"))]
     Memory { policy: Arc<AtomicBool> },
@@ -363,6 +368,22 @@ impl CodeGraphActivationAuthorityV1 {
 
     pub fn policy(&self) -> CodeGraphActivationPolicyV1 {
         CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
+    }
+
+    /// The generation whose durable graph this worktree last seated.
+    pub fn seated_graph_generation(&self) -> Option<CodeGenerationId> {
+        match self {
+            Self::Persistent { seated, .. } => seated
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            #[cfg(any(test, feature = "test-helpers"))]
+            Self::Memory { .. } => None,
+        }
+    }
+
+    fn record_seated(seated: &RwLock<Option<CodeGenerationId>>, generation: CodeGenerationId) {
+        *seated.write().unwrap_or_else(PoisonError::into_inner) = Some(generation);
     }
 
     /// Validate and seat an already-published revision-7 graph directly from
@@ -430,6 +451,7 @@ impl CodeGraphActivationAuthorityV1 {
             Self::Persistent {
                 runtime,
                 project_database,
+                seated,
                 ..
             } => {
                 let generation_id = latest.metadata().manifest().generation_id.clone();
@@ -439,7 +461,7 @@ impl CodeGraphActivationAuthorityV1 {
                         repository_id.clone(),
                         worktree_id.clone(),
                         latest.metadata().snapshot().reference.clone(),
-                        generation_id,
+                        generation_id.clone(),
                         Arc::clone(project_database),
                         replay_binding,
                     ),
@@ -469,6 +491,11 @@ impl CodeGraphActivationAuthorityV1 {
                             );
                         }
                     }));
+                }
+                // A historical generation read seats beside the live graph
+                // and never replaces it.
+                if require_current_head {
+                    Self::record_seated(seated, generation_id);
                 }
                 Ok(true)
             }
@@ -502,6 +529,7 @@ impl CodeGraphActivationAuthorityV1 {
             Self::Persistent {
                 runtime,
                 project_database,
+                seated,
                 ..
             } => {
                 let retained = hotpath::future!(
@@ -529,6 +557,7 @@ impl CodeGraphActivationAuthorityV1 {
                 })?
                 .map_err(CodeGraphProjectionError::from)
                 .inspect_err(|error| refuse_spent_publication_budget(latest, error))?;
+                Self::record_seated(seated, latest.metadata().manifest().generation_id.clone());
                 Ok(true)
             }
             #[cfg(any(test, feature = "test-helpers"))]
@@ -560,6 +589,7 @@ impl CodeGraphActivationAuthorityV1 {
             Self::Persistent {
                 runtime,
                 project_database,
+                seated,
                 ..
             } => {
                 let generation_id = latest.generation().manifest().generation_id.clone();
@@ -569,7 +599,7 @@ impl CodeGraphActivationAuthorityV1 {
                         repository_id.clone(),
                         worktree_id.clone(),
                         latest.generation().snapshot().reference.clone(),
-                        generation_id,
+                        generation_id.clone(),
                         Arc::clone(project_database),
                         replay_binding,
                     ),
@@ -596,6 +626,7 @@ impl CodeGraphActivationAuthorityV1 {
                         }
                     }));
                 }
+                Self::record_seated(seated, generation_id);
                 Ok(())
             }
             #[cfg(any(test, feature = "test-helpers"))]

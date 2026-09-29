@@ -196,6 +196,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 runtime: graph_runtime,
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
+                seated: Arc::default(),
             },
             path_policy,
         )
