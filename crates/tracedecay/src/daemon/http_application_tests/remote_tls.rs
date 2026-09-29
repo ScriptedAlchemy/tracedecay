@@ -1566,29 +1566,22 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
             .expect("bind Remote Brain TLS egress service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
 
-    // The 5 s idle deadlines must not race 128 handshakes on a loaded host:
-    // paused time advances only once every task waits, so the bounds below
-    // catch a stall rather than host scheduling.
-    tokio::time::pause();
-    let mut peer_tasks = Vec::with_capacity(128);
-    for _ in 0..128 {
-        let certificate = certificate.clone();
-        peer_tasks.push(tokio::spawn(async move {
-            let mut peer = remote_tls_connect(endpoint, &certificate).await;
-            peer.write_all(b"GET /remote/egress HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .await
-                .expect("request large TLS response");
-            peer.flush().await.expect("flush large TLS request");
-            peer
-        }));
-    }
-    tokio::time::timeout(std::time::Duration::from_secs(2), handler_barrier.wait())
-        .await
-        .expect("every large-response handler must reach the egress barrier");
+    // One peer at a time finishes its handshake and request right after its
+    // accept, so no connection waits out the 5 s request-read deadlines
+    // behind the other 127 handshakes on a loaded host.
     let mut non_reading_peers = Vec::with_capacity(128);
-    for task in peer_tasks {
-        non_reading_peers.push(task.await.expect("join non-reading TLS peer"));
+    for _ in 0..128 {
+        let mut peer = remote_tls_connect(endpoint, &certificate).await;
+        peer.write_all(b"GET /remote/egress HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request large TLS response");
+        peer.flush().await.expect("flush large TLS request");
+        non_reading_peers.push(peer);
     }
+    // Egress starts when this test joins the handler barrier. Pausing at the
+    // release leaves the 5 s write-idle deadlines to the sleeps below.
+    handler_barrier.wait().await;
+    tokio::time::pause();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let snapshot = service
