@@ -213,6 +213,15 @@ pub async fn upsert_payload_metadata(
         ],
     )
     .await?;
+    // A reference is being written to this payload. Clearing its GC mark in
+    // the same transaction is what lets payload GC read its reference closure
+    // outside its write transaction: GC deletes only payloads whose
+    // unreferenced mark survived into that transaction.
+    conn.execute(
+        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
+        params![payload.payload_ref.as_str()],
+    )
+    .await?;
     let mut rows = conn
         .query(
             "SELECT provider, session_id, message_id, kind, content_hash,

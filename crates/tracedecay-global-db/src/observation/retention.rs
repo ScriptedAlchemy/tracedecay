@@ -79,7 +79,7 @@ use tracedecay_store::observation::ObservationCoverageV1;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::{
-    Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
+    Database, DatabaseWriteTransaction,
     engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
 
@@ -142,13 +142,6 @@ pub use restore::replay_current_release_state_for_restore;
 
 fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDecayError {
     TraceDecayError::database_operation(OPERATION, source)
-}
-
-fn require_apply_transaction<T>(transaction: Option<T>, message: &'static str) -> Result<T> {
-    transaction.ok_or_else(|| TraceDecayError::Database {
-        operation: OPERATION.to_string(),
-        message: message.to_string(),
-    })
 }
 
 /// Per-table retention windows for the observation evidence stores. Released
@@ -278,14 +271,6 @@ pub struct ObservationRetentionReport {
     /// Superseded append-only cursor-advance receipts reclaimed by the
     /// daemon-authorized maintenance transaction.
     pub cursor_advances_reclaimed: ObservationRetentionPhaseReport,
-    /// Count of `retrieval_anchors` whose `anchor_json` still carries a payload
-    /// (not yet released), before/after the run.
-    pub anchor_payloads_before: u64,
-    pub anchor_payloads_after: u64,
-    /// Count of `observations` whose `observation_json` still carries a payload,
-    /// before/after the run.
-    pub observation_payloads_before: u64,
-    pub observation_payloads_after: u64,
     pub cursor_advances_before: u64,
     pub cursor_advances_after: u64,
     /// Database `PRAGMA freelist_count` before/after (freed pages are the
@@ -343,41 +328,6 @@ async fn row_count(conn: &(impl QueryExecutor + ?Sized), sql: &str) -> Result<u6
     query_u64(conn, sql, ()).await
 }
 
-/// Count of rows in `table` whose `column` still carries a live payload (i.e.
-/// has not been rewritten to a `{"__retention_released": …}` marker), optionally
-/// scoped through an anchor join to a projection generation.
-async fn live_payload_count(
-    conn: &(impl QueryExecutor + ?Sized),
-    sql: &str,
-    generation: Option<&str>,
-) -> Result<u64> {
-    query_u64(conn, sql, params![opt_text(generation)]).await
-}
-
-// The release passes write the marker consts verbatim (and the restore scan
-// matches them exactly), so a direct string comparison is the released test,
-// no JSON parse of every multi-KB live payload.
-fn anchor_payload_count_sql() -> String {
-    format!(
-        "SELECT COUNT(*) FROM retrieval_anchors a
-         WHERE (?1 IS NULL OR a.projection_generation = ?1)
-           AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'"
-    )
-}
-
-fn observation_payload_count_sql() -> String {
-    format!(
-        "SELECT COUNT(*) FROM observations o
-         WHERE (?1 IS NULL OR EXISTS (
-             SELECT 1 FROM observation_retrieval_anchors b
-             JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
-             WHERE b.observation_id = o.observation_id
-               AND a.projection_generation = ?1
-         ))
-           AND o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'"
-    )
-}
-
 const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
 
 /// `generation` scopes every pass to a single `projection_generation` (`None`
@@ -393,10 +343,6 @@ pub async fn run_observation_retention(
 ) -> Result<ObservationRetentionReport> {
     crate::hotpath_observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
-    let anchor_payloads_before =
-        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
-    let observation_payloads_before =
-        live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
     let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
     let freelist_before = pragma_u64(&reader, "freelist_count").await?;
     let page_count_before = pragma_u64(&reader, "page_count").await?;
@@ -410,10 +356,6 @@ pub async fn run_observation_retention(
         observations_released: ObservationRetentionPhaseReport::default(),
         provenance_released: ObservationRetentionPhaseReport::default(),
         cursor_advances_reclaimed: ObservationRetentionPhaseReport::default(),
-        anchor_payloads_before,
-        anchor_payloads_after: anchor_payloads_before,
-        observation_payloads_before,
-        observation_payloads_after: observation_payloads_before,
         cursor_advances_before,
         cursor_advances_after: cursor_advances_before,
         freelist_before,
@@ -441,10 +383,6 @@ pub async fn run_observation_retention(
 
     report.ended_at = now;
     let reader = database.read_connection();
-    report.anchor_payloads_after =
-        live_payload_count(&reader, &anchor_payload_count_sql(), generation).await?;
-    report.observation_payloads_after =
-        live_payload_count(&reader, &observation_payload_count_sql(), generation).await?;
     report.cursor_advances_after = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await?;
     report.freelist_after = pragma_u64(&reader, "freelist_count").await?;
     report.page_count_after = pragma_u64(&reader, "page_count").await?;
@@ -464,26 +402,6 @@ async fn execute_required(executor: &(impl Executor + ?Sized), sql: &str) -> Res
         .map_err(db_error)
 }
 
-enum RetentionQueryExecutor<'reader, 'database> {
-    Read(&'reader DatabaseEngineReadConnection),
-    Transaction(&'reader DatabaseWriteTransaction<'database>),
-}
-
-impl RetentionQueryExecutor<'_, '_> {
-    #[hotpath::skip]
-    async fn query(
-        &self,
-        sql: &str,
-        params: Params,
-    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
-    {
-        match self {
-            Self::Read(connection) => connection.query(sql, params).await,
-            Self::Transaction(transaction) => transaction.query(sql, params).await,
-        }
-    }
-}
-
 /// Reclaimed bytes for one released column: the original length minus the
 /// compact marker that replaces it (saturating so a payload already smaller
 /// than the marker never underflows).
@@ -491,10 +409,132 @@ fn reclaimed_bytes(original_len: u64, marker: &str) -> u64 {
     original_len.saturating_sub(marker.len() as u64)
 }
 
-struct AnchorTarget {
-    anchor_id: String,
+/// One row whose payload a pass selected for release.
+struct ReleaseTarget {
+    id: String,
     original_len: u64,
     effective_at: i64,
+}
+
+/// The in-place payload rewrite one pass applies to its selected batch.
+struct PayloadRelease {
+    intent: &'static str,
+    drop_trigger: &'static str,
+    create_trigger: &'static str,
+    marker: &'static str,
+    /// `UPDATE … RETURNING id` over `{ids}` that re-checks each row's
+    /// eligibility (`?1` is the marker, `?2` the disposition cutoff).
+    update: String,
+    label: &'static str,
+    window_days: Option<u32>,
+    cutoff: i64,
+}
+
+/// Reads one pass's candidates on the reader. Selection scans the evidence
+/// tables, so it never runs inside the write transaction; the release below
+/// re-checks each selected row.
+async fn select_release_targets(
+    database: &Database,
+    sql: &str,
+    query_params: Params,
+) -> Result<Vec<ReleaseTarget>> {
+    let reader = database.read_connection();
+    let mut rows = reader.query(sql, query_params).await.map_err(db_error)?;
+    let mut targets = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_error)? {
+        targets.push(ReleaseTarget {
+            id: row.get(0).map_err(db_error)?,
+            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
+            effective_at: row.get(2).map_err(db_error)?,
+        });
+    }
+    Ok(targets)
+}
+
+/// Selects a pass's bounded batch and, in apply mode, releases it.
+async fn run_release_pass(
+    database: &Database,
+    selection: (&str, Params),
+    release: PayloadRelease,
+    mode: RetentionMode,
+    errors: &mut Vec<String>,
+) -> Result<ObservationRetentionPhaseReport> {
+    let mut report = ObservationRetentionPhaseReport {
+        window_days: release.window_days,
+        ..ObservationRetentionPhaseReport::default()
+    };
+    let targets = select_release_targets(database, selection.0, selection.1).await?;
+    report.eligible = targets.len() as u64;
+    report.oldest_eligible_at = targets.iter().map(|target| target.effective_at).min();
+    if !mode.is_apply() {
+        report.bytes_reclaimed = targets
+            .iter()
+            .map(|target| reclaimed_bytes(target.original_len, release.marker))
+            .sum();
+        return Ok(report);
+    }
+    if !targets.is_empty() {
+        release_payload_batch(database, &release, &targets, &mut report, errors).await?;
+    }
+    Ok(report)
+}
+
+/// Rewrites a selected batch's payload column to its released marker in one
+/// bounded transaction. The transaction drops only that table's update guard,
+/// rewrites the payload, and recreates the identical canonical trigger before
+/// commit, so immutability is never observably relaxed and a crash rolls back
+/// to the triggered schema. A row that stopped qualifying since it was
+/// selected is left untouched.
+async fn release_payload_batch(
+    database: &Database,
+    release: &PayloadRelease,
+    targets: &[ReleaseTarget],
+    report: &mut ObservationRetentionPhaseReport,
+    errors: &mut Vec<String>,
+) -> Result<()> {
+    let txn = database
+        .begin_write_transaction(release.intent)
+        .await
+        .map_err(db_error)?;
+    execute_required(&txn, release.drop_trigger).await?;
+    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
+        let ids = (0..chunk.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = release.update.replace("{ids}", &ids);
+        let mut values = Vec::with_capacity(chunk.len() + 2);
+        values.push(Value::Text(release.marker.to_owned()));
+        values.push(Value::Integer(release.cutoff));
+        values.extend(chunk.iter().map(|target| Value::Text(target.id.clone())));
+        let mut rows = match txn.query(&sql, values).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                errors.push(format!(
+                    "release {} batch ({} ids starting {}): {err}",
+                    release.label,
+                    chunk.len(),
+                    chunk[0].id
+                ));
+                continue;
+            }
+        };
+        let mut released = std::collections::BTreeSet::new();
+        while let Some(row) = rows.next().await.map_err(db_error)? {
+            released.insert(row.get::<String>(0).map_err(db_error)?);
+        }
+        drop(rows);
+        report.acted = report.acted.saturating_add(released.len() as u64);
+        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(
+            chunk
+                .iter()
+                .filter(|target| released.contains(&target.id))
+                .map(|target| reclaimed_bytes(target.original_len, release.marker))
+                .sum(),
+        );
+    }
+    execute_required(&txn, release.create_trigger).await?;
+    commit_transaction(txn).await
 }
 
 async fn run_anchor_pass(
@@ -505,12 +545,9 @@ async fn run_anchor_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.anchor_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.anchor_release_after_days else {
-        return Ok(report);
+    let window_days = config.anchor_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     let sql = format!(
@@ -529,91 +566,61 @@ async fn run_anchor_pass(
          ORDER BY a.anchor_id ASC
          LIMIT ?3"
     );
-    let transaction = if mode.is_apply() {
-        Some(
-            database
-                .begin_write_transaction("begin anchor retention pass")
-                .await
-                .map_err(db_error)?,
-        )
-    } else {
-        None
+    let release = PayloadRelease {
+        intent: "begin anchor retention pass",
+        drop_trigger: DROP_ANCHOR_UPDATE_TRIGGER,
+        create_trigger: CREATE_ANCHOR_UPDATE_TRIGGER,
+        marker: ANCHOR_RELEASED_MARKER,
+        update: format!(
+            "UPDATE retrieval_anchors AS a SET anchor_json = ?1
+             WHERE a.anchor_id IN ({{ids}})
+               AND a.anchor_json <> ?1
+               AND {RELEASED_DISPOSITION}
+             RETURNING anchor_id"
+        ),
+        label: "anchor",
+        window_days,
+        cutoff,
     };
-    let reader = database.read_connection();
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Read(&reader),
-        RetentionQueryExecutor::Transaction,
-    );
-    let mut rows = query_executor
-        .query(
+    run_release_pass(
+        database,
+        (
             &sql,
             params![opt_text(generation), cutoff, config.batch_limit()],
-        )
-        .await
-        .map_err(db_error)?;
-    let mut targets = Vec::new();
-    while let Some(row) = rows.next().await.map_err(db_error)? {
-        targets.push(AnchorTarget {
-            anchor_id: row.get(0).map_err(db_error)?,
-            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
-            effective_at: row.get(2).map_err(db_error)?,
-        });
-    }
-    report.eligible = targets.len() as u64;
-    report.oldest_eligible_at = targets.iter().map(|target| target.effective_at).min();
-    if !mode.is_apply() {
-        report.bytes_reclaimed = targets
-            .iter()
-            .map(|t| reclaimed_bytes(t.original_len, ANCHOR_RELEASED_MARKER))
-            .sum();
-        return Ok(report);
-    }
-
-    // Drop the update trigger, rewrite the fat column to the compact marker,
-    // then recreate the identical trigger, atomically, so immutability is
-    // never observably relaxed and a crash rolls back to the triggered schema.
-    let txn = require_apply_transaction(
-        transaction,
-        "apply mode requires an open anchor retention transaction",
-    )?;
-    execute_required(&txn, DROP_ANCHOR_UPDATE_TRIGGER).await?;
-    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "UPDATE retrieval_anchors SET anchor_json = ? WHERE anchor_id IN ({placeholders})"
-        );
-        let mut values = Vec::with_capacity(chunk.len() + 1);
-        values.push(Value::Text(ANCHOR_RELEASED_MARKER.to_string()));
-        values.extend(
-            chunk
-                .iter()
-                .map(|target| Value::Text(target.anchor_id.clone())),
-        );
-        match txn.execute(&sql, values).await {
-            Ok(count) => {
-                report.acted = report.acted.saturating_add(count);
-                let reclaimed: u64 = chunk
-                    .iter()
-                    .map(|target| reclaimed_bytes(target.original_len, ANCHOR_RELEASED_MARKER))
-                    .sum();
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
-            }
-            Err(err) => errors.push(format!(
-                "release anchor batch ({} ids starting {}): {err}",
-                chunk.len(),
-                chunk[0].anchor_id
-            )),
-        }
-    }
-    execute_required(&txn, CREATE_ANCHOR_UPDATE_TRIGGER).await?;
-    commit_transaction(txn).await?;
-    Ok(report)
+        ),
+        release,
+        mode,
+        errors,
+    )
+    .await
 }
 
-struct ObservationTarget {
-    observation_id: String,
-    original_len: u64,
-    effective_at: i64,
+/// True when no anchor bound to `{observation}` still keeps its payload live:
+/// every binding's current disposition is released past the window (`?2`).
+fn no_live_binding(observation: &str) -> String {
+    format!(
+        "NOT EXISTS (
+             SELECT 1
+             FROM observation_retrieval_anchors live_binding
+             JOIN retrieval_anchors live_anchor
+               ON live_anchor.anchor_id = live_binding.anchor_id
+             WHERE live_binding.observation_id = {observation}
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM retrieval_anchor_dispositions live_disposition
+                   WHERE live_disposition.anchor_id = live_anchor.anchor_id
+                     AND live_disposition.owner_json = live_anchor.owner_json
+                     AND live_disposition.sequence = (
+                         SELECT MAX(live_latest.sequence)
+                         FROM retrieval_anchor_dispositions live_latest
+                         WHERE live_latest.anchor_id = live_anchor.anchor_id
+                           AND live_latest.owner_json = live_anchor.owner_json
+                     )
+                     AND live_disposition.state IN ('superseded', 'deleted')
+                     AND live_disposition.effective_at < ?2
+               )
+         )"
+    )
 }
 
 async fn run_observation_pass(
@@ -624,12 +631,9 @@ async fn run_observation_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.observation_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.observation_release_after_days else {
-        return Ok(report);
+    let window_days = config.observation_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     // An observation is released once per observation only when every anchor
@@ -659,115 +663,46 @@ async fn run_observation_pass(
                )
                AND d.state IN ('superseded', 'deleted')
                AND d.effective_at < ?2
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM observation_retrieval_anchors live_binding
-                   JOIN retrieval_anchors live_anchor
-                     ON live_anchor.anchor_id = live_binding.anchor_id
-                   WHERE live_binding.observation_id = b.observation_id
-                     AND NOT EXISTS (
-                         SELECT 1
-                         FROM retrieval_anchor_dispositions live_disposition
-                         WHERE live_disposition.anchor_id = live_anchor.anchor_id
-                           AND live_disposition.owner_json = live_anchor.owner_json
-                           AND live_disposition.sequence = (
-                               SELECT MAX(live_latest.sequence)
-                               FROM retrieval_anchor_dispositions live_latest
-                               WHERE live_latest.anchor_id = live_anchor.anchor_id
-                                 AND live_latest.owner_json = live_anchor.owner_json
-                           )
-                           AND live_disposition.state IN ('superseded', 'deleted')
-                           AND live_disposition.effective_at < ?2
-                     )
-               )
+               AND {live}
              GROUP BY b.observation_id
          ) released ON released.observation_id = o.observation_id
          WHERE o.observation_json <> '{OBSERVATION_RELEASED_MARKER}'
          ORDER BY o.sequence ASC
-         LIMIT ?3"
+         LIMIT ?3",
+        live = no_live_binding("b.observation_id"),
     );
-    let transaction = if mode.is_apply() {
-        Some(
-            database
-                .begin_write_transaction("begin observation retention pass")
-                .await
-                .map_err(db_error)?,
-        )
-    } else {
-        None
+    let release = PayloadRelease {
+        intent: "begin observation retention pass",
+        drop_trigger: DROP_OBSERVATION_UPDATE_TRIGGER,
+        create_trigger: CREATE_OBSERVATION_UPDATE_TRIGGER,
+        marker: OBSERVATION_RELEASED_MARKER,
+        update: format!(
+            "UPDATE observations AS o SET observation_json = ?1
+             WHERE o.observation_id IN ({{ids}})
+               AND o.observation_json <> ?1
+               AND EXISTS (
+                   SELECT 1 FROM observation_retrieval_anchors bound
+                   WHERE bound.observation_id = o.observation_id
+               )
+               AND {live}
+             RETURNING observation_id",
+            live = no_live_binding("o.observation_id"),
+        ),
+        label: "observation",
+        window_days,
+        cutoff,
     };
-    let reader = database.read_connection();
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Read(&reader),
-        RetentionQueryExecutor::Transaction,
-    );
-    let mut rows = query_executor
-        .query(
+    run_release_pass(
+        database,
+        (
             &sql,
             params![opt_text(generation), cutoff, config.batch_limit()],
-        )
-        .await
-        .map_err(db_error)?;
-    let mut targets = Vec::new();
-    while let Some(row) = rows.next().await.map_err(db_error)? {
-        targets.push(ObservationTarget {
-            observation_id: row.get(0).map_err(db_error)?,
-            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
-            effective_at: row.get(2).map_err(db_error)?,
-        });
-    }
-    report.eligible = targets.len() as u64;
-    report.oldest_eligible_at = targets.iter().map(|target| target.effective_at).min();
-    if !mode.is_apply() {
-        report.bytes_reclaimed = targets
-            .iter()
-            .map(|t| reclaimed_bytes(t.original_len, OBSERVATION_RELEASED_MARKER))
-            .sum();
-        return Ok(report);
-    }
-
-    let txn = require_apply_transaction(
-        transaction,
-        "apply mode requires an open observation retention transaction",
-    )?;
-    execute_required(&txn, DROP_OBSERVATION_UPDATE_TRIGGER).await?;
-    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "UPDATE observations SET observation_json = ? WHERE observation_id IN ({placeholders})"
-        );
-        let mut values = Vec::with_capacity(chunk.len() + 1);
-        values.push(Value::Text(OBSERVATION_RELEASED_MARKER.to_string()));
-        values.extend(
-            chunk
-                .iter()
-                .map(|target| Value::Text(target.observation_id.clone())),
-        );
-        match txn.execute(&sql, values).await {
-            Ok(count) => {
-                report.acted = report.acted.saturating_add(count);
-                let reclaimed: u64 = chunk
-                    .iter()
-                    .map(|target| reclaimed_bytes(target.original_len, OBSERVATION_RELEASED_MARKER))
-                    .sum();
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
-            }
-            Err(err) => errors.push(format!(
-                "release observation batch ({} ids starting {}): {err}",
-                chunk.len(),
-                chunk[0].observation_id
-            )),
-        }
-    }
-    execute_required(&txn, CREATE_OBSERVATION_UPDATE_TRIGGER).await?;
-    commit_transaction(txn).await?;
-    Ok(report)
-}
-
-struct ProvenanceTarget {
-    observation_id: String,
-    original_len: u64,
-    effective_at: i64,
+        ),
+        release,
+        mode,
+        errors,
+    )
+    .await
 }
 
 async fn run_provenance_pass(
@@ -778,12 +713,9 @@ async fn run_provenance_pass(
     now: i64,
     errors: &mut Vec<String>,
 ) -> Result<ObservationRetentionPhaseReport> {
-    let mut report = ObservationRetentionPhaseReport {
-        window_days: config.provenance_release_after_days,
-        ..ObservationRetentionPhaseReport::default()
-    };
-    let Some(window) = config.provenance_release_after_days else {
-        return Ok(report);
+    let window_days = config.provenance_release_after_days;
+    let Some(window) = window_days else {
+        return Ok(ObservationRetentionPhaseReport::default());
     };
     let cutoff = cutoff_secs(window, now);
     // Only rows that carry a provenance anchor are released; the anchor linkage
@@ -810,89 +742,39 @@ async fn run_provenance_pass(
          ORDER BY p.observation_id ASC
          LIMIT ?3"
     );
-    let transaction = if mode.is_apply() {
-        Some(
-            database
-                .begin_write_transaction("begin provenance retention pass")
-                .await
-                .map_err(db_error)?,
-        )
-    } else {
-        None
+    let release = PayloadRelease {
+        intent: "begin provenance retention pass",
+        drop_trigger: DROP_PROVENANCE_UPDATE_TRIGGER,
+        create_trigger: CREATE_PROVENANCE_UPDATE_TRIGGER,
+        marker: PROVENANCE_RELEASED_MARKER,
+        update: format!(
+            "UPDATE observation_repository_provenance AS p
+             SET availability_json = ?1, capture_json = ?1
+             WHERE p.observation_id IN ({{ids}})
+               AND p.retrieval_anchor_id IS NOT NULL
+               AND p.availability_json <> ?1
+               AND EXISTS (
+                   SELECT 1 FROM retrieval_anchors a
+                   WHERE a.anchor_id = p.retrieval_anchor_id
+                     AND {RELEASED_DISPOSITION}
+               )
+             RETURNING observation_id"
+        ),
+        label: "provenance",
+        window_days,
+        cutoff,
     };
-    let reader = database.read_connection();
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Read(&reader),
-        RetentionQueryExecutor::Transaction,
-    );
-    let mut rows = query_executor
-        .query(
+    run_release_pass(
+        database,
+        (
             &sql,
             params![opt_text(generation), cutoff, config.batch_limit()],
-        )
-        .await
-        .map_err(db_error)?;
-    let mut targets = Vec::new();
-    while let Some(row) = rows.next().await.map_err(db_error)? {
-        targets.push(ProvenanceTarget {
-            observation_id: row.get(0).map_err(db_error)?,
-            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
-            effective_at: row.get(2).map_err(db_error)?,
-        });
-    }
-    report.eligible = targets.len() as u64;
-    report.oldest_eligible_at = targets.iter().map(|target| target.effective_at).min();
-    if !mode.is_apply() {
-        report.bytes_reclaimed = targets
-            .iter()
-            .map(|t| reclaimed_bytes(t.original_len, PROVENANCE_RELEASED_MARKER))
-            .sum();
-        return Ok(report);
-    }
-
-    let txn = require_apply_transaction(
-        transaction,
-        "apply mode requires an open provenance retention transaction",
-    )?;
-    execute_required(&txn, DROP_PROVENANCE_UPDATE_TRIGGER).await?;
-    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        // ?1 is the shared marker (bound once, reused for both fat columns);
-        // the `IN` list starts at ?2 so the marker index isn't reused for ids.
-        let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE observation_repository_provenance
-             SET availability_json = ?1, capture_json = ?1
-             WHERE observation_id IN ({placeholders})"
-        );
-        let mut values = Vec::with_capacity(chunk.len() + 1);
-        values.push(Value::Text(PROVENANCE_RELEASED_MARKER.to_string()));
-        values.extend(
-            chunk
-                .iter()
-                .map(|target| Value::Text(target.observation_id.clone())),
-        );
-        match txn.execute(&sql, values).await {
-            Ok(count) => {
-                report.acted = report.acted.saturating_add(count);
-                let reclaimed: u64 = chunk
-                    .iter()
-                    .map(|target| reclaimed_bytes(target.original_len, PROVENANCE_RELEASED_MARKER))
-                    .sum();
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
-            }
-            Err(err) => errors.push(format!(
-                "release provenance batch ({} ids starting {}): {err}",
-                chunk.len(),
-                chunk[0].observation_id
-            )),
-        }
-    }
-    execute_required(&txn, CREATE_PROVENANCE_UPDATE_TRIGGER).await?;
-    commit_transaction(txn).await?;
-    Ok(report)
+        ),
+        release,
+        mode,
+        errors,
+    )
+    .await
 }
 
 struct CursorAdvanceTarget {
@@ -927,26 +809,14 @@ async fn run_cursor_advance_pass(
          WHERE advance.rowid > ?1
          ORDER BY advance.rowid
          LIMIT ?2";
-    let transaction = if mode.is_apply() {
-        Some(
-            database
-                .begin_write_transaction("begin source cursor advance retention pass")
-                .await
-                .map_err(db_error)?,
-        )
-    } else {
-        None
-    };
+    // Candidates are read on the reader: a current cursor only advances, so an
+    // advance it supersedes stays superseded, and only this pass deletes them.
     let reader = database.read_connection();
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Read(&reader),
-        RetentionQueryExecutor::Transaction,
-    );
     let mut targets = Vec::new();
     let target_limit = config.max_batch_size.max(1);
     let mut scan_cursor = 0_i64;
     loop {
-        let mut rows = query_executor
+        let mut rows = reader
             .query(sql, params![scan_cursor, CURSOR_ADVANCE_SCAN_PAGE_ROWS])
             .await
             .map_err(db_error)?;
@@ -984,10 +854,10 @@ async fn run_cursor_advance_pass(
         return Ok(report);
     }
 
-    let txn = require_apply_transaction(
-        transaction,
-        "apply mode requires an open cursor advance retention transaction",
-    )?;
+    let txn = database
+        .begin_write_transaction("begin source cursor advance retention pass")
+        .await
+        .map_err(db_error)?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!("DELETE FROM source_cursor_advances WHERE rowid IN ({placeholders})");

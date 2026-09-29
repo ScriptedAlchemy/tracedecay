@@ -2,6 +2,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
+use crate::schema_stages::RegisteredSchemaAttachmentV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
     cancellation::CancellationToken,
@@ -33,18 +34,38 @@ type SessionRelationGraphStateV1 = RwLock<
     )>,
 >;
 
-/// An authority inside an admitted store whose persisted rows this binary
-/// refuses to read. The store serves its other authorities; every feature
-/// that reads the refused one gets [`Self::error`] until the store is reset.
+/// A session authority inside an admitted store whose persisted shape this
+/// binary refuses to read. The store serves its other authorities; every
+/// session feature gets [`Self::error`] until the store is reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RefusedAuthorityV1 {
-    pub(crate) authority: &'static str,
-    pub(crate) reason: &'static str,
+pub(crate) enum RefusedAuthorityV1 {
+    /// Rows or tables whose shape nothing converts.
+    Shape {
+        authority: &'static str,
+        reason: &'static str,
+    },
+    /// A recorded schema version other than the one this binary writes.
+    Version {
+        component: &'static str,
+        found_version: Option<i64>,
+        required_version: i64,
+    },
 }
 
 impl RefusedAuthorityV1 {
     pub(crate) fn error(self) -> TraceDecayError {
-        TraceDecayError::reset_required(self.authority, self.reason)
+        match self {
+            Self::Shape { authority, reason } => TraceDecayError::reset_required(authority, reason),
+            Self::Version {
+                component,
+                found_version,
+                required_version,
+            } => TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            },
+        }
     }
 }
 
@@ -100,15 +121,19 @@ impl RegisteredGlobalDbOwnerV1 {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
         // Short-lived attaches have no daemon shutdown to observe.
-        let (_, refused_authority) = super::schema_stages::ensure_attached_registered_schema(
+        let refused_authority = match super::schema_stages::ensure_attached_registered_schema(
             &registered.database,
             &CancellationToken::new(),
         )
-        .await?;
-        // A store refused for reset is never converged: its reset deletes it.
-        if refused_authority.is_none() {
-            super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
-        }
+        .await?
+        {
+            RegisteredSchemaAttachmentV1::Admitted(_) => {
+                super::schema_stages::converge_attached_registered_schema(&registered.database)
+                    .await?;
+                None
+            }
+            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
+        };
         drop(registered);
         Ok(Self {
             database,
@@ -119,23 +144,30 @@ impl RegisteredGlobalDbOwnerV1 {
     }
 
     /// Returns the resumable convergence plan for an already admitted schema
-    /// without retaining an unowned client lease. A `cancellation` observed
-    /// before the admission transaction commits rolls it back and fails with
-    /// [`TraceDecayError::store_open_cancelled`].
+    /// without retaining an unowned client lease. A store admitted in its
+    /// typed reset-required state has no plan: its reset deletes it. A
+    /// `cancellation` observed before the admission transaction commits rolls
+    /// it back and fails with [`TraceDecayError::store_open_cancelled`].
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
         cancellation: &CancellationToken,
-    ) -> tracedecay_domain::errors::Result<(Self, super::schema_stages::RegisteredSchemaConvergence)>
-    {
+    ) -> tracedecay_domain::errors::Result<(
+        Self,
+        Option<super::schema_stages::RegisteredSchemaConvergence>,
+    )> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
         let (convergence, refused_authority) =
-            super::schema_stages::ensure_attached_registered_schema(
+            match super::schema_stages::ensure_attached_registered_schema(
                 &registered.database,
                 cancellation,
             )
-            .await?;
+            .await?
+            {
+                RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
+                RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
+            };
         drop(registered);
         Ok((
             Self {

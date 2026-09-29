@@ -6963,6 +6963,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-host-admission",
  "tracedecay-lcm",
+ "tracedecay-maintenance",
  "tracedecay-privacy",
  "tracedecay-query",
  "tracedecay-runtime-core",

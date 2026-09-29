@@ -18,7 +18,7 @@ const OBSERVATION_UNIFIED_IDENTITY_MIGRATION: &str = "observations-unified-ident
 /// observation identity. The store's other authorities stay admissible; its
 /// session features are refused until the store is reset.
 pub(crate) const OBSERVATIONS_PREDATE_UNIFIED_IDENTITY: crate::registered::RefusedAuthorityV1 =
-    crate::registered::RefusedAuthorityV1 {
+    crate::registered::RefusedAuthorityV1::Shape {
         authority: "observations",
         reason: "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts",
     };

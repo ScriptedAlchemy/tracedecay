@@ -541,6 +541,9 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
     }
     .normalized();
 
+    let snapshot = read_payload_gc_snapshot(&store.conn, PROVIDER, None)
+        .await
+        .map_err(|err| err.to_string())?;
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -554,6 +557,7 @@ async fn committed_orphan_tombstone_preserves_same_size_replacement() -> Result<
         &cfg,
         true,
         mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+        &snapshot,
     )
     .await
     .map_err(|err| err.to_string())?;
@@ -1669,6 +1673,9 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
     .normalized();
 
     let counter = WorkCounter::default();
+    let snapshot = read_payload_gc_snapshot(&store.conn, PROVIDER, None)
+        .await
+        .map_err(|err| err.to_string())?;
     let transaction = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1687,6 +1694,7 @@ async fn unreferenced_reap_round_trips(count: usize) -> Result<usize, String> {
             &cfg,
             true,
             1_000_000,
+            &snapshot,
         )
         .await
         .map_err(|err| err.to_string())?
