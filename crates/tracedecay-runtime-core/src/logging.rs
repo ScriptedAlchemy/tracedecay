@@ -151,6 +151,68 @@ impl<K: Ord, S: PartialEq> Default for StateChangeLogGate<K, S> {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+static TRACING_CALLSITE_KEEPALIVE: std::sync::OnceLock<[tracing::Dispatch; 2]> =
+    std::sync::OnceLock::new();
+
+/// Pins every `tracing` callsite in this test process to `Interest::sometimes`
+/// so a per-test thread-local `Dispatch` census stays isolated to that thread.
+///
+/// `tracing_core` caches callsite interest process-globally and computes it
+/// from `Dispatchers::rebuilder()`. While at most one `Dispatch` is registered,
+/// that rebuilder takes the `Rebuilder::JustOne` fast path, which asks the
+/// current thread's default subscriber. Callsites register lazily on first
+/// execution, so under `--test-threads=N` an unrelated test that reaches a
+/// callsite first, on a thread with no scoped dispatcher (`NoSubscriber`),
+/// permanently caches `Interest::never()` for that callsite. A later census
+/// then observes zero events for work that did happen.
+///
+/// Registering two permanently-live dispatchers makes `has_just_one` false for
+/// the life of the process, so interest is folded over the real registry
+/// instead of one arbitrary thread's default. Both keepalives claim
+/// `Interest::sometimes()` for every callsite, which means enablement is
+/// decided per event by the calling thread's dispatcher. Constructing them
+/// also rebuilds the interest cache, repairing any callsite already poisoned
+/// before the census ran.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn install_tracing_callsite_keepalive() {
+    struct AlwaysConsultThreadDispatch;
+
+    impl tracing::Subscriber for AlwaysConsultThreadDispatch {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    TRACING_CALLSITE_KEEPALIVE.get_or_init(|| {
+        [
+            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
+            tracing::Dispatch::new(AlwaysConsultThreadDispatch),
+        ]
+    });
+}
+
 #[cfg(test)]
 mod state_change_gate_tests {
     use super::StateChangeLogGate;

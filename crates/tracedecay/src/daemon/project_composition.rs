@@ -69,6 +69,7 @@ async fn release_one_idle_project_server_before_open(
     capacity_admission: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
     let runtime_registry = store_administration.session_runtime_registry().await?;
+    let blocked_retirement = retry_failed_capacity_releases(store_administration).await;
     // The route cache and invocation schedulers have independent bounds. Retire
     // the whole idle owner before either fills: evicting only its MCP server
     // leaves the code-index worker holding its scheduler slot.
@@ -83,15 +84,8 @@ async fn release_one_idle_project_server_before_open(
     if graph_admission_available && !project_server_cache_saturated {
         return Ok(capacity_admission);
     }
-    if let Some(error) = store_administration
-        .completed_capacity_retirement_failure()
-        .await
-    {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "a prior project server retirement failed before capacity reuse: {error}"
-            ),
-        });
+    if let Some(error) = blocked_retirement {
+        return Err(error);
     }
     let profile_identity = store_administration.profile_identity()?.clone();
     let mut retirement_admission = store_administration
@@ -133,19 +127,27 @@ async fn release_one_idle_project_server_before_open(
         .map(|(_, server)| server)
         .collect::<Vec<_>>();
     let retired_server_count = retired_servers.len();
-    let retirement_administration = store_administration.clone();
-    let retirement_invocation = invocation.clone();
-    let completion =
-        retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
-            let _capacity_admission = capacity_admission;
-            retirement_administration
+    let release = capacity_retirement_release(CapacityRetirementStores {
+        administration: store_administration.clone(),
+        invocation: invocation.clone(),
+        runtime_registry,
+        owner: retired_owner.clone(),
+        project_roots,
+        profile_identity,
+    });
+    let teardown_administration = store_administration.clone();
+    let teardown_owner = retired_owner.clone();
+    let completion = retirement_admission.spawn_and_track_fallible(
+        retired_owner.clone(),
+        async move {
+            teardown_administration
                 .session_temporal_refresh_schedulers()
-                .retire_project(&retired_owner)
+                .retire_project(&teardown_owner)
                 .await;
             #[cfg(unix)]
             super::scheduler::retire_owner_automation_schedulers(
-                &retirement_administration,
-                &retired_owner,
+                &teardown_administration,
+                &teardown_owner,
             )
             .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
@@ -155,79 +157,16 @@ async fn release_one_idle_project_server_before_open(
             for prior in prior_owner_retirements {
                 prior.wait().await?;
             }
-            let project_id =
-                retired_owner
-                    .project_id
-                    .clone()
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message:
-                            "retired project server omitted its authoritative project identity"
-                                .to_owned(),
-                    })?;
-            let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("retired project server identity is invalid: {error}"),
-                }
-            })?;
-            super::branch_admin::retire_registered_context_scout_owner(
-                &project_id,
-                &retired_owner.graph_db_path,
-            );
-            let runtime_quiescence = retirement_invocation
-                .quiesce_project_runtime_owners(
-                    profile_identity.profile_id(),
-                    &project_id,
-                    &project_roots,
-                )
-                .await?;
-            let project_sessions_path = retired_owner
-                .store_root
-                .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
-            retirement_administration
-                .git_index_transaction_services()
-                .retire_project_database(&project_id, &project_sessions_path)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "could not retire project Git transaction actors before capacity reuse: {error}"
-                    ),
-                })?;
-            retirement_administration
-                .native_integration_services()
-                .retire_project_database(&project_id, &project_sessions_path)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "could not retire project native integration actors before capacity reuse: {error}"
-                    ),
-                })?;
-            retirement_administration
-                .session_sync_service()
-                .retire_project(profile_identity.profile_id(), &project_id)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "could not retire project session sync before capacity reuse: {error}"
-                    ),
-                })?;
-            let telemetry_sampling = retirement_administration.store_telemetry_sampling();
-            telemetry_sampling.release_retained_handle(&project_sessions_path);
-            telemetry_sampling.release_retained_handle(&retired_owner.graph_db_path);
-            runtime_registry
-                .retire_project_session_relation_graph(&project_id)
-                .await?;
-            runtime_registry
-                .retire_project_memory_graph(&project_id)
-                .await?;
-            runtime_registry
-                .drop_project_runtime_caches(&project_id)
-                .await;
-            drop(runtime_quiescence);
-            Ok(())
-        });
+            Ok(capacity_admission)
+        },
+        release,
+    );
     hotpath::gauge!("project_servers").inc(-(retired_server_count as f64));
     drop(retirement_admission);
-    completion.wait().await?;
+    completion
+        .wait()
+        .await
+        .map_err(|error| project_server_retirement_blocked_error(&retired_owner, &error))?;
     let capacity_admission = Arc::clone(&capacity_gate).lock_owned().await;
     if !store_administration
         .session_runtime_registry()
@@ -237,6 +176,123 @@ async fn release_one_idle_project_server_before_open(
         return Err(project_server_capacity_error());
     }
     Ok(capacity_admission)
+}
+
+/// Retry the store release of every failed capacity retirement. The first
+/// release that is still refused is the typed capacity blocker an open that
+/// needs capacity reports; the next open retries it again.
+async fn retry_failed_capacity_releases(
+    store_administration: &StoreAdministration,
+) -> Option<TraceDecayError> {
+    let mut retirement_admission = store_administration
+        .acquire_project_server_retirement_admission()
+        .await;
+    let serving = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .keys()
+        .map(|key| key.owner.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let retries =
+        retirement_admission.retry_failed_capacity_releases(|owner| serving.contains(owner));
+    drop(retirement_admission);
+    let mut blocked = None;
+    for (owner, completion) in retries {
+        if let Err(error) = completion.wait().await {
+            blocked.get_or_insert_with(|| project_server_retirement_blocked_error(&owner, &error));
+        }
+    }
+    blocked
+}
+
+/// Everything the store release of one capacity-retired owner reads. It is
+/// cloned into each attempt so a refused release can run again.
+#[derive(Clone)]
+struct CapacityRetirementStores {
+    administration: StoreAdministration,
+    invocation: DaemonInvocationState,
+    runtime_registry: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
+    owner: StoreOwnerKey,
+    project_roots: std::collections::BTreeSet<PathBuf>,
+    profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+}
+
+fn capacity_retirement_release(
+    stores: CapacityRetirementStores,
+) -> super::branch_admin::CapacityRetirementRelease {
+    Arc::new(move || Box::pin(release_capacity_retired_stores(stores.clone())))
+}
+
+#[hotpath::measure(label = "daemon.project.compose.release_retired_stores", future = true)]
+async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Result<()> {
+    let CapacityRetirementStores {
+        administration,
+        invocation,
+        runtime_registry,
+        owner,
+        project_roots,
+        profile_identity,
+    } = stores;
+    let project_id = owner
+        .project_id
+        .clone()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "retired project server omitted its authoritative project identity".to_owned(),
+        })?;
+    let project_id =
+        tracedecay_domain::ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
+            message: format!("retired project server identity is invalid: {error}"),
+        })?;
+    super::branch_admin::retire_registered_context_scout_owner(&project_id, &owner.graph_db_path);
+    let runtime_quiescence = invocation
+        .quiesce_project_runtime_owners(profile_identity.profile_id(), &project_id, &project_roots)
+        .await?;
+    let project_sessions_path = owner
+        .store_root
+        .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    administration
+        .git_index_transaction_services()
+        .retire_project_database(&project_id, &project_sessions_path)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "could not retire project Git transaction actors before capacity reuse: {error}"
+            ),
+        })?;
+    administration
+        .native_integration_services()
+        .retire_project_database(&project_id, &project_sessions_path)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "could not retire project native integration actors before capacity reuse: {error}"
+            ),
+        })?;
+    administration
+        .session_sync_service()
+        .retire_project(profile_identity.profile_id(), &project_id)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "could not retire project session sync before capacity reuse: {error}"
+            ),
+        })?;
+    let telemetry_sampling = administration.store_telemetry_sampling();
+    telemetry_sampling.release_retained_handle(&project_sessions_path);
+    telemetry_sampling.release_retained_handle(&owner.graph_db_path);
+    runtime_registry
+        .retire_project_session_relation_graph(&project_id)
+        .await?;
+    runtime_registry
+        .retire_project_memory_graph(&project_id)
+        .await?;
+    runtime_registry
+        .drop_project_runtime_caches(&project_id)
+        .await;
+    drop(runtime_quiescence);
+    Ok(())
 }
 
 /// The one transcript owner a composed project reads host transcripts for:
