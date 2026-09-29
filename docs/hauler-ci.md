@@ -63,3 +63,13 @@ not make admitted PRs mutually trustworthy.
 Hosted runners and their warm state end with the job. The lane lifetime and
 snapshot limit bound spending, not a guaranteed queue latency. Inspect the
 reported timings before increasing either limit.
+
+## Verify automatic ownership
+
+For a new eligible PR head, check that **Hauler CI / enqueue** creates four
+pending Hauler checks, then inspect the ordinary CI scope job. Its successful
+`Hauler route / delegated / <policy>` step is the handoff receipt. Equivalent
+native heavy jobs should be skipped while repository gates still run. The
+workers update those same pending checks with the pinned snapshot and results.
+A successful controller workflow does not mean every PR passed; the individual
+Hauler checks contain the test verdicts.
