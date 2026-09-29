@@ -954,20 +954,12 @@ pub(super) async fn session_activity_page_after(
     // its session bounds are (`idx_sessions_activity_fallback`). Seeding the
     // page from those index ranges keeps a convergence pass proportional to
     // the activity since the frontier; aggregating every session instead
-    // read the whole message index on each host drain.
+    // read the whole message index on each host drain. The `IN` list, unlike
+    // a `UNION`, keeps SQLite from merging the two ranges over a full scan
+    // of `sessions`.
     let mut rows = conn
         .query(
-            "WITH candidate(source_rowid) AS (
-                 SELECT s.rowid
-                 FROM lcm_raw_messages m
-                 JOIN sessions s
-                   ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE m.timestamp >= ?1
-                 UNION
-                 SELECT rowid FROM sessions
-                 WHERE COALESCE(ended_at, started_at) >= ?1
-             ),
-             activity AS (
+            "WITH activity AS (
                  SELECT s.provider, s.session_id, s.project_path,
                         s.started_at, s.ended_at,
                         (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
@@ -977,8 +969,18 @@ pub(super) async fn session_activity_page_after(
                          WHERE m.provider = s.provider AND m.session_id = s.session_id)
                             AS last_ts,
                         s.rowid AS source_rowid
-                 FROM candidate
-                 JOIN sessions s ON s.rowid = candidate.source_rowid
+                 FROM sessions s
+                 WHERE s.rowid IN (
+                     SELECT touched.rowid
+                     FROM lcm_raw_messages m
+                     JOIN sessions touched
+                       ON touched.provider = m.provider
+                      AND touched.session_id = m.session_id
+                     WHERE m.timestamp >= ?1
+                     UNION ALL
+                     SELECT rowid FROM sessions
+                     WHERE COALESCE(ended_at, started_at) >= ?1
+                 )
              )
              SELECT provider, session_id, project_path, started_at, ended_at,
                     first_ts, last_ts, source_rowid,
