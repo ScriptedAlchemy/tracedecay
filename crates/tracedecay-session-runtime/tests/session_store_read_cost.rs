@@ -28,7 +28,7 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_global_db::observation::retention::ObservationRetentionConfig;
-use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::tests::harness::{HostAdmissionTestRuntimeV1, writer_telemetry};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_lcm::LcmRetentionConfig;
@@ -558,12 +558,7 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
 /// SQLite VM steps the store's writer executed, and its rolled-back
 /// transactions: the work retention does inside its write transactions.
 fn writer_work(database: &RegisteredGlobalDb) -> (u64, u64) {
-    let writer = database
-        .runtime_client()
-        .writer_telemetry_snapshot()
-        .expect("registered database must expose rusqlite writer telemetry")
-        .writer
-        .expect("mounted writer must carry rusqlite writer telemetry");
+    let writer = writer_telemetry(database);
     (
         writer.sqlite_vm.vm_steps,
         writer.transactions.rolled_back_transactions,
