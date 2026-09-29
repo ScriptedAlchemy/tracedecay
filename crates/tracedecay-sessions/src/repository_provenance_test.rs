@@ -8,12 +8,12 @@ use super::*;
 
 const PRIVACY_DOMAIN_SALT: [u8; 32] = [0x5a; 32];
 
-struct GitFixture {
+pub(crate) struct GitFixture {
     root: TempDir,
 }
 
 impl GitFixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = TempDir::new().unwrap();
         let fixture = Self { root };
         fixture.git(&["init", "-q", "-b", "main"]);
@@ -22,7 +22,7 @@ impl GitFixture {
         fixture
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.root.path()
     }
 
@@ -49,7 +49,7 @@ impl GitFixture {
         output
     }
 
-    fn commit(&self, contents: &str) {
+    pub(crate) fn commit(&self, contents: &str) {
         fs::write(self.path().join("tracked.txt"), contents).unwrap();
         self.git(&["add", "--", "tracked.txt"]);
         self.git(&["commit", "-q", "-m", contents]);
