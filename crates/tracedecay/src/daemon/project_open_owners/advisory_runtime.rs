@@ -2098,7 +2098,10 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
 
     /// With a ready sealed generation the deferred mount is already upgrading
     /// this owner, so a request waits for that publication instead of taking
-    /// the retryable warming answer.
+    /// the retryable warming answer. A restart serves its retained generation
+    /// before its first pass proves the checkout still matches it; that
+    /// proof, or the successor it finds owed, is what upgrades this owner, so
+    /// a retained owner waits as well.
     // ponytail: a deferred mount that fails terminally leaves this owner in
     // place, so such a request waits out its own deadline before the warming
     // answer; surfacing the terminal mount failure here would end it early.
@@ -2107,13 +2110,20 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
             if code_index_disabled_for_scope(&self.code_index_schedulers, &self.scope) {
                 return DaemonAdvisoryCycleMountV1::Answers;
             }
-            match self
+            if self
                 .code_index_schedulers
-                .latest_feedback_generation_for_scope(&self.project_root, &self.scope)
+                .retained_text_owner_freshness_for_scope(&self.scope)
                 .await
+                .is_some()
+                || self
+                    .code_index_schedulers
+                    .latest_feedback_generation_for_scope(&self.project_root, &self.scope)
+                    .await
+                    .is_some()
             {
-                Some(_) => DaemonAdvisoryCycleMountV1::Mounting,
-                None => DaemonAdvisoryCycleMountV1::Answers,
+                DaemonAdvisoryCycleMountV1::Mounting
+            } else {
+                DaemonAdvisoryCycleMountV1::Answers
             }
         })
     }
