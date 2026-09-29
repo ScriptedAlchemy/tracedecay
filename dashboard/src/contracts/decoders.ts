@@ -151,6 +151,7 @@ import type {
   CredentialReferenceId,
   CrossMergeModeV1,
   CrossMergePolicyV1,
+  DaemonServiceUnitObservationV1,
   DashboardAuthorizationV1,
   DashboardCoverageCompletenessV1,
   DashboardCoverageV1,
@@ -1495,6 +1496,11 @@ export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<["denied", "mal
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("daemon_unreachable"),
+  named_by: z.string().nullable(),
+  service_unit: z.lazy(() => DaemonServiceUnitObservationV1Schema),
+  socket: z.string(),
+}).strict(), z.object({
   generation: z.string().nullable(),
   kind: z.literal("diagnostics_pending"),
   producer: z.string(),
@@ -2715,6 +2721,19 @@ export const CrossMergePolicyV1Schema: z.ZodObject<{
   allowed_modes: z.array(z.lazy(() => CrossMergeModeV1Schema)),
   default_mode: z.lazy(() => CrossMergeModeV1Schema),
 }).strict();
+
+/** The managed daemon service unit as a client observed it, from the unit
+file alone. */
+export const DaemonServiceUnitObservationV1Schema: z.ZodType<DaemonServiceUnitObservationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+  path: z.string(),
+  serves: z.string(),
+  state: z.literal("installed"),
+}).strict(), z.object({
+  state: z.literal("not_installed"),
+}).strict(), z.object({
+  error: z.string(),
+  state: z.literal("unobservable"),
+}).strict()]);
 
 /** Authorization outcome for the read. On the loopback single-user dashboard a
 legal local read is [`Self::Authorized`]; the other variants are retained so

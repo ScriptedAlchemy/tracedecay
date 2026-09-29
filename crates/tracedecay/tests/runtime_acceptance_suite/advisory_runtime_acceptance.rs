@@ -1231,8 +1231,9 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             serde_json::from_str::<Value>(&stdout)
                 .ok()
                 .is_some_and(|response| {
-                    response["problem"]["code"] == "feedback.advisory-cycle.unavailable"
-                        && response["problem"]["retryable"] == true
+                    let problem = &response["structuredContent"]["problem"];
+                    problem["code"] == "feedback.advisory-cycle.unavailable"
+                        && problem["retryable"] == true
                 });
         assert!(
             retryable_unavailable,

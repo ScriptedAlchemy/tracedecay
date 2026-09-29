@@ -1880,8 +1880,14 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     );
     let stale_payload: Value =
         serde_json::from_slice(&stale.stdout).expect("stale write problem JSON");
-    assert_eq!(stale_payload["problem"]["kind"], "conflict");
-    assert_eq!(stale_payload["problem"]["code"], "configuration.conflict");
+    assert_eq!(
+        stale_payload["structuredContent"]["problem"]["kind"],
+        "conflict"
+    );
+    assert_eq!(
+        stale_payload["structuredContent"]["problem"]["code"],
+        "configuration.conflict"
+    );
 }
 
 #[test]
@@ -3634,7 +3640,10 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
     let (code, refused) = configuration_get_from(&home, &outside, "index.max_file_size.v1");
     assert_eq!(code, Some(1), "{refused}");
     assert_eq!(
-        (&refused["problem"]["kind"], &refused["problem"]["code"]),
+        (
+            &refused["structuredContent"]["problem"]["kind"],
+            &refused["structuredContent"]["problem"]["code"]
+        ),
         (&json!("invalid_request"), &json!("project_required")),
         "{refused}"
     );

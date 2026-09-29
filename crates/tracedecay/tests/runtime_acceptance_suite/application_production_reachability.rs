@@ -512,6 +512,26 @@ fn invocation_terminal(result: &ApplicationSurfaceInvocationResult) -> Value {
     }
 }
 
+/// The application envelope a CLI `--json` call printed: the envelope
+/// itself for an answer, and for a refusal the tool result's envelope text,
+/// whose record is the one at `structuredContent.problem`.
+fn cli_terminal(printed: Value) -> Value {
+    if printed["isError"] != true {
+        return printed;
+    }
+    let envelope: Value = serde_json::from_str(
+        printed["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("CLI refusal names its envelope: {printed:#}")),
+    )
+    .unwrap_or_else(|error| panic!("CLI refusal envelope JSON ({error}): {printed:#}"));
+    assert_eq!(
+        envelope["problem"], printed["structuredContent"]["problem"],
+        "the refusal's structured record is its envelope's: {printed:#}"
+    );
+    envelope
+}
+
 fn terminal_disposition(value: &Value) -> (&str, &str) {
     if let Some(outcome) = value.get("outcome") {
         let outcome = outcome["outcome"]
@@ -919,6 +939,7 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
         );
         let cli: Value = serde_json::from_slice(&cli.stdout)
             .unwrap_or_else(|error| panic!("parse CLI {} JSON: {error}", operation.as_str()));
+        let cli = cli_terminal(cli);
 
         assert_eq!(
             mcp.binding_id.as_str(),

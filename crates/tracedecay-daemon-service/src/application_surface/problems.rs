@@ -3,15 +3,14 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationProblem, ApplicationProblemDetailV1,
-    ApplicationProblemEnvelope, LegalAction, ProblemOwningLayer, RequestId, ResultContractRef,
-    RetryDirective, SafeDiagnostic,
+    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, LegalAction,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, CatalogBindingResolver, DispatchError,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, SchemaId};
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, BindingSurface};
 
 use super::catalog::{application_surface_catalog_ref, resolve_application_binding};
 
@@ -28,23 +27,14 @@ pub(super) fn registered_adapter_unavailable(
     code: &str,
     message: &str,
 ) -> Response {
-    let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    match ApplicationProblemEnvelope::new(
-        contract,
+    match tracedecay_api::adapter_problem(
         request_id,
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: code.to_owned(),
             message: message.to_owned(),
         }),
     ) {
-        Ok(problem) => tracedecay_api::application_problem_response(
-            problem.with_owning_layer(ProblemOwningLayer::Adapter),
-        ),
+        Ok(problem) => tracedecay_api::application_problem_response(problem),
         Err(error) => application_contract_error_response(error),
     }
 }
@@ -114,29 +104,29 @@ pub(super) fn http_adapter_problem(
         .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Adapter))
 }
 
-/// The canonical typed terminal for an MCP `tools/call` whose project open
-/// was refused because the store requires an explicit reset.
+/// A refusal settled before any handler ran (a refused project open, an
+/// unreachable daemon) as the typed problem envelope of `tool_name` under
+/// its `surface` binding's result contract, with that binding's id.
 ///
-/// The refusal settles before any project server exists, so the MCP boundary
-/// cannot route the call to its handler; the truthful answer for the named
-/// operation is the reset-required terminal under its own mounted MCP result
-/// contract, whose typed detail names the refused authority, its versions,
-/// and the exact command that performs the one legal action, so the agent can
-/// relay it. Returns `None` for tools without a mounted application binding.
-pub fn mcp_project_open_reset_refusal(
+/// No route can hand such a call to its handler, so the truthful answer for
+/// the named operation is this runtime-owned terminal. Returns `None` for
+/// tools without a mounted application binding on `surface`.
+pub fn settled_tool_refusal(
+    surface: BindingSurface,
     tool_name: &str,
     request_id: RequestId,
-    detail: ApplicationProblemDetailV1,
-) -> Option<ApplicationProblemEnvelope> {
+    problem: ApplicationProblem,
+) -> Option<(BindingId, ApplicationProblemEnvelope)> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
     let catalog = application_surface_catalog_ref().ok()?;
     let resolver = CatalogBindingResolver::new(catalog);
-    let binding = resolve_application_binding(&resolver, BindingSurface::Mcp, operation)?;
+    let binding = resolve_application_binding(&resolver, surface, operation)?;
     let contract = ResultContractRef::from_schema(&binding.result_schema);
-    let problem = ApplicationProblem::from_detail(detail);
-    ApplicationProblemEnvelope::new(contract, request_id, problem)
-        .ok()
-        .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))
+    let envelope = ApplicationProblemEnvelope::new(contract, request_id, problem).ok()?;
+    Some((
+        binding.binding_id,
+        envelope.with_owning_layer(ProblemOwningLayer::Runtime),
+    ))
 }
 
 pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {

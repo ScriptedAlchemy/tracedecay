@@ -421,7 +421,8 @@ pub(crate) fn invalid_request_problem(
     )
 }
 
-pub(crate) fn adapter_problem(
+/// A refusal no binding owns, under the adapter-owned problem contract.
+pub fn adapter_problem(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {

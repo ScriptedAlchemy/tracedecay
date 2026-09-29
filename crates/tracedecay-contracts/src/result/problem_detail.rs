@@ -1,1 +1,3 @@
-pub use tracedecay_domain::{ApplicationProblemDetailV1, DiagnosticsSearchedTsconfigV1};
+pub use tracedecay_domain::{
+    ApplicationProblemDetailV1, DaemonServiceUnitObservationV1, DiagnosticsSearchedTsconfigV1,
+};

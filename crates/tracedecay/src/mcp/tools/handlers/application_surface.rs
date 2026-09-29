@@ -522,6 +522,59 @@ fn settle_graph_tool_result(
     ))
 }
 
+/// A route refusal that settled before any owner answered `tool_name` (an
+/// unreachable daemon, a refused argument, an unknown tool), rendered as the
+/// one tool-result shape every route answers: `isError` with the typed
+/// record at `structuredContent.problem`. A tool with a binding on `surface`
+/// refuses under its own result contract; a name no binding owns refuses
+/// under the adapter's. `None` when `error` is not a route refusal.
+pub fn render_settled_route_refusal(
+    surface: tracedecay_tool_catalog::BindingSurface,
+    tool_name: &str,
+    request_id: RequestId,
+    error: &TraceDecayError,
+    args: &Value,
+) -> Option<Result<tracedecay_mcp::ToolResult>> {
+    error.project_route_context()?;
+    let problem = graph_tool_error_problem(error);
+    let bound = ApplicationSurfaceOperation::from_tool_name(tool_name).and_then(|operation| {
+        tracedecay_daemon_service::application_surface::settled_tool_refusal(
+            surface,
+            tool_name,
+            request_id.clone(),
+            problem.clone(),
+        )
+        .map(|(binding_id, problem)| ApplicationRefusal {
+            operation,
+            binding_id,
+            problem,
+        })
+    });
+    let rendered = match bound {
+        Some(refusal) => refusal.render(None, args),
+        None => unbound_refusal(request_id, problem),
+    };
+    Some(rendered.map(|mut rendered| {
+        tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut rendered);
+        rendered
+    }))
+}
+
+fn unbound_refusal(
+    request_id: RequestId,
+    problem: tracedecay_contracts::ApplicationProblem,
+) -> Result<tracedecay_mcp::ToolResult> {
+    let envelope = tracedecay_api::adapter_problem(request_id, problem).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("the adapter refusal violated its problem contract: {error}"),
+        }
+    })?;
+    tracedecay_mcp::application_output::tool_result::problem_tool_result(
+        &serde_json::to_string(&envelope)?,
+        &envelope,
+    )
+}
+
 /// The graph-tool owner reports handler argument errors as invalid requests,
 /// a typed route detail or a lock that missed its deadline as that detail, a
 /// route refusal as unavailable under its own reason code, and any other

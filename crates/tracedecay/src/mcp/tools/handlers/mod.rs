@@ -9,7 +9,8 @@ pub(crate) use application_surface::graph_tool_error_problem;
 pub use application_surface::{
     GraphToolOutcome, RetainedSurfaceExecution, execute_graph_tool_surface,
     execute_retained_surface_tool, handle_application_surface, render_application_surface_result,
-    render_retained_execution, retained_tool_target, run_retained_surface_tool,
+    render_retained_execution, render_settled_route_refusal, retained_tool_target,
+    run_retained_surface_tool,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
 pub use support::{registered_project_not_found, registered_project_selector_id};
