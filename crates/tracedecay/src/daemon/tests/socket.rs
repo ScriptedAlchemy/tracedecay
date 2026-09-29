@@ -874,6 +874,7 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
 }
 
 /// Every JSON pointer at which a tool result carries a `problem` member.
+#[cfg(unix)]
 fn problem_placement(value: &Value, pointer: &str, found: &mut Vec<String>) {
     if let Value::Object(members) = value {
         for (key, member) in members {
@@ -886,6 +887,7 @@ fn problem_placement(value: &Value, pointer: &str, found: &mut Vec<String>) {
     }
 }
 
+#[cfg(unix)]
 fn problem_placements(result: &Value) -> Vec<String> {
     let mut found = Vec::new();
     problem_placement(result, "", &mut found);

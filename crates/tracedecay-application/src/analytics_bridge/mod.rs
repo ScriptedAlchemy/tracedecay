@@ -363,7 +363,11 @@ mod tests {
         let real = root.path().join("real");
         std::fs::create_dir(&real).expect("real root");
         let alias = root.path().join("link");
+        // Directory alias: canonical project identity must follow it on every host.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &alias).expect("alias root");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &alias).expect("alias root");
         let canonical = std::fs::canonicalize(&real)
             .expect("canonical root")
             .to_string_lossy()
