@@ -707,32 +707,45 @@ describe('LoomPage', () => {
     expect(document.querySelector(`[data-event="msg:${lane}:m2"]`)!.getAttribute('data-x-basis')).toBe('sequence');
   });
 
-  it('states that no recorded test-run authority is bound to a session', async () => {
-    const reason = 'daemon-managed test runs carry no session attribution';
-    const testRuns = {
-      id: 'session_test',
-      label: 'Session → test run',
-      state: 'unsupported',
-      authority: null,
-      granularity: 'recorded test outcome',
-      providers: [],
-      item_count: null,
-      reason,
-      required_authority: 'a session-attributed test-run recording authority',
-      coverage: { completeness: 'unknown', eligible: null, examined: null, matched: null, omitted: null, unit: null, reason },
-    };
-    const temporal = {
-      ...TEMPORAL,
-      payload: { ...TEMPORAL.payload, source_statuses: [...TEMPORAL.payload.source_statuses, testRuns] },
-    };
+  it('draws managed test runs on the requesting lane and filters them by kind', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.events = [
+      {
+        provider: 'cursor', session_id: 'sess-open', kind: 'test_run', operation_id: 'request.test-run.open',
+        recorded_at: NOW - 6_000, started_at_micros: (NOW - 6_000) * 1_000_000,
+        outcome: { finished_at_micros: (NOW - 5_990) * 1_000_000, termination: 'completed', exit_code: 101, passed: 2, failed: 1, ignored: 0 },
+      },
+    ];
+    const reason = '1 of 2 recorded test runs served at their recorded start; 1 recorded without a requesting session are counted, not placed';
+    temporal.payload.source_statuses = [
+      ...temporal.payload.source_statuses,
+      {
+        id: 'session_test',
+        label: 'Session → test run',
+        state: 'partial',
+        authority: 'managed_test_runs recorded against the requesting session',
+        granularity: 'managed test run',
+        providers: ['cursor'],
+        item_count: 1,
+        reason,
+        required_authority: null,
+        coverage: { completeness: 'partial', eligible: 2, examined: 2, matched: 1, omitted: 1, unit: 'recorded test runs', reason },
+      },
+    ];
     renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } });
+    const user = userEvent.setup();
     await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    const lane = LANE('cursor', 'sess-open').replace(/"/g, '\\"');
+    const selector = `[data-event="test:${lane}:request.test-run.open"][data-kind="test_run"]`;
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
     expect(screen.getByText('Session → test run')).toBeTruthy();
-    expect(
-      screen.getByText(
-        '· requires a session-attributed test-run recording authority · daemon-managed test runs carry no session attribution',
-      ),
-    ).toBeTruthy();
+
+    const filter = screen.getByRole('checkbox', { name: 'Show test run events' });
+    await user.click(filter);
+    expect(document.querySelectorAll(selector)).toHaveLength(0);
+    expect(document.querySelectorAll('[data-event][data-kind="test_run"]')).toHaveLength(0);
+    await user.click(filter);
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
   });
 
   it('uses the Loom temporal read for recorded ends and causal relations', async () => {

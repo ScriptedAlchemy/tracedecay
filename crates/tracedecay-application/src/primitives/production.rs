@@ -24,15 +24,15 @@ use url::Url;
 use super::concrete::AuthenticatedSymbolGraphCursorAdapter;
 use super::runtime::{
     CodeIndexConvergenceParkPortV1, DiagnosticPrimitiveRecord, DiagnosticsPrimitiveResult,
-    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
-    ManagedTestRunCurrentScopePort, PrimitiveProjectRuntime, open_primitive_project_runtime,
+    ManagedTestResultCursorPort, ManagedTestRunCurrentIdentity,
+    ManagedTestRunCurrentIdentityFuture, ManagedTestRunCurrentScopePort, PrimitiveProjectRuntime,
+    RetainedManagedTestRuns, open_primitive_project_runtime,
 };
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::DiagnosticQueryCursor;
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
-use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
@@ -435,6 +435,10 @@ fn diagnostics_result(
 
 const DIAGNOSTIC_CURSOR_LANE_WORKSPACE: &str = "workspace";
 
+/// Authenticated cursors over the session store's active cursor key, bound
+/// to the request grant, a code generation, and a lane. Diagnostics pages and
+/// managed test-result pages continue under it.
+#[derive(Clone)]
 struct AuthenticatedDiagnosticCursorAuthorityV1 {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
@@ -548,6 +552,78 @@ impl AuthenticatedDiagnosticCursorAuthorityV1 {
         )
         .map_err(|_| ())?;
         OpaqueCursor::new(encoded).map_err(|_| ())
+    }
+}
+
+fn managed_test_result_lane(operation_id: &str) -> String {
+    format!("managed-test-results:{operation_id}")
+}
+
+/// The binding every managed test-result cursor carries: the same
+/// `test_results` shape the live operation stream binds its pages to.
+fn managed_test_result_binding(page_size: u32) -> Option<CursorBindingV1> {
+    CursorBindingV1::builder("test_results")
+        .parameter("page_size", &page_size)
+        .build()
+        .ok()
+}
+
+impl ManagedTestResultCursorPort for AuthenticatedDiagnosticCursorAuthorityV1 {
+    fn encode(
+        &self,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+        offset: usize,
+    ) -> Option<OpaqueCursor> {
+        let lane = managed_test_result_lane(operation_id);
+        let snapshot = self.snapshot(context, generation, &lane).ok()?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &managed_test_result_binding(page_size)?,
+            &StableSortKey {
+                normalized_score_micros: u64::try_from(offset).ok()?,
+                knowledge_at_micros: 0,
+                stable_id: operation_id.to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .ok()?;
+        OpaqueCursor::new(encoded).ok()
+    }
+
+    fn decode(
+        &self,
+        cursor: &OpaqueCursor,
+        context: &RequestContext,
+        operation_id: &str,
+        generation: &CodeGenerationId,
+        page_size: u32,
+    ) -> Result<usize, Option<CursorBindingMismatchV1>> {
+        let lane = managed_test_result_lane(operation_id);
+        let snapshot = self
+            .snapshot(context, generation, &lane)
+            .map_err(|()| None)?;
+        let binding = managed_test_result_binding(page_size).ok_or(None)?;
+        let sort_key = verify_cursor(
+            cursor.as_str(),
+            &snapshot,
+            &binding,
+            self.authenticator.as_ref(),
+        )
+        .map_err(|error| match error {
+            CursorError::Binding(mismatch) => Some(mismatch),
+            CursorError::Malformed | CursorError::Tampered => {
+                Some(CursorBindingMismatchV1::Foreign)
+            }
+            _ => None,
+        })?;
+        if sort_key.knowledge_at_micros != 0 || sort_key.stable_id != operation_id {
+            return Err(Some(CursorBindingMismatchV1::Foreign));
+        }
+        usize::try_from(sort_key.normalized_score_micros)
+            .map_err(|_| Some(CursorBindingMismatchV1::Foreign))
     }
 }
 
@@ -721,7 +797,6 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
-    operation_events: OperationEventAuthority,
 }
 
 impl ProductionPrimitiveOpenRequestV1 {
@@ -732,7 +807,6 @@ impl ProductionPrimitiveOpenRequestV1 {
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         access: ProjectSourceAccessSnapshot,
         admitted_root_uri: String,
-        operation_events: OperationEventAuthority,
     ) -> Self {
         Self {
             source_runtime,
@@ -745,7 +819,6 @@ impl ProductionPrimitiveOpenRequestV1 {
             convergence_park: code.convergence_park,
             access,
             admitted_root_uri,
-            operation_events,
         }
     }
 }
@@ -766,7 +839,6 @@ pub async fn open_production_primitive_runtime(
         convergence_park,
         access,
         admitted_root_uri,
-        operation_events,
     } = request;
     let database = source_runtime.db().clone();
     let project_root = source_runtime.project_root().to_path_buf();
@@ -806,18 +878,23 @@ pub async fn open_production_primitive_runtime(
             scope.clone(),
             Arc::clone(&code_index),
         ));
+    let evidence_cursors = AuthenticatedDiagnosticCursorAuthorityV1 {
+        key,
+        configuration_digest,
+        authenticator,
+    };
+    let test_runs = RetainedManagedTestRuns {
+        store: session_db.clone(),
+        cursors: Arc::new(evidence_cursors.clone()),
+    };
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
         Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         database.clone(),
-        session_db.clone(),
+        session_db,
         code_index,
         Arc::clone(&diagnostic_identity),
-        AuthenticatedDiagnosticCursorAuthorityV1 {
-            key,
-            configuration_digest,
-            authenticator,
-        },
+        evidence_cursors,
     ));
     open_primitive_project_runtime(
         database,
@@ -840,7 +917,7 @@ pub async fn open_production_primitive_runtime(
         scope,
         access,
         admitted_root_uri,
-        operation_events,
+        test_runs,
         test_run_scope,
         convergence_park,
     )

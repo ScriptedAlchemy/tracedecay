@@ -8,8 +8,8 @@ use super::schema_contract::{
 use super::{
     configuration, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
-    global_db_operation_message, observability_rollup, observation, observation_projection,
-    project_registry, session_temporal_schema, stack_delivery,
+    global_db_operation_message, managed_test_runs, observability_rollup, observation,
+    observation_projection, project_registry, session_temporal_schema, stack_delivery,
 };
 use tracedecay_runtime_core::{
     db::{
@@ -739,6 +739,10 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(TRANSCRIPT_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
+    transaction
+        .execute_batch(managed_test_runs::MANAGED_TEST_RUN_SCHEMA)
+        .await
+        .map_err(|error| global_db_operation_error("initialize managed test-run schema", error))?;
     transaction
         .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
         .await
