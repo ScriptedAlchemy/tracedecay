@@ -7,7 +7,7 @@ pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
@@ -655,27 +655,29 @@ impl TestChildProcess {
         self.release_recorded_socket();
         status
     }
+}
 
-    /// Streams the child's stderr to `log` (else a developer's
-    /// `TRACEDECAY_TEST_DAEMON_LOG`), or discards it.
-    fn drain_stderr(&mut self, log: Option<PathBuf>) {
-        let Some(mut stderr) = self.child.stderr.take() else {
+/// Streams a daemon's stderr, after the `startup` lines already read from it,
+/// to `log` (else a developer's `TRACEDECAY_TEST_DAEMON_LOG`), or discards it.
+fn drain_daemon_stderr(
+    startup: String,
+    mut stderr: BufReader<std::process::ChildStderr>,
+    log: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        if let Some(path) =
+            log.or_else(|| std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map(PathBuf::from))
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = file.write_all(startup.as_bytes());
+            let _ = std::io::copy(&mut stderr, &mut file);
             return;
-        };
-        std::thread::spawn(move || {
-            if let Some(path) =
-                log.or_else(|| std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map(PathBuf::from))
-                && let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-            {
-                let _ = std::io::copy(&mut stderr, &mut file);
-                return;
-            }
-            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-        });
-    }
+        }
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+    });
 }
 
 impl Drop for TestChildProcess {
@@ -1150,42 +1152,54 @@ fn spawn_tracedecay_daemon_process(
     #[cfg(unix)]
     daemon.release_socket_on_stop(socket_path.clone());
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    poll_until(
-        deadline,
-        Duration::from_millis(25),
-        || {
+    // Startup has no product deadline. The daemon logs `daemon_listening`
+    // once its endpoint is bound and published, so that line is readiness;
+    // stderr closing first means it exited.
+    let Some(stderr) = daemon.child.stderr.take() else {
+        // A caller redirected stderr, so only the endpoint can show readiness.
+        loop {
             #[cfg(unix)]
             let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
             #[cfg(not(unix))]
             let ready = portable_daemon_connectable();
             if ready {
-                return Some(());
+                return daemon;
             }
             if let Some(status) = daemon
                 .child
                 .try_wait()
                 .expect("daemon status should be readable")
             {
-                let mut stderr = String::new();
-                if let Some(mut child_stderr) = daemon.child.stderr.take() {
-                    let _ = child_stderr.read_to_string(&mut stderr);
-                }
                 panic!(
-                    "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
-                    stderr.trim()
+                    "tracedecay daemon exited before accepting connections at {}: {status}",
+                    authority_path.display()
                 );
             }
-            None
-        },
-        || {
-            format!(
-                "timed out waiting for daemon authority at {}",
-                authority_path.display()
-            )
-        },
-    );
-    daemon.drain_stderr(log);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let mut stderr = BufReader::new(stderr);
+    let mut startup = String::new();
+    loop {
+        let line_start = startup.len();
+        let read = stderr
+            .read_line(&mut startup)
+            .expect("daemon stderr should be readable");
+        if read == 0 {
+            let status = daemon
+                .child
+                .wait()
+                .expect("daemon status should be readable");
+            panic!(
+                "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
+                startup.trim()
+            );
+        }
+        if startup[line_start..].starts_with("[tracedecay] event=daemon_listening ") {
+            break;
+        }
+    }
+    drain_daemon_stderr(startup, stderr, log);
     daemon
 }
 
