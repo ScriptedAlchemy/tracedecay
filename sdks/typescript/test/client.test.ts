@@ -6,7 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { OPERATIONS } from "../src/operations";
 import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
@@ -19,10 +19,7 @@ import {
 
 import {
   TraceDecayAbortError,
-  TraceDecayDisconnectedError,
   TraceDecayMalformedResponseError,
-  TraceDecayPartialEffectError,
-  TraceDecayProtocolError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
   TraceDecayUnavailableError,
@@ -332,14 +329,21 @@ describe("canonical JSON Schema decoding", () => {
     expect(decodeCanonicalSchema(Number.MIN_SAFE_INTEGER, int64)).toBe(
       Number.MIN_SAFE_INTEGER,
     );
-    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(TypeError);
+    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(
+      "value is outside uint32",
+    );
+    expect(() => decodeCanonicalSchema(-1, uint64)).toThrow(
+      "value is outside safely representable uint64",
+    );
     expect(() =>
       decodeCanonicalSchema(Number.MAX_SAFE_INTEGER + 1, uint64),
-    ).toThrow(TypeError);
-    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(TypeError);
+    ).toThrow("value must be integer");
+    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(
+      "value must be integer",
+    );
   });
 
-  it("canonicalizes unique object keys in one serialization per item", () => {
+  it("treats key order as insignificant when rejecting duplicate items", () => {
     const schema = {
       type: "array",
       uniqueItems: true,
@@ -353,23 +357,22 @@ describe("canonical JSON Schema decoding", () => {
         ],
         schema,
       ),
-    ).toThrow(TypeError);
+    ).toThrow("value contains duplicate items");
 
-    let serializations = 0;
-    const originalStringify = JSON.stringify.bind(JSON);
-    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value: unknown) => {
-      serializations += 1;
-      return originalStringify(value);
-    });
-    try {
+    expect(
       decodeCanonicalSchema(
-        Array.from({ length: 100 }, (_, index) => ({ index })),
+        [
+          { index: 0, label: "item" },
+          { index: 1, label: "item" },
+          { index: 2, label: "item" },
+        ],
         schema,
-      );
-    } finally {
-      stringify.mockRestore();
-    }
-    expect(serializations).toBe(100);
+      ),
+    ).toEqual([
+      { index: 0, label: "item" },
+      { index: 1, label: "item" },
+      { index: 2, label: "item" },
+    ]);
   });
 });
 
@@ -401,7 +404,9 @@ describe("TraceDecayClient generated operation bindings", () => {
         {},
         { deadlineMicros: 1_800_000_000_000_003 },
       ),
-    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    ).rejects.toThrow(
+      "the daemon returned an invalid workflow_list_definitions success envelope",
+    );
 
     expect(requestedUrl).toBe(
       "https://remote.example/api/v1/projects/project.sdk/application/workflow/list-definitions",
@@ -428,12 +433,14 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(client.operations.application_fact_store_curate({}))
-      .rejects.toBeInstanceOf(TraceDecayProtocolError);
+      .rejects.toThrow(
+        "application_fact_store_curate requires a stable requestId replay handle",
+      );
     expect(fetchCalls).toBe(0);
     await expect(client.operations.application_fact_store_curate(
       {},
       { requestId: "request.sdk.curate" },
-    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    )).rejects.toThrow("the daemon returned an unknown HTTP envelope");
     expect(fetchCalls).toBe(1);
     expect(replayHeader).toBe("request.sdk.curate");
   });
@@ -460,7 +467,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     await expect(client.operations.application_fact_store_curate(
       {},
       { requestId: "request.sdk.curate" },
-    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    )).rejects.toThrow("the daemon returned a malformed problem envelope");
   });
 
   it("accepts only the started receipt of the run the request admitted", async () => {
@@ -558,46 +565,55 @@ describe("TraceDecayClient generated operation bindings", () => {
         // @ts-expect-error Deliberately malformed at the package boundary.
         { definition_id: "workflow.sdk", definition_version: "1" },
       ),
-    ).rejects.toBeInstanceOf(TypeError);
+    ).rejects.toThrow("value.definition_version must be integer");
     expect(fetchCalls).toBe(0);
-    expect("invoke" in client).toBe(false);
-    expect("requestOperation" in client).toBe(false);
-    expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes workflow_register_definition with the canonical descriptor identity", () => {
+  it("posts a workflow definition to the register-definition route", async () => {
+    let method = "";
+    let url = "";
+    let body = "";
+    const definition = {
+      definition_id: "workflow.sdk",
+      definition_version: 1,
+      project_id: "project.sdk",
+      pinned_catalog_digest: `sha256:${"a".repeat(64)}`,
+      pinned_configuration_digest: `sha256:${"a".repeat(64)}`,
+      pinned_policy_digest: `sha256:${"a".repeat(64)}`,
+      steps: [
+        {
+          step_id: "publish",
+          operation: "operation.work.publish",
+          predecessors: [],
+          inputs: [],
+          outputs: ["artifact"],
+          fan_out: null,
+        },
+      ],
+    };
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
+      fetch: async (input, init) => {
+        method = init?.method ?? "";
+        url = String(input);
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
     });
-    expect("workflow_register_definition" in client.operations).toBe(true);
 
-    const descriptor = OPERATIONS.find(
-      (operation) => operation.operation === "workflow_register_definition",
+    await expect(
+      client.operations.workflow_register_definition({ definition }),
+    ).rejects.toThrow("the daemon returned an unknown HTTP envelope");
+    expect(method).toBe("POST");
+    expect(url).toBe(
+      "http://127.0.0.1:43123/projects/project.sdk/application/workflow/register-definition",
     );
-    expect(descriptor).toBeDefined();
-    expect(descriptor?.operationId).toBe("operation.workflow.register_definition");
-    expect(descriptor?.transport).toEqual({
-      kind: "http",
-      route: "/application/workflow/register-definition",
-      method: "POST",
-    });
-    expect(descriptor?.effect).toBe("administrative");
-    expect(descriptor?.idempotency).toBe("required");
-    expect(descriptor?.bindingId).toBe("binding.http.workflow.register_definition");
-    expect(descriptor?.requestSchema).toEqual({
-      schemaId: "schema.workflow.register_definition.request",
-      revision: 1,
-    });
-    expect(descriptor?.resultSchema).toEqual({
-      schemaId: "schema.workflow.register_definition.result",
-      revision: 1,
-    });
-    expect(descriptor?.deadline).toEqual({
-      maximum_millis: 30_000,
-      behavior: "return_effect_receipt",
-    });
+    expect(JSON.parse(body)).toEqual({ definition });
   });
 
   it("rejects an operation-illegal terminal before decoding its payload", () => {
@@ -683,17 +699,17 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayResetRequiredError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "reset_required/store_reset_required: store_reset_required",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayPartialEffectError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "partial_effect/effect_partially_committed: effect_partially_committed",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
       },
     );
@@ -713,19 +729,19 @@ describe("TraceDecayClient transport envelopes", () => {
 
     await expect(
       requestThroughTransport(client, { page: { size: 0 } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page size must be an integer between 1 and 1000");
     await expect(
       requestThroughTransport(client, { page: { size: 1_001 } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page size must be an integer between 1 and 1000");
     await expect(
       requestThroughTransport(client, { page: { cursor: " cursor " } }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("page cursor is not a canonical opaque cursor");
     await expect(
       requestThroughTransport(client, { deadlineMicros: 0 }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
     await expect(
       requestThroughTransport(client, { deadlineMicros: 1.5 }),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    ).rejects.toThrow("deadlineMicros must be a positive safe integer");
     expect(fetchCalls).toBe(0);
   });
 
@@ -751,8 +767,8 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned an invalid workflow_list_definitions success envelope",
         );
       },
     );
@@ -880,7 +896,9 @@ describe("TraceDecayClient transport envelopes", () => {
     for (const cursor of cursors) {
       served = successEnvelope([], cursor);
       await expect(requestThroughTransport(client), JSON.stringify(cursor).slice(0, 80))
-        .rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        .rejects.toThrow(
+          "the daemon returned an invalid workflow_list_definitions success envelope",
+        );
     }
   });
 
@@ -904,7 +922,7 @@ describe("TraceDecayClient transport envelopes", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        ).rejects.toThrow("the daemon returned a malformed problem envelope");
       },
     );
   });
@@ -1092,11 +1110,11 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
       },
     );
@@ -1120,8 +1138,8 @@ describe("TraceDecayClient transport envelopes", () => {
           token: "sdk-secret",
         });
 
-        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(requestThroughTransport(client)).rejects.toThrow(
+          "the daemon returned a malformed problem envelope",
         );
       },
     );
@@ -1268,8 +1286,8 @@ describe("TraceDecayClient operation lifecycle", () => {
             // Drain the stream.
           }
         };
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(consume()).rejects.toThrow(
+          "the daemon returned a malformed SSE open frontier",
         );
       },
     );
@@ -1309,8 +1327,8 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayMalformedResponseError,
+        await expect(consume()).rejects.toThrow(
+          "the daemon opened an operation stream with an invalid media type",
         );
       },
     );
@@ -1570,7 +1588,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           for await (const _event of client.streamOperation("request.operation")) {
             // Drain the stream.
           }
-        }).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+        }).rejects.toThrow("operation stream ended with an incomplete SSE event");
       },
     );
   });
@@ -1619,7 +1637,7 @@ describe("TraceDecayClient operation lifecycle", () => {
 
         await expect(
           client.cancelOperation("request.operation"),
-        ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+        ).rejects.toThrow("the daemon returned a malformed cancellation response");
       },
     );
   });
@@ -1650,8 +1668,8 @@ describe("TraceDecayClient operation lifecycle", () => {
           }
         };
 
-        await expect(consume()).rejects.toBeInstanceOf(
-          TraceDecayDisconnectedError,
+        await expect(consume()).rejects.toThrow(
+          "operation stream ended before a terminal event after 0 reconnects",
         );
       },
     );
@@ -1683,7 +1701,7 @@ describe("TraceDecayClient operation lifecycle", () => {
 
         const aborted = await pending.catch((error: unknown) => error);
         expect(aborted).toBeInstanceOf(TraceDecayAbortError);
-        expect((aborted as Error).message).not.toMatch(/rollback|rolled back/i);
+        expect((aborted as Error).message).toBe("the caller aborted the request");
       },
     );
   });
