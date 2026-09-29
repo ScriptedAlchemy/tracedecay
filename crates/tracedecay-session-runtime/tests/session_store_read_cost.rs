@@ -1,12 +1,15 @@
-//! Ingest read cost follows the work it admits, not the store size.
+//! Session-store work follows the work it admits, not the store size.
 //!
 //! Every project-scope drain also converges the session Git evidence past its
 //! durable frontier, picks pending external-source projections, and wakes the
 //! temporal refresh that discovers which sessions moved. Any of those that
 //! visits every session, pending row, or observation effect re-reads the whole
-//! session store for each streamed message. These tests measure the process's
-//! own read bytes through the public capture, drain, and refresh path on the
-//! same store before and after it grows.
+//! session store for each streamed message. Retention runs over the same store
+//! on every maintenance tick, and a pass that scans it inside its write
+//! transaction outlives the transaction lease once the store is large. These
+//! tests measure the process's own read bytes, or the writer's SQLite work,
+//! through the public ingest and retention paths on the same store before and
+//! after it grows.
 
 #![cfg(target_os = "linux")]
 
@@ -24,9 +27,12 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::observation::retention::ObservationRetentionConfig;
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_lcm::LcmRetentionConfig;
+use tracedecay_maintenance::retention::registered_store::run_registered_store_retention;
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_runtime::session_sync::test_harness::{
@@ -48,6 +54,8 @@ const GROWN_SESSIONS: u64 = 8 * BASE_SESSIONS;
 const SEED_TIMESTAMP: i64 = 1_780_000_000;
 const DRAIN_WINDOW: usize = 4_096;
 const MAX_REFRESH_PASSES: usize = 4_096;
+/// Retention runs long after the seeded messages, so every window has passed.
+const RETENTION_NOW: i64 = SEED_TIMESTAMP + 400 * 86_400;
 
 /// Reads are measured for the whole process, so the probes must not overlap.
 static MEASURED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -544,5 +552,64 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
         grown_read <= base_read * 2,
         "an 8x larger session store must not double one streamed message's reads: \
          base={base_read} grown={grown_read}"
+    );
+}
+
+/// SQLite VM steps the store's writer executed, and its rolled-back
+/// transactions: the work retention does inside its write transactions.
+fn writer_work(database: &RegisteredGlobalDb) -> (u64, u64) {
+    let writer = database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .expect("registered database must expose rusqlite writer telemetry")
+        .writer
+        .expect("mounted writer must carry rusqlite writer telemetry");
+    (
+        writer.sqlite_vm.vm_steps,
+        writer.transactions.rolled_back_transactions,
+    )
+}
+
+/// Runs one maintenance retention tick and returns the VM steps its write
+/// transactions executed.
+async fn retention_writer_steps(database: &RegisteredGlobalDb) -> u64 {
+    let (steps_before, rolled_back_before) = writer_work(database);
+    let report = run_registered_store_retention(
+        database,
+        &LcmRetentionConfig::default(),
+        &ObservationRetentionConfig::default(),
+        RETENTION_NOW,
+    )
+    .await;
+    assert!(report.succeeded(), "retention must succeed");
+    let (steps_after, rolled_back_after) = writer_work(database);
+    assert_eq!(
+        rolled_back_after, rolled_back_before,
+        "every retention transaction must commit"
+    );
+    steps_after - steps_before
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_write_transactions_do_not_scale_with_the_session_store() {
+    let _measured = MEASURED.lock().await;
+    let fixture = DrainFixture::open().await;
+    let facade = fixture.facade();
+    let database = fixture
+        .runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let (project, scope) = (fixture.project.as_path(), fixture.scope());
+
+    seed_sessions(&facade, project, &scope, 0..BASE_SESSIONS).await;
+    let base_steps = retention_writer_steps(database).await;
+    seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
+    let grown_steps = retention_writer_steps(database).await;
+
+    eprintln!("retention writer VM steps: base={base_steps} grown={grown_steps}");
+    assert!(
+        grown_steps <= base_steps * 2,
+        "an 8x larger session store must not double the work retention does inside \
+         its write transactions: base={base_steps} grown={grown_steps}"
     );
 }

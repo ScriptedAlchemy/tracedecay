@@ -601,7 +601,7 @@ async fn active_observation_in_other_generation_remains_live() -> Result<(), Str
     Ok(())
 }
 
-// Reclaim is measurable via payload-count and page/free-list metrics.
+// Reclaim is measurable via released-row and page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     let conn = test_store().await;
@@ -613,13 +613,8 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
 
     let report = run_apply(&conn, None, &released_config()).await?;
 
-    assert_eq!(report.anchor_payloads_before, 8);
-    assert_eq!(
-        report.anchor_payloads_after, 0,
-        "payload-count delta measurable"
-    );
-    assert_eq!(report.observation_payloads_before, 8);
-    assert_eq!(report.observation_payloads_after, 0);
+    assert_eq!(report.anchors_released.acted, 8);
+    assert_eq!(report.observations_released.acted, 8);
     assert!(report.page_count_before > 0, "page_count observed");
     assert!(
         report.freelist_after >= report.freelist_before,

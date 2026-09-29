@@ -66,6 +66,17 @@ const PROJECTION_DURABLE: &str = "EXISTS (
           AND s.source_id = CAST(r.store_id AS TEXT)
     )";
 
+/// SQL predicate (over `r`) that reaches the raw rows a durable summary covers
+/// through the summary lineage index. Retention candidates must be durable, so
+/// driving the scan from the lineage instead of every row past the window keeps
+/// rows no summary covers yet, whose content retention would otherwise read on
+/// every pass, out of the scan. The unary `+` keeps the window bound from
+/// displacing the rowid lookups.
+const DURABLE_ROW_IDS: &str = "r.store_id IN (
+        SELECT CAST(s.source_id AS INTEGER) FROM session_summary_sources s
+        WHERE s.source_kind = 'raw_message'
+    )";
+
 /// Externalization kind recorded on retention-offloaded payloads.
 const OFFLOAD_KIND: &str = "retention_offload";
 
@@ -238,14 +249,14 @@ pub async fn read_session_retention_backlog(
             "SELECT MIN(r.timestamp),
                     COALESCE(SUM(LENGTH(COALESCE(r.content, ''))), 0)
              FROM lcm_raw_messages r
-             WHERE r.timestamp IS NOT NULL
+             WHERE {DURABLE_ROW_IDS}
+               AND r.timestamp IS NOT NULL
                AND (
-                    (?1 = 1 AND r.timestamp < ?2 AND {PROJECTION_DURABLE})
-                 OR (?3 = 1 AND r.timestamp < ?4
+                    (?1 = 1 AND +r.timestamp < ?2)
+                 OR (?3 = 1 AND +r.timestamp < ?4
                      AND r.storage_kind = 'inline'
                      AND r.content IS NOT NULL
-                     AND LENGTH(r.content) > 0
-                     AND {PROJECTION_DURABLE})
+                     AND LENGTH(r.content) > 0)
                )"
         );
         let mut rows = conn
@@ -516,26 +527,6 @@ impl QueryExecutor for RetentionReadConnection {
     }
 }
 
-enum RetentionQueryExecutor<'query, 'store> {
-    Read(&'query RetentionReadConnection),
-    Transaction(&'query RetentionWriteTransaction<'store>),
-}
-
-impl RetentionQueryExecutor<'_, '_> {
-    #[hotpath::skip]
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl tracedecay_runtime_core::db::engine::IntoParams,
-    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
-    {
-        match self {
-            Self::Read(connection) => connection.query(sql, params).await,
-            Self::Transaction(transaction) => transaction.query(sql, params).await,
-        }
-    }
-}
-
 enum RetentionWriteTransaction<'a> {
     Database(DatabaseMemoryTransaction<'a>),
     #[cfg(test)]
@@ -686,28 +677,17 @@ async fn run_drop_pass(
     let sql = format!(
         "SELECT r.store_id, r.timestamp, LENGTH(COALESCE(r.content, '')) AS content_len
          FROM lcm_raw_messages r
-         WHERE (?1 = 'all' OR r.provider = ?1)
+         WHERE {DURABLE_ROW_IDS}
+           AND (?1 = 'all' OR r.provider = ?1)
            AND (?2 IS NULL OR r.session_id = ?2)
-           AND r.timestamp IS NOT NULL AND r.timestamp < ?3
-           AND {PROJECTION_DURABLE}
+           AND r.timestamp IS NOT NULL AND +r.timestamp < ?3
          ORDER BY r.timestamp ASC, r.store_id ASC
          LIMIT ?4"
     );
-    let transaction = if mode.is_apply() {
-        Some(
-            store
-                .begin_memory_write_transaction("begin session retention drop pass", authorize)
-                .await?,
-        )
-    } else {
-        None
-    };
+    // Candidates are read outside the write transaction; the delete below
+    // re-checks each row, so the transaction holds only the bounded batch.
     let read = store.read_connection();
-    let query_executor = match transaction.as_ref() {
-        Some(transaction) => RetentionQueryExecutor::Transaction(transaction),
-        None => RetentionQueryExecutor::Read(&read),
-    };
-    let mut rows = query_executor
+    let mut rows = read
         .query(
             &sql,
             params![
@@ -726,33 +706,42 @@ async fn run_drop_pass(
             content_len: row.get::<i64>(2)?.max(0) as u64,
         });
     }
+    drop(rows);
     report.eligible = targets.len() as u64;
     report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
     if !mode.is_apply() {
         report.bytes_reclaimed = targets.iter().map(|t| t.content_len).sum();
         return Ok(report);
     }
+    if targets.is_empty() {
+        return Ok(report);
+    }
 
-    let txn = transaction.ok_or_else(|| {
-        LcmError::Db("apply mode did not start a session retention drop transaction".to_owned())
-    })?;
+    let txn = store
+        .begin_memory_write_transaction("begin session retention drop pass", authorize)
+        .await?;
+    let delete_sql = format!(
+        "DELETE FROM lcm_raw_messages AS r
+         WHERE r.store_id = ?1
+           AND r.timestamp IS NOT NULL AND r.timestamp < ?2
+           AND {PROJECTION_DURABLE}"
+    );
     for target in &targets {
         if let Some(authorize) = authorize {
             authorize("drop session retention row")?;
         }
         // The FTS delete trigger fires with the row. Any external payload the
         // raw row referenced becomes unreferenced and is reaped by payload GC.
+        // A row that stopped qualifying since it was read changes nothing.
         match txn
-            .execute(
-                "DELETE FROM lcm_raw_messages WHERE store_id = ?1",
-                params![target.store_id],
-            )
+            .execute(&delete_sql, params![target.store_id, cutoff])
             .await
         {
             Ok(1) => {
                 report.acted += 1;
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(target.content_len);
             }
+            Ok(0) => {}
             Ok(changed) => errors.push(format!(
                 "drop raw row {} changed {changed} rows",
                 target.store_id
@@ -796,12 +785,12 @@ async fn run_offload_pass(
     let sql = format!(
         "SELECT r.store_id, r.provider, r.session_id, r.message_id, r.timestamp, r.content
          FROM lcm_raw_messages r
-         WHERE (?1 = 'all' OR r.provider = ?1)
+         WHERE {DURABLE_ROW_IDS}
+           AND (?1 = 'all' OR r.provider = ?1)
            AND (?2 IS NULL OR r.session_id = ?2)
-           AND r.timestamp IS NOT NULL AND r.timestamp < ?3
+           AND r.timestamp IS NOT NULL AND +r.timestamp < ?3
            AND r.storage_kind = 'inline'
            AND r.content IS NOT NULL AND LENGTH(r.content) > 0
-           AND {PROJECTION_DURABLE}
          ORDER BY r.timestamp ASC, r.store_id ASC
          LIMIT ?4"
     );
