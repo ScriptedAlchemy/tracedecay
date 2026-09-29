@@ -13,7 +13,7 @@ use tracedecay_domain::{
     RetrievalAnchorTarget, SessionId, WorktreeId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationStore,
@@ -425,7 +425,7 @@ async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit(
         ObservationSourceGenerationV1::new(1).unwrap(),
         None,
         ObservationSourceRangeV1::new(0, 4).unwrap(),
-        NonDurableFrameReason::BlankFrame,
+        ObservationCoverageReason::BlankFrame,
     )
     .unwrap();
 
