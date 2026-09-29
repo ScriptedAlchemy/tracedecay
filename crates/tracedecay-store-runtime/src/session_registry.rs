@@ -2772,6 +2772,9 @@ pub fn registry_open_error(
         StoreRuntimeRegistryFailure::ResetRequired { authority, reason } => {
             TraceDecayError::reset_required(authority, reason)
         }
+        StoreRuntimeRegistryFailure::OpenCancelled { .. } => {
+            TraceDecayError::store_open_cancelled(operation)
+        }
         failure => session_registry_error(operation, format!("{failure:?}")),
     }
 }

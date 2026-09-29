@@ -38,6 +38,7 @@ use tracedecay_store::{
 use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
+use crate::cancellation::CancellationToken;
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 #[cfg(test)]
@@ -1310,6 +1311,11 @@ pub enum StoreRuntimeRegistryFailure {
     OpenTaskAbandoned {
         key: Box<StoreRuntimeKey>,
     },
+    /// Shutdown cancelled this open at a safe point. Nothing it opened is
+    /// published or left open.
+    OpenCancelled {
+        key: Box<StoreRuntimeKey>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1453,6 +1459,7 @@ struct StoreRuntimeRegistryInner {
     /// reservation funnels through `lock_state`, so it is the coarsest lock in
     /// the store runtime and the first place cross-shard queueing shows up.
     state: ProfiledMutex<RegistryState>,
+    open_cancellation: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -1474,6 +1481,7 @@ impl StoreRuntimeRegistry {
                     Mutex::new(RegistryState::default()),
                     label = "runtime_core.shard_runtime.registry_state"
                 ),
+                open_cancellation: CancellationToken::new(),
             }),
         }
     }
@@ -1505,8 +1513,23 @@ impl StoreRuntimeRegistry {
                     Mutex::new(RegistryState::default()),
                     label = "runtime_core.shard_runtime.registry_state"
                 ),
+                open_cancellation: CancellationToken::new(),
             }),
         })
+    }
+
+    /// Refuses every new runtime open and stops in-flight opens and schema
+    /// installs at their next safe point, each with a typed
+    /// [`StoreRuntimeRegistryFailure::OpenCancelled`]. Shutdown-only: the
+    /// registry never admits opens again.
+    pub fn cancel_opens_for_shutdown(&self) {
+        self.inner.open_cancellation.cancel();
+    }
+
+    /// The token opens and the schema installs that follow them observe.
+    #[must_use]
+    pub fn open_cancellation(&self) -> &CancellationToken {
+        &self.inner.open_cancellation
     }
 
     pub fn lookup(&self, expected: &StoreRuntimeBindingV1) -> StoreRuntimeLookup {

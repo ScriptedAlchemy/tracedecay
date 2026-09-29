@@ -11,7 +11,7 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
 
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -492,10 +492,12 @@ impl RegisteredGlobalDbHarness {
             .await
             .expect("publish daemon test runtime")
             .into_parts();
-        let (database, convergence) =
-            RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner)
-                .await
-                .expect("daemon admission");
+        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database_owner,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await
+        .expect("daemon admission");
         let registered = database.issue_lease().expect("issue daemon test lease");
         (
             Self {

@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 use crate::schema_stages::RegisteredSchemaAttachmentV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
+    cancellation::CancellationToken,
     db::{
         Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
@@ -119,17 +120,20 @@ impl RegisteredGlobalDbOwnerV1 {
     ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        let refused_authority =
-            match super::schema_stages::ensure_attached_registered_schema(&registered.database)
-                .await?
-            {
-                RegisteredSchemaAttachmentV1::Admitted(_) => {
-                    super::schema_stages::converge_attached_registered_schema(&registered.database)
-                        .await?;
-                    None
-                }
-                RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
-            };
+        // Short-lived attaches have no daemon shutdown to observe.
+        let refused_authority = match super::schema_stages::ensure_attached_registered_schema(
+            &registered.database,
+            &CancellationToken::new(),
+        )
+        .await?
+        {
+            RegisteredSchemaAttachmentV1::Admitted(_) => {
+                super::schema_stages::converge_attached_registered_schema(&registered.database)
+                    .await?;
+                None
+            }
+            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
+        };
         drop(registered);
         Ok(Self {
             database,
@@ -141,10 +145,13 @@ impl RegisteredGlobalDbOwnerV1 {
 
     /// Returns the resumable convergence plan for an already admitted schema
     /// without retaining an unowned client lease. A store admitted in its
-    /// typed reset-required state has no plan: its reset deletes it.
+    /// typed reset-required state has no plan: its reset deletes it. A
+    /// `cancellation` observed before the admission transaction commits rolls
+    /// it back and fails with [`TraceDecayError::store_open_cancelled`].
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
+        cancellation: &CancellationToken,
     ) -> tracedecay_domain::errors::Result<(
         Self,
         Option<super::schema_stages::RegisteredSchemaConvergence>,
@@ -152,8 +159,11 @@ impl RegisteredGlobalDbOwnerV1 {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
         let (convergence, refused_authority) =
-            match super::schema_stages::ensure_attached_registered_schema(&registered.database)
-                .await?
+            match super::schema_stages::ensure_attached_registered_schema(
+                &registered.database,
+                cancellation,
+            )
+            .await?
             {
                 RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
                 RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
