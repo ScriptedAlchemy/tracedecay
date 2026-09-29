@@ -489,3 +489,133 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
 
     harness.shutdown().await;
 }
+
+fn assert_retirement_blocked(error: &TraceDecayError, project_id: &str) {
+    let Some((reason_code, retryable, detail)) = error.project_route_context() else {
+        panic!("a blocked retirement must be a typed capacity refusal: {error:?}");
+    };
+    assert_eq!(reason_code, PROJECT_SERVER_CAPACITY_REASON_CODE);
+    assert!(
+        retryable,
+        "a blocked retirement clears when its lease drops"
+    );
+    assert!(
+        detail.contains(&format!("retiring idle project '{project_id}' is blocked"))
+            && detail.contains("ClientLeases"),
+        "the refusal must name the retired project and its store blocker: {detail}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_capacity_retirement_is_typed_and_clears_once_its_store_lease_drops() {
+    let isolation = TempDir::new().expect("production harness isolation");
+    let mut projects = Vec::new();
+    for ordinal in 0..14 {
+        let project = isolation.path().join(format!("project-{ordinal}"));
+        std::fs::create_dir_all(project.join("src")).expect("project source root");
+        std::fs::write(
+            project.join("src/lib.rs"),
+            format!("pub fn leased_{ordinal}_probe() -> usize {{ {ordinal} }}\n"),
+        )
+        .expect("project source");
+        git(&project, &["init", "-q"]);
+        git(&project, &["add", "."]);
+        git(&project, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            &project,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        git(&project, &["commit", "-qm", "seed project"]);
+        projects.push(project);
+    }
+    let mut harness = ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        std::iter::once(projects[0].clone()),
+    )
+    .await
+    .expect("production harness authority");
+    let first_root = canonical_existing_identity(&projects[0]).expect("canonical first project");
+    drop(
+        harness
+            .resources
+            .as_mut()
+            .expect("production harness resources")
+            .servers
+            .remove(&first_root)
+            .expect("harness retains its initial client handle"),
+    );
+
+    // Lease the oldest project's session store the way its automation loop
+    // once did, then leave the project idle so capacity picks it to retire.
+    let leased = open_project_composition(&harness, &projects[0], "leased")
+        .await
+        .expect("the leased project opens");
+    let project_id = leased
+        .server
+        .cg()
+        .await
+        .configuration_runtime()
+        .configuration_target()
+        .project_id
+        .clone();
+    let registry = harness
+        .resources
+        .as_ref()
+        .expect("production harness resources")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("session runtime registry");
+    let session_lease = registry
+        .mounted_project_sessions(&project_id)
+        .await
+        .expect("the open project mounts its session store");
+    drop(leased);
+
+    let mut refusal = None;
+    for (ordinal, project) in projects.iter().enumerate().skip(1) {
+        match open_project_composition(&harness, project, &format!("fill-{ordinal}")).await {
+            Ok(opened) => drop(opened),
+            Err(error) => {
+                refusal = Some((ordinal, error));
+                break;
+            }
+        }
+    }
+    let (blocked, refused) = refusal.expect("capacity must retire the leased idle project");
+    assert_retirement_blocked(&refused, project_id.as_str());
+
+    // The refused owner's servers are already gone, so an open can still use
+    // their slot; the next open that needs capacity retries the release and
+    // reports the live blocker again.
+    let mut refusal = None;
+    for (ordinal, project) in projects.iter().enumerate().skip(blocked) {
+        match open_project_composition(&harness, project, &format!("still-leased-{ordinal}")).await
+        {
+            Ok(opened) => drop(opened),
+            Err(error) => {
+                refusal = Some((ordinal, error));
+                break;
+            }
+        }
+    }
+    let (blocked, still_blocked) =
+        refusal.expect("an open that needs capacity reports the live lease");
+    assert_retirement_blocked(&still_blocked, project_id.as_str());
+
+    drop(session_lease);
+    let opened = open_project_composition(&harness, &projects[blocked], "lease-released")
+        .await
+        .expect("the next open retries the retirement and serves without a restart");
+    assert_eq!(
+        opened.canonical_project_path,
+        canonical_existing_identity(&projects[blocked]).expect("canonical blocked project")
+    );
+    drop(opened);
+    let reopened = open_project_composition(&harness, &projects[0], "retired-reopen")
+        .await
+        .expect("the retired project reopens once its stores are released");
+    assert_eq!(reopened.canonical_project_path, first_root);
+    drop(reopened);
+    harness.shutdown().await;
+}
