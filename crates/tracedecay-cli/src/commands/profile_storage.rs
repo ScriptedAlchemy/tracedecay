@@ -834,7 +834,7 @@ mod reset_project_store_tests {
         let outcome =
             reset_refused_project_graph_store(&profile_root, "proj_absent", true).unwrap();
 
-        assert!(matches!(outcome.reset_graph_db, None));
+        assert!(outcome.reset_graph_db.is_none());
         assert_eq!(
             outcome.canonical_schema_version,
             tracedecay_runtime_core::db::migrations::SCHEMA_VERSION

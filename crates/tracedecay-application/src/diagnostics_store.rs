@@ -1763,7 +1763,7 @@ mod tests {
         let collision = fixture_record(gen2, "anchor.diagnostic.shared");
         assert_database_refusal(
             store
-                .publish_clean_generation(&id(gen2), &[collision.clone()])
+                .publish_clean_generation(&id(gen2), std::slice::from_ref(&collision))
                 .await
                 .unwrap_err(),
             "diagnostics publish_clean_generation",
