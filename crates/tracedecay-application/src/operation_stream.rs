@@ -451,15 +451,6 @@ impl CanonicalManagedTestRunReader {
         Some(current_managed_test_run(snapshot, current))
     }
 
-    pub(crate) async fn latest_page(
-        &self,
-        root_uri: &str,
-        page: &PageRequest,
-    ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
-        let snapshot = self.events.latest_managed_test_run(root_uri).await?;
-        self.events.page_managed_test_run(snapshot, page).await
-    }
-
     #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
     pub(crate) async fn latest_current_page(
         &self,
@@ -479,32 +470,41 @@ impl CanonicalManagedTestRunReader {
     }
 }
 
+/// The refusal outcome when a retained run's head or code generation is
+/// unbound or differs from the current one; `None` when both are current.
+pub(crate) fn managed_test_run_source_refusal(
+    retained_head: Option<&CommitId>,
+    retained_generation: Option<&CodeGenerationId>,
+    current: &ManagedTestRunCurrentScope,
+) -> Option<ManagedTestRunReadOutcome> {
+    let unavailable = |reason| Some(ManagedTestRunReadOutcome::Unavailable(reason));
+    let Some(current_head) = current.head_commit_id.as_ref() else {
+        return unavailable(ManagedTestRunUnavailableReason::CurrentHeadUnbound);
+    };
+    let Some(current_generation) = current.code_generation_id.as_ref() else {
+        return unavailable(ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound);
+    };
+    let Some(retained_head) = retained_head else {
+        return unavailable(ManagedTestRunUnavailableReason::RetainedHeadUnbound);
+    };
+    let Some(retained_generation) = retained_generation else {
+        return unavailable(ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound);
+    };
+    (retained_head != current_head || retained_generation != current_generation).then_some(
+        ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity),
+    )
+}
+
 pub(crate) fn current_managed_test_run(
     snapshot: ManagedTestRunSnapshot,
     current: &ManagedTestRunCurrentScope,
 ) -> ManagedTestRunReadOutcome {
-    let Some(current_head) = current.head_commit_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::CurrentHeadUnbound,
-        );
-    };
-    let Some(current_generation) = current.code_generation_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
-        );
-    };
-    let Some(retained_head) = snapshot.head_commit_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::RetainedHeadUnbound,
-        );
-    };
-    let Some(retained_generation) = snapshot.code_generation_id.as_ref() else {
-        return ManagedTestRunReadOutcome::Unavailable(
-            ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
-        );
-    };
-    if retained_head != current_head || retained_generation != current_generation {
-        return ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity);
+    if let Some(outcome) = managed_test_run_source_refusal(
+        snapshot.head_commit_id.as_ref(),
+        snapshot.code_generation_id.as_ref(),
+        current,
+    ) {
+        return outcome;
     }
     match (
         current.document_uri.as_ref(),
@@ -2054,18 +2054,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_managed_test_run_pages_without_source_identity() {
-        let reader = CanonicalManagedTestRunReader::new(OperationEventAuthority::default());
-
-        assert_eq!(
-            reader
-                .latest_page("file:///workspace", &PageRequest::first(1).expect("page"),)
-                .await,
-            Err(OperationEventError::FrontierExpired)
-        );
-    }
-
-    #[tokio::test]
     async fn canonical_test_run_reader_rejects_exact_source_identity_drift() {
         let authority = OperationEventAuthority::default();
         let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
@@ -2159,50 +2147,13 @@ mod tests {
             reader
                 .latest_current_page(
                     &current,
-                    &PageRequest::new(2, Some(tampered.clone())).expect("tampered page"),
+                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
                 )
                 .await,
             ManagedTestRunReadOutcome::Unavailable(
                 ManagedTestRunUnavailableReason::AuthorityFailure,
             )
         );
-        assert_eq!(
-            reader
-                .latest_page(
-                    "file:///workspace",
-                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
-                )
-                .await
-                .map(|page| page.result_offset),
-            Err(OperationEventError::CursorRefused(
-                tracedecay_domain::CursorBindingMismatchV1::Foreign
-            ))
-        );
-        assert_eq!(
-            reader
-                .latest_page(
-                    "file:///workspace",
-                    &PageRequest::new(1, Some(cursor.clone())).expect("resized page"),
-                )
-                .await
-                .map(|page| page.result_offset),
-            Err(OperationEventError::CursorRefused(
-                tracedecay_domain::CursorBindingMismatchV1::ParameterChanged {
-                    parameter: "page_size"
-                }
-            ))
-        );
-        assert_eq!(
-            reader
-                .latest_page(
-                    "file:///workspace",
-                    &PageRequest::new(2, Some(cursor.clone())).expect("continuation page"),
-                )
-                .await
-                .map(|page| page.result_offset),
-            Ok(2)
-        );
-
         let ManagedTestRunReadOutcome::Current(second) = reader
             .latest_current_page(
                 &current,

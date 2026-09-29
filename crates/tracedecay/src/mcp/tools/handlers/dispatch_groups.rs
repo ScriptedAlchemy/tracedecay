@@ -35,6 +35,7 @@ use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServin
 
 use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
+use crate::mcp::project_route::mcp_analytics_session_id;
 use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
@@ -697,6 +698,34 @@ async fn compute_admin_cli(
     .await
 }
 
+/// Runs the affected tests and records the run in the project session store
+/// against the session the request names.
+async fn compute_run_affected_tests(
+    cg: &TraceDecay,
+    args: Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+    let store = options.registered_project_session_db.clone().ok_or_else(|| {
+        TraceDecayError::project_route(
+            "runtime_mounting",
+            true,
+            "managed test runs are recorded in the project session store, which is still mounting",
+        )
+    })?;
+    let recording = workflow::ManagedTestRunRecording {
+        store,
+        session_id: mcp_analytics_session_id(&args),
+    };
+    workflow::compute_run_affected_tests(
+        cg,
+        admitted_graph_query(options, "file_dependents"),
+        args,
+        recording,
+        options.application_cancellation.clone(),
+    )
+    .await
+}
+
 /// Runs one side-effecting owner operation under the owner's admitted
 /// authorities. The dashboard composes the daemon-owned readers and writers
 /// this owner carries; the test run admits the verified graph to select tests;
@@ -711,13 +740,7 @@ async fn compute_owner_side_effect(
 ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
     let result = match operation {
         ApplicationSurfaceOperation::RunAffectedTests => {
-            return workflow::compute_run_affected_tests(
-                cg,
-                admitted_graph_query(options, "file_dependents"),
-                args,
-                options.application_cancellation.clone(),
-            )
-            .await;
+            return compute_run_affected_tests(cg, args, options).await;
         }
         ApplicationSurfaceOperation::AdminSync => {
             let AdminSyncSurfaceRequestV1 {} =

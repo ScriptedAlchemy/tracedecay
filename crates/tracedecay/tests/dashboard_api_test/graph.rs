@@ -801,6 +801,7 @@ async fn start_dashboard_fixture_seeded(
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             &profile,
+            None,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             tracedecay_dashboard_api::DashboardTestEndpointV1 {

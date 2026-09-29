@@ -443,6 +443,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             &server_profile,
+            None,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             tracedecay_dashboard_api::DashboardTestEndpointV1 {

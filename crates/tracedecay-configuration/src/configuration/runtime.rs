@@ -4,7 +4,6 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and transactional store.
 
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_contracts::now_micros;
@@ -32,7 +31,6 @@ use tracedecay_global_db::configuration::contracts::types::{
 };
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
-use super::user_settings::{ProductionUserSettingsDaemonClient, UserSettingsDaemonClient};
 
 type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send + Sync>;
 
@@ -46,20 +44,15 @@ pub struct ProjectConfigurationRuntime {
     configuration_database: RegisteredGlobalDbLeaseV1,
     authorities: Arc<ConfigurationAuthoritySlots>,
     client: Arc<ProductionConfigurationDaemonClient>,
-    user_settings: Arc<ProductionUserSettingsDaemonClient>,
 }
 
 impl ProjectConfigurationRuntime {
-    pub fn open(
-        opened: OpenedRuntimeConfiguration,
-        profile_root: &Path,
-    ) -> Result<(Self, PinnedRuntimeConfiguration)> {
+    pub fn open(opened: OpenedRuntimeConfiguration) -> Result<(Self, PinnedRuntimeConfiguration)> {
         let OpenedRuntimeConfiguration {
             configuration,
             registered_database,
         } = opened;
         let target = configuration.target().clone();
-        let profile_id = registered_database.binding().shard_id.profile_id.clone();
         let registry = crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
             TraceDecayError::Config {
                 message: format!("configuration registry unavailable: {error}"),
@@ -82,18 +75,12 @@ impl ProjectConfigurationRuntime {
             store,
             control_plane: Arc::clone(&control_plane),
         });
-        let user_settings = Arc::new(ProductionUserSettingsDaemonClient::new(
-            Arc::clone(&client),
-            profile_id,
-            profile_root.to_path_buf(),
-        ));
         Ok((
             Self {
                 target,
                 configuration_database: registered_database,
                 authorities,
                 client,
-                user_settings,
             },
             configuration,
         ))
@@ -120,12 +107,6 @@ impl ProjectConfigurationRuntime {
 
     pub fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
         Arc::clone(&self.client)
-    }
-
-    /// Daemon-owned user-profile settings authority. Dashboard and other
-    /// adapters receive this narrow client rather than loading `config.toml`.
-    pub fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient> {
-        Arc::clone(&self.user_settings) as Arc<dyn UserSettingsDaemonClient>
     }
 
     pub fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {

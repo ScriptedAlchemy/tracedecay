@@ -168,7 +168,7 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
 /// `graph_ready`, not `fresh`, is the predicate: freshness also reports
 /// whether a reconcile pass is in flight, and this read admits a query that
 /// arms one, so a freshness wait would perturb the very state it samples.
-fn await_published_code_index(home: &Path, project: &Path) {
+pub(crate) fn await_published_code_index(home: &Path, project: &Path) {
     let project_arg = project.to_string_lossy().into_owned();
     let output = common::tracedecay_command_with_home(home)
         .current_dir(project)

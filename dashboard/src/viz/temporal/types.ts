@@ -84,7 +84,8 @@ export type JourneyEventKind =
   | 'spawn'
   | 'commit'
   | 'file_edit'
-  | 'pull_request';
+  | 'pull_request'
+  | 'test_run';
 
 export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'session_start',
@@ -97,6 +98,7 @@ export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'commit',
   'file_edit',
   'pull_request',
+  'test_run',
 ];
 
 /** One drawable record on a lane. */

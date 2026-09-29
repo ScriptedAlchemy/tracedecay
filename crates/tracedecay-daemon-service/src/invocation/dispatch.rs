@@ -871,7 +871,8 @@ impl DaemonInvocationService {
             | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | DaemonInvocationPayload::MultiRootExecute { .. }
             | DaemonInvocationPayload::ProfileRetainedApplication { .. }
-            | DaemonInvocationPayload::ProfileGraphTool { .. } => {
+            | DaemonInvocationPayload::ProfileGraphTool { .. }
+            | DaemonInvocationPayload::ProfileConfiguration { .. } => {
                 DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,

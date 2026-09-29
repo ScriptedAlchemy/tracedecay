@@ -545,3 +545,216 @@ async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_
 
     owner.harness.shutdown().await;
 }
+
+const RECORDED_SESSION: &str = "production-codex-reopen-000";
+
+async fn start_dashboard(fixture: &ProductionCompositionFixture) -> String {
+    let started = parse_tool_json(
+        "tracedecay_dashboard",
+        &call_tool(
+            fixture,
+            "tracedecay_dashboard",
+            json!({"host": "127.0.0.1", "port": 0, "format": "json"}),
+        )
+        .await,
+    );
+    assert_eq!(started["status"], json!("started"), "{started}");
+    crate::common::dashboard_api_base_url(started["url"].as_str().expect("dashboard url"))
+}
+
+async fn stop_dashboard(fixture: &ProductionCompositionFixture) {
+    call_tool(fixture, "tracedecay_dashboard", json!({"action": "stop"})).await;
+}
+
+/// The Loom temporal read once the project session authority it composes has
+/// mounted; a freshly opened daemon answers `loading` until then.
+async fn loom_temporal(dashboard: String) -> Value {
+    let url = format!("{dashboard}/api/loom/temporal?limit=200");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+        loop {
+            let url = url.clone();
+            let envelope = tokio::task::spawn_blocking(move || {
+                let (status, envelope) =
+                    crate::common::get_json(&crate::common::http_agent(), &url);
+                assert_eq!(status, 200, "{envelope}");
+                envelope
+            })
+            .await
+            .expect("Loom temporal read");
+            if envelope["payload"]["available"] == json!(true) {
+                break envelope;
+            }
+            assert_eq!(envelope["domain_state"], json!("loading"), "{envelope}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Loom session authority mount deadline")
+}
+
+/// Ingests the composed Codex rollout, retrying only the typed
+/// `application.runtime.mounting` refusal the session stores answer while the
+/// full project server is still mounting.
+async fn ingest_codex_transcripts(fixture: &ProductionCompositionFixture) {
+    let arguments = json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"});
+    let ingest = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = call_tool(fixture, "tracedecay_hook_runtime", arguments.clone()).await;
+            if result.value["problem"]["code"] == json!("application.runtime.mounting") {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
+            assert_ne!(result.value["isError"], json!(true), "{}", result.value);
+            break parse_tool_json("tracedecay_hook_runtime", &result);
+        }
+    })
+    .await
+    .expect("project session stores mount deadline");
+    assert_eq!(ingest["completed"], json!(true), "{ingest}");
+}
+
+/// The retained-run fields `tracedecay_test_results` answers with.
+async fn test_results(fixture: &ProductionCompositionFixture) -> Value {
+    let read = super::session_search_test::call_production_tool(
+        &fixture.harness,
+        &fixture.project_root,
+        "tracedecay_test_results",
+        json!({"format": "json"}),
+    )
+    .await;
+    json!({
+        "operation_id": read["operation_id"],
+        "session_id": read["session_id"],
+        "passed": read["passed"],
+        "failed": read["failed"],
+        "ignored": read["ignored"],
+        "exit_code": read["exit_code"],
+        "results": read["results"],
+        "termination": read["termination"],
+    })
+}
+
+fn loom_test_runs(envelope: &Value) -> (Vec<Value>, Value) {
+    let runs = envelope["payload"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Loom events: {envelope}"))
+        .iter()
+        .filter(|event| event["kind"] == "test_run")
+        .cloned()
+        .collect();
+    let status = envelope["payload"]["source_statuses"]
+        .as_array()
+        .and_then(|statuses| {
+            statuses
+                .iter()
+                .find(|status| status["id"] == "session_test")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("missing test-run source: {envelope}"));
+    (runs, status)
+}
+
+/// A test run started through MCP with a session id is recorded against that
+/// session at the moment it runs: the Loom route serves it on the session's
+/// lane with the recorded start and outcome, and `tracedecay_test_results`
+/// reads the newest record with its attribution. A run whose request named no
+/// session is counted unattributed, never placed on a lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_attributed_test_runs_are_loom_events() {
+    let _dashboard = crate::mcp_dashboard_tool_test::TEST_LOCK.lock().await;
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_affected_fixture(project);
+        let isolation = project.parent().expect("composition isolation root");
+        super::session_search_test::write_production_codex_rollout(
+            &super::session_search_test::composed_transcript_home(isolation),
+            project,
+        );
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production affected-tests server");
+    wait_for_current_graph(&server).await;
+    ingest_codex_transcripts(&fixture).await;
+
+    let attributed = run_affected(
+        &fixture,
+        json!({
+            "changed_paths": ["tests/failing_greeting.rs"],
+            "timeout_secs": 120,
+            "max_tests": 5,
+            "session_id": RECORDED_SESSION,
+        }),
+    )
+    .await;
+    assert_eq!(attributed["exit_code"], json!(101), "{attributed}");
+    assert_eq!(attributed["failed"], json!(1), "{attributed}");
+    assert_eq!(attributed["ignored"], json!(0), "{attributed}");
+    let terminal = &attributed["terminal"];
+    assert_eq!(
+        terminal["session_id"],
+        json!(RECORDED_SESSION),
+        "{attributed}"
+    );
+    let receipt = &terminal["receipt"];
+    let started_at = receipt["started_at"].as_i64().expect("recorded start");
+    let ended_at = receipt["ended_at"].as_i64().expect("recorded end");
+
+    let sessionless = run_affected(
+        &fixture,
+        json!({"changed_paths": ["tests/ordered.rs"], "timeout_secs": 120, "max_tests": 1}),
+    )
+    .await;
+    assert_eq!(sessionless["passed"], json!(1), "{sessionless}");
+    assert_eq!(
+        sessionless["terminal"]["session_id"],
+        Value::Null,
+        "{sessionless}"
+    );
+
+    let expected_run = json!({
+        "provider": "codex",
+        "session_id": RECORDED_SESSION,
+        "kind": "test_run",
+        "operation_id": terminal["operation_id"],
+        "recorded_at": started_at.div_euclid(1_000_000),
+        "started_at_micros": started_at,
+        "outcome": {
+            "finished_at_micros": ended_at,
+            "termination": "completed",
+            "exit_code": 101,
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0,
+        },
+    });
+    let expected_results = json!({
+        "operation_id": sessionless["terminal"]["operation_id"],
+        "session_id": null,
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "results": [{"test": KEPT_TEST, "passed": true}],
+        "termination": "completed",
+    });
+    assert_eq!(test_results(&fixture).await, expected_results);
+
+    let dashboard = start_dashboard(&fixture).await;
+    let (runs, status) = loom_test_runs(&loom_temporal(dashboard).await);
+    stop_dashboard(&fixture).await;
+    assert_eq!(runs, vec![expected_run]);
+    assert_eq!(status["state"], json!("partial"), "{status}");
+    assert_eq!(status["item_count"], json!(1), "{status}");
+    assert_eq!(
+        (
+            &status["coverage"]["eligible"],
+            &status["coverage"]["matched"],
+            &status["coverage"]["omitted"],
+        ),
+        (&json!(2), &json!(1), &json!(1)),
+        "the sessionless run is counted unattributed, not dropped: {status}"
+    );
+    fixture.shutdown().await;
+}

@@ -49,14 +49,25 @@ pub fn register_test_schema_installer() {
 
 #[doc(hidden)]
 /// The dashboard context of `graph`, owned by `profile` when a daemon serves
-/// it, else by the profile the graph was opened in.
+/// it, else by the profile the graph was opened in. User settings resolve from
+/// `profile_sessions`, the owner's registered profile store; without one they
+/// are unavailable.
 pub fn dashboard_project_context(
     graph: &tracedecay_project::project::TraceDecay,
     profile: Option<&tracedecay_runtime_core::config::ProfileRoot>,
+    profile_sessions: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
 ) -> tracedecay_domain::errors::Result<DashboardProjectContext> {
     let profile = match profile {
         Some(profile) => profile.clone(),
         None => tracedecay_runtime_core::config::ProfileRoot::new(graph.profile_root()?),
+    };
+    let user_settings_client = match profile_sessions {
+        Some(database) => tracedecay_configuration::ProductionUserSettingsDaemonClient::new(
+            database.clone(),
+            database.binding().shard_id.profile_id.clone(),
+            profile.data_dir().to_path_buf(),
+        ),
+        None => tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
     };
     Ok(DashboardProjectContext {
         profile,
@@ -65,7 +76,7 @@ pub fn dashboard_project_context(
         dashboard_database: graph.dashboard_database_guard(),
         retention_config: graph.get_config().sync.retention.clone(),
         host_io: tracedecay_agent_hosts::host_io(),
-        user_settings_client: graph.configuration_runtime().user_settings_client(),
+        user_settings_client: std::sync::Arc::new(user_settings_client),
     })
 }
 
@@ -75,6 +86,7 @@ pub fn dashboard_project_context(
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     graph: std::sync::Arc<tracedecay_project::project::TraceDecay>,
     profile: &tracedecay_runtime_core::config::ProfileRoot,
+    profile_sessions: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -86,7 +98,11 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     tracedecay_dashboard_api::run_until_shutdown_for_tests_with_host_admission(
-        std::sync::Arc::new(dashboard_project_context(&graph, Some(profile))?),
+        std::sync::Arc::new(dashboard_project_context(
+            &graph,
+            Some(profile),
+            profile_sessions,
+        )?),
         authority,
         project_graphs,
         endpoint,

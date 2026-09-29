@@ -567,7 +567,6 @@ async fn same_authority_source_edit_owners_alias_one_incumbent() {
             pinned,
             runtime.project_database_arc().expect("project database"),
         ),
-        &profile_root,
     )
     .expect("configuration runtime");
     let configuration = Arc::new(configuration);
