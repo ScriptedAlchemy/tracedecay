@@ -2985,8 +2985,10 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    /// Observe serving-slot seating. Each advance means the serving slot was
-    /// written; the receiver reads the slot to learn what it now holds.
+    /// Observe serving-slot seating. Each advance means what serves changed:
+    /// the slot was written, or a seal installed its text owner and released
+    /// the predecessor seat ahead of its decode. The receiver re-probes to
+    /// learn what now answers.
     pub fn subscribe_serving_seats(&self) -> tokio::sync::watch::Receiver<u64> {
         self.serving_seats.subscribe()
     }
@@ -2997,8 +2999,9 @@ impl CodeIndexSchedulerRegistryV1 {
         self.root_mounted.subscribe()
     }
 
-    /// Record that the serving slot was written. Call this only after the slot
-    /// holds the new generation, so a woken waiter observes the seated value.
+    /// Record that what serves changed. Call this only after the slot and the
+    /// text owner hold their new values, so a woken waiter's re-probe observes
+    /// them.
     fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
     }

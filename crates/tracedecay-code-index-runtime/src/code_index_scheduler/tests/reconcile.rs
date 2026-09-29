@@ -8511,8 +8511,10 @@ fn reparse_matches_full_parse_chunks() {
 /// Publication is broadcast when reconcile seals, before the sealed generation
 /// takes the serving slot, so `branch_add`'s exact-branch wait had no event for
 /// the seat and polled the slot every 10ms for up to thirty minutes instead.
-/// The seating counter replaces that poll, and it only can if a wake means the
-/// slot already holds the generation.
+/// The seating counter replaces that poll. A seal now installs its text owner
+/// and records a seat before the decoded generation exists, so a wake means
+/// what serves changed and the waiter re-probes; it never fires while nothing
+/// answers, and the decoded seat arrives on a later wake, not by polling.
 #[tokio::test]
 async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -8527,17 +8529,27 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
         )
         .await
         .expect("mount scheduler");
-    tokio::time::timeout(Duration::from_secs(30), seats.changed())
-        .await
-        .expect("seating wakes its waiters instead of leaving them to poll")
-        .expect("the seating channel stays open while the registry lives");
-    assert!(
-        registry
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::time::timeout_at(deadline, seats.changed())
+            .await
+            .expect("seating wakes its waiters instead of leaving them to poll")
+            .expect("the seating channel stays open while the registry lives");
+        assert!(
+            registry
+                .latest_generation_id(fixture.path())
+                .await
+                .is_some(),
+            "a seat wake must not fire before a generation answers"
+        );
+        if registry
             .latest_complete_serving_for_test(fixture.path())
             .await
-            .is_some(),
-        "a seat wake must not fire before the serving slot holds the generation"
-    );
+            .is_some()
+        {
+            break;
+        }
+    }
     registry.shutdown().await;
 }
 
@@ -11986,10 +11998,12 @@ async fn graph_decode_does_not_block_text_freshness() {
     registry.shutdown().await;
 }
 
-/// Busy admission preserves the prior generation and schedules a follow-up wake
-/// so serve-during-refresh cannot leave the index stale indefinitely.
+/// Busy admission preserves the prior generation without scheduling a wake of
+/// its own: the pass parked on the held scheduler is the source observation,
+/// and it renews the moved proof once the lock frees, so serve-during-refresh
+/// cannot leave the index stale indefinitely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn busy_admission_schedules_follow_up_cadence_wake() {
+async fn busy_admission_serves_prior_generation_until_the_parked_pass_reconciles() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -12008,14 +12022,16 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         .generation_id
         .clone();
     // The mount pass records its receipt after it releases its in-progress
-    // guard, so wait for the receipt itself before taking the baseline.
+    // guard, so wait for the receipt itself before taking the baseline, and
+    // settle the seat's projection so the worker owes no continuation that
+    // the parked pass would carry into the wake accounting below.
     wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
+    settle_text_projection(&registry, fixture.path()).await;
     let before_receipts = registry.event_to_ready_receipts().len();
     // A new branch ref moves Git metadata past the seated proof without
-    // changing HEAD or any source, so the follow-up pass is an unchanged
-    // reconcile. A busy read must leave that one follow-up wake rather than
-    // trust the expired proof.
+    // changing HEAD or any source, so the parked pass is an unchanged
+    // reconcile that renews the proof.
     git(fixture.path(), &["branch", "proof-moved"]);
 
     let scheduler = registry
@@ -12060,8 +12076,8 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
     release_tx.send(()).expect("release");
     lock_thread.join().expect("join");
 
-    // The follow-up wake must produce its own cadence receipt after the lock
-    // frees.
+    // The parked pass runs once the lock frees and records the receipt for
+    // the arrival it was woken for; the busy read added no wake of its own.
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -12069,16 +12085,34 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         if receipts
             .iter()
             .skip(before_receipts)
-            .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
+            .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::Overflow)
         {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "busy follow-up wake did not produce a cadence receipt"
+            "the parked pass did not produce a cadence receipt"
         );
         signals.changed_before(deadline).await;
     }
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let triggers: Vec<_> = registry
+        .event_to_ready_receipts()
+        .iter()
+        .skip(before_receipts)
+        .map(|receipt| receipt.trigger)
+        .collect();
+    assert!(
+        triggers
+            .iter()
+            .all(|trigger| *trigger == CodeIndexCadenceTriggerV1::Overflow),
+        "a read blocked on the parked pass must not schedule another verification: {triggers:?}"
+    );
+    let renewed = registry
+        .latest_complete_ready(fixture.path())
+        .await
+        .expect("the parked pass renewed the moved proof");
+    assert_eq!(renewed.generation.manifest().generation_id, expected);
     registry.shutdown().await;
 }
 
