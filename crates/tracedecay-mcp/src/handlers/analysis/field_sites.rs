@@ -1,8 +1,10 @@
 //! `tracedecay_field_sites`, read and write references to a named field.
 
+use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
 use tracedecay_contracts::retrieval::{
     FieldSiteV1, FieldSitesResultV1, FieldSitesSurfaceRequestV1,
 };
+use tracedecay_domain::{ContentDigest, LanguageId};
 
 use super::*;
 
@@ -23,9 +25,17 @@ pub(super) async fn compute_field_sites(
         None => (None, raw.to_string()),
     };
 
-    let (symbols_by_file, qualified_scope) =
+    let (symbols_by_file, sealed_files, qualified_scope) =
         hotpath::measure_block!("mcp.analysis.field_sites.graph", {
             let symbols = verified_analysis_symbols(graph, scope_prefix)?;
+            let sealed_files = graph
+                .files(ANALYSIS_SYMBOL_BUDGET)?
+                .into_iter()
+                .filter_map(|file| {
+                    let language = file.language?;
+                    Some((file.logical_path, (language, file.content_digest)))
+                })
+                .collect::<HashMap<_, _>>();
             let qualified_scope = qualifier
                 .as_deref()
                 .map(|qualifier| qualified_field_scope(graph, &symbols, qualifier, &field_name))
@@ -37,7 +47,7 @@ pub(super) async fn compute_field_sites(
                     .or_default()
                     .push(symbol);
             }
-            (symbols_by_file, qualified_scope)
+            (symbols_by_file, sealed_files, qualified_scope)
         });
     // Graph phase is done. The source walk reads every candidate file, so it
     // belongs on a blocking worker like the sibling analysis scans.
@@ -50,9 +60,10 @@ pub(super) async fn compute_field_sites(
             let mut reads: Vec<FieldSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
 
+            let needle = format!(".{field_name}");
             'outer: for file in &files {
                 let abs = project_root.join(file);
-                let Ok(source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
+                let Ok(disk_source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
                 };
 
@@ -61,6 +72,10 @@ pub(super) async fn compute_field_sites(
                 // nodes anyway cost one daemon round trip per file in the project,
                 // O(store) work to answer a question whose result is a handful of
                 // sites.
+                if !disk_source.contains(&needle) {
+                    continue;
+                }
+                let source = sealed_field_source(&project_root, file, sealed_files.get(file))?;
                 let masked = path_is_rust(file).then(|| {
                     tracedecay_code_extraction::source_mask::masked_rust_source_with(
                         &source,
@@ -173,6 +188,50 @@ pub(super) async fn compute_field_sites(
         }),
         touched,
     ))
+}
+
+/// The text the graph's byte spans index for `file`. Sites are attributed to
+/// declarations by byte containment, so they must be found in the same bytes
+/// the generation sealed, which differ from the checkout when git's clean
+/// filters rewrite it (a CRLF checkout under `core.autocrlf=true`).
+fn sealed_field_source(
+    project_root: &Path,
+    file: &str,
+    sealed: Option<&(LanguageId, ContentDigest)>,
+) -> Result<String> {
+    let Some((language, digest)) = sealed else {
+        return Err(TraceDecayError::project_route(
+            "code-graph-corrupt",
+            false,
+            format!(
+                "indexed symbols name '{file}' but the graph has no present file record for it"
+            ),
+        ));
+    };
+    let bytes = sealed_source_bytes(project_root, file, language, digest)
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "verified-field-source-unavailable",
+                true,
+                format!("cannot read the bytes the indexed graph sealed for '{file}': {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "verified-field-source-stale",
+                true,
+                format!(
+                    "the checkout of '{file}' no longer holds the bytes the indexed graph sealed"
+                ),
+            )
+        })?;
+    String::from_utf8(bytes).map_err(|_| {
+        TraceDecayError::project_route(
+            "code-graph-corrupt",
+            false,
+            format!("the sealed source of '{file}' is not UTF-8"),
+        )
+    })
 }
 
 struct QualifiedFieldScope {

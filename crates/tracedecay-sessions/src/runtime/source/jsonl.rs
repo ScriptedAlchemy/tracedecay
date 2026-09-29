@@ -500,14 +500,15 @@ fn unchanged_generation_cache_key(
     })
 }
 
-#[cfg(unix)]
-fn trusted_jsonl_cache_change_token(metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
-    Some(jsonl_file_change_token(metadata))
-}
+/// Whether an unchanged [`JsonlFileChangeToken`] proves the file's bytes
+/// unchanged. Unix ctime advances on every write and cannot be set back.
+/// Windows exposes no such witness: NTFS `ChangeTime` stays put when a writer
+/// restores `LastWriteTime` through its handle, so there an unchanged token
+/// only fails to disprove a rewrite and callers must re-verify content.
+pub(in crate::runtime) const JSONL_CHANGE_TOKEN_WITNESSES_REWRITES: bool = cfg!(unix);
 
-#[cfg(not(unix))]
-fn trusted_jsonl_cache_change_token(_metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
-    None
+fn trusted_jsonl_cache_change_token(metadata: &std::fs::Metadata) -> Option<JsonlFileChangeToken> {
+    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES.then(|| jsonl_file_change_token(metadata))
 }
 
 #[cfg(any(test, feature = "hotpath"))]
