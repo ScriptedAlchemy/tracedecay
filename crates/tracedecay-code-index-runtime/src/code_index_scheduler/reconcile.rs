@@ -281,7 +281,7 @@ pub enum CodeIndexSchedulerErrorV1 {
 
 impl CodeIndexSchedulerErrorV1 {
     /// An activation failure that leaves the sealed artifact intact and can
-    /// succeed on a later attempt (deadline, cancellation, budget, an
+    /// succeed on a later attempt (cancellation, budget, an
     /// unavailable/saturated graph runtime, or a publication conflict). The
     /// worker retries activation of the same sealed generation with backoff
     /// for these instead of resealing a duplicate; payload corruption and
@@ -293,13 +293,16 @@ impl CodeIndexSchedulerErrorV1 {
     /// terminal turned one such race into a permanent outage: the seat pass
     /// gave up stale serving, the next reconcile hit the same race, and the
     /// route answered `generation_unverified` until the daemon restarted.
+    ///
+    /// `DeadlineExceeded` is not retryable: the publication already spent its
+    /// whole background budget on this exact sealed generation, and a retry
+    /// replays the identical build into the same budget (#2505).
     pub fn is_retryable_activation(&self) -> bool {
         match self {
             Self::GraphProjection(error) => matches!(
                 error,
                 CodeGraphProjectionError::Cancelled
                     | CodeGraphProjectionError::BudgetExhausted { .. }
-                    | CodeGraphProjectionError::DeadlineExceeded
                     | CodeGraphProjectionError::Conflict { .. }
                     | CodeGraphProjectionError::Unavailable(_)
                     | CodeGraphProjectionError::Closed
@@ -377,7 +380,17 @@ impl CodeIndexSchedulerErrorV1 {
     }
 
     pub fn is_graph_activation_refusal(&self) -> bool {
-        matches!(self, Self::GraphActivationRefused(_)) || self.is_resident_memory_graph_refusal()
+        matches!(self, Self::GraphActivationRefused(_))
+            || self.is_resident_memory_graph_refusal()
+            || self.is_graph_publication_deadline()
+    }
+
+    /// The native graph publication ran out its background budget.
+    pub fn is_graph_publication_deadline(&self) -> bool {
+        matches!(
+            self,
+            Self::GraphProjection(CodeGraphProjectionError::DeadlineExceeded)
+        )
     }
 
     /// The native graph publication stopped at the measured-RSS watermark.

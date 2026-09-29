@@ -15,20 +15,13 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::measure(future = true, label = "global_db.transcript.get_session")]
-    pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
-        SessionStoreAccess::new(self)
-            .get_session(provider, session_id)
-            .await
-    }
-
-    #[hotpath::measure(future = true, label = "global_db.transcript.get_session_result")]
-    pub async fn get_session_result(
+    pub async fn get_session(
         &self,
         provider: &str,
         session_id: &str,
     ) -> Result<Option<SessionRecord>, TranscriptPersistenceError> {
         SessionStoreAccess::new(self)
-            .get_session_result(provider, session_id)
+            .get_session(provider, session_id)
             .await
     }
 
@@ -103,18 +96,11 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::measure(future = true, label = "global_db.transcript.get_parse_offset")]
-    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
-        SessionStoreAccess::new(self).get_parse_offset(path).await
-    }
-
-    #[hotpath::skip]
-    pub async fn get_parse_offset_result(
+    pub async fn get_parse_offset(
         &self,
         path: &str,
     ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-        SessionStoreAccess::new(self)
-            .get_parse_offset_result(path)
-            .await
+        SessionStoreAccess::new(self).get_parse_offset(path).await
     }
 
     #[hotpath::measure(future = true, label = "global_db.transcript.set_parse_offset")]

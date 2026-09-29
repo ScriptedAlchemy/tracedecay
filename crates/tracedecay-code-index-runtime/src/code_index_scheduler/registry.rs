@@ -26,7 +26,8 @@ use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, VerifiedSealedTextGenerationMetadataV1,
 };
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
+    CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, IndexPathPolicyV1, ManifestDigest, ProjectId, RepositoryId,
@@ -1222,6 +1223,25 @@ pub(super) fn dashboard_code_graph_serving(
         },
         LatestCompleteCodeIndexV1::code_graph_serving_readiness,
     ))
+}
+
+/// Text readiness is not generation readiness: while the generation's native
+/// graph is still pending, the `Ready` the text build left in the progress
+/// slot names the graph publication instead, with no estimate (#2470).
+pub(super) fn project_graph_publication_phase(
+    progress: &mut Option<CodeIndexBuildProgressV1>,
+    code_graph_serving: &Option<CodeGraphServingReadinessV1>,
+) {
+    if let Some(progress) = progress.as_mut()
+        && progress.phase == CodeIndexBuildPhaseV1::Ready
+        && matches!(
+            code_graph_serving,
+            Some(CodeGraphServingReadinessV1::Pending)
+        )
+    {
+        progress.phase = CodeIndexBuildPhaseV1::GraphPublication;
+        progress.estimated_remaining_seconds = None;
+    }
 }
 
 /// Whether the lane owners alone would let status report this worktree as

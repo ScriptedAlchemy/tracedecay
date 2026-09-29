@@ -22,7 +22,8 @@ use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublica
 /// The worktree id is unique per test fixture, while generation ids are
 /// content-derived and collide across tests that share a fixture template. A
 /// positive count makes the memory activation authority fail that many
-/// activations with a deadline error so worker retry behavior is observable.
+/// activations with an unavailable graph runtime so worker retry behavior is
+/// observable.
 #[cfg(any(test, feature = "test-helpers"))]
 fn injected_activation_failures()
 -> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
@@ -60,6 +61,17 @@ fn injected_resident_memory_refusals()
     static REFUSALS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
         std::sync::OnceLock::new();
     REFUSALS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+/// Test-only publications that run out their background budget, keyed by
+/// worktree id: the memory activation authority answers every activation of
+/// such a worktree with the deadline the persistent build reports.
+#[cfg(any(test, feature = "test-helpers"))]
+fn injected_publication_deadlines() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>>
+{
+    static DEADLINES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    DEADLINES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -169,6 +181,18 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
 }
 
 #[cfg(test)]
+pub fn set_injected_publication_deadline(worktree_id: &WorktreeId, exceeded: bool) {
+    let mut deadlines = injected_publication_deadlines()
+        .lock()
+        .expect("injected publication deadline gate must not be poisoned");
+    if exceeded {
+        deadlines.insert(worktree_id.as_str().to_owned());
+    } else {
+        deadlines.remove(worktree_id.as_str());
+    }
+}
+
+#[cfg(test)]
 pub fn set_injected_terminal_activation_failure(worktree_id: &WorktreeId, failed: bool) {
     let mut failures = injected_terminal_activation_failures()
         .lock()
@@ -184,6 +208,14 @@ pub fn set_injected_terminal_activation_failure(worktree_id: &WorktreeId, failed
 #[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
 fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
     injected_resident_memory_refusals()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(worktree_id.as_str())
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn has_injected_publication_deadline(worktree_id: &WorktreeId) -> bool {
+    injected_publication_deadlines()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(worktree_id.as_str())
@@ -254,6 +286,13 @@ fn take_injected_activation_gate(
 pub(crate) const RESIDENT_MEMORY_GRAPH_REFUSAL_REASON: &str =
     "code graph activation was refused by the resident-memory policy";
 
+/// The typed reason a generation reports once its native graph publication
+/// ran out its background budget. The build is a pure function of the sealed
+/// generation, so the verdict stands until a new generation seals.
+pub(crate) const GRAPH_PUBLICATION_DEADLINE_REASON: &str = "the sealed code graph publication \
+     exceeded its background budget; this generation serves exact and lexical without a \
+     native graph until the next generation seals";
+
 /// Whether a projection error is the resident-memory budget refusal that
 /// [`CodeIndexSchedulerErrorV1::is_graph_activation_refusal`] recognizes.
 pub(crate) fn is_resident_memory_refusal(error: &CodeGraphProjectionError) -> bool {
@@ -262,6 +301,17 @@ pub(crate) fn is_resident_memory_refusal(error: &CodeGraphProjectionError) -> bo
         CodeGraphProjectionError::BudgetExhausted { budget, .. }
             if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
     )
+}
+
+/// Record a spent publication budget on the generation, so status reports
+/// the typed refusal and no later pass replays the same build.
+fn refuse_spent_publication_budget(
+    text: &LatestCodeTextGenerationV1,
+    error: &CodeGraphProjectionError,
+) {
+    if matches!(error, CodeGraphProjectionError::DeadlineExceeded) {
+        text.refuse_graph_activation(GRAPH_PUBLICATION_DEADLINE_REASON);
+    }
 }
 
 #[derive(Clone)]
@@ -477,7 +527,8 @@ impl CodeGraphActivationAuthorityV1 {
                         "sealed graph publication task failed: {error}"
                     ))
                 })?
-                .map_err(CodeGraphProjectionError::from)?;
+                .map_err(CodeGraphProjectionError::from)
+                .inspect_err(|error| refuse_spent_publication_budget(latest, error))?;
                 Ok(true)
             }
             #[cfg(any(test, feature = "test-helpers"))]
@@ -572,6 +623,11 @@ impl CodeGraphActivationAuthorityV1 {
                         },
                     ));
                 }
+                if has_injected_publication_deadline(worktree_id) {
+                    let deadline = CodeGraphProjectionError::DeadlineExceeded;
+                    refuse_spent_publication_budget(&latest.text, &deadline);
+                    return Err(CodeIndexSchedulerErrorV1::GraphProjection(deadline));
+                }
                 if take_injected_activation_conflict(worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         GraphDbError::conflict("publication.prepare.expected_prior_head").into(),
@@ -579,7 +635,9 @@ impl CodeGraphActivationAuthorityV1 {
                 }
                 if take_injected_activation_failure(worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
-                        CodeGraphProjectionError::DeadlineExceeded,
+                        CodeGraphProjectionError::Unavailable(
+                            "injected unavailable graph runtime".to_owned(),
+                        ),
                     ));
                 }
                 latest.prewarm_serving_derivations();
@@ -727,6 +785,7 @@ impl LatestCompleteCodeIndexV1 {
                     if is_resident_memory_refusal(error) {
                         self.refuse_graph_activation(RESIDENT_MEMORY_GRAPH_REFUSAL_REASON);
                     }
+                    refuse_spent_publication_budget(&self.text, error);
                 })
         )?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(

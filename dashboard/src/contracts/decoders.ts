@@ -2375,7 +2375,7 @@ export const CodeIndexBuildBlockedReasonV1Schema: z.ZodEnum<["artifact_store_una
 
 A phase is not inferred from scheduler state. The mounted registry publishes
 the exact phase that owns the active generation. */
-export const CodeIndexBuildPhaseV1Schema: z.ZodEnum<["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]> = z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]);
+export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication", z.ZodTypeDef, unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("graph_publication")]);
 
 /** The latest committed progress boundary for one active code-index generation.
 

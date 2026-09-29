@@ -863,7 +863,7 @@ export type CodeGraphServingReadinessV1 =
 
 export type CodeIndexBuildBlockedReasonV1 = "artifact_store_unavailable" | "publication_authority_corrupt" | "resident_memory" | "retry_backoff" | "source_unavailable";
 
-export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification";
+export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication";
 
 export type CodeIndexBuildProgressV1 = {
   blocked_reason: CodeIndexBuildBlockedReasonV1 | null;
