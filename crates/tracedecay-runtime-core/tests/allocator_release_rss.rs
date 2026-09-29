@@ -93,6 +93,7 @@ fn releases_return_freed_c_heap_while_a_rust_allocator_release_is_installed() {
     install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
         release: rust_allocator_release,
         collect_calling_thread: rust_allocator_release,
+        owner_heaps: None,
     })
     .expect("first installation");
     assert_release_returns_freed_c_heap("full release", release_process_allocator_memory_v1);

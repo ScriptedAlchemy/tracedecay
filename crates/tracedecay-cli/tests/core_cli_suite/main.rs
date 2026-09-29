@@ -24,6 +24,8 @@ mod monitor_test;
 // host-CLI fixture provisioner.
 #[path = "../../build-support/provision_host_cli_fixture.rs"]
 mod provision_host_cli_fixture;
+#[cfg(target_os = "linux")]
+mod resident_memory_invariant_test;
 mod source_provenance_test;
 mod sync_test;
 mod test_profile_isolation_test;

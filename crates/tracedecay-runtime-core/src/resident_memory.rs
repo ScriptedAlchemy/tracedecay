@@ -15,7 +15,7 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
 
 mod owners;
-mod runtime_heap;
+mod runtime_allowance;
 
 pub use owners::{
     RESIDENT_OWNER_IDLE_WINDOW_V1, RESIDENT_OWNER_SHED_ORDER_V1, ResidentHoldingV1,
@@ -25,10 +25,7 @@ pub use owners::{
     ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
     ResidentOwnersV1, ResidentSharedContentV1, process_resident_owners_v1,
 };
-pub use runtime_heap::{
-    PROCESS_RUNTIME_ALLOWANCE_BYTES_V1, ProcessRuntimeHeapKindV1, ProcessRuntimeHeapSampleV1,
-    sample_process_runtime_heap_v1,
-};
+pub use runtime_allowance::PROCESS_RUNTIME_ALLOWANCE_BYTES_V1;
 
 /// Conservative fallback when the host cannot report physical memory.
 ///

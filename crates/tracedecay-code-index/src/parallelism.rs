@@ -881,6 +881,7 @@ mod tests {
         install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
             release: release_nothing,
             collect_calling_thread: count_worker_collect,
+            owner_heaps: None,
         })
         .expect("the only allocator release installed in this binary");
         let owner = CodeIndexWorkerRuntimeV1::build(
