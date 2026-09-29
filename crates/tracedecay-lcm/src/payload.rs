@@ -11,7 +11,6 @@ mod delete_recovery;
 mod filesystem_authority;
 mod rollback;
 
-pub(crate) use delete_recovery::ReferencedClosureCache;
 #[cfg(test)]
 pub use delete_recovery::delete_external_payload;
 pub use delete_recovery::{
@@ -40,22 +39,20 @@ pub async fn delete_external_payload_in_transaction(
         .await
 }
 
-/// Prepares one member of a caller-owned deletion batch while sharing its
-/// exact reference closure. The caller deletes GC marks only for successful
-/// preparations, in one bounded statement after the batch.
-pub(crate) async fn prepare_external_payload_delete_in_transaction_with_cache(
+/// Prepares one member of a caller-owned deletion batch. The caller deletes
+/// GC marks only for successful preparations, in one bounded statement after
+/// the batch.
+pub(crate) async fn prepare_external_payload_delete_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
     opts: &DeleteOpts,
-    referenced: &mut ReferencedClosureCache,
 ) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::prepare_external_payload_delete_in_transaction_with_cache(
+    delete_recovery::prepare_external_payload_delete_in_transaction(
         conn,
         storage_root,
         payload_ref,
         opts,
-        referenced,
     )
     .await
 }

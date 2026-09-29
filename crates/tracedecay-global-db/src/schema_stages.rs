@@ -178,6 +178,9 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_event_idempotency
         ON analytics_events(provider, project_id, hint_id)
         WHERE provider = 'tracedecay-observability' AND hint_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_observability_event_retention
+        ON analytics_events(json_extract(metadata_json, '$.retention_class'), timestamp)
+        WHERE provider = 'tracedecay-observability';
     CREATE TABLE IF NOT EXISTS observability_emission_outbox (
         project_id TEXT NOT NULL,
         owner_event_id TEXT NOT NULL,
@@ -195,6 +198,8 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_observability_emission_outbox_pending
         ON observability_emission_outbox(project_id, owner_event_id)
         WHERE state = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_observability_emission_outbox_analytics_event
+        ON observability_emission_outbox(analytics_event_id);
     CREATE TRIGGER IF NOT EXISTS observability_emission_outbox_identity_immutable
     BEFORE UPDATE ON observability_emission_outbox
     WHEN OLD.project_id != NEW.project_id

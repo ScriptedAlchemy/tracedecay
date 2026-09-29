@@ -339,8 +339,13 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
         SessionWriteTxn::commit(transaction).await?;
 
-        let snapshot =
-            gc::read_payload_gc_snapshot(&self.read_connection(), provider, session_id).await?;
+        let snapshot = gc::read_payload_gc_snapshot(
+            &self.read_connection(),
+            storage_root,
+            provider,
+            session_id,
+        )
+        .await?;
         let transaction = self
             .begin_write_transaction()
             .await
