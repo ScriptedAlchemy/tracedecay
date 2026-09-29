@@ -953,19 +953,31 @@ mod select_detected_integrations_tests {
     #[test]
     fn empty_home_selects_nothing_instead_of_failing() {
         let home = tempfile::tempdir().unwrap();
-        assert!(select_detected_integrations(home.path(), &[]).is_none());
+        assert_eq!(select_detected_integrations(home.path(), &[]), None);
+
+        let claude_home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(claude_home.path().join(".claude")).unwrap();
+        assert_eq!(
+            select_detected_integrations(claude_home.path(), &[]),
+            Some(vec!["claude".to_string()])
+        );
     }
 
     #[test]
     fn the_empty_home_notice_names_the_agents_and_the_retry() {
         let home = tempfile::tempdir().unwrap();
         let notice = no_detected_integrations_notice(home.path());
-        assert!(notice.contains("Claude Code"), "{notice}");
-        assert!(notice.contains("Cursor"), "{notice}");
-        assert!(notice.contains("tracedecay install"), "{notice}");
-        assert!(
-            notice.contains(&home.path().display().to_string()),
-            "{notice}"
+        assert_eq!(
+            notice,
+            format!(
+                "No supported agents detected under {}.\n\
+                 TraceDecay configures {}.\n\
+                 Install one of them, then run `tracedecay install` again.",
+                home.path().display(),
+                "Antigravity, Claude Code, Cline, Codex CLI, Cursor, Devin, Factory Droid, \
+                 Gemini CLI, GitHub Copilot, Hermes, Kilo CLI, Kimi CLI, Kiro, Mistral Vibe, \
+                 OpenCode, Pi, Roo Code, Zed"
+            )
         );
     }
 
@@ -978,8 +990,7 @@ mod select_detected_integrations_tests {
         let to_install =
             select_detected_integrations(home.path(), &["cursor".to_string()]).unwrap();
 
-        assert!(!to_install.iter().any(|id| id == "cursor"));
-        assert!(to_install.iter().any(|id| id == "claude"));
+        assert_eq!(to_install, vec!["claude".to_string()]);
     }
 }
 

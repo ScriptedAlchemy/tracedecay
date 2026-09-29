@@ -43,6 +43,110 @@ fn unbound_hook_analytics_do_not_create_a_missing_profile() {
         !profile_root.exists(),
         "unbound hook analytics created a missing profile"
     );
+
+    let present = tempfile::tempdir().unwrap();
+    let present_root = present.path().join(".tracedecay");
+    std::fs::create_dir(&present_root).unwrap();
+    let present_profile = ProfileRoot::new(&present_root);
+    drop(record_hook_invoked_parsed(
+        &crate::ports::hook_runtime::crate_test_runtime(present_profile),
+        None,
+        HostIntegrationIdV1::Claude,
+        "Stop",
+        event,
+        &parsed,
+    ));
+    let rows = read_analytics_rows(&present_root.join("hook_analytics.jsonl"));
+    assert_eq!(
+        rows.len(),
+        2,
+        "an existing profile records invoke and completion"
+    );
+    let invoked = rows
+        .iter()
+        .find(|row| row["event"] == "hook_invoked")
+        .expect("hook_invoked row");
+    let mut invoked_fields = invoked
+        .as_object()
+        .cloned()
+        .expect("hook_invoked row is an object");
+    let recorded_at = invoked_fields
+        .remove("ts_unix_ms")
+        .and_then(|value| value.as_u64())
+        .expect("hook_invoked carries a unix millisecond timestamp");
+    assert!(recorded_at >= 1_700_000_000_000);
+    assert_eq!(
+        Value::Object(invoked_fields),
+        serde_json::json!({
+            "event": "hook_invoked",
+            "schema_version": 1,
+            "coverage": "host_measured",
+            "agent": "claude",
+            "hook_name": "Stop",
+            "session_id": "s1",
+            "prompt_category": null,
+            "payload_bytes": event.len() as u64,
+        })
+    );
+
+    let completed = rows
+        .iter()
+        .find(|row| row["event"] == "hook_completed")
+        .expect("hook_completed row");
+    let mut completed_fields = completed
+        .as_object()
+        .cloned()
+        .expect("hook_completed row is an object");
+    let completed_at = completed_fields
+        .remove("ts_unix_ms")
+        .and_then(|value| value.as_u64())
+        .expect("hook_completed carries a unix millisecond timestamp");
+    assert!(completed_at >= recorded_at);
+    let duration_us = completed_fields
+        .remove("duration_us")
+        .and_then(|value| value.as_u64())
+        .expect("duration_us");
+    assert_eq!(
+        completed_fields
+            .remove("duration_ms")
+            .and_then(|value| value.as_u64()),
+        Some(duration_us / 1000)
+    );
+    assert_eq!(
+        completed_fields
+            .remove("hook_wall_time_us")
+            .and_then(|value| value.as_u64()),
+        Some(duration_us)
+    );
+    assert_eq!(
+        completed_fields
+            .remove("hook_wall_time_ms")
+            .and_then(|value| value.as_u64()),
+        Some(duration_us / 1000)
+    );
+    assert_eq!(
+        Value::Object(completed_fields),
+        serde_json::json!({
+            "event": "hook_completed",
+            "schema_version": 1,
+            "coverage": "host_measured",
+            "agent": "claude",
+            "hook_name": "Stop",
+            "session_id": "s1",
+            "prompt_category": null,
+            "daemon_rtt_us": null,
+            "daemon_call_count": 0,
+            "payload_bytes": event.len() as u64,
+            "daemon_ipc_payload_bytes": null,
+            "timeout": { "budget_ms": null, "timed_out": null },
+            "disposition": {
+                "status": "unknown",
+                "retryable": false,
+                "reason_code": "disposition_absent",
+                "class": "unknown"
+            }
+        })
+    );
 }
 
 #[test]

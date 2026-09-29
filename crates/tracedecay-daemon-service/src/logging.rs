@@ -503,13 +503,34 @@ mod watcher_log_tests {
             "event=git_watch_started project=/tmp/project"
         );
 
-        assert!(parse_watcher_log_line(line).is_none());
+        match parse_watcher_log_line(line) {
+            None => {}
+            Some(event) => panic!("tracing line forged a watcher event: {event:?}"),
+        }
+
+        let marked = "[tracedecay] event=git_watch_started project=/tmp/project";
+        let event = parse_watcher_log_line(marked).expect("marked git_watch line");
+        assert_eq!(event.event, "git_watch_started");
+        assert_eq!(event.project.as_deref(), Some("/tmp/project"));
+        assert_eq!(event.detail.as_deref(), None);
     }
 
     #[test]
     fn non_watcher_daemon_events_are_ignored() {
         let line = "[tracedecay] event=scheduler_task task=memory_curator outcome=start";
 
-        assert!(parse_watcher_log_line(line).is_none());
+        match parse_watcher_log_line(line) {
+            None => {}
+            Some(event) => panic!("non-watcher daemon event was accepted: {event:?}"),
+        }
+
+        let marked = concat!(
+            "[tracedecay] event=git_watch_degraded project=/srv/repo ",
+            "reason=\"watch limit reached\""
+        );
+        let event = parse_watcher_log_line(marked).expect("marked git_watch line");
+        assert_eq!(event.event, "git_watch_degraded");
+        assert_eq!(event.project.as_deref(), Some("/srv/repo"));
+        assert_eq!(event.detail.as_deref(), Some("watch limit reached"));
     }
 }
