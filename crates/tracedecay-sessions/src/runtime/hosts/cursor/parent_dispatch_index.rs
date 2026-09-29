@@ -18,19 +18,14 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
-use tracedecay_private_fs::windows_file::{
-    FileChangeToken as WindowsFileChangeToken, change_token as windows_file_change_token,
-};
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, is_subagent_dispatch_tool, record_bytes_may_name_subagent_dispatch,
 };
 
-#[cfg(unix)]
-use crate::runtime::source::jsonl_change_token_settled;
 use crate::runtime::source::{
-    JsonlFileChangeToken, JsonlNativeFileIdentity, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
-    RawJsonlFrameReader, ResumeDigest, jsonl_file_change_token, jsonl_native_file_identity,
+    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES, JsonlFileChangeToken, JsonlNativeFileIdentity,
+    MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, ResumeDigest,
+    jsonl_change_token_settled, jsonl_file_change_token, jsonl_native_file_identity,
     jsonl_prefix_digest,
 };
 
@@ -88,21 +83,11 @@ impl DispatchScanReceipt {
     }
 }
 
-#[cfg(windows)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ParentFileChangeToken {
-    jsonl: JsonlFileChangeToken,
-    windows: WindowsFileChangeToken,
-}
-
-#[cfg(not(windows))]
-type ParentFileChangeToken = JsonlFileChangeToken;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ParentFileRevision {
     identity: JsonlNativeFileIdentity,
     len: u64,
-    change: ParentFileChangeToken,
+    change: JsonlFileChangeToken,
 }
 
 fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevision>> {
@@ -110,30 +95,26 @@ fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevisio
     let Some(identity) = jsonl_native_file_identity(file, &metadata) else {
         return Ok(None);
     };
-    #[cfg(windows)]
-    let change = ParentFileChangeToken {
-        jsonl: jsonl_file_change_token(&metadata),
-        windows: windows_file_change_token(file)?,
-    };
-    #[cfg(not(windows))]
-    let change = jsonl_file_change_token(&metadata);
     Ok(Some(ParentFileRevision {
         identity,
         len: metadata.len(),
-        change,
+        change: jsonl_file_change_token(&metadata),
     }))
 }
 
+impl ParentFileRevision {
+    /// Whether an equal revision proves the file's bytes unchanged, which
+    /// only a platform whose change token witnesses rewrites can say.
+    fn proves_unchanged(self, observed: Self) -> bool {
+        JSONL_CHANGE_TOKEN_WITNESSES_REWRITES && self == observed
+    }
+}
+
+/// Whether `revision` can authorize a later zero-I/O hit: its change token
+/// witnesses rewrites on this platform and is already behind the coarse
+/// clock, so a later write must move it.
 fn parent_revision_settled(revision: &ParentFileRevision) -> bool {
-    #[cfg(unix)]
-    {
-        jsonl_change_token_settled(revision.change)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = revision;
-        true
-    }
+    JSONL_CHANGE_TOKEN_WITNESSES_REWRITES && jsonl_change_token_settled(revision.change)
 }
 
 struct ParentDispatchEntry {
@@ -279,14 +260,14 @@ impl ParentDispatchIndex {
         let expected = entry.resume_digest.witness(verified_cursor);
         let cached = entry.models.get(agent_id).cloned();
         // Zero-I/O hit, which is the reason this index exists: the native
-        // revision, identity, length, and the change token, which on Unix
-        // carries ctime and on Windows carries native ChangeTime, is identical
-        // to the one this entry was verified under, and the entry covers the
-        // whole file. A settled token cannot be shared with a later write, so
-        // nothing can have been appended or rewritten. A token still inside
-        // the kernel's coarse timestamp quantum can, so that case falls
+        // revision, identity, length, and the change token carrying Unix
+        // ctime, is identical to the one this entry was verified under, and
+        // the entry covers the whole file. A settled token cannot be shared
+        // with a later write, so nothing can have been appended or rewritten.
+        // A token still inside the kernel's coarse timestamp quantum can, and
+        // no Windows timestamp witnesses a rewrite at all, so both fall
         // through to the prefix digest.
-        if entry.revision == revision
+        if entry.revision.proves_unchanged(revision)
             && verified_cursor == revision.len
             && entry.verified_settled
             && parent_revision_settled(&revision)
@@ -447,11 +428,11 @@ impl ParentDispatchIndex {
 
 /// Revalidate the exact bytes parsed from one opened parent handle.
 ///
-/// A stable native revision needs no content read. When the revision moved,
-/// one digest of the consumed prefix distinguishes a safe append or metadata
-/// touch from an in-place rewrite. A second revision capture refuses mutation
-/// during that proof instead of polling. Work is therefore bounded to one
-/// consumed-prefix digest per changed scan revision.
+/// A native revision that proves unchanged bytes needs no content read.
+/// Otherwise one digest of the consumed prefix distinguishes a safe append or
+/// metadata touch from an in-place rewrite. A second revision capture refuses
+/// mutation during that proof instead of polling. Work is therefore bounded to
+/// one consumed-prefix digest per scan whose revision is not proven unchanged.
 fn revalidate_scanned_prefix(
     file: &mut File,
     scanned: ParentFileRevision,
@@ -467,7 +448,7 @@ fn revalidate_scanned_prefix(
     {
         return Ok((None, 0));
     }
-    if current == scanned {
+    if scanned.proves_unchanged(current) {
         return Ok((Some(current), 0));
     }
 
@@ -774,6 +755,14 @@ mod tests {
     use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 
     const TEST_UNCHANGED_TAIL_BYTES: u64 = 4096;
+
+    /// Prefix bytes the post-scan commit re-hashes when the revision did not
+    /// move during the scan: none under Unix ctime, which witnesses rewrites;
+    /// no Windows timestamp does, so the verified prefix is re-proven there.
+    fn commit_proof_bytes(verified: u64) -> u64 {
+        if cfg!(unix) { 0 } else { verified }
+    }
+
     static FIXTURE_SERIAL: AtomicU64 = AtomicU64::new(0);
 
     struct Layout {
@@ -911,7 +900,8 @@ mod tests {
         assert_eq!(model.as_deref(), Some("late-model"));
         assert_eq!(appended.bytes_parsed, delta);
         assert_eq!(
-            appended.prefix_digest_bytes, before_len,
+            appended.prefix_digest_bytes,
+            before_len + commit_proof_bytes(after_len),
             "one changed revision performs exactly one cached-prefix proof"
         );
         assert_eq!(appended.records_parsed, 1);
@@ -1050,7 +1040,10 @@ mod tests {
         let (model, receipt) = lookup(&layout, "rewrite-agent");
         assert_eq!(model.as_deref(), Some("new-model"));
         assert!(receipt.rescanned_from_zero);
-        assert_eq!(receipt.prefix_digest_bytes, original_len);
+        assert_eq!(
+            receipt.prefix_digest_bytes,
+            original_len + commit_proof_bytes(original_len)
+        );
     }
 
     #[test]
@@ -1242,7 +1235,10 @@ mod tests {
         let (late_model, caught_up) = index.lookup(&layout.candidate_two, "late-agent");
         assert_eq!(late_model.as_deref(), Some("late-model"));
         assert_eq!(caught_up.bytes_parsed, appended_len);
-        assert_eq!(caught_up.prefix_digest_bytes, initial_len);
+        assert_eq!(
+            caught_up.prefix_digest_bytes,
+            initial_len + commit_proof_bytes(initial_len + appended_len)
+        );
         assert!(!caught_up.rescanned_from_zero);
 
         let (_, unchanged) = index.lookup(&layout.candidate_two, "late-agent");

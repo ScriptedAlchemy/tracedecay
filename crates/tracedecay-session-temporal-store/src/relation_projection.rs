@@ -1410,26 +1410,47 @@ mod tests {
 
     #[test]
     fn parent_message_in_the_same_thread_does_not_fabricate_hierarchy() {
-        let parent = occurrence(
-            "occurrence.parent",
-            "anchor.parent",
-            "message.parent",
-            "thread.shared",
-            None,
-            1,
-        );
-        let child = occurrence(
-            "occurrence.child",
-            "anchor.child",
-            "message.child",
-            "thread.shared",
-            Some("message.parent"),
-            2,
-        );
+        let parent = || {
+            occurrence(
+                "occurrence.parent",
+                "anchor.parent",
+                "message.parent",
+                "thread.shared",
+                None,
+                1,
+            )
+        };
+        let child = || {
+            occurrence(
+                "occurrence.child",
+                "anchor.child",
+                "message.child",
+                "thread.shared",
+                Some("message.parent"),
+                2,
+            )
+        };
 
-        let (_, threads, _, _) = occurrence_relations(&[parent, child]).unwrap();
-
+        let (_, threads, _, _) = occurrence_relations(&[parent(), child()]).unwrap();
         assert!(threads.is_empty());
+
+        let other_thread = occurrence(
+            "occurrence.other",
+            "anchor.other",
+            "message.other",
+            "thread.other",
+            Some("message.parent"),
+            3,
+        );
+        let (_, threads, _, _) = occurrence_relations(&[parent(), child(), other_thread]).unwrap();
+        assert_eq!(
+            threads,
+            vec![ThreadHierarchyRelation {
+                parent_thread_id: ThreadId::new("thread.shared").unwrap(),
+                child_thread_id: ThreadId::new("thread.other").unwrap(),
+                ordinal: 3,
+            }]
+        );
     }
 
     #[test]
@@ -1452,7 +1473,32 @@ mod tests {
         );
 
         let (_, threads, _, _) = occurrence_relations(&[child, future_parent]).unwrap();
-
         assert!(threads.is_empty());
+
+        let earlier_parent = occurrence(
+            "occurrence.earlier-parent",
+            "anchor.earlier-parent",
+            "message.parent",
+            "thread.earlier-parent",
+            None,
+            1,
+        );
+        let later_child = occurrence(
+            "occurrence.later-child",
+            "anchor.later-child",
+            "message.child",
+            "thread.child",
+            Some("message.parent"),
+            2,
+        );
+        let (_, threads, _, _) = occurrence_relations(&[earlier_parent, later_child]).unwrap();
+        assert_eq!(
+            threads,
+            vec![ThreadHierarchyRelation {
+                parent_thread_id: ThreadId::new("thread.earlier-parent").unwrap(),
+                child_thread_id: ThreadId::new("thread.child").unwrap(),
+                ordinal: 2,
+            }]
+        );
     }
 }

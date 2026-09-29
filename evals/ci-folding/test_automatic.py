@@ -30,6 +30,7 @@ def pr(number, sha, *, draft=False, repo=automatic.REPOSITORY, base="master",
 
 class AutomaticTest(unittest.TestCase):
     def test_setup_key_allows_dependency_changes_but_detects_runner_changes(self):
+        self.assertTrue(automatic.setup_path(".github/workflows/ci.yml"))
         def tree(action, cargo):
             return {"tree": [
                 {"path": ".github/actions/setup-linux-mold/action.yml", "mode": "100644", "sha": action},
@@ -51,15 +52,18 @@ class AutomaticTest(unittest.TestCase):
 
     def test_completed_check_is_idempotent_but_cancelled_check_can_retry(self):
         runs = {"check_runs": [
-            {"name": automatic.CHECK, "head_sha": SHA_A, "external_id": f"merge:{SHA_B}:42:1:1",
+            {"name": automatic.CHECK, "head_sha": SHA_A, "external_id": f"merge:{SHA_B}:v2:42:1:1",
              "status": "completed", "conclusion": "success"},
-            {"name": automatic.CHECK, "head_sha": SHA_B, "external_id": f"merge:{SHA_C}:42:1:2",
+            {"name": automatic.CHECK, "head_sha": SHA_B, "external_id": f"merge:{SHA_C}:v2:42:1:2",
              "status": "completed", "conclusion": "cancelled"},
         ]}
         with patch.object(automatic, "api", return_value=runs):
             self.assertTrue(automatic.checked({"sha": SHA_A, "merge": SHA_B}))
             self.assertFalse(automatic.checked({"sha": SHA_A, "merge": SHA_C}))
             self.assertFalse(automatic.checked({"sha": SHA_B, "merge": SHA_C}))
+        runs["check_runs"][0]["external_id"] = f"merge:{SHA_B}:42:1:1"
+        with patch.object(automatic, "api", return_value=runs):
+            self.assertFalse(automatic.checked({"sha": SHA_A, "merge": SHA_B}))
 
     def test_plan_prefers_trigger_and_skips_completed_and_ineligible_heads(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -216,6 +220,7 @@ class AutomaticTest(unittest.TestCase):
             automatic.report(plan, Path(temp), "success")
         self.assertEqual([call["conclusion"] for call in calls], ["cancelled", "cancelled"])
         self.assertEqual([call["head_sha"] for call in calls], [SHA_A, SHA_B])
+        self.assertEqual(calls[0]["external_id"], f"merge:{SHA_B}:v2:42:1:1")
 
     def test_report_accepts_only_complete_nonempty_junit_for_each_head(self):
         plan = {"version": 1, "repository": automatic.REPOSITORY,
@@ -272,7 +277,7 @@ class AutomaticTest(unittest.TestCase):
                 if command[0] == "pnpm":
                     installs.append(command)
                     return {"seconds": 1, "exit_code": 0}
-                if command[-1] == "check":
+                if command[:3] == ["bash", "-e", "-c"]:
                     return {"seconds": 1, "exit_code": 0}
                 seen.append((env["HOME"], env["TMPDIR"], env["CARGO_HAULER_STATE_DIR"],
                              env["CARGO_TARGET_DIR"], env.get("GH_TOKEN"), timeout,
@@ -334,7 +339,9 @@ class AutomaticTest(unittest.TestCase):
                      {"seconds": 1, "exit_code": 0}, {"seconds": 2, "exit_code": 1}]) as command:
                 row = automatic.run_head(worker, entry, "core-contracts", output, root / "state", ["contracts"])
             self.assertEqual(command.call_count, 2)
-            self.assertEqual(command.call_args.args[0][-1], "check")
+            self.assertEqual(command.call_args.args[0][-1],
+                             "python3 scripts/test-linux-test-partitions.py && "
+                             "python3 scripts/linux-test-partitions.py check")
             self.assertEqual(row["precheck"]["exit_code"], 1)
             self.assertEqual(automatic.row_conclusion(row, entry, "core-contracts", output, ["contracts"]),
                              "failure")

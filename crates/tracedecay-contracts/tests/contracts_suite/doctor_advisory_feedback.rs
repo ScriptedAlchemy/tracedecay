@@ -203,12 +203,14 @@ fn advisory_feedback_rejects_summary_row_identity_disagreement() {
         }],
     });
 
-    assert!(
+    assert_eq!(
         block_on(
             DoctorReportComposerV1::new()
                 .with_advisory_feedback(&port)
                 .compose(&common::context(&common::operation()))
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "Doctor advisory feedback read is inconsistent with the application contract"
     );
 }

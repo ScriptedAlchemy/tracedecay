@@ -261,6 +261,7 @@ fn pressure_from_sample(
         tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
             resident_bytes: 0,
             unreclaimable_bytes: 0,
+            swapped_bytes: 0,
             cgroup_committed_bytes: None,
         },
     ));
@@ -282,6 +283,7 @@ fn set_sample(
         tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
             resident_bytes: unreclaimable_bytes,
             unreclaimable_bytes,
+            swapped_bytes: 0,
             cgroup_committed_bytes: None,
         };
 }
@@ -1791,6 +1793,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
             resident_bytes: 0,
             unreclaimable_bytes: 0,
+            swapped_bytes: 0,
             cgroup_committed_bytes: None,
         },
     ));
@@ -1811,6 +1814,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
                         tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
                             resident_bytes: limit_bytes,
                             unreclaimable_bytes: limit_bytes,
+                            swapped_bytes: 0,
                             cgroup_committed_bytes: None,
                         },
                     );

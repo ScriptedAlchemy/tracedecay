@@ -310,6 +310,12 @@ mod tests {
         assert!(parse_openrouter_json("not json").is_none());
         assert!(parse_openrouter_json("{}").is_none());
         assert!(parse_openrouter_json(r#"{"data": []}"#).is_none());
+
+        let usable = parse_openrouter_json(
+            r#"{"data": [{"id": "vendor/m", "pricing": {"prompt": "0.000001", "completion": "0"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(usable.keys().collect::<Vec<_>>(), vec!["vendor/m"]);
     }
 
     #[test]

@@ -31,7 +31,7 @@ use super::row_codec::{
     scoring_preface_rows,
 };
 use super::schema::field_code;
-use super::{checkpoint, sqlite_error};
+use super::{checkpoint, sqlite_error, sqlite_open_path};
 use crate::retrieval::lexical::LexicalFieldV1;
 use crate::retrieval::lexical::projection::CodeLexicalProjectionMetadataV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -127,7 +127,7 @@ pub(super) fn stage_carried_parent(
     let carrying = staging_sibling(staging, CARRYING_SUFFIX)?;
     remove_sqlite_family(&carrying)?;
     copy_private_file(parent, &carrying)?;
-    let mut connection = Connection::open(&carrying).map_err(sqlite_error)?;
+    let mut connection = Connection::open(sqlite_open_path(&carrying)?).map_err(sqlite_error)?;
     connection
         .pragma_update(None, "journal_mode", "DELETE")
         .map_err(sqlite_error)?;

@@ -185,14 +185,23 @@ mod tests {
 
         let mut duplicate_alias = descriptor();
         duplicate_alias.aliases.push("rust".to_owned());
-        assert!(duplicate_alias.validate().is_err());
+        assert_eq!(
+            duplicate_alias.validate().unwrap_err().to_string(),
+            "language descriptor alias order is not canonical"
+        );
 
         let mut duplicate_extension = descriptor();
         duplicate_extension.extensions.push("rs".to_owned());
-        assert!(duplicate_extension.validate().is_err());
+        assert_eq!(
+            duplicate_extension.validate().unwrap_err().to_string(),
+            "language descriptor extension order is not canonical"
+        );
 
         let mut reordered_roots = descriptor();
         reordered_roots.root_markers.reverse();
-        assert!(reordered_roots.validate().is_err());
+        assert_eq!(
+            reordered_roots.validate().unwrap_err().to_string(),
+            "language descriptor root marker order is not canonical"
+        );
     }
 }

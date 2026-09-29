@@ -348,8 +348,9 @@ mod tests {
         ];
 
         for value in malformed {
-            assert!(
-                ManifestDigest::new(&value).is_err(),
+            assert_eq!(
+                ManifestDigest::new(&value).unwrap_err().to_string(),
+                "ManifestDigest is not canonical",
                 "accepted malformed digest {value}"
             );
         }
@@ -358,6 +359,11 @@ mod tests {
     #[test]
     fn integrity_digest_deserialization_is_checked() {
         let value = serde_json::json!("catalog-digest-synthetic-001");
-        assert!(serde_json::from_value::<ManifestDigest>(value).is_err());
+        assert_eq!(
+            serde_json::from_value::<ManifestDigest>(value)
+                .unwrap_err()
+                .to_string(),
+            "ManifestDigest is not canonical"
+        );
     }
 }

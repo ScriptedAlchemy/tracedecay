@@ -167,6 +167,103 @@ pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + '
     args.iter().map(|arg| plain_host_path(Path::new(arg)))
 }
 
+/// Spells an absolute Windows path in its extended-length (`\\?\`) form, the
+/// inverse of [`plain_host_path`].
+///
+/// A drive path `D:\x` becomes `\\?\D:\x` and a UNC path `\\server\share\x`
+/// becomes `\\?\UNC\server\share\x`. A path that already carries a `\\?\` or
+/// `\\.\` prefix, or is not absolute in Windows syntax, is returned unchanged.
+/// Windows applies no normalization to an extended-length name, so the input
+/// must already be absolute with backslash separators and no `.` or `..`
+/// components, which is what [`std::path::absolute`] returns on Windows.
+///
+/// Like [`plain_host_path`] this is a transform on the spelling so it can be
+/// exercised on any host; only Windows callers should apply it.
+#[must_use]
+pub fn extended_length_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return PathBuf::from(format!(r"\\?\{text}"));
+    }
+    match text.strip_prefix(r"\\") {
+        Some(share) if !share.starts_with(['?', '.']) && !share.is_empty() => {
+            PathBuf::from(format!(r"\\?\UNC\{share}"))
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Why a database path cannot be handed to `SQLite`.
+#[derive(Debug, thiserror::Error)]
+pub enum SqliteDatabasePathError {
+    #[error("cannot resolve SQLite database path '{path}': {source}")]
+    Unresolved {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// No retry changes this: `SQLite`'s Unix VFS refuses the name and its
+    /// Windows VFS silently truncates it to the limit.
+    #[error(
+        "SQLite database path '{path}' is {bytes} bytes; SQLite's default VFS opens names shorter than {limit} bytes"
+    )]
+    NameTooLong {
+        path: PathBuf,
+        bytes: usize,
+        limit: usize,
+    },
+    #[error("SQLite has no default VFS to open '{path}' with")]
+    VfsUnavailable { path: PathBuf },
+}
+
+/// The spelling `SQLite` must be given to open the database at `path`.
+///
+/// `std::fs` adds the extended-length prefix to a long Windows path itself;
+/// `SQLite`'s Windows VFS hands the name to `CreateFileW` as given, so an
+/// ordinary absolute path past `MAX_PATH` (260) fails to open. The path is
+/// made absolute and, on Windows, spelled with [`extended_length_path`]. A
+/// name longer than the default VFS's pathname limit is a typed refusal
+/// rather than an open failure a caller would retry.
+pub fn sqlite_database_path(path: &Path) -> std::result::Result<PathBuf, SqliteDatabasePathError> {
+    let absolute =
+        std::path::absolute(path).map_err(|source| SqliteDatabasePathError::Unresolved {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    #[cfg(windows)]
+    let absolute = extended_length_path(&absolute);
+    let limit = sqlite_default_vfs_max_pathname().ok_or_else(|| {
+        SqliteDatabasePathError::VfsUnavailable {
+            path: absolute.clone(),
+        }
+    })?;
+    // The Windows VFS keeps at most `mxPathname - 1` bytes of a full name, so
+    // a name of exactly `mxPathname` bytes is refused on every platform.
+    let bytes = absolute.as_os_str().len();
+    if bytes >= limit {
+        return Err(SqliteDatabasePathError::NameTooLong {
+            path: absolute,
+            bytes,
+            limit,
+        });
+    }
+    Ok(absolute)
+}
+
+/// `mxPathname` of `SQLite`'s default VFS: the longest full pathname it opens.
+fn sqlite_default_vfs_max_pathname() -> Option<usize> {
+    // SAFETY: `sqlite3_vfs_find` initializes SQLite on first use and returns
+    // either null or a pointer to a registered VFS that lives for the rest of
+    // the process; only its immutable `mxPathname` field is read.
+    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
+    // SAFETY: a non-null `vfs` points at a registered, never-freed VFS.
+    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
+    usize::try_from(max_pathname).ok()
+}
+
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
 ///
 /// This is a separate step rather than part of canonicalization because the
@@ -234,7 +331,8 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 mod tests {
     use super::{
         canonical_root_identity, canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path, plain_git_args, plain_host_path, same_canonical_path,
+        extended_length_path, normalize_source_edit_relative_path, plain_git_args, plain_host_path,
+        same_canonical_path,
     };
     use std::path::{Path, PathBuf};
 
@@ -320,6 +418,58 @@ mod tests {
             collapse_relative_components(Path::new("/a/./b/../c")),
             PathBuf::from("/a/c")
         );
+    }
+
+    /// Runs on every host, like its inverse below. The staging path is the
+    /// 275-character name `SQLite` could not open on the Windows runner.
+    #[test]
+    fn an_absolute_windows_path_is_spelled_with_its_extended_length_prefix() {
+        let staging = r"D:\a\_temp\tmp\.tmpTPA5kk\profile\projects\proj_8d6c098d2dd75ba9\code-index-v1\bc92ebba09df969fbaddcbda144ce85df1aee980d85ab9e9111ef8bd13ed757c\code-text-artifact-staging-v1\.text-artifact-55d951cf30e3b0e5f75b4162f14663864eb036b71a246d78de9d41f645f91bf7.staging.initializing";
+        let extended_staging = format!(r"\\?\{staging}");
+        let spellings: [(&str, &str); 7] = [
+            (staging, &extended_staging),
+            (r"\\server\share\graph.db", r"\\?\UNC\server\share\graph.db"),
+            (r"\\?\D:\store\graph.db", r"\\?\D:\store\graph.db"),
+            (
+                r"\\?\UNC\server\share\graph.db",
+                r"\\?\UNC\server\share\graph.db",
+            ),
+            (r"\\.\pipe\tracedecay", r"\\.\pipe\tracedecay"),
+            (r"relative\graph.db", r"relative\graph.db"),
+            (
+                "/home/user/.tracedecay/graph.db",
+                "/home/user/.tracedecay/graph.db",
+            ),
+        ];
+        for (input, expected) in spellings {
+            assert_eq!(
+                extended_length_path(Path::new(input)),
+                PathBuf::from(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            plain_host_path(Path::new(&extended_staging)),
+            PathBuf::from(staging)
+        );
+    }
+
+    /// Unix `SQLite` refuses a full name of 512 bytes or more with a bare
+    /// "unable to open database file"; the handoff names the limit instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_sqlite_name_past_the_vfs_limit_is_refused_with_the_limit() {
+        let root = Path::new("/");
+        let within = root.join("d".repeat(510));
+        assert_eq!(super::sqlite_database_path(&within).unwrap(), within);
+
+        let past = root.join("d".repeat(511));
+        match super::sqlite_database_path(&past) {
+            Err(super::SqliteDatabasePathError::NameTooLong { path, bytes, limit }) => {
+                assert_eq!((path, bytes, limit), (past, 512, 512));
+            }
+            other => panic!("expected a typed name-length refusal, got {other:?}"),
+        }
     }
 
     /// Runs on every host: the transform is defined on the spelling, not on

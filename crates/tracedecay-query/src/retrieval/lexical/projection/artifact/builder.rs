@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
 use tracedecay_code_index::production::{
-    CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1,
@@ -34,7 +35,7 @@ use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
     PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
     STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt,
-    content_metadata_bytes, contract_number, decode_fingerprint_postings, decode_padded_receipt,
+    content_metadata_bytes, contract_number, decode_fingerprint_postings,
     decode_padded_receipt_with_control, decode_page_base_sections_receipt,
     encode_fingerprint_postings, encode_term_lists, finish_base_section_receipt_fold, hash_bytes,
     initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
@@ -1211,9 +1212,10 @@ impl CodeLexicalArtifactBuilderV1 {
     #[hotpath::skip]
     pub fn progress(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
-        progress(&self.connection)
+        progress(&self.connection, control)
     }
 
     /// The receipt of a staging file that finished finalization and awaits
@@ -1222,9 +1224,10 @@ impl CodeLexicalArtifactBuilderV1 {
     #[hotpath::skip]
     pub fn sealed_receipt(
         &self,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
-        read_receipt(&self.connection)
+        read_receipt_with_control(&self.connection, control)
     }
 
     /// The ledger bytes charged regardless of page content: the SQLite
@@ -1463,7 +1466,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact page batches must be non-empty".to_owned(),
             ));
         }
-        if read_receipt(&self.connection)?.is_some() {
+        if read_receipt_with_control(&self.connection, control)?.is_some() {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "finalized lexical artifacts do not accept more source pages".to_owned(),
             ));
@@ -1482,6 +1485,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 self.fixed_ledger_charge_bytes,
                 self.memory_budget_bytes,
                 pages,
+                control,
             )
         })?;
         let fresh_pages = &pages[fresh_start..];
@@ -1563,7 +1567,7 @@ impl CodeLexicalArtifactBuilderV1 {
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
-        if read_receipt(&self.connection)?.is_some() {
+        if read_receipt_with_control(&self.connection, control)?.is_some() {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "finalized lexical artifacts do not accept more source pages".to_owned(),
             ));
@@ -1573,7 +1577,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 "lexical artifact finalization has started; source pages are immutable".to_owned(),
             ));
         }
-        let current = progress(&self.connection)?;
+        let current = progress(&self.connection, control)?;
         if pages.is_empty() {
             record_artifact_progress(&current);
             return Ok(current);
@@ -1664,7 +1668,7 @@ impl CodeLexicalArtifactBuilderV1 {
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its
         // cursor once the whole batch has committed.
-        let progress = progress(&self.connection)?;
+        let progress = progress(&self.connection, &UninterruptibleCodeIndexControlV1)?;
         #[cfg(feature = "hotpath")]
         {
             hotpath::gauge!("query.artifact.batch.committed_pages_total")
@@ -1711,7 +1715,7 @@ impl CodeLexicalArtifactBuilderV1 {
             &self.metadata_digest,
             control,
         )?;
-        if let Some(receipt) = read_receipt(&self.connection)? {
+        if let Some(receipt) = read_receipt_with_control(&self.connection, control)? {
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, source)?;
             self.canonicalize_sealed_header()?;
             let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
@@ -2124,7 +2128,7 @@ impl CodeLexicalArtifactBuilderV1 {
     ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         self.verify_path_binding()?;
-        if let Some(receipt) = read_receipt(&self.connection)? {
+        if let Some(receipt) = read_receipt_with_control(&self.connection, control)? {
             verify_finalized_artifact(
                 &self.connection,
                 &self.path,
@@ -3031,6 +3035,7 @@ fn prepare_page_batch_admission(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
     pages: &[VerifiedSealedLexicalPageV1],
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(CodeLexicalArtifactBuildProgressV1, usize), CodeLexicalArtifactErrorV1> {
     admit_page_batch_within_memory_budget(
         metadata,
@@ -3038,7 +3043,7 @@ fn prepare_page_batch_admission(
         memory_budget_bytes,
         pages,
     )?;
-    let current = progress(connection)?;
+    let current = progress(connection, control)?;
     let persisted_previous = pages
         .first()
         .map(|page| cursor_before_page(connection, page.page_ordinal()))
@@ -6500,8 +6505,9 @@ type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8
 
 fn progress(
     connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-    if read_receipt(connection)?.is_some() {
+    if read_receipt_with_control(connection, control)?.is_some() {
         return Err(CodeLexicalArtifactErrorV1::Contract(
             "a sealed lexical artifact keeps no source progress; publish it".to_owned(),
         ));
@@ -6805,19 +6811,6 @@ fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexica
         }
     }
     Ok(())
-}
-
-fn read_receipt(
-    connection: &Connection,
-) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT receipt FROM artifact_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_corrupt)?;
-    decode_padded_receipt(&bytes)
 }
 
 fn read_receipt_with_control(
@@ -7389,6 +7382,36 @@ mod tests {
                 "sealing the statistics must drop the staging totals"
             );
         }
+    }
+
+    /// SQLite's Unix VFS cannot open a full name of 512 bytes or more and
+    /// says only "unable to open database file", which the scheduler kept
+    /// retrying as an unavailable store. The builder names the limit as a
+    /// contract failure, which ends the build.
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_staging_path_sqlite_cannot_address() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let mut parent = directory.path().to_path_buf();
+        while parent.as_os_str().len() < 520 {
+            parent.push("d".repeat(64));
+        }
+        std::fs::create_dir_all(&parent).expect("deep staging parent");
+        let path = parent.join("staging.sqlite");
+
+        let error = match CodeLexicalArtifactBuilderV1::create(&path, test_metadata()) {
+            Ok(_) => panic!("SQLite cannot open a staging path this long"),
+            Err(error) => error,
+        };
+
+        let CodeLexicalArtifactErrorV1::Contract(detail) = error else {
+            panic!("expected a contract refusal naming the SQLite limit, got {error:?}");
+        };
+        assert!(
+            detail.starts_with(&format!("SQLite database path '{}", path.display()))
+                && detail.ends_with("SQLite's default VFS opens names shorter than 512 bytes"),
+            "{detail}"
+        );
     }
 
     #[test]

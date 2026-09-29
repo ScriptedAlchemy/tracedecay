@@ -637,6 +637,9 @@ mod tests {
             missing: BTreeSet::new(),
             observed_at: UtcMicros(20),
         };
-        assert!(state.validate().is_err());
+        assert_eq!(
+            state.validate().unwrap_err().to_string(),
+            "partial authority evidence must not be empty"
+        );
     }
 }

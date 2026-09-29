@@ -1799,9 +1799,10 @@ impl LatestCodeTextGenerationV1 {
                     control,
                 )
                 .map(|(reader, witness)| {
-                    if let Err(error) = self
-                        .text_artifact_store
-                        .publish_restore_witness(descriptor, &witness)
+                    if let Some(witness) = witness
+                        && let Err(error) = self
+                            .text_artifact_store
+                            .publish_restore_witness(descriptor, &witness)
                     {
                         tracing::warn!(
                             event = "code_text_artifact_restore_witness_publish_failed",
@@ -2964,7 +2965,7 @@ impl LatestCodeTextGenerationV1 {
         // A staging file sealed before its publication was interrupted keeps
         // no source cursor; it is complete and is published as it stands.
         if builder
-            .sealed_receipt()
+            .sealed_receipt(control)
             .map_err(map_text_artifact_error)?
             .is_some()
         {
@@ -2978,7 +2979,7 @@ impl LatestCodeTextGenerationV1 {
                 control,
             );
         }
-        let mut progress = builder.progress().map_err(map_text_artifact_error)?;
+        let mut progress = builder.progress(control).map_err(map_text_artifact_error)?;
         if let Some(cursor) = progress.next_cursor.as_ref() {
             match source.restore_cursor_classified(cursor, control) {
                 Ok(()) => {}
@@ -2993,7 +2994,7 @@ impl LatestCodeTextGenerationV1 {
                         builder_budget,
                     )
                     .map_err(map_text_artifact_error)?;
-                    progress = builder.progress().map_err(map_text_artifact_error)?;
+                    progress = builder.progress(control).map_err(map_text_artifact_error)?;
                 }
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(error)) => {
                     return Err(map_sealed_page_source_error(error));
@@ -3328,7 +3329,7 @@ impl LatestCodeTextGenerationV1 {
                 };
                 let progress = artifact_build
                     .builder
-                    .progress()
+                    .progress(control)
                     .map_err(map_text_artifact_error)?;
                 self.publish_text_progress_boundary(
                     artifact_build,

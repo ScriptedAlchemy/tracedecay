@@ -145,14 +145,24 @@ async fn feedback_history_permits_only_detail_redaction() {
              WHERE fact_id = 'history.fact'",
             (),
         )
-        .await;
-    assert!(tampered.is_err());
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        tampered.contains("memory_v2 feedback history permits only detail redaction"),
+        "{tampered}"
+    );
     // Deleting recorded history aborts.
     let deleted = conn
         .execute(
             "DELETE FROM memory_v2_feedback_history WHERE fact_id = 'history.fact'",
             (),
         )
-        .await;
-    assert!(deleted.is_err());
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        deleted.contains("memory_v2 feedback history records are immutable"),
+        "{deleted}"
+    );
 }

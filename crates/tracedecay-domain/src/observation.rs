@@ -3,8 +3,8 @@
 //! These values deliberately exclude filesystem paths, ambient working
 //! directories, database row identifiers, and provider display labels from
 //! durable identity. Capture code resolves those runtime details before it
-//! constructs this boundary. Claude compatibility aliases preserve the legacy
-//! wire format while later providers retain typed native ordering evidence.
+//! constructs this boundary. Every provider uses one observation-id domain,
+//! one receipt domain, and a provider field on the source identity.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -23,18 +23,14 @@ use crate::research::{
     SanitizationReceiptRefV1, SessionId, canonical_json_bytes,
 };
 
-const CLAUDE_OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
 const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.observation.v1\0";
 const OBSERVATION_POSITIONAL_OCCURRENCE_DOMAIN: &[u8] =
     b"tracedecay.observation.positional-occurrence.v1\0";
-const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
-const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
 const OBSERVATION_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.observation.receipt.v1\0";
-const CLAUDE_RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
-const CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
-const CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
-const CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
-const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
+const RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
+const RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
+const RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
+const RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
 const OBSERVATION_RECEIPT_ID_PREFIX: &str = "privacy.observation.v1.";
 
 /// Shared parse and canonical-envelope limits for one observation record.
@@ -82,8 +78,6 @@ pub enum ObservationContractError {
     ReceiptPayloadMismatch,
     #[error("serialized observation identity does not match its source evidence")]
     ObservationIdentityMismatch,
-    #[error("serialized idempotency key does not match its source evidence")]
-    IdempotencyKeyMismatch,
     #[error("canonical observation envelope version is unsupported")]
     UnsupportedCanonicalEnvelopeVersion,
     #[error("canonical observation record kind is invalid")]
@@ -115,10 +109,6 @@ pub enum ObservationContractError {
 )]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSourceIdentityV1 {
-    #[serde(
-        default = "default_observation_provider",
-        skip_serializing_if = "is_default_observation_provider"
-    )]
     provider: ProviderId,
     session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,10 +200,6 @@ impl ObservationSourceIdentityV1 {
 
 fn default_observation_provider() -> ProviderId {
     ProviderId::new("claude").expect("the built-in Claude provider id is valid")
-}
-
-fn is_default_observation_provider(provider: &ProviderId) -> bool {
-    provider.as_str() == "claude"
 }
 
 /// Authoritative ownership scope selected before persistence.
@@ -727,28 +713,6 @@ impl CanonicalObservationIdV1 {
         material: &ObservationIdentityMaterialV1,
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
-        if is_default_observation_provider(material.source().provider()) {
-            if let Some(native_record_id) = material.native_record_id() {
-                #[derive(Serialize)]
-                struct ClaudeNativeIdentity<'a> {
-                    provider: &'a ProviderId,
-                    session_id: &'a SessionId,
-                    scope: &'a ObservationScopeV1,
-                    native_record_id: &'a ObservationId,
-                }
-
-                return Self::new(domain_digest(
-                    CLAUDE_OBSERVATION_ID_DOMAIN,
-                    &ClaudeNativeIdentity {
-                        provider: material.source().provider(),
-                        session_id: material.source().session_id(),
-                        scope: material.scope(),
-                        native_record_id,
-                    },
-                )?);
-            }
-            return Self::new(domain_digest(CLAUDE_OBSERVATION_ID_DOMAIN, material)?);
-        }
         if let Some(native_record_id) = material.native_record_id() {
             #[derive(Serialize)]
             struct NativeIdentity<'a> {
@@ -2301,39 +2265,8 @@ impl SensitivityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReceiptDomainV1 {
-    Claude,
-    Observation,
-}
-
-impl ReceiptDomainV1 {
-    fn for_identity(identity: &ObservationIdentityMaterialV1) -> Self {
-        if is_default_observation_provider(identity.source().provider()) {
-            Self::Claude
-        } else {
-            Self::Observation
-        }
-    }
-
-    fn digest_domain(self) -> &'static [u8] {
-        match self {
-            Self::Claude => CLAUDE_RECEIPT_ID_DOMAIN,
-            Self::Observation => OBSERVATION_RECEIPT_ID_DOMAIN,
-        }
-    }
-
-    fn id_prefix(self) -> &'static str {
-        match self {
-            Self::Claude => CLAUDE_RECEIPT_ID_PREFIX,
-            Self::Observation => OBSERVATION_RECEIPT_ID_PREFIX,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
-    receipt_domain: ReceiptDomainV1,
     sanitizer_version: ComponentVersion,
     observation_id: CanonicalObservationIdV1,
     disposition: SanitizerDispositionV1,
@@ -2381,7 +2314,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
-            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -2404,7 +2336,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
-            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -2416,23 +2347,22 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
 
     pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
         let mut hasher = Sha256::new();
-        update_hash_frame(&mut hasher, self.receipt_domain.digest_domain());
+        update_hash_frame(&mut hasher, OBSERVATION_RECEIPT_ID_DOMAIN);
         update_hash_frame(&mut hasher, self.sanitizer_version.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.observation_id.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.disposition.as_str().as_bytes());
-        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SENSITIVITY_DOMAIN);
+        update_hash_frame(&mut hasher, RECEIPT_SENSITIVITY_DOMAIN);
         update_hash_frame(&mut hasher, self.sensitivity.as_str().as_bytes());
-        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN);
+        update_hash_frame(&mut hasher, RECEIPT_RAW_DIGEST_DOMAIN);
         update_hash_frame(&mut hasher, &self.raw_digest);
         if let Some(payload_digest) = &self.sanitized_payload_digest {
-            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN);
+            update_hash_frame(&mut hasher, RECEIPT_SANITIZED_PAYLOAD_DOMAIN);
             update_hash_frame(&mut hasher, payload_digest.as_str().as_bytes());
         } else {
-            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN);
+            update_hash_frame(&mut hasher, RECEIPT_NO_PAYLOAD_DOMAIN);
         }
         let receipt_id = SanitizationReceiptId::new(format!(
-            "{}{}",
-            self.receipt_domain.id_prefix(),
+            "{OBSERVATION_RECEIPT_ID_PREFIX}{}",
             crate::canonical_text::encode_lowercase_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
@@ -2573,10 +2503,6 @@ impl DurableObservationV1 {
         &self.observation_id
     }
 
-    pub fn idempotency_key(&self) -> &CanonicalObservationIdV1 {
-        &self.observation_id
-    }
-
     pub fn identity(&self) -> &ObservationIdentityMaterialV1 {
         &self.identity
     }
@@ -2617,9 +2543,8 @@ impl Serialize for DurableObservationV1 {
     where
         S: Serializer,
     {
-        let mut wire = serializer.serialize_struct("DurableClaudeObservationV1", 6)?;
+        let mut wire = serializer.serialize_struct("DurableObservationV1", 5)?;
         wire.serialize_field("observation_id", &self.observation_id)?;
-        wire.serialize_field("idempotency_key", self.idempotency_key())?;
         wire.serialize_field("identity", &self.identity)?;
         wire.serialize_field("receipt", &self.receipt)?;
         wire.serialize_field("retention_class", &self.retention_class)?;
@@ -2637,7 +2562,6 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             observation_id: CanonicalObservationIdV1,
-            idempotency_key: CanonicalObservationIdV1,
             identity: ObservationIdentityMaterialV1,
             receipt: SanitizationReceiptV1,
             retention_class: RetentionClass,
@@ -2645,41 +2569,19 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let expected_observation_id = wire.observation_id.clone();
-        let expected_idempotency_key = wire.idempotency_key.clone();
-        let mut observation = Self::new(
+        let expected_observation_id = wire.observation_id;
+        let observation = Self::new(
             wire.identity,
             wire.receipt,
             wire.retention_class,
             wire.payload,
         )
         .map_err(serde::de::Error::custom)?;
-        let accepted =
-            accepted_identity_digests(&observation.observation_id, &observation.identity)
-                .map_err(serde::de::Error::custom)?;
-        if !accepted.contains(&expected_observation_id) {
+        if expected_observation_id != observation.observation_id {
             return Err(serde::de::Error::custom(
                 ObservationContractError::ObservationIdentityMismatch,
             ));
         }
-        if !accepted.contains(&expected_idempotency_key) {
-            return Err(serde::de::Error::custom(
-                ObservationContractError::IdempotencyKeyMismatch,
-            ));
-        }
-        // Carry the id the row actually stores, not the one just re-derived.
-        //
-        // `new` derives the current form, which is right for a fresh
-        // observation and wrong for a decoded one: a row written under an
-        // earlier derivation is keyed by that earlier digest, in its own
-        // `observation_id` column and in every row that joins to it. Handing
-        // callers a different id than the row is keyed by makes each of them
-        // responsible for knowing the derivation history, and the storage
-        // audit's column-versus-JSON comparison failed for exactly that
-        // reason. Keeping the accepted digest here also makes decode/encode
-        // round-trip, so re-serializing a legacy row cannot silently restate
-        // its identity.
-        observation.observation_id = expected_observation_id;
         Ok(observation)
     }
 }
@@ -2950,39 +2852,6 @@ fn domain_digest(
     hasher.update(domain);
     hasher.update(bytes);
     Ok(format_sha256(&hasher.finalize()))
-}
-
-/// Every digest this identity material has legitimately produced, newest
-/// first. Element zero is the only one ever written; the rest exist so rows
-/// committed under an earlier derivation stay decodable.
-///
-/// A stored row carries this digest under two names. `observation_id` and its
-/// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`], so
-/// the two fields must accept exactly the same set. Accepting an older entry
-/// grants nothing: every one digests the same identity material under a domain
-/// separator, so a row still binds to its own evidence. Rejecting them makes
-/// committed rows permanently undecodable, and nothing downstream can
-/// quarantine a row that will not decode.
-///
-/// A new derivation goes at the front of this list and nowhere else.
-///
-/// `current` is the caller's already-derived id rather than a re-derivation,
-/// because the warm-up authority audit runs this once per row over the whole
-/// `observations` table.
-fn accepted_identity_digests(
-    current: &CanonicalObservationIdV1,
-    material: &ObservationIdentityMaterialV1,
-) -> Result<[CanonicalObservationIdV1; 3], ObservationContractError> {
-    let provider_domain = if is_default_observation_provider(material.source().provider()) {
-        CLAUDE_OBSERVATION_ID_DOMAIN
-    } else {
-        OBSERVATION_ID_DOMAIN
-    };
-    Ok([
-        current.clone(),
-        CanonicalObservationIdV1::new(domain_digest(provider_domain, material)?)?,
-        CanonicalObservationIdV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)?,
-    ])
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

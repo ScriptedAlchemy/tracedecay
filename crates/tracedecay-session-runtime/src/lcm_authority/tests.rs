@@ -623,6 +623,8 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         }))
         .await
         .unwrap();
+    assert_eq!(first.outcome, LcmAuthorityOutcome::Ready);
+    assert_eq!(second.outcome, LcmAuthorityOutcome::Ready);
     assert_ne!(first.receipt.grant_digest, second.receipt.grant_digest);
 
     let project_identity = ResolvedSessionIdentity::for_project(

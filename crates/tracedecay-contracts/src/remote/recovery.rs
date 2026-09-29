@@ -238,7 +238,10 @@ mod tests {
             required_sink_ids: vec!["writer".into()],
             expires_at_micros: 20,
         };
-        assert!(preview.validate(10).is_err());
+        assert_eq!(
+            preview.validate(10).unwrap_err().to_string(),
+            "promotion replacement epoch is inconsistent with the application contract"
+        );
     }
 
     #[test]
@@ -265,8 +268,14 @@ mod tests {
             expires_at_micros: 20,
         };
         assert!(promotion.validate(10).is_ok());
-        assert!(promotion.validate(20).is_err());
+        assert_eq!(
+            promotion.validate(20).unwrap_err().to_string(),
+            "promotion confirmation is inconsistent with the application contract"
+        );
         promotion.expected_placement_revision = 0;
-        assert!(promotion.validate(10).is_err());
+        assert_eq!(
+            promotion.validate(10).unwrap_err().to_string(),
+            "promotion confirmation is inconsistent with the application contract"
+        );
     }
 }

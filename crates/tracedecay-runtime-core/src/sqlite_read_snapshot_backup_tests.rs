@@ -778,11 +778,24 @@ async fn copied_snapshot_does_not_claim_freshness_after_the_source_changes() {
         .execute("INSERT INTO durable(id, value) VALUES (2, 'later')", [])
         .unwrap();
 
-    assert!(
-        snapshot.validate_source().is_err(),
+    let changed = format!(
+        "SQLite database family '{}' changed after its read snapshot",
+        source.display()
+    );
+    assert_eq!(
+        snapshot.validate_source().unwrap_err().to_string(),
+        changed,
         "a successful backup is not a freshness claim after the source family changes"
     );
-    assert!(snapshot.attach_token().unwrap().verified_path().is_err());
+    assert_eq!(
+        snapshot
+            .attach_token()
+            .unwrap()
+            .verified_path()
+            .unwrap_err()
+            .to_string(),
+        changed
+    );
 }
 
 #[cfg(windows)]

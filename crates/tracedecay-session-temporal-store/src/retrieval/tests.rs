@@ -1350,11 +1350,12 @@ async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift
         .expect("same read snapshot retains generation one");
     let fresh_read = runtime.retrieval_read_for_test().await;
     let fresh_adapter = fresh_read.adapter();
-    assert!(
-        fresh_adapter
-            .validate_snapshot(&frozen_snapshot)
-            .await
-            .is_err()
+    assert_eq!(
+        fresh_adapter.validate_snapshot(&frozen_snapshot).await,
+        Err(TemporalPortError::Read {
+            operation: "validate temporal read snapshot",
+            message: "snapshot does not match the active frozen generation".to_owned(),
+        })
     );
     fresh_adapter
         .validate_snapshot(&snapshot(2))

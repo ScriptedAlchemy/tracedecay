@@ -930,7 +930,16 @@ fn stale_projection_transitions_are_rejected() {
     )
     .unwrap();
 
-    for event in [stale_trust, stale_access] {
+    for (event, refusal) in [
+        (
+            stale_trust,
+            "Invalid parameter name: fact trust transition is stale",
+        ),
+        (
+            stale_access,
+            "Invalid parameter name: fact payload access transition is stale",
+        ),
+    ] {
         let batch = FactWriteBatch::new(
             fact_id.clone(),
             owner.clone(),
@@ -943,7 +952,12 @@ fn stale_projection_transitions_are_rejected() {
         .unwrap();
         let savepoint = connection.savepoint().unwrap();
 
-        assert!(publish_projection(&savepoint, &owner_columns, &batch).is_err());
+        assert_eq!(
+            publish_projection(&savepoint, &owner_columns, &batch)
+                .unwrap_err()
+                .to_string(),
+            refusal
+        );
     }
 }
 
@@ -1048,7 +1062,10 @@ fn lineage_read_rejects_stored_event_identity_mismatch() {
         .unwrap();
     let query = FactLineageQuery::new(FactOwnerV1::Profile, requested_fact_id, None, 10).unwrap();
 
-    assert!(read_lineage(&connection, &query).is_err());
+    assert_eq!(
+        read_lineage(&connection, &query).unwrap_err().to_string(),
+        "Invalid parameter name: stored lineage event identity mismatch"
+    );
 }
 
 #[test]

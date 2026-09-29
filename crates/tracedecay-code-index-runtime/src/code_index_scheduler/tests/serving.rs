@@ -253,9 +253,11 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .path()
         .join("code-text-artifact-restore-witnesses-v1")
         .join(artifact_file.replace(".bin", ".json"));
-    assert!(
+    assert_eq!(
         witness_path.is_file(),
-        "the fully verified publication open must persist its bounded restart witness"
+        cfg!(unix),
+        "the fully verified publication open persists its bounded restart witness \
+         only where native file state proves the artifact unchanged"
     );
 
     // Simulated restart: a fresh scheduler over the same store must reopen
@@ -282,33 +284,35 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .find(|entry| entry.generation_id == active_generation)
         .and_then(|entry| entry.text_artifact())
         .expect("restart artifact descriptor");
-    let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
-        &std::fs::read(&witness_path).expect("read bounded restore witness"),
-    )
-    .expect("decode bounded restore witness");
-    let mut authentication_progress = Vec::new();
-    let directly_restored = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
-        &artifact_path,
-        &descriptor.artifact_digest,
-        descriptor.artifact_size_bytes,
-        &witness,
-        &latest
-            .text_projection_metadata()
-            .expect("restart projection metadata"),
-        &UninterruptibleCodeIndexControlV1,
-        |completed, total| authentication_progress.push((completed, total)),
-    )
-    .expect("bounded content-addressed restore");
-    assert_eq!(
-        authentication_progress,
-        (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
-        "bounded restore must publish every fixed authentication boundary"
-    );
-    assert_eq!(
-        directly_restored.metadata().generation,
-        latest.metadata().manifest().generation_id
-    );
-    drop(directly_restored);
+    if cfg!(unix) {
+        let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
+            &std::fs::read(&witness_path).expect("read bounded restore witness"),
+        )
+        .expect("decode bounded restore witness");
+        let mut authentication_progress = Vec::new();
+        let directly_restored =
+            CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                &artifact_path,
+                &descriptor.artifact_digest,
+                descriptor.artifact_size_bytes,
+                &witness,
+                &latest
+                    .text_projection_metadata()
+                    .expect("restart projection metadata"),
+                &UninterruptibleCodeIndexControlV1,
+                |completed, total| authentication_progress.push((completed, total)),
+            )
+            .expect("bounded content-addressed restore");
+        assert_eq!(
+            authentication_progress,
+            (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>(),
+            "bounded restore must publish every fixed authentication boundary"
+        );
+        assert_eq!(
+            directly_restored.metadata().generation,
+            latest.metadata().manifest().generation_id
+        );
+    }
     assert!(
         latest
             .advance_text_serving(1)
@@ -924,7 +928,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
             |row| row.get(0),
         )
         .expect("read sealed revision");
-    assert_eq!(revision, 29);
+    assert_eq!(revision, 30);
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
         .map(|entry| entry.expect("artifact entry").file_name())
@@ -2416,7 +2420,10 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
             panic!("partial text build");
         };
-        let progress = build.builder.progress().unwrap();
+        let progress = build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap();
         assert!(progress.next_page_ordinal > 0);
         build.builder =
             CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
@@ -2454,7 +2461,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("refusal keeps resumable build");
         };
-        assert_eq!(build.builder.progress().unwrap(), before);
+        assert_eq!(
+            build
+                .builder
+                .progress(&UninterruptibleCodeIndexControlV1)
+                .unwrap(),
+            before
+        );
         assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
     }
     assert!(
@@ -2465,7 +2478,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
     let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
         panic!("indivisible refusal keeps durable prefix");
     };
-    assert_eq!(build.builder.progress().unwrap(), before);
+    assert_eq!(
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .unwrap(),
+        before
+    );
     assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
 }
 
@@ -2704,7 +2723,10 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         let super::super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
             panic!("partial build");
         };
-        build.builder.progress().expect("durable progress")
+        build
+            .builder
+            .progress(&UninterruptibleCodeIndexControlV1)
+            .expect("durable progress")
     };
     let dashboard_before = build_progress_snapshot(&scheduler);
     assert_eq!(
@@ -2744,7 +2766,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         };
         build
             .builder
-            .progress()
+            .progress(&UninterruptibleCodeIndexControlV1)
             .expect("durable progress after cancellation")
     };
     assert_eq!(progress_after, progress_before);

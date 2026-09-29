@@ -133,36 +133,69 @@ fn exact_observation_absence_round_trips_as_explicit_state() {
 
 #[test]
 fn remote_query_request_enforces_shard_inventory_bounds_and_identity() {
-    assert!(request(Vec::new()).validate().is_err());
+    assert_eq!(
+        request(Vec::new()).validate().unwrap_err().to_string(),
+        "remote query expected shard inventory has an invalid range"
+    );
     assert!(request(vec![shard(1)]).validate().is_ok());
-    assert!(request(vec![shard(1), shard(2)]).validate().is_err());
-    assert!(request(vec![shard(1), shard(1)]).validate().is_err());
+    assert_eq!(
+        request(vec![shard(1), shard(2)])
+            .validate()
+            .unwrap_err()
+            .to_string(),
+        "remote query expected shard inventory has an invalid range"
+    );
+    assert_eq!(
+        request(vec![shard(1), shard(1)])
+            .validate()
+            .unwrap_err()
+            .to_string(),
+        "remote query expected shard inventory has an invalid range"
+    );
 
     let mut mixed = shard(2);
     mixed.brain_id = "brain.other".to_owned();
-    assert!(request(vec![shard(1), mixed]).validate().is_err());
+    assert_eq!(
+        request(vec![shard(1), mixed])
+            .validate()
+            .unwrap_err()
+            .to_string(),
+        "remote query expected shard inventory has an invalid range"
+    );
 }
 
 #[test]
 fn remote_query_request_binds_inventory_to_expected_fence() {
     let mut mismatched_brain = request(vec![shard(1)]);
     mismatched_brain.expected_shards[0].brain_id = "brain.other".into();
-    assert!(mismatched_brain.validate().is_err());
+    assert_eq!(
+        mismatched_brain.validate().unwrap_err().to_string(),
+        "remote query authority inventory binding is inconsistent with the application contract"
+    );
 
     let mut mismatched_shard = request(vec![shard(1)]);
     mismatched_shard.expected_shards[0].shard_id = "shard.other".into();
-    assert!(mismatched_shard.validate().is_err());
+    assert_eq!(
+        mismatched_shard.validate().unwrap_err().to_string(),
+        "remote query authority inventory binding is inconsistent with the application contract"
+    );
 
     let mut mismatched_generation = request(vec![shard(1)]);
     mismatched_generation.expected_shards[0].generation_id = "generation.other".into();
-    assert!(mismatched_generation.validate().is_err());
+    assert_eq!(
+        mismatched_generation.validate().unwrap_err().to_string(),
+        "remote query authority inventory binding is inconsistent with the application contract"
+    );
 }
 
 #[test]
 fn remote_query_request_rejects_invalid_shard_identifiers() {
     let mut invalid = shard(1);
     invalid.generation_id = " generation.remote-query ".to_owned();
-    assert!(request(vec![invalid]).validate().is_err());
+    assert_eq!(
+        request(vec![invalid]).validate().unwrap_err().to_string(),
+        "remote query generation identity must be non-empty, trimmed, bounded, and control-character free"
+    );
 }
 
 #[test]
@@ -172,7 +205,12 @@ fn remote_query_request_rejects_unknown_wire_fields() {
         .expect("object request")
         .insert("unexpected".to_owned(), serde_json::Value::Null);
 
-    assert!(serde_json::from_value::<RemoteQueryRequestV1>(json).is_err());
+    assert!(
+        serde_json::from_value::<RemoteQueryRequestV1>(json)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `unexpected`")
+    );
 }
 
 #[test]
@@ -192,7 +230,12 @@ fn protocol_and_body_authority_must_match_exactly() {
 
     let mut missing = exact.clone();
     missing.expected_authority = None;
-    assert!(validate_protocol_authority_binding(&missing).is_err());
+    assert_eq!(
+        validate_protocol_authority_binding(&missing)
+            .unwrap_err()
+            .to_string(),
+        "remote exact observation query authority fence is stale"
+    );
 
     let mut mismatched = exact;
     mismatched
@@ -200,7 +243,12 @@ fn protocol_and_body_authority_must_match_exactly() {
         .as_mut()
         .unwrap()
         .authority_epoch = AuthorityEpoch(2);
-    assert!(validate_protocol_authority_binding(&mismatched).is_err());
+    assert_eq!(
+        validate_protocol_authority_binding(&mismatched)
+            .unwrap_err()
+            .to_string(),
+        "remote exact observation query authority fence is stale"
+    );
 }
 
 #[test]
@@ -220,7 +268,12 @@ fn faulty_composition_identity_is_rejected_fail_closed() {
             "epoch" => manifest.authority_epoch += 1,
             _ => unreachable!(),
         }
-        assert!(validate_composition(&result, &expected, &fence).is_err());
+        assert_eq!(
+            validate_composition(&result, &expected, &fence)
+                .unwrap_err()
+                .to_string(),
+            "remote exact observation query receipt is mismatched"
+        );
     }
 }
 
@@ -260,7 +313,7 @@ fn faulty_adapter_result_identity_is_rejected() {
     );
 
     let wrong_contract = super::protocol::remote_replay_result_contract_v1();
-    assert!(
+    assert_eq!(
         validate_result_identity(
             &wrong_contract,
             &expected_request,
@@ -268,9 +321,11 @@ fn faulty_adapter_result_identity_is_rejected() {
             &expected_request,
             &expected_scope
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
-    assert!(
+    assert_eq!(
         validate_result_identity(
             &contract,
             &RequestId::new("request.other").unwrap(),
@@ -278,7 +333,9 @@ fn faulty_adapter_result_identity_is_rejected() {
             &expected_request,
             &expected_scope
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
     let wrong_scope = ResolvedScope::new(
         ProjectId::new("project.other").unwrap(),
@@ -287,7 +344,7 @@ fn faulty_adapter_result_identity_is_rejected() {
         expected_scope.reference.clone(),
     )
     .unwrap();
-    assert!(
+    assert_eq!(
         validate_result_identity(
             &contract,
             &expected_request,
@@ -295,7 +352,9 @@ fn faulty_adapter_result_identity_is_rejected() {
             &expected_request,
             &expected_scope
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
 }
 
@@ -319,7 +378,7 @@ fn faulty_adapter_observation_identity_is_rejected() {
         .is_ok()
     );
     let wrong_id = CanonicalObservationIdV1::new(format!("sha256:{}", "b".repeat(64))).unwrap();
-    assert!(
+    assert_eq!(
         validate_returned_observation_identity(
             &wrong_id,
             &generation,
@@ -328,9 +387,11 @@ fn faulty_adapter_observation_identity_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
-    assert!(
+    assert_eq!(
         validate_returned_observation_identity(
             &expected_id,
             &ProjectionGenerationId::new("generation.other").unwrap(),
@@ -339,9 +400,11 @@ fn faulty_adapter_observation_identity_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
-    assert!(
+    assert_eq!(
         validate_returned_observation_identity(
             &expected_id,
             &generation,
@@ -352,7 +415,9 @@ fn faulty_adapter_observation_identity_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
 }
 
@@ -442,7 +507,7 @@ fn faulty_adapter_repository_provenance_is_rejected() {
         )
         .is_ok()
     );
-    assert!(
+    assert_eq!(
         validate_returned_provenance(
             &EvidenceAvailabilityV1::Unavailable,
             Some(&generation),
@@ -450,10 +515,12 @@ fn faulty_adapter_repository_provenance_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
     let wrong_generation = ProjectionGenerationId::new("generation.other").unwrap();
-    assert!(
+    assert_eq!(
         validate_returned_provenance(
             &valid,
             Some(&wrong_generation),
@@ -461,11 +528,13 @@ fn faulty_adapter_repository_provenance_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
     let mut wrong_scope = expected_scope.clone();
     wrong_scope.repository_id = RepositoryId::new("repository.other").unwrap();
-    assert!(
+    assert_eq!(
         validate_returned_provenance(
             &provenance(&wrong_scope, &generation, &observation_id),
             Some(&generation),
@@ -473,7 +542,9 @@ fn faulty_adapter_repository_provenance_is_rejected() {
             &generation,
             &expected_scope,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "remote exact observation query receipt is mismatched"
     );
 }
 

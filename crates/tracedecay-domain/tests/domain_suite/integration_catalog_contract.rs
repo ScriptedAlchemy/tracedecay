@@ -122,11 +122,21 @@ fn observation_host_matrix_matches_native_event_fixture_providers() {
 fn schema_rejects_unknown_fields() {
     let mut unknown = golden_catalog_json();
     unknown["future_field"] = json!(true);
-    assert!(serde_json::from_value::<HostIntegrationCatalogV1>(unknown).is_err());
+    assert!(
+        serde_json::from_value::<HostIntegrationCatalogV1>(unknown)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `future_field`")
+    );
 
     let mut host_unknown = golden_catalog_json();
     host_unknown["capabilities"][0]["hosts"][0]["availability_states"] = json!([]);
-    assert!(serde_json::from_value::<HostIntegrationCatalogV1>(host_unknown).is_err());
+    assert!(
+        serde_json::from_value::<HostIntegrationCatalogV1>(host_unknown)
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown field `availability_states`")
+    );
 }
 
 #[test]

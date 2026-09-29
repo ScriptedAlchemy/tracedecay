@@ -223,7 +223,7 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
     let wrong_request = typed_schema::<ReadRequest>(schema("schema.other.request")).unwrap();
     let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
 
-    assert!(
+    assert_eq!(
         ExecutableBindingV1::daemon_owned(
             &manifest,
             OperationId::new("operation.source.read").unwrap(),
@@ -233,12 +233,14 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
             CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
             RouteExposureV1::Internal,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "capability capability.source.read is invalid: executable binding schema bodies do not match the manifest"
     );
 
     let request = typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap();
     let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
-    assert!(
+    assert_eq!(
         ExecutableBindingV1::direct(
             &manifest,
             OperationId::new("operation.source.read").unwrap(),
@@ -251,7 +253,9 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
                 route_path: "/application/source/read".to_owned(),
             },
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "capability capability.source.read is invalid: public executable route is not declared by the manifest"
     );
 }
 

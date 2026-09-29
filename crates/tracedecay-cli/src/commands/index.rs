@@ -85,7 +85,7 @@ pub(crate) async fn handle_init(
     let daemon_available = init_daemon_available(profile);
 
     let project_path_for_remedy = project_path.clone();
-    handle_init_with_daemon_availability(project_path, handshake, daemon_available)
+    handle_init_with_daemon_availability(profile, project_path, handshake, daemon_available)
         .await
         .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
 }
@@ -167,12 +167,13 @@ fn annotate_reset_required_init_error(
 }
 
 async fn handle_init_with_daemon_availability(
+    profile: &ProfileRoot,
     project_path: PathBuf,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     if daemon_available {
-        return brokered_init(&project_path, &handshake).await;
+        return brokered_init(profile, &project_path, &handshake).await;
     }
     Err(tracedecay_domain::errors::TraceDecayError::project_route(
         "code_index_scheduler_unavailable",
@@ -182,6 +183,7 @@ async fn handle_init_with_daemon_availability(
 }
 
 async fn brokered_init(
+    profile: &ProfileRoot,
     project_path: &Path,
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -193,6 +195,7 @@ async fn brokered_init(
     // background open instead of abandoning it just before it completes.
     let init_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     tracedecay::daemon::call_default_tool_awaiting_project_open(
+        profile,
         handshake,
         "tracedecay_status",
         serde_json::json!({"format": "json", "admission_only": true}),
@@ -204,7 +207,7 @@ async fn brokered_init(
     // eventually demand it does not survive a daemon restart. Request the
     // reconciliation explicitly so the message below reports something that
     // actually happened.
-    let reconcile = admin_sync(handshake.clone(), init_deadline).await;
+    let reconcile = admin_sync(profile, handshake.clone(), init_deadline).await;
     let reconcile = match reconcile {
         Err(error) => {
             if !code_index_reconciliation_is_optional(project_path, &error).await {
@@ -236,10 +239,12 @@ async fn brokered_init(
 
 /// Asks the project's owner for the operator's code-index reconcile.
 async fn admin_sync(
+    profile: &ProfileRoot,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     deadline: tokio::time::Instant,
 ) -> tracedecay_domain::errors::Result<AdminSyncResultV1> {
     match crate::tool_command::owner_operation_result(
+        profile,
         handshake,
         ApplicationSurfaceOperation::AdminSync,
         serde_json::json!({}),
@@ -369,9 +374,14 @@ mod init_bootstrap_tests {
         std::fs::create_dir_all(&project).unwrap();
         let handshake = test_handshake(&project, &profile);
 
-        let error = handle_init_with_daemon_availability(project.clone(), handshake, false)
-            .await
-            .unwrap_err();
+        let error = handle_init_with_daemon_availability(
+            &ProfileRoot::new(&profile),
+            project.clone(),
+            handshake,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(
                 error.project_route_context(),
@@ -520,7 +530,7 @@ pub(crate) async fn handle_sync(
     .await?;
     let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
     let deadline = tokio::time::Instant::now() + crate::tool_command::tool_command_deadline()?;
-    let result = admin_sync(handshake, deadline).await?;
+    let result = admin_sync(profile, handshake, deadline).await?;
     if verbose {
         eprintln!("{}", serde_json::to_string_pretty(&result)?);
     }

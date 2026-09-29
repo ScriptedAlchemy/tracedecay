@@ -721,10 +721,12 @@ mod tests {
                 limit: 1,
             }),
         );
-        assert!(
+        assert_eq!(
             wrong_repository
                 .validate_for_binding(&code_binding)
-                .is_err()
+                .unwrap_err()
+                .to_string(),
+            "operation repository read is incompatible with shard family code"
         );
 
         let profile_binding = binding("profile.a", StoreShardScopeV1::Profile);
@@ -734,7 +736,13 @@ mod tests {
             binding: wrong_binding,
             effect_id: StoreEffectIdV1::new("effect.fixture").unwrap(),
         });
-        assert!(effects.validate_for_binding(&profile_binding).is_err());
+        assert_eq!(
+            effects
+                .validate_for_binding(&profile_binding)
+                .unwrap_err()
+                .to_string(),
+            "operation repository read is incompatible with shard family profile"
+        );
     }
 }
 

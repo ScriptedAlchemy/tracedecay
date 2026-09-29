@@ -169,7 +169,7 @@ fn evidence_cannot_be_attached_to_another_fact() {
         Confidence::new(1.0).unwrap(),
     )
     .unwrap();
-    assert!(
+    assert_eq!(
         FactAssertionV1::new(
             second,
             owner,
@@ -179,7 +179,9 @@ fn evidence_cannot_be_attached_to_another_fact() {
             UtcMicros(10),
             None,
         )
-        .is_err()
+        .unwrap_err()
+        .to_string(),
+        "fact assertion evidence fact references an unknown identity"
     );
 }
 
@@ -197,7 +199,12 @@ fn identity_bearing_wire_values_reject_tampering() {
     .unwrap();
     let mut evidence_wire = serde_json::to_value(&evidence).unwrap();
     evidence_wire["evidence_id"] = json!("fact-evidence.v1.forged");
-    assert!(serde_json::from_value::<FactEvidenceRefV1>(evidence_wire).is_err());
+    assert_eq!(
+        serde_json::from_value::<FactEvidenceRefV1>(evidence_wire)
+            .unwrap_err()
+            .to_string(),
+        "manifest digest does not match its canonical domain-separated payload"
+    );
 
     let assertion = FactAssertionV1::new(
         fact_id,
@@ -211,11 +218,21 @@ fn identity_bearing_wire_values_reject_tampering() {
     .unwrap();
     let mut assertion_wire = serde_json::to_value(&assertion).unwrap();
     assertion_wire["assertion_id"] = json!("fact-assertion.v1.forged");
-    assert!(serde_json::from_value::<FactAssertionV1>(assertion_wire).is_err());
+    assert_eq!(
+        serde_json::from_value::<FactAssertionV1>(assertion_wire)
+            .unwrap_err()
+            .to_string(),
+        "manifest digest does not match its canonical domain-separated payload"
+    );
 
     let mut owner_wire = serde_json::to_value(&assertion).unwrap();
     owner_wire["owner"] = json!({"kind": "project", "project_id": "project.other"});
-    assert!(serde_json::from_value::<FactAssertionV1>(owner_wire).is_err());
+    assert_eq!(
+        serde_json::from_value::<FactAssertionV1>(owner_wire)
+            .unwrap_err()
+            .to_string(),
+        "fact owner binding references an unknown identity"
+    );
 }
 
 #[test]
@@ -268,7 +285,14 @@ fn unknown_identity_and_assertion_variants_are_rejected() {
         serde_json::from_value::<FactIdentitySourceV1>(json!({
             "kind": "unknown",
         }))
-        .is_err()
+        .unwrap_err()
+        .to_string()
+        .starts_with("unknown variant `unknown`")
     );
-    assert!(serde_json::from_value::<FactAssertionKindV1>(json!({"kind": "unknown"})).is_err());
+    assert!(
+        serde_json::from_value::<FactAssertionKindV1>(json!({"kind": "unknown"}))
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown variant `unknown`")
+    );
 }

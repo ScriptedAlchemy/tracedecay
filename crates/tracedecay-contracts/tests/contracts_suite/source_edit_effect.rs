@@ -47,7 +47,10 @@ fn source_edit_effect_requires_the_exact_current_grant() {
     let mut request = request();
     request.authority.grant_revision += 1;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate().unwrap_err().to_string(),
+        "source edit request current grant is inconsistent with the application contract"
+    );
 }
 
 #[test]
@@ -55,7 +58,10 @@ fn source_edit_effect_rejects_zero_catalog_revision() {
     let mut request = request();
     request.proof.catalog_revision = 0;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate().unwrap_err().to_string(),
+        "source edit effect proof catalog revision must be greater than zero"
+    );
 }
 
 #[test]
@@ -63,7 +69,10 @@ fn source_edit_effect_rejects_zero_privacy_key_epoch() {
     let mut request = request();
     request.proof.privacy_key_epoch = 0;
 
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate().unwrap_err().to_string(),
+        "source edit effect proof privacy key epoch must be greater than zero"
+    );
 }
 
 #[test]
@@ -85,7 +94,10 @@ fn rename_apply_rejects_a_stale_or_missing_preview_digest() {
         dry_run: false,
         verify: true,
     };
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate().unwrap_err().to_string(),
+        "rename exact accepted preview digest is inconsistent with the application contract"
+    );
 
     if let SourceEditRequest::RenameSymbol { binding, .. } = &mut request.edit {
         binding.accepted_preview = Some(RenamePreviewAcceptanceV1 {
@@ -98,7 +110,10 @@ fn rename_apply_rejects_a_stale_or_missing_preview_digest() {
     } else {
         unreachable!("rename test request");
     }
-    assert!(request.validate().is_err());
+    assert_eq!(
+        request.validate().unwrap_err().to_string(),
+        "rename exact accepted preview digest is inconsistent with the application contract"
+    );
 
     let SourceEditRequest::RenameSymbol { binding, .. } = &mut request.edit else {
         unreachable!("rename test request");
@@ -168,12 +183,18 @@ fn reconciliation_requires_its_distinct_current_capability() {
 
     let mut reused_original_key = request.clone();
     reused_original_key.attempt_idempotency_key = reused_original_key.idempotency_key.clone();
-    assert!(reused_original_key.validate().is_err());
+    assert_eq!(
+        reused_original_key.validate().unwrap_err().to_string(),
+        "source edit reconciliation attempt idempotency key is inconsistent with the application contract"
+    );
 
     let mut wrong_capability = request;
     wrong_capability.context = effect.context;
     wrong_capability.authority = effect.authority;
-    assert!(wrong_capability.validate().is_err());
+    assert_eq!(
+        wrong_capability.validate().unwrap_err().to_string(),
+        "source edit reconciliation admission is inconsistent with the application contract"
+    );
 }
 
 #[test]

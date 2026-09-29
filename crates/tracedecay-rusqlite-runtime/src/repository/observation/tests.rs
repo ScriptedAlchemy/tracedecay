@@ -512,7 +512,7 @@ fn anchored_write_persists_all_authority_rows_atomically() {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert!(count > 0, "{table} was not persisted");
+        assert_eq!(count, 1, "{table}");
     }
 }
 

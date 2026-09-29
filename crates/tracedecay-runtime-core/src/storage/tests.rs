@@ -174,8 +174,10 @@ mod tests {
             worker.join().unwrap().unwrap();
         }
 
-        assert!(dashboard.is_dir());
-        assert!(lock_dir.is_dir());
+        tracedecay_private_fs::validate_private_directory(&dashboard)
+            .expect("the shared parent converges to one private directory");
+        tracedecay_private_fs::validate_private_directory(&lock_dir)
+            .expect("the nested child converges to one private directory");
     }
 
     #[test]

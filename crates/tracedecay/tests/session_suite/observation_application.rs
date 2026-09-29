@@ -9,15 +9,13 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, ObservationRecordParseErrorV1,
-    PrivacySanitizerError, RecordSanitizerV1, parse_normalized_observation_record_v1,
-    parse_observation_record_v1,
+    ClaudeSanitizerPolicyV1, ObservationRecordParseErrorV1, PrivacySanitizerError,
+    RecordSanitizerV1, parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
-    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
+    AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     GetObservationRequest, ObservationApplication, ObservationApplicationError,
     ObservationCancellation, ReplayObservationsRequest,
 };
@@ -54,7 +52,7 @@ fn request(
     session_id: &str,
     record: Value,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> CaptureClaudeObservationRequest {
+) -> CaptureObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
     let range = ObservationSourceRangeV1::new(0, frame_end).unwrap();
@@ -66,7 +64,7 @@ fn request(
         |native| claude_normalize(&native, session_id, record_id.clone(), range),
     )
     .unwrap();
-    CaptureClaudeObservationRequest::new(
+    CaptureObservationRequest::new(
         parsed_record,
         ObservationIdentityMaterialV1::for_native_record(
             source(session_id),
@@ -196,20 +194,20 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::claude_v1().unwrap(),
+        RecordSanitizerV1::claude_v1().unwrap(),
     );
     let session_id = "session.observation-privacy";
     let secret = "sk-proj-observation-sink-canary-1234567890";
     let record = conversational_record("message-private", "safe projected content", secret);
 
     let committed = application
-        .capture_claude_observation(request(session_id, record.clone(), None))
+        .capture_observation(request(session_id, record.clone(), None))
         .await
         .unwrap();
     assert!(!format!("{committed:?}").contains(secret));
     let first_receipt = committed.sanitization_receipt().clone();
     let observation_id = match &committed {
-        CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
+        CaptureObservationOutcome::Persisted { outcome, .. } => {
             assert!(matches!(**outcome, ObservationPersistOutcome::Committed(_)));
             outcome.receipt().observation().observation_id().clone()
         }
@@ -219,11 +217,11 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
 
     // Simulate a lost acknowledgement: retry the exact request after commit.
     let retry = application
-        .capture_claude_observation(request(session_id, record.clone(), None))
+        .capture_observation(request(session_id, record.clone(), None))
         .await
         .unwrap();
     match &retry {
-        CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
+        CaptureObservationOutcome::Persisted { outcome, .. } => {
             assert!(matches!(
                 **outcome,
                 ObservationPersistOutcome::ExactDuplicate(_)
@@ -288,7 +286,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         "collision fixture must preserve the source identity range"
     );
     let collision = application
-        .capture_claude_observation(request(session_id, collision_record, None))
+        .capture_observation(request(session_id, collision_record, None))
         .await
         .expect_err("same identity with different sanitized payload must collide");
     assert!(matches!(collision, ObservationApplicationError::Store(_)));
@@ -309,7 +307,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::new(
+        RecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(1, usize::MAX, usize::MAX)
@@ -320,7 +318,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap(),
-        ClaudeRecordSanitizerV1::new(
+        RecordSanitizerV1::new(
             ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(usize::MAX, 2, usize::MAX)
@@ -333,7 +331,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let before = table_counts(&runtime).await;
 
     let rejected = application
-        .capture_claude_observation(request(
+        .capture_observation(request(
             session_id,
             json!({"payload": rejected_secret}),
             None,
@@ -342,12 +340,12 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         .unwrap();
     assert!(matches!(
         rejected,
-        CaptureClaudeObservationOutcome::Rejected { .. }
+        CaptureObservationOutcome::Rejected { .. }
     ));
     assert!(!format!("{rejected:?}").contains(rejected_secret));
 
     let quarantined = quarantine_application
-        .capture_claude_observation(request(
+        .capture_observation(request(
             session_id,
             nested_value(json!(quarantined_secret), 4),
             None,
@@ -356,7 +354,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
         .unwrap();
     assert!(matches!(
         quarantined,
-        CaptureClaudeObservationOutcome::Quarantined { .. }
+        CaptureObservationOutcome::Quarantined { .. }
     ));
     assert!(!format!("{quarantined:?}").contains(quarantined_secret));
 

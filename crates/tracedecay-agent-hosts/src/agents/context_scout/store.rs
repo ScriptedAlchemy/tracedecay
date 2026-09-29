@@ -51,9 +51,7 @@ struct StoredContextScoutStateV1 {
     tombstones: Vec<ContextScoutWorkV1>,
     receipts: Vec<ContextScoutDeliveryReceiptV1>,
     feedback: Vec<ContextScoutFeedbackV1>,
-    #[serde(default)]
     delivery_addresses: Vec<StoredDeliveryAddressV1>,
-    #[serde(default)]
     delivery_provenance_complete: bool,
 }
 
@@ -311,6 +309,37 @@ fn mutation_receipt_key(effect_identity: &ManifestDigest) -> Option<String> {
     Some(format!("{MUTATION_RECEIPT_KEY_PREFIX_V1}{suffix}"))
 }
 
+/// A document written before delivery addresses were part of the state.
+/// Receipts in that document are not replayed into the current shape.
+fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(encoded) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some(stored_project) = object.get("project_id") else {
+        return false;
+    };
+    let Ok(stored_project) = serde_json::from_value::<[u8; 16]>(stored_project.clone()) else {
+        return false;
+    };
+    if stored_project != project_id {
+        return false;
+    }
+    if !object.contains_key("delivery_addresses")
+        || !object.contains_key("delivery_provenance_complete")
+    {
+        return object.contains_key("entries") && object.contains_key("receipts");
+    }
+    match serde_json::from_str::<StoredContextScoutStateV1>(encoded) {
+        Ok(state) => {
+            !state.delivery_provenance_complete || !state.has_complete_delivery_provenance()
+        }
+        Err(_) => false,
+    }
+}
+
 fn decode_mutation_settlement(encoded: &str) -> Option<ContextScoutMutationSettlementV1> {
     if encoded.len() > MAX_MUTATION_RECEIPT_BYTES_V1 {
         return None;
@@ -395,7 +424,7 @@ impl StoredContextScoutStateV1 {
                     .any(|receipt| receipt.envelope_id == binding.envelope_id)
         });
         let complete_delivery_provenance =
-            !self.delivery_provenance_complete || self.has_complete_delivery_provenance();
+            self.delivery_provenance_complete && self.has_complete_delivery_provenance();
 
         entries_valid
             && tombstones_valid
@@ -758,7 +787,9 @@ impl ProjectContextScoutDurableStoreV1 {
                 omitted: 0,
             });
         };
-        if encoded.len() > MAX_STORED_STATE_BYTES_V1 {
+        if encoded.len() > MAX_STORED_STATE_BYTES_V1
+            || document_needs_provenance_reset(&encoded, self.project_id)
+        {
             return ContextScoutRecentReadOutcomeV1::Unavailable;
         }
         let Ok(state) = serde_json::from_str::<StoredContextScoutStateV1>(&encoded) else {
@@ -897,6 +928,9 @@ impl ProjectContextScoutDurableStoreV1 {
         drop(rows);
 
         let mut state = match encoded {
+            Some(encoded) if document_needs_provenance_reset(&encoded, self.project_id) => {
+                return None;
+            }
             Some(encoded) if encoded.len() <= MAX_STORED_STATE_BYTES_V1 => {
                 serde_json::from_str::<StoredContextScoutStateV1>(&encoded).ok()?
             }
@@ -955,6 +989,12 @@ impl ProjectContextScoutDurableStoreV1 {
         if now.0 <= 0 || limit == 0 || limit > MAX_SCOUT_ACTIVE_ADDRESSES {
             return ContextScoutDurableStartupOutcomeV1::Unavailable;
         }
+        if self.provenance_reset_required().await {
+            return match self.replace_with_fresh_state().await {
+                Some(()) => ContextScoutDurableStartupOutcomeV1::Reset,
+                None => ContextScoutDurableStartupOutcomeV1::Unavailable,
+            };
+        }
         // Startup is a read that *may* need to requeue expired claims. Asking
         // for the exclusive writer lane before knowing that made project open
         // depend on it unconditionally: a concurrently opening sibling route
@@ -979,6 +1019,31 @@ impl ProjectContextScoutDurableStoreV1 {
         })
         .await
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
+    }
+
+    async fn provenance_reset_required(&self) -> bool {
+        let Ok(Some(encoded)) = self.database.get_metadata(STORE_KEY_V1).await else {
+            return false;
+        };
+        document_needs_provenance_reset(&encoded, self.project_id)
+    }
+
+    /// Replaces a pre-provenance document with an empty current one. The
+    /// previous receipts, feedback, and queue entries are not copied.
+    async fn replace_with_fresh_state(&self) -> Option<()> {
+        let transaction = self
+            .database
+            .begin_write_transaction("reset Context Scout durable store")
+            .await
+            .ok()?;
+        let encoded =
+            serde_json::to_string(&StoredContextScoutStateV1::new(self.project_id)).ok()?;
+        self.database
+            .set_metadata_unguarded(&transaction, STORE_KEY_V1, &encoded)
+            .await
+            .ok()?;
+        transaction.commit().await.ok()?;
+        Some(())
     }
 
     /// Decodes the durable state without taking the writer lane. `None` means
