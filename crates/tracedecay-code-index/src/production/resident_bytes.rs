@@ -339,6 +339,11 @@ pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             artifacts.unresolved_references.capacity(),
             unresolved_heap_bytes,
         ))
+        .saturating_add(vec_bytes(
+            &artifacts.callable_arities,
+            artifacts.callable_arities.capacity(),
+            |row| row.occurrence.as_str().len(),
+        ))
         .saturating_add(exact_authority_bytes)
 }
 

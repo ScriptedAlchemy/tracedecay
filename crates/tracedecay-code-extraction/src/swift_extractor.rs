@@ -1061,6 +1061,7 @@ impl SwiftExtractor {
                             column,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -1200,6 +1201,7 @@ impl SwiftExtractor {
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         Self::extract_call_sites(state, child, fn_node_id);
@@ -1355,6 +1357,7 @@ impl SwiftExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
 
         state.edges.push(Edge {

@@ -214,17 +214,17 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
     worktrees.sort();
     assert_eq!(
         decoded(&alone),
-        [(vec![primary.worktree_id.clone()], true, Some(1_458_681))]
+        [(vec![primary.worktree_id.clone()], true, Some(1_462_329))]
     );
-    assert_eq!(alone.measured_bytes, 1_458_681);
-    // Two copies would hold 2,917,362 bytes; the linked worktree adds only
+    assert_eq!(alone.measured_bytes, 1_462_329);
+    // Two copies would hold 2,924,658 bytes; the linked worktree adds only
     // the manifest, lineage, and projection evidence it sealed itself.
     assert_eq!(
         decoded(&both),
-        [(worktrees, true, Some(1_846_349))],
+        [(worktrees, true, Some(1_849_421))],
         "one decode row for one content, naming both worktrees"
     );
-    assert_eq!(both.measured_bytes, 1_846_349);
+    assert_eq!(both.measured_bytes, 1_849_421);
 
     let later = Instant::now() + IDLE_WINDOW;
     let released = owners.release_idle(later);
@@ -249,7 +249,7 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
             .iter()
             .map(|release| release.bytes.measured().unwrap_or(0))
             .sum::<u64>(),
-        1_846_349,
+        1_849_421,
         "the two releases give back exactly what the shared row held"
     );
     let idle = owners.report(later);

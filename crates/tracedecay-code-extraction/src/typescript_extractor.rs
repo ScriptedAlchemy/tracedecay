@@ -950,6 +950,7 @@ impl TypeScriptExtractor {
                             column: parent.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -1411,6 +1412,7 @@ impl TypeScriptExtractor {
                                     column: child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1429,6 +1431,7 @@ impl TypeScriptExtractor {
                                             column: iface.start_position().column as u32,
                                             file_path: state.file_path.clone(),
                                             unmodeled_import: None,
+                                            argument_count: None,
                                         });
                                     }
                                     if !inner.goto_next_sibling() {
@@ -1486,6 +1489,7 @@ impl TypeScriptExtractor {
                         column: site.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
                 Self::extract_call_sites(state, child, fn_node_id);
@@ -1692,6 +1696,7 @@ impl TypeScriptExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             } else {
@@ -1833,6 +1838,7 @@ impl TypeScriptExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 }

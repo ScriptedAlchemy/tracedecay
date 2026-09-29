@@ -640,6 +640,7 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     if !cursor.goto_next_sibling() {
@@ -759,6 +760,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
 
@@ -852,6 +854,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         if top_level_argument.is_some() {
@@ -874,6 +877,7 @@ impl RustExtractor {
                         column: import.start_column,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 }
             }
@@ -1383,6 +1387,7 @@ impl RustExtractor {
                 column: start_column,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         let Some(body) = find_direct_child_by_kind(node, "token_tree") else {
@@ -1891,6 +1896,7 @@ impl RustExtractor {
                                 column: position.column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
@@ -1908,6 +1914,7 @@ impl RustExtractor {
                                     column: position.column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                             }
                         }
@@ -1929,6 +1936,7 @@ impl RustExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id, receivers);
                     }
@@ -2744,6 +2752,7 @@ impl RustExtractor {
                         column: position.column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                     Self::extract_calls_in_token_tree(state, children[i + 1], fn_node_id);
                     i += 2; // skip the token_tree we just handled
@@ -2842,6 +2851,7 @@ impl RustExtractor {
                             column: attr_node.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                 }
@@ -2908,6 +2918,7 @@ impl RustExtractor {
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
             return;
         }
@@ -2920,6 +2931,7 @@ impl RustExtractor {
                 column: n.start_position().column as u32,
                 file_path: state.file_path.clone(),
                 unmodeled_import: None,
+                argument_count: None,
             });
         }
         if cursor.goto_first_child() {
@@ -3014,6 +3026,7 @@ impl RustExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
 
         state.edges.push(Edge {
@@ -3052,6 +3065,7 @@ impl RustExtractor {
             imports: state.imports,
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 }

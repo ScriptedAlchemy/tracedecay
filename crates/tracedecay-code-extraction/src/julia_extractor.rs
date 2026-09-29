@@ -325,6 +325,7 @@ impl JuliaExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                     }
                     Self::extract_calls(state, child, fn_id);

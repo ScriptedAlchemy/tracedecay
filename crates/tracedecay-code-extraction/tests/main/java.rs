@@ -5,6 +5,70 @@ use tracedecay_domain::*;
 include!("support/edges.rs");
 
 #[test]
+fn java_records_call_argument_counts_and_declared_parameter_lists() {
+    let source = r#"
+class Validate {
+    Validate(int a, int b) {}
+    static void notNull(Object obj, String msg) {}
+    static String format(String pattern, Object... args) { return pattern; }
+    void run() {
+        notNull(this, /* why */ "m");
+        format("x");
+        Validate.notNull(null, String.valueOf(1));
+    }
+}
+"#;
+    let artifact = JavaExtractor.extract_artifact("Validate.java", source);
+    let name_of = |id: &str| {
+        artifact
+            .result
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.name.clone())
+            .expect("arity node")
+    };
+    let arities = artifact
+        .callable_arities
+        .iter()
+        .map(|row| {
+            (
+                name_of(&row.node_id),
+                row.arity.parameters,
+                row.arity.variadic,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arities.iter().collect::<std::collections::BTreeSet<_>>(),
+        [
+            ("Validate".to_owned(), 2, false),
+            ("format".to_owned(), 2, true),
+            ("notNull".to_owned(), 2, false),
+            ("run".to_owned(), 0, false),
+        ]
+        .iter()
+        .collect()
+    );
+    let calls = artifact
+        .result
+        .unresolved_refs
+        .iter()
+        .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| (r.reference_name.as_str(), r.argument_count))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        calls,
+        std::collections::BTreeSet::from([
+            ("notNull", Some(2)),
+            ("format", Some(1)),
+            ("Validate.notNull", Some(2)),
+            ("String.valueOf", Some(1)),
+        ])
+    );
+}
+
+#[test]
 fn test_java_empty_javadoc_no_panic() {
     let source = r#"
 public class PanicReproduction {
