@@ -981,8 +981,23 @@ mod tests {
         #[cfg(windows)]
         assert!(reacquired.is_ok());
         #[cfg(not(windows))]
-        assert!(reacquired.is_err());
+        {
+            let Err(error) = reacquired else {
+                panic!("the post-update lease stays held across the handoff");
+            };
+            assert_eq!(
+                error.to_string(),
+                "config error: cannot start post-update: update is already active; retry after it \
+                 finishes"
+            );
+        }
         drop(held);
+        #[cfg(not(windows))]
+        tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+            profile.path(),
+            "post-update",
+        )
+        .expect("dropping the handed-off lease releases the profile");
     }
 
     use tracedecay_session_memory::user_config::UserConfig;

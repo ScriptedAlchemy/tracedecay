@@ -516,7 +516,8 @@ mod tests {
         )
         .unwrap();
         let skills = temp.path().join(".hermes/skills");
-        fs::create_dir_all(&skills).unwrap();
+        fs::create_dir_all(skills.join("owned")).unwrap();
+        fs::write(skills.join("owned/SKILL.md"), "---\nname: owned\n---\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path().join("escaped"), skills.join("escaped")).unwrap();
 
@@ -525,7 +526,14 @@ mod tests {
             HermesSkillBridgeOptions::default(),
         )
         .unwrap();
-        assert!(snapshot.skills.is_empty());
+        assert_eq!(
+            snapshot
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            ["owned"]
+        );
     }
 
     #[cfg(unix)]

@@ -679,6 +679,21 @@ mod tests {
             .expect("wrong owner operation")
             .is_empty()
         );
+        let phases = native_integration_envelopes(
+            &identity("project.scope"),
+            "project.scope",
+            "preflight_native_integration",
+            &preview(),
+            None,
+        )
+        .expect("the same preview under its owner operation")
+        .into_iter()
+        .map(|envelope| match envelope.payload {
+            ObservabilityPayloadV1::WorkIntegrationTransition(payload) => payload.phase,
+            _ => panic!("wrong payload family"),
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(phases, vec![IntegrationPhaseV1::DryRunTerminal]);
     }
 
     #[test]

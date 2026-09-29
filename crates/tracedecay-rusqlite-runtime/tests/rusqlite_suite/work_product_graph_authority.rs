@@ -18,18 +18,18 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
-    Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
-    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductExpectedAuthorityV1,
-    WorkProductMutationIdentityV1, WorkProductMutationServiceV1, WorkProductReadServiceV1,
-    WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
+    Deadline, DisclosureClass, OpaqueCursor, RequestContext, RequestId, ResolvedScope,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphSelectionCoverageV1,
+    WorkProductApplicationErrorV1, WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1,
+    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
+    WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
-    AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
-    MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
-    WorkAcceptanceCriterionV1, WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1,
-    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
-    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductGraphV1,
+    AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId,
+    CursorBindingMismatchV1, InitiativeId, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId,
+    TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkCommandId, WorkGraphVersionV1,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId,
+    WorkPlanV1, WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductGraphV1,
     WorkRuntimeProjectionCoverageV1, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
@@ -836,6 +836,47 @@ fn a_forensic_read_is_placed_by_observation_time_not_by_the_change_instant() {
         panic!("an as-of read must answer with a snapshot");
     };
     assert_eq!(snapshot.valid_at(), UtcMicros(100));
+}
+
+#[test]
+fn a_timeline_continuation_the_read_did_not_mint_is_refused() {
+    let store = RegisteredWorkStore::start("work-product-foreign-continuation");
+    create(
+        &store,
+        "command.work-product.foreign-continuation",
+        UtcMicros(100),
+        vec![item("task.only", &[], 2)],
+    )
+    .expect("create the work product");
+    let window = WorkGraphReadRequestV1::evolution(
+        repository_selection(),
+        UtcMicros(0),
+        UtcMicros(300),
+        PROJECTED_AT,
+    )
+    .unwrap();
+    let WorkGraphReadV1::Evolution { timeline, .. } = reads(&store)
+        .read_graph(&context(), window.clone())
+        .expect("read evolution")
+    else {
+        panic!("an evolution read must answer with a timeline");
+    };
+    assert_eq!(timeline.entries().len(), 1);
+
+    for foreign in ["work-product-graph-version:0", "bc1.7b7d"] {
+        assert_eq!(
+            reads(&store).read_graph(
+                &context(),
+                WorkGraphReadRequestV1 {
+                    continuation: Some(OpaqueCursor::new(foreign).unwrap()),
+                    ..window.clone()
+                },
+            ),
+            Err(WorkProductApplicationErrorV1::CursorRefused(
+                CursorBindingMismatchV1::Foreign
+            ))
+        );
+    }
 }
 
 /// A read must never answer from a journal whose verified row was corrupted

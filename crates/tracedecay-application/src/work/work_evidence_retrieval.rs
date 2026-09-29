@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
 use tracedecay_contracts::{
@@ -21,15 +21,16 @@ use tracedecay_contracts::{
     WorkTaskSessionRequestV1,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, ComponentRevision, EphemeralSanitizedQueryViewV1, FreshnessVectorDigest,
-    HydrationStateV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalCursor,
-    RetrievalGrainV1, RetrievalRequest, RetrievalScope, SanitizerRevision, ScoreDomainId,
-    SingleRootScopeV1, VectorWatermark,
+    AuthorizationRevision, ComponentRevision, CursorBindingMismatchV1, CursorBindingV1,
+    EphemeralSanitizedQueryViewV1, FreshnessVectorDigest, HydrationStateV1, PrincipalId,
+    QueryNormalizationRevision, RetrievalBudget, RetrievalContractError, RetrievalCursor,
+    RetrievalError, RetrievalGrainV1, RetrievalRequest, RetrievalScope, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, VectorWatermark, decode_bound_cursor, encode_bound_cursor,
 };
-use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::evidence_lanes::{
     TaskSessionBindingV1, TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1,
 };
+use tracedecay_query::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
 use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
     TaskSessionRetrievalOutcomeV1,
@@ -205,12 +206,22 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
     ) -> WorkTaskSessionFuture<'a> {
         Box::pin(hotpath::future!(
             async move {
-                if request.continuation.as_ref().is_some_and(|continuation| {
-                    continuation.verified_version != request.verified_version
+                let continuation_binding = task_session_continuation_binding(&request)?;
+                if let Some(continuation) = &request.continuation {
+                    // The Work service already matched the version and
+                    // attempt to the request; a different provider session
+                    // than the attempt's own is a continuation Work never
+                    // minted.
+                    if continuation.verified_version != request.verified_version
                         || continuation.attempt != request.attempt
                         || continuation.source != request.source
-                }) {
-                    return Err(WorkEvidenceHydrationErrorV1::Stale);
+                    {
+                        return Err(WorkEvidenceHydrationErrorV1::CursorRefused(
+                            CursorBindingMismatchV1::Foreign,
+                        ));
+                    }
+                    decode_bound_cursor::<()>(&continuation_binding, continuation.binding.as_str())
+                        .map_err(WorkEvidenceHydrationErrorV1::CursorRefused)?;
                 }
                 let authority_port = self
                     .federated_authority
@@ -254,7 +265,11 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                     .and_then(|continuation| continuation.ranking_cursor.as_ref())
                     .map(|cursor| serde_json::from_str::<RetrievalCursor>(cursor.as_str()))
                     .transpose()
-                    .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+                    .map_err(|_| {
+                        WorkEvidenceHydrationErrorV1::CursorRefused(
+                            CursorBindingMismatchV1::Foreign,
+                        )
+                    })?;
                 let selector = WorkTaskSessionSelectorV1 {
                     authority: authority.as_ref(),
                     context,
@@ -263,6 +278,7 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                     page_size: usize::try_from(page_size)
                         .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?,
                     ranking_cursor,
+                    ranking_cursor_refused: OnceLock::new(),
                 };
                 let outcome = self
                     .retrieval
@@ -278,7 +294,7 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                         &selector,
                     )
                     .await;
-                task_session_evidence(&request, outcome, &selector)
+                task_session_evidence(&request, &continuation_binding, outcome, &selector)
             },
             label = "daemon.session_retrieval.evidence"
         ))
@@ -302,6 +318,9 @@ struct WorkTaskSessionSelectorV1<'a> {
     reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
     page_size: usize,
     ranking_cursor: Option<RetrievalCursor>,
+    /// Set when the ranking authority could not verify the presented ranking
+    /// cursor; the selection callback can only report it as invalid.
+    ranking_cursor_refused: OnceLock<CursorBindingMismatchV1>,
 }
 
 impl TaskSessionRankSelectorV1 for WorkTaskSessionSelectorV1<'_> {
@@ -338,8 +357,34 @@ impl TaskSessionRankSelectorV1 for WorkTaskSessionSelectorV1<'_> {
                 self.page_size,
                 self.ranking_cursor.as_ref(),
             )
-            .map_err(|error| TaskSessionSelectionCallbackErrorV1::Invalid(error.to_string()))
+            .map_err(|error| {
+                if matches!(
+                    error,
+                    QueryAuthorityErrorV1::Retrieval(RetrievalError::CursorAuthenticationFailed)
+                        | QueryAuthorityErrorV1::Contract(
+                            RetrievalContractError::InvalidCursorBinding { .. }
+                        )
+                ) {
+                    let _ = self
+                        .ranking_cursor_refused
+                        .set(CursorBindingMismatchV1::Foreign);
+                }
+                TaskSessionSelectionCallbackErrorV1::Invalid(error.to_string())
+            })
     }
+}
+
+const WORK_RETRIEVE_EVIDENCE_OPERATION: &str = "work_retrieve_evidence";
+
+fn task_session_continuation_binding(
+    request: &WorkTaskSessionRequestV1,
+) -> Result<CursorBindingV1, WorkEvidenceHydrationErrorV1> {
+    CursorBindingV1::builder(WORK_RETRIEVE_EVIDENCE_OPERATION)
+        .parameter("selection", &request.selection)
+        .parameter("temporal", &request.temporal)
+        .parameter("page_size", &request.page_size)
+        .build()
+        .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)
 }
 
 fn binding_matches_request(
@@ -445,9 +490,13 @@ fn task_session_query_text(request: &WorkTaskSessionRequestV1) -> String {
 
 fn task_session_evidence(
     request: &WorkTaskSessionRequestV1,
+    continuation_binding: &CursorBindingV1,
     outcome: TaskSessionRetrievalOutcomeV1,
-    selector: &dyn TaskSessionRankSelectorV1,
+    selector: &WorkTaskSessionSelectorV1<'_>,
 ) -> Result<WorkTaskSessionEvidenceV1, WorkEvidenceHydrationErrorV1> {
+    if let Some(mismatch) = selector.ranking_cursor_refused.get() {
+        return Err(WorkEvidenceHydrationErrorV1::CursorRefused(*mismatch));
+    }
     let report = match outcome {
         TaskSessionRetrievalOutcomeV1::Complete(report) => report,
         TaskSessionRetrievalOutcomeV1::Omitted(omission) => {
@@ -464,8 +513,12 @@ fn task_session_evidence(
         TaskSessionRetrievalOutcomeV1::WrongScope | TaskSessionRetrievalOutcomeV1::Denied => {
             return Err(WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized);
         }
-        TaskSessionRetrievalOutcomeV1::Stale { .. } => {
+        TaskSessionRetrievalOutcomeV1::Stale { .. }
+        | TaskSessionRetrievalOutcomeV1::CursorStale => {
             return Err(WorkEvidenceHydrationErrorV1::Stale);
+        }
+        TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch) => {
+            return Err(WorkEvidenceHydrationErrorV1::CursorRefused(mismatch));
         }
         TaskSessionRetrievalOutcomeV1::TimedOut => {
             return Err(WorkEvidenceHydrationErrorV1::TimedOut);
@@ -556,6 +609,7 @@ fn task_session_evidence(
     let counts = &result.coverage;
     let continuation = task_session_continuation(
         request,
+        continuation_binding,
         participant_epoch.clone(),
         result.next_cursor.as_deref(),
         report.selection.continuation(),
@@ -645,6 +699,7 @@ fn reauthorize_work_stage(
 
 fn task_session_continuation(
     request: &WorkTaskSessionRequestV1,
+    binding: &CursorBindingV1,
     participant_epoch: tracedecay_domain::ManifestDigest,
     temporal_cursor: Option<&str>,
     ranking_cursor: Option<&RetrievalCursor>,
@@ -657,6 +712,10 @@ fn task_session_continuation(
         attempt: request.attempt.clone(),
         source: request.source.clone(),
         participant_epoch,
+        binding: encode_bound_cursor(binding, &())
+            .ok()
+            .and_then(|cursor| OpaqueCursor::new(cursor).ok())
+            .ok_or(WorkEvidenceHydrationErrorV1::Unavailable)?,
         temporal_cursor: temporal_cursor
             .map(OpaqueCursor::new)
             .transpose()

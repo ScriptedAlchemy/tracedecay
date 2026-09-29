@@ -183,8 +183,8 @@ macro_rules! host_lifecycle_exit_status {
 
 Exit status:
   0   every host completed, or was skipped: not applicable, or the host is
-      `not installed` (its CLI is not on PATH) or `not signed in`, whether
-      tracked, named with --agent, or only detected. `uninstall` stops
+      `not installed` (its CLI is not on PATH), whether tracked, named with
+      --agent, or only detected. `uninstall` stops
       tracking such a host and leaves the host-owned registration in place
   1   a host failed: the lifecycle ran and failed; the per-host summary
       names each one
@@ -356,7 +356,7 @@ Update re-runs install for every configured agent integration so a separate
 
 Exit status (a completed binary upgrade stays installed in every case):
   0   the binary is current and every host refreshed, or was skipped as
-      `not installed` or `not signed in`
+      `not installed`
   1   the upgrade failed, or the refresh failed for a host or for the daemon;
       the per-host summary names each failed host
   75  the refresh waits on an operator step: an interactive host step (Kimi
@@ -444,8 +444,8 @@ Examples:
   tracedecay doctor                              Check everything
   tracedecay doctor --json                       Also print the report as JSON on stdout
 
-A host that is not installed or not signed in is reported as skipped with
-that reason and never counts as an issue, warning, or pending step.
+A host that is not installed is reported as skipped with that reason and
+never counts as an issue, warning, or pending step.
 
 Exit status:
   0   no issue found (warnings and skipped hosts may still be printed)

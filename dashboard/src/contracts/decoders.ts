@@ -9478,15 +9478,10 @@ export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV
   returned: z.number().int().min(0),
 }).strict()]);
 
-/** Resume point for the next attempt-list page, bound to the exact verified
-topology generation it was minted under. */
-export const WorkAttemptListCursorV1Schema: z.ZodObject<{
-  generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  start_after: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
-  generation: z.string(),
-  start_after: z.lazy(() => WorkAttemptIdentityV1Schema),
-}).strict();
+/** Opaque resume point for the next page of one attempt-list-family read,
+bound to the operation and `page_size` that minted it and pinned to the
+verified topology generation the page was read under. */
+export const WorkAttemptListCursorV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
 
 export const WorkAttemptListRequestV1Schema: z.ZodObject<{
   cursor: z.ZodType<WorkAttemptListCursorV1 | null, z.ZodTypeDef, unknown>;
@@ -12007,6 +12002,7 @@ export const WorkSynthesisSourceSetV1Schema: z.ZodObject<{
 
 export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
   attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
+  binding: z.ZodType<string, z.ZodTypeDef, unknown>;
   participant_epoch: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
   ranking_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
   source: z.ZodType<ObservationSourceIdentityV1, z.ZodTypeDef, unknown>;
@@ -12014,6 +12010,7 @@ export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
   verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
 }, "strict"> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  binding: z.string(),
   participant_epoch: z.lazy(() => ManifestDigestSchema),
   ranking_cursor: z.string().nullable(),
   source: z.lazy(() => ObservationSourceIdentityV1Schema),

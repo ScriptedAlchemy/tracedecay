@@ -1225,7 +1225,7 @@ async fn configured_upload_enabled(
         false,
         false,
     )?;
-    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,
         operation,
@@ -1330,7 +1330,7 @@ fn check_user_config(
 }
 
 /// Reports every host the profile tracks or finds integrated. A host that is
-/// not installed or not signed in is one skipped line, counted nowhere.
+/// not installed is one skipped line, counted nowhere.
 fn check_host_integrations(
     dc: &mut DoctorCounters,
     profile: &tracedecay_runtime_core::config::ProfileRoot,

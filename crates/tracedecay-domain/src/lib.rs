@@ -8,6 +8,7 @@ pub mod automation;
 pub mod canonical_text;
 pub mod code_intelligence;
 pub mod configuration;
+pub mod cursor_binding;
 pub mod diagnostics;
 pub mod errors;
 pub mod external_source;
@@ -129,6 +130,11 @@ pub use configuration::{
     WorktreeCleanlinessRequirementV1, WorktreePlacementModeV1, WorktreePlacementRootId,
     WorktreeRetentionPolicyV1, WorktreeRootPolicyV1, resolve_restrictive_capabilities,
     safe_work_topology_policy_v1,
+};
+pub use cursor_binding::{
+    CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingBuilderV1,
+    CursorBindingMismatchV1, CursorBindingStampV1, CursorBindingV1, decode_bound_cursor,
+    encode_bound_cursor,
 };
 pub use diagnostics::{
     DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,

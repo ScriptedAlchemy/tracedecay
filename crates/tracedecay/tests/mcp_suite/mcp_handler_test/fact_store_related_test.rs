@@ -301,13 +301,11 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
         )],
         "first related page: {first_page}"
     );
-    assert_eq!(
-        first_page["next_after"]["score_millionths"], 910_000,
-        "{first_page}"
-    );
-    assert_eq!(
-        first_page["next_after"]["fact_id"], source.fact_id,
-        "{first_page}"
+    assert!(
+        first_page["next_after"]
+            .as_str()
+            .is_some_and(|cursor| cursor.starts_with("bc1.")),
+        "opaque continuation: {first_page}"
     );
     let second_page = related(
         &fixture,
@@ -335,12 +333,14 @@ async fn fact_store_related_lists_cooccurring_facts_and_omits_isolated_ones() {
         )],
         "second related page: {second_page}"
     );
-    assert_eq!(
-        second_page["next_after"]["score_millionths"], 620_000,
-        "{second_page}"
+    assert!(
+        second_page["next_after"]
+            .as_str()
+            .is_some_and(|cursor| cursor.starts_with("bc1.")),
+        "opaque continuation: {second_page}"
     );
-    assert_eq!(
-        second_page["next_after"]["fact_id"], neighbor.fact_id,
+    assert_ne!(
+        second_page["next_after"], first_page["next_after"],
         "{second_page}"
     );
     let third_page = related(

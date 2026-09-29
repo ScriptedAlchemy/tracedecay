@@ -329,6 +329,7 @@ impl ProcessResidentSampleV1 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
     status
         .lines()
@@ -340,6 +341,7 @@ fn status_kib_field_bytes(status: &str, field: &str) -> Option<u64> {
         .checked_mul(1_024)
 }
 
+#[cfg(target_os = "linux")]
 fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResidentSampleV1> {
     let anon = status_kib_field_bytes(status, "RssAnon")?;
     let shmem = status_kib_field_bytes(status, "RssShmem")?;
@@ -351,6 +353,7 @@ fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResiden
     })
 }
 
+#[cfg(target_os = "linux")]
 fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
     stat.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
@@ -369,6 +372,7 @@ fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
 /// `None` when every `memory.max` is absent or `max`. Counting `memory.current`
 /// on an unlimited cgroup treats the machine's page cache as a kill line and
 /// refuses work the kernel can reclaim.
+#[cfg(target_os = "linux")]
 fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
     let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
     let mut chosen: Option<(std::path::PathBuf, u64)> = None;

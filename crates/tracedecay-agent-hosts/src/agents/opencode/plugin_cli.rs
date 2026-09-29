@@ -3,7 +3,7 @@
 //!
 //! Every other host in this crate that owns its plugin lifecycle gets that
 //! lifecycle driven through the host's own command (`claude plugin …`,
-//! `kiro-cli mcp …`). This module records why OpenCode is the exception, and
+//! `droid mcp …`). This module records why OpenCode is the exception, and
 //! encodes the parts of that decision that must not rot silently.
 //!
 //! # What `opencode plugin` actually is

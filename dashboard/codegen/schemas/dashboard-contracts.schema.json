@@ -26514,23 +26514,8 @@
       ]
     },
     "WorkAttemptListCursorV1": {
-      "additionalProperties": false,
-      "description": "Resume point for the next attempt-list page, bound to the exact verified\ntopology generation it was minted under.",
-      "properties": {
-        "generation": {
-          "description": "The verified topology generation the cursor was minted under.",
-          "type": "string"
-        },
-        "start_after": {
-          "$ref": "#/$defs/WorkAttemptIdentityV1",
-          "description": "The last attempt identity the prior page returned."
-        }
-      },
-      "required": [
-        "generation",
-        "start_after"
-      ],
-      "type": "object"
+      "description": "Opaque resume point for the next page of one attempt-list-family read,\nbound to the operation and `page_size` that minted it and pinned to the\nverified topology generation the page was read under.",
+      "type": "string"
     },
     "WorkAttemptListRequestV1": {
       "additionalProperties": false,
@@ -33132,6 +33117,10 @@
         "attempt": {
           "$ref": "#/$defs/WorkAttemptIdentityV1"
         },
+        "binding": {
+          "description": "Binds the continuation to the retrieve-evidence operation and the\nresult-shaping request fields the envelope does not echo.",
+          "type": "string"
+        },
         "participant_epoch": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -33159,6 +33148,7 @@
         "attempt",
         "source",
         "participant_epoch",
+        "binding",
         "temporal_cursor",
         "ranking_cursor"
       ],

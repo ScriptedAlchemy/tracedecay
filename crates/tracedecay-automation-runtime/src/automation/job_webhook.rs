@@ -522,7 +522,10 @@ mod tests {
             response: Vec::new(),
             sent: true,
         };
-        assert!(read_status(&mut reader).is_err());
+        assert_eq!(
+            read_status(&mut reader).unwrap_err().to_string(),
+            "config error: failed to read webhook response: connection aborted"
+        );
     }
 
     #[test]

@@ -288,8 +288,16 @@ mod tests {
 
         fs::write(directory.path().join("present.rs"), b"two").unwrap();
         let after = source_edit_state_digest(directory.path(), &files).unwrap();
-
         assert_ne!(before, after);
+
+        fs::write(directory.path().join("missing.rs"), b"").unwrap();
+        let created = source_edit_state_digest(directory.path(), &files).unwrap();
+        assert_ne!(after, created, "creating a missing file changes the state");
+        fs::remove_file(directory.path().join("missing.rs")).unwrap();
+        assert_eq!(
+            source_edit_state_digest(directory.path(), &files).unwrap(),
+            after
+        );
     }
 
     #[cfg(unix)]

@@ -22,6 +22,7 @@ use super::{
     ScopeRevalidationEvidenceV1, StoredConfigurationProtectedOperationV1, UtcMicros,
     canonical_sha256,
 };
+use tracedecay_domain::encode_bound_cursor;
 
 impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
     fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
@@ -568,15 +569,19 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 audit_from_transaction(&read, query.after_event_id.as_ref(), query.limit + 1)
                     .await
                     .map_err(map_store_error)?;
-            let next_after_event_id = if events.len() > query.limit {
+            let next_cursor = if events.len() > query.limit {
                 events.pop();
-                events.last().map(|event| event.event_id.clone())
+                events
+                    .last()
+                    .map(|event| encode_bound_cursor(&query.binding, &event.event_id))
+                    .transpose()
+                    .map_err(|_| ConfigurationError::Unavailable)?
             } else {
                 None
             };
             Ok(ConfigurationAuditPage {
                 events,
-                next_after_event_id,
+                next_cursor,
             })
         })
     }

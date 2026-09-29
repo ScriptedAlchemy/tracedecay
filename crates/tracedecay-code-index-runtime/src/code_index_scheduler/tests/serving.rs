@@ -40,10 +40,11 @@ use tracedecay_query::retrieval::{
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-        CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-        CodeLexicalArtifactRestoreWitnessV1, LexicalLaneRequest, LexicalRouteKindV1,
-        LexicalRoutingV1,
+        CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1,
+        CodeLexicalArtifactReaderV1, CodeLexicalArtifactRestoreWitnessV1, LexicalLaneRequest,
+        LexicalRouteKindV1, LexicalRoutingV1,
     },
 };
 use tracedecay_runtime_core::resident_memory::{
@@ -920,7 +921,8 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         "positional fingerprints cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
-    let revision: u32 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+    let artifact_path = active_text_artifact_path(store.path());
+    let revision: u32 = rusqlite::Connection::open(&artifact_path)
         .expect("open sealed artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -932,6 +934,47 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         observation.artifact_format_revision,
         Some(revision),
         "clone readiness reports the revision the first seal wrote"
+    );
+    let metadata = latest
+        .text_projection_metadata()
+        .expect("projection metadata");
+    let control = UninterruptibleCodeIndexControlV1;
+    CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata.clone(),
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("the current artifact revision opens");
+    let previous = i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1) - 1;
+    {
+        let connection = rusqlite::Connection::open(&artifact_path).expect("open sealed artifact");
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE artifact_state SET format_revision = ?1 WHERE singleton = 1",
+                    [previous],
+                )
+                .expect("write the previous format revision"),
+            1
+        );
+    }
+    let opened = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    );
+    let Err(error) = opened else {
+        panic!("the previous artifact revision is refused");
+    };
+    assert!(
+        matches!(
+            error,
+            CodeLexicalArtifactErrorV1::Incompatible(ref message)
+                if message == &format!("format revision {previous} is unsupported")
+        ),
+        "previous revision reached the wrong rejection: {error}"
     );
     let staging = std::fs::read_dir(code_text_artifact_staging_root(store.path()))
         .expect("artifacts root")
@@ -1542,7 +1585,10 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
             .expect("build current-format text artifact")
         {}
     }
-    let incompatible_path = rewrite_active_text_artifact_format_revision(store.path(), 1);
+    let incompatible_path = rewrite_active_text_artifact_format_revision(
+        store.path(),
+        u64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 - 1),
+    );
 
     let scheduler = scheduler(
         &fixture,
@@ -1778,7 +1824,10 @@ fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
             rusqlite::Connection::open(&staging_path).expect("open partial staging database");
         assert_eq!(
             connection
-                .execute("UPDATE artifact_state SET format_revision = 1", [],)
+                .execute(
+                    "UPDATE artifact_state SET format_revision = ?1",
+                    [i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 - 1)],
+                )
                 .expect("rewrite staging format revision"),
             1
         );
@@ -5806,7 +5855,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         refusal
             .diagnostic()
             .map(|diagnostic| diagnostic.code.as_str()),
-        Some("callable_code.cursor_invalid"),
+        Some("cursor.invalid"),
         "MAC verification must precede expiry and other binding diagnostics"
     );
 

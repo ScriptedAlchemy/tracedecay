@@ -5,8 +5,12 @@ use futures_util::stream::{self, StreamExt};
 use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
 };
-use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
-use tracedecay_session_memory::session::{SessionRetrievalScope, SessionTemporalQuery};
+use tracedecay_domain::{
+    ActorId, DomainError, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256,
+};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionRetrievalScope, SessionTemporalQuery,
+};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -163,6 +167,9 @@ impl DashboardLcmReadAdapter {
                 }
                 SessionRetrievalServiceOutcome::CursorStale => {
                     return not_ready(DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale");
+                }
+                SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+                    return not_ready(DashboardLcmReadStateV1::CursorRefused, mismatch.code());
                 }
                 SessionRetrievalServiceOutcome::WrongScope => return wrong_scope_not_ready(),
                 SessionRetrievalServiceOutcome::Locked => {
@@ -562,6 +569,9 @@ impl DashboardLcmReadAdapter {
             LcmDescribeServiceOutcome::CursorStale => {
                 Err((DashboardLcmReadStateV1::Stale, "lcm_temporal_cursor_stale"))
             }
+            LcmDescribeServiceOutcome::CursorRefused(mismatch) => {
+                Err((DashboardLcmReadStateV1::CursorRefused, mismatch.code()))
+            }
             LcmDescribeServiceOutcome::WrongScope => Err(wrong_scope_error()),
             LcmDescribeServiceOutcome::Locked => {
                 Err((DashboardLcmReadStateV1::Locked, "lcm_temporal_read_locked"))
@@ -619,17 +629,17 @@ impl DashboardLcmReadAdapter {
             DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
         })?;
         let cancellation = control.cancellation().clone();
+        // The grant digest names the authority, never the HTTP request: it
+        // feeds every continuation's request binding, so a per-request id,
+        // deadline, or cancellation token here refused every next page.
         let digest = canonical_sha256(&(
-            "tracedecay.dashboard.session-retrieval.grant.v1",
+            "tracedecay.dashboard.session-retrieval.grant.v2",
             self.identity.profile_id().as_str(),
             self.identity
                 .project_id()
                 .map(tracedecay_domain::ProjectId::as_str),
             self.identity.store_id().as_str(),
             self.identity.root_id().as_str(),
-            control.request_id().as_str(),
-            control.deadline().expires_at.0,
-            cancellation.context().token_id.as_str(),
         ))
         .map_err(|_| {
             DashboardLcmRequestAdmissionErrorV1::Unavailable("lcm_dashboard_admission_invalid")
@@ -783,6 +793,46 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     }
 }
 
+/// The route and query parameters a dashboard LCM continuation is minted for.
+fn dashboard_cursor_request(
+    request: &DashboardLcmReadRequestV1,
+) -> Result<SessionCursorRequest, DomainError> {
+    match request {
+        DashboardLcmReadRequestV1::Overview { query, limit } => {
+            SessionCursorRequest::new("dashboard_lcm_overview")
+                .parameter("q", query)?
+                .parameter("limit", limit)
+        }
+        DashboardLcmReadRequestV1::Search {
+            query,
+            limit,
+            cursor: _,
+            role,
+            source,
+            session_id,
+            since,
+            until,
+        } => SessionCursorRequest::new("dashboard_lcm_search")
+            .parameter("q", query)?
+            .parameter("limit", limit)?
+            .parameter("role", role)?
+            .parameter("source", source)?
+            .parameter("session_id", session_id)?
+            .parameter("since", since)?
+            .parameter("until", until),
+        DashboardLcmReadRequestV1::Session {
+            session_id,
+            limit,
+            cursor: _,
+        } => SessionCursorRequest::new("dashboard_lcm_session")
+            .parameter("session_id", session_id)?
+            .parameter("limit", limit),
+        DashboardLcmReadRequestV1::Timeline { session_id, .. } => {
+            SessionCursorRequest::new("dashboard_lcm_timeline").parameter("session_id", session_id)
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "LCM retrieval query is one hydrate-and-page of the selected session store."
@@ -902,6 +952,7 @@ fn retrieval_query(
         },
     )
     .ok()?
+    .with_cursor_request(dashboard_cursor_request(request).ok()?)
     .with_execution_limits(execution_limits)
     .with_retrieval_scope(retrieval_scope);
     Some(query.with_semantic_filter(
@@ -987,6 +1038,40 @@ mod tests {
         };
         assert_eq!(state, DashboardLcmReadStateV1::TimedOut);
         assert_eq!(reason, "lcm_dashboard_request_deadline_elapsed");
+    }
+
+    /// The dashboard pages through separate HTTP requests, so the authority a
+    /// continuation is bound to must not change with the request id, deadline,
+    /// or cancellation token of the request that happens to carry it.
+    #[test]
+    fn every_dashboard_request_admits_the_same_continuation_authority() {
+        let adapter = DashboardLcmReadAdapter::new(
+            Arc::new(UnusedSessionRetrieval),
+            dashboard_lcm_test_identity(),
+        )
+        .expect("project dashboard adapter");
+        let now = tracedecay_contracts::now_micros();
+        let admit = |request: &str, cancellation: &str, lifetime_micros: i64| {
+            let control = DashboardHttpRequestControlV1::from_parts_for_test(
+                tracedecay_contracts::RequestId::new(request).expect("request identity"),
+                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+                    now.0 + lifetime_micros,
+                ))
+                .expect("request deadline"),
+                CancellationSignal::active(cancellation).expect("request cancellation"),
+                now,
+            );
+            adapter
+                .request_context(&control)
+                .expect("admitted dashboard request")
+                .0
+        };
+
+        let first_page = admit("request.dashboard-page-one", "cancel.page-one", 30_000_000);
+        let next_page = admit("request.dashboard-page-two", "cancel.page-two", 90_000_000);
+
+        assert_ne!(first_page.request_id(), next_page.request_id());
+        assert_eq!(first_page.grant().digest, next_page.grant().digest);
     }
 
     #[test]

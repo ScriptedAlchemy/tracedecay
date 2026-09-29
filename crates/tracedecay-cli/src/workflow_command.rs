@@ -30,5 +30,5 @@ pub(crate) async fn run(
             invocation.json,
         )?
     );
-    Ok(())
+    crate::application_cli::outcome_status(&outcome)
 }

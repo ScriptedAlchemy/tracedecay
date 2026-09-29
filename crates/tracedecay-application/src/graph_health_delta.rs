@@ -498,9 +498,12 @@ mod tests {
     #[test]
     fn health_delta_scope_rejects_noncanonical_paths() {
         for path in ["/src", "src\\lib", "src/../other", "src//lib", "."] {
-            assert!(
-                health_delta_scope(Some("project.first".to_owned()), Some(path)).is_err(),
-                "{path} must not enter a persisted health-delta scope"
+            let error = health_delta_scope(Some("project.first".to_owned()), Some(path))
+                .expect_err("noncanonical path must not enter a persisted health-delta scope");
+            assert_eq!(
+                error.to_string(),
+                "config error: health-delta path_prefix must be one canonical project-relative path",
+                "{path}"
             );
         }
     }
@@ -517,7 +520,11 @@ mod tests {
             cursor,
             health_delta_cursor(&scope, "generation.second").expect("next cursor")
         );
-        assert!(health_delta_digest_from_cursor("health-delta.v1.not-a-digest").is_err());
+        let error = health_delta_digest_from_cursor("health-delta.v1.not-a-digest").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: invalid health-delta cursor"
+        );
     }
 
     #[tokio::test]

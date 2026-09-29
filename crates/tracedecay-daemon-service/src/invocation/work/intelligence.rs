@@ -7,8 +7,8 @@
 
 use tracedecay_contracts::{
     ApplicationProblem, Deadline, RequestContext, RequestId, SafeDiagnostic,
-    WorkAttemptListRequestV1, WorkExperienceRequestV1, WorkExpertiseConsentSnapshotV1,
-    WorkProductBindingV1, WorkProposalComparisonRequestV1,
+    WorkAttemptListOperationV1, WorkAttemptListRequestV1, WorkExperienceRequestV1,
+    WorkExpertiseConsentSnapshotV1, WorkProductBindingV1, WorkProposalComparisonRequestV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -74,15 +74,20 @@ pub(super) fn execution_history(
     // Initial attempt admission appends the accepted-attempt graph event and
     // inserts the attempt row in one transaction. Read both from that committed
     // generation; a fresh attempt does not need a session correlation.
-    let attempts = services.attempts().list(context, &request, || {
-        preparation::current_work_product_attempt_topology(
-            registered,
-            context,
-            capability,
-            &use_case,
-            observed_at,
-        )
-    });
+    let attempts = services.attempts().list(
+        context,
+        WorkAttemptListOperationV1::ExecutionHistory,
+        &request,
+        || {
+            preparation::current_work_product_attempt_topology(
+                registered,
+                context,
+                capability,
+                &use_case,
+                observed_at,
+            )
+        },
+    );
     let history = attempts.and_then(|attempts| {
         let storage = registered.database.work_storage().map_err(|_| {
             ApplicationProblem::unavailable(SafeDiagnostic {

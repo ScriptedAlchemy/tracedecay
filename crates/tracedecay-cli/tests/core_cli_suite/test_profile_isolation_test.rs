@@ -20,13 +20,14 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 /// Host CLIs the operator really has installed; a fixture child must never
 /// reach one of them through the test process's `PATH`.
 #[cfg(unix)]
-const REAL_HOST_CLIS: [&str; 4] = ["kimi", "kiro-cli", "codex", "cursor-agent"];
+const REAL_HOST_CLIS: [&str; 5] = ["kimi", "kiro-cli", "droid", "codex", "cursor-agent"];
 
-/// Lifecycle commands that launch host CLIs: Kiro and Codex install through
-/// their own CLIs.
+/// Lifecycle commands: Droid and Codex install through their own CLIs, and
+/// Kiro, which edits its documented config file, must launch no CLI at all.
 #[cfg(unix)]
-const HOST_LIFECYCLE_COMMANDS: [&[&str]; 2] = [
+const HOST_LIFECYCLE_COMMANDS: [&[&str]; 3] = [
     &["install", "--agent", "kiro"],
+    &["install", "--agent", "droid"],
     &["install", "--agent", "codex"],
 ];
 
@@ -116,7 +117,7 @@ fn fixture_children_run_only_admitted_fake_hosts_never_ambient_ones() {
             .output()
             .unwrap();
     }
-    assert_eq!(recorded_hosts(&fake_log), ["codex", "kiro-cli"]);
+    assert_eq!(recorded_hosts(&fake_log), ["codex", "droid"]);
     assert_eq!(
         recorded_hosts(&sentinel_dir.join("ran.log")),
         Vec::<String>::new(),

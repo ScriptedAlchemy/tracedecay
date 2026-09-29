@@ -6,12 +6,15 @@ use tracedecay_contracts::retrieval::{
     TemporalRetrievalPort,
 };
 use tracedecay_contracts::{
-    CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
-    EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence, TemporalState, now_micros,
+    ApplicationProblem, CancellationObservation, CancellationStage, CoverageCompleteness,
+    CoverageDomainState, EvidenceCoverage, EvidenceDomain, FreshnessState, Omission,
+    OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence,
+    TemporalState, now_micros,
 };
 use tracedecay_domain::{RetrievalGrainV1, UtcMicros};
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionCursorRequest, SessionDataFreshness, SessionTemporalQuery,
+};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::SortContractId;
@@ -70,6 +73,12 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
                     },
                 )
                 .map_err(|_| TemporalRetrievalFailure::Unavailable)?
+                .with_cursor_request(
+                    SessionCursorRequest::new("session_lookup")
+                        .parameter("temporal", &request.meta.temporal)
+                        .and_then(|bound| bound.parameter("page_size", &limit))
+                        .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
+                )
                 .with_execution_limits(admitted_execution_limits(limit));
                 let outcome = self
                     .retrieval
@@ -119,6 +128,12 @@ fn map_outcome(
         SessionRetrievalServiceOutcome::CursorStale => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Stale, None)?,
         )),
+        SessionRetrievalServiceOutcome::CursorRefused(mismatch) => {
+            Ok(RetrievalPortOutcome::Refused(
+                terminal_evidence(request, finished_at, OmissionReason::Unavailable, None)?,
+                Box::new(ApplicationProblem::cursor_refused(&mismatch)),
+            ))
+        }
         SessionRetrievalServiceOutcome::Redacted => Ok(RetrievalPortOutcome::Unavailable(
             terminal_evidence(request, finished_at, OmissionReason::Redacted, None)?,
         )),

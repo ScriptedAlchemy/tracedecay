@@ -17,7 +17,9 @@ use tracedecay_contracts::retrieval::{
 const MAX_BRANCH_REFS_PER_READ: usize = 128;
 static BRANCH_REF_READ_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
-
+use tracedecay_domain::CursorBindingV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{decode_bound_cursor, encode_bound_cursor};
 enum BranchRouteReadErrorV1 {
     Capacity,
     Task,
@@ -144,7 +146,18 @@ pub async fn compute_branch_list(
             message: "branch-list limit must be positive".to_owned(),
         });
     }
-    let after = request.after.filter(|after| !after.is_empty());
+    let cursor_binding = CursorBindingV1::builder("branch_list")
+        .parameter("limit", &limit)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind branch list cursor: {error}"),
+        })?;
+    let after = request
+        .cursor
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| decode_bound_cursor::<String>(&cursor_binding, &cursor))
+        .transpose()
+        .map_err(|mismatch| crate::tool_errors::cursor_refusal(&mismatch))?;
     let result = match hotpath::future!(
         run_branch_ref_read(
             ctx.project_root().to_path_buf(),
@@ -170,7 +183,13 @@ pub async fn compute_branch_list(
             snapshot_count: page.snapshots.len(),
             examined: page.examined,
             limit,
-            next_after: page.next_after,
+            next_cursor: page
+                .next_after
+                .map(|after| encode_bound_cursor(&cursor_binding, &after))
+                .transpose()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to mint branch list cursor: {error}"),
+                })?,
             snapshots: page
                 .snapshots
                 .into_iter()
@@ -278,7 +297,18 @@ pub async fn compute_branch_search(
     let limit = request.limit.map_or(10, |value| {
         usize::try_from(value).map_or(500, |value| value.min(500))
     });
-    let cursor = crate::handlers::support::retrieval_cursor(&args)?;
+    let cursor_binding = CursorBindingV1::builder("branch_search")
+        .parameter("branch", &branch)
+        .parameter("query", &query)
+        .parameter("limit", &limit)
+        .build()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to bind branch search cursor: {error}"),
+        })?;
+    let cursor = crate::handlers::support::decode_retrieval_cursor(
+        &cursor_binding,
+        request.cursor.as_deref(),
+    )?;
     let revision_branch = branch.clone();
     let revision = match hotpath::future!(
         run_branch_ref_read(
@@ -346,11 +376,10 @@ pub async fn compute_branch_search(
     .await
     {
         tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let next_cursor = complete
-                .next_cursor
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
+            let next_cursor = crate::handlers::support::encode_retrieval_cursor(
+                &cursor_binding,
+                complete.next_cursor.as_ref(),
+            )?;
             let has_more = next_cursor.is_some();
             let source_reference = format!("refs/heads/{branch}");
             let results = hotpath::measure_block!("mcp.git.branch_search.assemble", {
@@ -672,6 +701,9 @@ pub async fn compute_branch_diff(
                 })
             );
             (result, touched)
+        }
+        tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::CursorRefused(mismatch) => {
+            return Err(crate::tool_errors::cursor_refusal(&mismatch));
         }
         tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => (
             diff_unavailable(

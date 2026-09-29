@@ -48,7 +48,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Publish pending lane checks
-        uses: ScriptedAlchemy/cargo-hauler@7782b2ffdfe3a1ab96252c99b2b7ccf3d6627f1e
+        uses: ScriptedAlchemy/cargo-hauler@f7e84610425e659f67985aea991bf525e87d956b
         with:
           mode: enqueue
           pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
@@ -69,9 +69,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - lane: linux-a
+          - lane: linux-journeys
             runner: ubuntu-24.04-arm
-          - lane: linux-b
+          - lane: linux-transport
+            runner: ubuntu-24.04-arm
+          - lane: linux-storage
+            runner: ubuntu-24.04-arm
+          - lane: linux-sessions
+            runner: ubuntu-24.04-arm
+          - lane: linux-runtime
+            runner: ubuntu-24.04-arm
+          - lane: linux-contracts
             runner: ubuntu-24.04-arm
           - lane: checks
             runner: ubuntu-24.04-arm
@@ -91,7 +99,7 @@ jobs:
           persist-credentials: false
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@7782b2ffdfe3a1ab96252c99b2b7ccf3d6627f1e
+        uses: ScriptedAlchemy/cargo-hauler@f7e84610425e659f67985aea991bf525e87d956b
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json

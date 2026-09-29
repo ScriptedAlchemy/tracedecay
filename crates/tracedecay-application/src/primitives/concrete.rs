@@ -12,7 +12,7 @@ use tracedecay_contracts::{
     ApplicationContractError, OpaqueCursor, OperationBudgetUsage, RequestAdmission, RequestContext,
     ResolvedScope,
 };
-use tracedecay_domain::{CodeGenerationId, UtcMicros};
+use tracedecay_domain::{CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
@@ -258,13 +258,14 @@ where
     fn claim_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
         Box::pin(hotpath::future!(
             async move {
                 reauthorize_cursor_context(context, observed_at)?;
+                let lane = binding.operation();
                 let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
                 validate_cursor_snapshot(context, snapshot.temporal())?;
                 let offset = match cursor {
@@ -276,6 +277,7 @@ where
                         let sort_key = verify_cursor(
                             cursor.as_str(),
                             snapshot.temporal(),
+                            binding,
                             self.authenticator.as_ref(),
                         )
                         .map_err(cursor_verification_failure)?;
@@ -299,7 +301,7 @@ where
     fn finish_page<'a>(
         &'a self,
         context: &'a RequestContext,
-        lane: &'a str,
+        binding: &'a CursorBindingV1,
         claim: &'a SymbolGraphPageClaim,
         next_offset: usize,
         total: usize,
@@ -309,6 +311,7 @@ where
         Box::pin(hotpath::future!(
             async move {
                 reauthorize_cursor_context(context, observed_at)?;
+                let lane = binding.operation();
                 if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
                     return Err(invalid_cursor());
                 }
@@ -339,6 +342,7 @@ where
                 // the continuation names the generation the page-set came from.
                 let encoded = encode_cursor(
                     claim.snapshot.temporal(),
+                    binding,
                     &sort_key,
                     self.authenticator.as_ref(),
                 )
@@ -392,6 +396,10 @@ fn validate_cursor_snapshot(
 
 fn cursor_verification_failure(error: CursorError) -> PrimitiveFailure {
     match error {
+        CursorError::Binding(mismatch) => PrimitiveFailure::cursor_refused(&mismatch),
+        CursorError::Malformed | CursorError::Tampered => {
+            PrimitiveFailure::cursor_refused(&CursorBindingMismatchV1::Foreign)
+        }
         CursorError::GenerationMismatch
         | CursorError::ParticipantManifestMismatch
         | CursorError::EpochMismatch
@@ -407,9 +415,7 @@ fn cursor_verification_failure(error: CursorError) -> PrimitiveFailure {
         CursorError::KeyUnavailable | CursorError::InvalidKeyMaterial => {
             cursor_issue_failure(error)
         }
-        CursorError::Malformed
-        | CursorError::Tampered
-        | CursorError::Expired
+        CursorError::Expired
         | CursorError::UnknownOrExpiredKey
         | CursorError::WrongRequest
         | CursorError::FilterMismatch
@@ -600,6 +606,10 @@ mod tests {
         assert!(SourceReadAdapter::new_bound(matching, projection, scope, &admitted_root,).is_ok());
     }
 
+    fn lane(name: &'static str) -> tracedecay_domain::CursorBindingV1 {
+        tracedecay_domain::CursorBindingV1::new(name, Vec::new()).expect("lane binding")
+    }
+
     struct FixedSnapshotAuthority {
         snapshot: SymbolGraphCursorSnapshot,
     }
@@ -663,18 +673,18 @@ mod tests {
         );
 
         let claim = adapter
-            .claim_page(&context, "search", None, NOW)
+            .claim_page(&context, &lane("search"), None, NOW)
             .await
             .expect("claim page");
         assert_eq!(claim.offset(), 0, "a first page starts at the beginning");
         let cursor = adapter
-            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .finish_page(&context, &lane("search"), &claim, 3, 8, true, NOW)
             .await
             .expect("finish page")
             .expect("a page with more to serve mints a continuation");
         assert_eq!(
             adapter
-                .claim_page(&context, "search", Some(&cursor), NOW)
+                .claim_page(&context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .expect("resume cursor")
                 .offset(),
@@ -682,7 +692,7 @@ mod tests {
         );
         assert!(
             adapter
-                .finish_page(&context, "search", &claim, 8, 8, false, NOW)
+                .finish_page(&context, &lane("search"), &claim, 8, 8, false, NOW)
                 .await
                 .expect("finish page")
                 .is_none(),
@@ -706,7 +716,7 @@ mod tests {
         );
         assert!(
             changed
-                .claim_page(&context, "search", Some(&cursor), NOW)
+                .claim_page(&context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .is_err()
         );
@@ -714,7 +724,7 @@ mod tests {
             application_context_for_project("symbol-graph", "project.retrieval-primitives.other");
         assert!(
             adapter
-                .claim_page(&other_context, "search", Some(&cursor), NOW)
+                .claim_page(&other_context, &lane("search"), Some(&cursor), NOW)
                 .await
                 .is_err()
         );
@@ -744,11 +754,11 @@ mod tests {
         );
 
         let claim = adapter
-            .claim_page(&context, "search", None, NOW)
+            .claim_page(&context, &lane("search"), None, NOW)
             .await
             .expect("claim page");
         let failure = adapter
-            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .finish_page(&context, &lane("search"), &claim, 3, 8, true, NOW)
             .await
             .expect_err("a superseded generation must refuse the page");
         assert_eq!(failure.kind, PrimitiveFailureKind::Stale);

@@ -19,6 +19,7 @@ const CONTINUATION = {
   kind: 'task_session' as const,
   continuation: {
     attempt: ATTEMPT,
+    binding: 'bc1.binding',
     participant_epoch: 'digest.participants',
     ranking_cursor: 'ranking.cursor',
     source: { provider: 'codex', session_id: 'session.1' },
