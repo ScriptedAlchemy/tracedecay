@@ -600,7 +600,9 @@ async fn ingest_codex_transcripts(fixture: &ProductionCompositionFixture) {
     let ingest = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let result = call_tool(fixture, "tracedecay_hook_runtime", arguments.clone()).await;
-            if result.value["problem"]["code"] == json!("application.runtime.mounting") {
+            if result.value["structuredContent"]["problem"]["code"]
+                == json!("application.runtime.mounting")
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 continue;
             }

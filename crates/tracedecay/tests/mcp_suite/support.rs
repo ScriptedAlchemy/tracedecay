@@ -1235,18 +1235,14 @@ pub(crate) fn application_surface_refusal_error(tool: &str, detail: &str) -> Val
 /// Owner-served tools answer every refusal, including arguments their typed
 /// request parser rejects, as an `isError` tool result carrying the whole
 /// problem record (an MCP 2025-11-25 tool-execution error), not as a JSON-RPC
-/// error. In-process dispatch keeps the record at `problem`; the rmcp
-/// transport moves it under `structuredContent`.
+/// error. Every route carries the record at `structuredContent.problem`.
 pub(crate) fn refusal_problem(result: &Value) -> &Value {
     assert_eq!(
         result["isError"],
         Value::Bool(true),
         "expected an isError refusal: {result}"
     );
-    let problem = match &result["structuredContent"]["problem"] {
-        Value::Null => &result["problem"],
-        transported => transported,
-    };
+    let problem = &result["structuredContent"]["problem"];
     assert!(
         problem.is_object(),
         "refusal carries no problem record: {result}"
@@ -1261,7 +1257,7 @@ pub(crate) fn tool_result_problem(result: &ToolResult) -> &Value {
     if result.semantic_error() != Some(true) {
         return refusal_problem(&result.value);
     }
-    let problem = &result.value["problem"];
+    let problem = &result.value["structuredContent"]["problem"];
     assert!(
         problem.is_object(),
         "refusal carries no problem record: {}",

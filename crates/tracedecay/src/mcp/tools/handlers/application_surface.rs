@@ -965,7 +965,7 @@ mod tests {
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut rendered);
 
             assert_eq!(rendered.value["isError"], true, "{error}");
-            let problem = &rendered.value["problem"];
+            let problem = &rendered.value["structuredContent"]["problem"];
             assert_eq!(problem["kind"], kind, "{error}");
             assert_eq!(problem["code"], code, "{error}");
             assert_eq!(problem["retry"], retry, "{error}");

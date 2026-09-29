@@ -170,7 +170,10 @@ fn assert_problem(result: &ChildResult, kind: &str) {
     let envelope: Value =
         serde_json::from_slice(&result.output.stdout).expect("typed problem JSON");
     assert_eq!(envelope["isError"], true, "{envelope}");
-    assert_eq!(envelope["problem"]["kind"], kind, "{envelope}");
+    assert_eq!(
+        envelope["structuredContent"]["problem"]["kind"], kind,
+        "{envelope}"
+    );
 }
 
 fn spawn_scripted_daemon<F>(
@@ -353,7 +356,7 @@ fn generic_tool_rejects_truncated_frame_as_typed_failure() {
     assert_problem(&result, "unavailable");
     let envelope: Value = serde_json::from_slice(&result.output.stdout).expect("problem envelope");
     assert_eq!(
-        envelope["problem"]["diagnostic"]["code"],
+        envelope["structuredContent"]["problem"]["diagnostic"]["code"],
         "daemon_unavailable"
     );
     assert!(!String::from_utf8_lossy(&result.output.stdout).contains("partial-must-not-escape"));
