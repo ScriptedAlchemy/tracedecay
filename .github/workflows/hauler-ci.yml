@@ -15,6 +15,8 @@ on:
         description: Maximum PR snapshots admitted per lane
         type: number
         default: 2
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -23,16 +25,46 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: hauler-ci-pool
-  cancel-in-progress: false
-
 jobs:
+  enqueue:
+    concurrency:
+      group: hauler-enqueue-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      github.event_name == 'pull_request_target' &&
+      vars.HAULER_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+      actions: read
+    steps:
+      # Only the trusted base commit is checked out; PR code never runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish pending lane checks
+        uses: ScriptedAlchemy/cargo-hauler@7c2539a21d688cb50344d89c6d6cb97610801671
+        with:
+          mode: enqueue
+          pull-requests: ${{ format('{0}', github.event.pull_request.number) }}
+          token: ${{ github.token }}
+          recipe: .github/hauler-ci.json
+          admission-workflow: ci.yml
+
   manage:
     if: >-
       github.repository == 'ScriptedAlchemy/tracedecay' &&
+      github.event_name != 'pull_request_target' &&
       (github.event_name == 'workflow_dispatch' || vars.HAULER_CI_ENABLED == 'true')
     name: Hauler pool / ${{ matrix.lane }}
+    concurrency:
+      group: hauler-ci-${{ matrix.lane }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +83,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,10 +91,12 @@ jobs:
           persist-credentials: false
       - name: Drain eligible PR snapshots
         id: hauler
-        uses: ScriptedAlchemy/cargo-hauler@6c5615fbd075a2cb10be0907cdb8e9a55c6e7f0e
+        uses: ScriptedAlchemy/cargo-hauler@7c2539a21d688cb50344d89c6d6cb97610801671
         with:
           token: ${{ github.token }}
           recipe: .github/hauler-ci.json
+          mode: drain
+          admission-workflow: ci.yml
           lane: ${{ matrix.lane }}
           pull-requests: ${{ inputs.pull_requests || '' }}
           max-minutes: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.max_minutes) || '300' }}

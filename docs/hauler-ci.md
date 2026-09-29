@@ -11,15 +11,28 @@ each PR's result as soon as its work finishes.
 Automatic admission is off unless repository variable `HAULER_CI_ENABLED` is
 `true`. Run **Hauler CI** manually from `master`, selecting PR numbers and a
 bounded lane lifetime (at most 300 minutes). The Action validates these inputs.
-Use a small snapshot limit for the pilot. Its artifacts contain controller timing metadata and bounded XML/JSON test
-reports. Raw worker logs are excluded; report text is PR-produced, not sanitized.
+An explicit manual PR selection bypasses automatic routing receipts for the
+pilot; it can duplicate native work. Use a small snapshot limit. Its artifacts
+contain controller timing metadata and bounded XML/JSON test reports. Raw worker logs are excluded; report text is PR-produced, not sanitized.
 
 Compare complete PR verdict latency and total runner minutes with ordinary CI.
-The pilot does not replace existing CI. Before enabling automatic admission,
-route admitted PRs away from duplicate heavy CI jobs while retaining repository
-gates and the ordinary path for unsupported PRs. Then set `HAULER_CI_ENABLED` to
-`true`. CI completion wakes the pool; the ten-minute schedule recovers missed
-wakeups. A single workflow concurrency group bounds the active pool.
+With the variable unset, ordinary CI remains active. Setting it to `true` routes
+ready same-repository PRs from the trusted recipe authors to Hauler only after
+its queued lane checks are visible. The Action validates the entire trusted
+recipe before ordinary CI skips equivalent heavy jobs. Cheap gates remain;
+forks, unlisted authors, invalid policies, and routing timeouts keep native CI.
+Push and manual full-CI runs remain native.
+
+A trusted `pull_request_target` job publishes pending checks without executing
+PR code or waiting for the worker pool. The read-only routing Action runs before
+PR checkout and records its decision in scope-job step metadata. Automated
+workers require that matching delegation receipt; a late enqueue cannot take
+work already routed to native CI. All three modes share a policy identity tied
+to the immutable Action version, normalized recipe, and trusted image inputs.
+CI completion wakes the pool; the ten-minute schedule recovers missed wakeups.
+Each lane has its own concurrency group, leaving enqueue free to run promptly. Unset the variable
+to restore native admission for subsequent runs. Already-created workflows
+retain their existing jobs.
 
 ## Snapshot and trust contract
 
@@ -38,7 +51,8 @@ completed test verdict. Update the PR head when fresh base integration evidence
 is needed.
 
 Only the trusted host controller receives the short-lived job token, scoped to
-reading contents/PRs and writing checks. Each snapshot runs in a restricted
+reading contents/PRs/Actions metadata and writing checks. Routing receives only
+read permissions; it cannot publish checks. Each snapshot runs in a restricted
 container with no host token, Docker socket, or host environment mounts; the
 container and its descendants are removed before another snapshot starts.
 Controller code, recipe, and image setup come from the reviewed default branch,
