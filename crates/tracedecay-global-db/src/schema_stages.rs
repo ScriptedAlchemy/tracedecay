@@ -553,12 +553,14 @@ pub async fn ensure_registered_schema_for_admission(
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
     if let Some(refused) = install_and_commit_registered_schema(
-        transaction,
+        CancellableSchemaTransaction {
+            transaction,
+            cancellation: installation.cancellation(),
+        },
         configuration_fresh.as_ref(),
         temporal_admission,
         workflow_admission,
         force_exhaustive,
-        installation.cancellation(),
         "commit registered global schema",
         "roll back registered global schema",
     )
@@ -616,12 +618,11 @@ async fn install_registered_schema_stages(
 }
 
 async fn install_and_commit_registered_schema<T>(
-    transaction: T,
+    install: CancellableSchemaTransaction<'_, T>,
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
-    cancellation: &CancellationToken,
     commit_operation: &'static str,
     rollback_operation: &'static str,
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>
@@ -629,10 +630,7 @@ where
     T: Executor + Sync + SchemaInstallTransaction,
 {
     let admission = install_registered_schema_stages(
-        &CancellableSchemaExecutor {
-            inner: &transaction,
-            cancellation,
-        },
+        &install,
         configuration_fresh,
         temporal_admission,
         workflow_admission,
@@ -640,8 +638,13 @@ where
     )
     .await
     .and_then(|refused_authority| {
-        schema_install_checkpoint(cancellation, commit_operation).map(|()| refused_authority)
+        schema_install_checkpoint(install.cancellation, commit_operation)
+            .map(|()| refused_authority)
     });
+    let CancellableSchemaTransaction {
+        transaction,
+        cancellation,
+    } = install;
     match admission {
         Ok(refused_authority) => {
             transaction.commit().await.map_err(|error| {
@@ -674,15 +677,15 @@ fn schema_install_checkpoint(
     Ok(())
 }
 
-/// Refuses the next statement once shutdown cancels the Store open, so the
-/// enclosing schema transaction rolls back at a statement boundary instead of
-/// running the whole install first.
-struct CancellableSchemaExecutor<'a, T> {
-    inner: &'a T,
+/// A schema transaction that refuses its next statement once shutdown cancels
+/// the Store open, so it rolls back at a statement boundary instead of running
+/// the whole install first.
+struct CancellableSchemaTransaction<'a, T> {
+    transaction: T,
     cancellation: &'a CancellationToken,
 }
 
-impl<T> CancellableSchemaExecutor<'_, T> {
+impl<T> CancellableSchemaTransaction<'_, T> {
     fn checkpoint(&self) -> engine::Result<()> {
         if self.cancellation.is_cancelled() {
             return Err(engine::Error::InvalidOperation(
@@ -693,28 +696,28 @@ impl<T> CancellableSchemaExecutor<'_, T> {
     }
 }
 
-impl<T: QueryExecutor + Sync> QueryExecutor for CancellableSchemaExecutor<'_, T> {
+impl<T: QueryExecutor + Sync> QueryExecutor for CancellableSchemaTransaction<'_, T> {
     async fn query<P>(&self, sql: &str, params: P) -> engine::Result<Rows>
     where
         P: IntoParams,
     {
         self.checkpoint()?;
-        self.inner.query(sql, params).await
+        self.transaction.query(sql, params).await
     }
 }
 
-impl<T: Executor + Sync> Executor for CancellableSchemaExecutor<'_, T> {
+impl<T: Executor + Sync> Executor for CancellableSchemaTransaction<'_, T> {
     async fn execute<P>(&self, sql: &str, params: P) -> engine::Result<u64>
     where
         P: IntoParams,
     {
         self.checkpoint()?;
-        self.inner.execute(sql, params).await
+        self.transaction.execute(sql, params).await
     }
 
     async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
         self.checkpoint()?;
-        self.inner.execute_batch(sql).await
+        self.transaction.execute_batch(sql).await
     }
 }
 
@@ -1096,12 +1099,14 @@ pub(crate) async fn ensure_attached_registered_schema(
     schema_install_checkpoint(cancellation, OPERATION)?;
     let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
     let refused_authority = install_and_commit_registered_schema(
-        transaction,
+        CancellableSchemaTransaction {
+            transaction,
+            cancellation,
+        },
         configuration_fresh.as_ref(),
         temporal_admission,
         workflow_admission,
         force_exhaustive,
-        cancellation,
         "commit attached registered global schema",
         "roll back attached registered global schema",
     )
