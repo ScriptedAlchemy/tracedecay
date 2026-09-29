@@ -106,14 +106,6 @@ pub enum FactProjectionV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FactSearchCursorV1 {
-    pub score_millionths: u32,
-    pub updated_at: UtcMicros,
-    pub fact_id: FactId,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FactSearchScoresV1 {

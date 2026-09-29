@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange,
-    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
+    ChangePlanId, ConfigurationAuditEvent, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange, RestartRequirementV1,
+    RollbackModeV1, SettingKey, SettingSensitivityV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -123,8 +123,9 @@ pub struct ConfigurationRollbackPreviewRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationAuditRequestV1 {
+    /// The previous page's `next_cursor`, valid only with the same `limit`.
     #[serde(default)]
-    pub after_event_id: Option<ConfigurationAuditEventId>,
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -183,7 +184,8 @@ pub struct ConfigurationMutationReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConfigurationAuditPage {
     pub events: Vec<ConfigurationAuditEvent>,
-    pub next_after_event_id: Option<ConfigurationAuditEventId>,
+    /// Opaque continuation, bound to this operation and request.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

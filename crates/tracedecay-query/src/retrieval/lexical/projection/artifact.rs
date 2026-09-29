@@ -50,6 +50,7 @@ pub use reader::{
     CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactRestoreWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
 };
+pub use schema::CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1;
 
 /// Floor for the artifact build memory ledger.
 ///

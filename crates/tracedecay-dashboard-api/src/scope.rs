@@ -65,20 +65,27 @@ mod tests {
 
     #[test]
     fn dashboard_scope_fails_closed_without_registered_project_id() {
-        let root = tempfile::tempdir().expect("root tempdir");
+        let project_id = "project.dashboard-scope";
+        let root = registered_root(project_id);
 
         // Missing registry: there is no path or CWD fallback that could
-        // fabricate an exact scope for an unregistered root.
+        // fabricate an exact scope, even for a root carrying an identity.
         assert!(resolve_dashboard_scope(root.path(), None).is_none());
+        let scope = resolve_dashboard_scope(root.path(), Some(project_id))
+            .expect("registered project id resolves");
+        assert_eq!(scope.project_id.as_str(), project_id);
     }
 
     #[test]
     fn dashboard_scope_fails_closed_for_invalid_project_id() {
-        let root = tempfile::tempdir().expect("root tempdir");
+        let root = registered_root("project.bad");
 
         assert!(resolve_dashboard_scope(root.path(), Some("")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some(" project.bad")).is_none());
         assert!(resolve_dashboard_scope(root.path(), Some("project.bad\n")).is_none());
+        let scope = resolve_dashboard_scope(root.path(), Some("project.bad"))
+            .expect("the canonical spelling resolves");
+        assert_eq!(scope.project_id.as_str(), "project.bad");
     }
 
     #[test]

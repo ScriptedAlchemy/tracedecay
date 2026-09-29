@@ -254,7 +254,7 @@ async fn fact_store_supersede_retires_old_fact_and_keeps_its_payload() {
     );
 
     let listed = call_tool(&server, "tracedecay_fact_store_list", json!({})).await;
-    assert_eq!(listed["next_after_fact_id"], Value::Null, "{listed}");
+    assert_eq!(listed["next_after"], Value::Null, "{listed}");
     assert_eq!(
         listed_contents(&listed),
         BTreeSet::from([FIFTEENTH_CUTOFF.to_owned()])

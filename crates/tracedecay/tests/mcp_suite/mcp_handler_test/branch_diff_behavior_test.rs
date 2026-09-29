@@ -446,7 +446,7 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
     assert_revision(&project_root, &active_head, "feature", "master");
     assert_symbols(&active_head, &feature_to_master());
 
-    let forged_cursor = diff_unavailable(
+    let forged_cursor = diff_refusal(
         &server,
         json!({
             "base": "master",
@@ -455,16 +455,11 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
         }),
     )
     .await;
-    assert_eq!(forged_cursor["status"], "unavailable", "{forged_cursor}");
-    assert_eq!(
-        forged_cursor["reason"], "invalid_request",
-        "{forged_cursor}"
-    );
-    assert_eq!(forged_cursor["retryable"], false, "{forged_cursor}");
-    assert_eq!(forged_cursor["base"], "master", "{forged_cursor}");
-    assert_eq!(forged_cursor["head"], "feature", "{forged_cursor}");
+    assert_eq!(forged_cursor["kind"], "invalid_request", "{forged_cursor}");
+    assert_eq!(forged_cursor["code"], "cursor.invalid", "{forged_cursor}");
 
     let mut cursor = None;
+    let mut first_cursor = None;
     let mut paged = Vec::new();
     for page_index in 0..8 {
         let mut args = json!({"base": "master", "head": "feature", "limit": 1});
@@ -488,6 +483,7 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
                     .unwrap_or_else(|| panic!("partial page cursor: {page}"));
                 assert!(!next.is_empty(), "partial page cursor is empty: {page}");
                 cursor = Some(next.to_owned());
+                first_cursor.get_or_insert_with(|| next.to_owned());
             }
             Some("complete") => {
                 assert_eq!(page_index, 3, "four symbols page at limit 1: {page}");
@@ -502,4 +498,30 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
     let mut expected = master_to_feature();
     expected.sort();
     assert_eq!(paged, expected);
+
+    // Page one's cursor was minted for the unfiltered comparison.
+    let filtered = diff_refusal(
+        &server,
+        json!({
+            "base": "master",
+            "head": "feature",
+            "kind": "struct",
+            "limit": 1,
+            "cursor": first_cursor,
+        }),
+    )
+    .await;
+    assert_eq!(filtered["code"], "cursor.parameter_changed", "{filtered}");
+    assert_eq!(
+        filtered["message"],
+        "The cursor was issued for a request with a different `kind`. Repeat the request \
+         with the parameters that returned the cursor, or restart without it.",
+        "{filtered}"
+    );
+}
+
+/// The typed problem a `tracedecay_branch_diff` call is refused with.
+async fn diff_refusal(server: &McpServer, args: Value) -> Value {
+    let response = handle_real_server_tool_call_raw(server, "tracedecay_branch_diff", args).await;
+    refusal_problem(&response["result"]).clone()
 }

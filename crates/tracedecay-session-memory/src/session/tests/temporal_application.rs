@@ -1156,7 +1156,7 @@ async fn request_budget_preflight_rejects_before_execution() {
 }
 
 #[tokio::test]
-async fn mode_cutoff_is_bound_and_a_forged_cursor_is_denied_by_the_cursor_authority() {
+async fn mode_cutoff_is_bound_and_a_forged_cursor_is_refused_by_the_cursor_authority() {
     let as_of = admitted_digest(
         AllowAuthorizer,
         context("root.one", DIGEST),
@@ -1224,7 +1224,7 @@ async fn mode_cutoff_is_bound_and_a_forged_cursor_is_denied_by_the_cursor_author
     );
     assert_eq!(
         retrieve(&service, &context("root.one", policy), forged.build()).await,
-        SessionRetrievalOutcome::Denied
+        SessionRetrievalOutcome::CursorRefused(tracedecay_domain::CursorBindingMismatchV1::Foreign)
     );
 }
 

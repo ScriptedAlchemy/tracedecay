@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, GenerationDiagnosticV1, ManifestDigest, RetrievalAnchorId,
-    SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, TestAttributionEvidenceClassV1,
-    UtcMicros,
+    CodeGenerationId, CursorBindingBuilderV1, FileOccurrenceId, GenerationDiagnosticV1,
+    ManifestDigest, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
+    TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
@@ -96,6 +96,16 @@ impl RetrievalRequestMeta {
             projection,
             order,
         }
+    }
+
+    /// Binds every result-shaping field of `meta` into a cursor binding.
+    #[must_use]
+    pub fn bind_cursor(&self, binding: CursorBindingBuilderV1) -> CursorBindingBuilderV1 {
+        binding
+            .parameter("meta.temporal", &self.temporal)
+            .parameter("meta.page_size", &self.page.page_size)
+            .parameter("meta.projection", &self.projection)
+            .parameter("meta.order", &self.order)
     }
 }
 

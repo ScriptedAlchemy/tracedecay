@@ -205,9 +205,16 @@ warning: unused variable: `y`
         let input = "\
 error: aborting due to previous error
 note: For more information about this error, try `rustc --explain E0308`.
+warning: unused import: `std::fs`
+  --> src/main.rs:3:5
+   |
 ";
         let diags = parse_cargo_output(input);
-        assert!(diags.is_empty());
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert_eq!(diags[0].message, "unused import: `std::fs`");
+        assert_eq!(diags[0].file, "src/main.rs");
+        assert_eq!(diags[0].line, 3);
     }
 }
 

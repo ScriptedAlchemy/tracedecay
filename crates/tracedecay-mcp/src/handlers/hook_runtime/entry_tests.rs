@@ -33,14 +33,26 @@ fn decode_keeps_the_session_payload_and_drops_only_presentation_keys() {
 
 #[test]
 fn required_field_rejects_missing_and_empty_values() {
-    assert!(required_field(None, "session_id").is_err());
-    assert!(required_field(Some(""), "session_id").is_err());
+    for value in [None, Some("")] {
+        assert_eq!(
+            required_field(value, "session_id").unwrap_err().to_string(),
+            "config error: missing required parameter `session_id`"
+        );
+    }
     assert_eq!(required_field(Some("s"), "session_id").unwrap(), "s");
 }
 
 #[test]
 fn session_authority_roles_fail_closed_independently() {
     let none = SessionAuthorities::default();
-    assert!(required_project_db(&none).is_err());
-    assert!(required_user_db(&none).is_err());
+    assert_eq!(
+        required_project_db(&none)
+            .err()
+            .map(|error| error.to_string()),
+        Some("config error: daemon project session database is unavailable".to_owned())
+    );
+    assert_eq!(
+        required_user_db(&none).err().map(|error| error.to_string()),
+        Some("config error: daemon user session database is unavailable".to_owned())
+    );
 }

@@ -628,6 +628,9 @@ pub enum CodeIndexBranchDiffOutcomeV1 {
     Complete(CodeIndexBranchDiffCompletedV1),
     Partial(CodeIndexBranchDiffPartialV1),
     Unavailable(CodeIndexBranchDiffUnavailableV1),
+    /// The continuation was minted by another operation or for a request with
+    /// a bound parameter changed.
+    CursorRefused(tracedecay_domain::CursorBindingMismatchV1),
 }
 
 pub type CodeIndexBranchDiffFuture = std::pin::Pin<

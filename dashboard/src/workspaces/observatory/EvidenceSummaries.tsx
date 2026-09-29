@@ -396,6 +396,7 @@ const PHASES: readonly CodeIndexBuildProgressV1['phase'][] = [
   'bulk_commit',
   'index_build',
   'verification',
+  'graph_publication',
   'ready',
 ];
 

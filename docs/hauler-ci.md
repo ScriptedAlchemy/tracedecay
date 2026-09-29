@@ -1,10 +1,14 @@
 # Hauler CI
 
-The Hauler workflow drains eligible open PRs through four hosted lanes: two
+The Hauler workflow drains eligible open PRs through eight hosted lanes: six
 Linux test lanes, compile checks on ARM, and the shipped CLI/dashboard on x86.
 The reviewed `.github/hauler-ci.json` owns commands and compatibility inputs.
 Each lane reuses compatible build outputs across admitted snapshots and posts
-each PR's result as soon as its work finishes.
+each PR's result as soon as its work finishes. Each Linux lane runs one test
+group, so independent groups can return results in parallel. Reuse happens
+across PRs within that group. This trades additional worker starts and duplicate
+cold compilation for a shorter serial path; hosted measurements must establish
+the effect on complete PR latency and runner minutes.
 
 ## Pilot and activation
 

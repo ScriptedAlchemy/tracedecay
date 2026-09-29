@@ -60,10 +60,15 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         path: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
-        Ok(self
-            .session_database_for_test(scope)?
+        self.session_database_for_test(scope)?
             .get_parse_offset(path)
-            .await)
+            .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "load registered parse offset".to_owned(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -434,10 +439,15 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         path: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
-        Ok(self
-            .project_database_for_test()?
+        self.project_database_for_test()?
             .get_parse_offset(path)
-            .await)
+            .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "load registered parse offset".to_owned(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -447,10 +457,15 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
     {
-        Ok(self
-            .project_database_for_test()?
+        self.project_database_for_test()?
             .get_session(provider, session_id)
-            .await)
+            .await
+            .map_err(
+                |error| tracedecay_domain::errors::TraceDecayError::Database {
+                    operation: "load registered session".to_owned(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]

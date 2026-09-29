@@ -68,5 +68,13 @@ mod tests {
             })))
             .is_none()
         );
+        assert_eq!(
+            caller_tool_call_deadline(Some(&json!({
+                "_meta": { TOOL_CALL_DEADLINE_META_KEY: 1_700_000_000_000_000_i64 }
+            }))),
+            Some(Deadline {
+                expires_at: UtcMicros(1_700_000_000_000_000)
+            })
+        );
     }
 }

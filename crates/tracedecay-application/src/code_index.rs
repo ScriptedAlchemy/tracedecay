@@ -246,7 +246,8 @@ mod tests {
 
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
     use tracedecay_runtime_core::resident_memory::{
-        ProcessResidentSampleV1, ResidentMemoryPressureV1,
+        ProcessResidentSampleV1, RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1,
+        ResidentMemoryPressureV1,
     };
 
     use super::DaemonCodeIndexControlV1;
@@ -291,6 +292,7 @@ mod tests {
             "a sample under the watermark must keep the build admitted"
         );
         assert!(!control.refused_by_resident_memory());
+        std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
         assert!(
             control.is_cancelled(),
             "the next live sample over the watermark must stop the build"

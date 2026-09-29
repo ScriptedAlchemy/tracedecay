@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_contracts::retrieval::{SimilarCoverageV1, SimilarMatchClassV1, SimilarResultV1};
 use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileOccurrenceId, GitOidV1, RefId, SymbolOccurrenceId,
+    CodeGenerationId, ContentDigest, CursorBindingMismatchV1, FileOccurrenceId, GitOidV1, RefId,
+    SymbolOccurrenceId,
 };
 
 use super::read_model::{
@@ -75,6 +76,8 @@ pub enum DashboardCodeReadErrorV1 {
     Cancelled,
     TimedOut,
     Internal,
+    /// A continuation minted for another read or request.
+    CursorRefused(CursorBindingMismatchV1),
 }
 
 impl DashboardCodeReadErrorV1 {
@@ -90,6 +93,7 @@ impl DashboardCodeReadErrorV1 {
             Self::Cancelled => "request_cancelled",
             Self::TimedOut => "request_timed_out",
             Self::Internal => "code_read_failed",
+            Self::CursorRefused(mismatch) => mismatch.code(),
         }
     }
 }
@@ -392,6 +396,7 @@ fn code_read_failed<T>(
             DashboardEnvelopeV1::unavailable(scope, None, error.reason())
         }
         DashboardCodeReadErrorV1::InvalidRequest
+        | DashboardCodeReadErrorV1::CursorRefused(_)
         | DashboardCodeReadErrorV1::CorruptionResetRequired
         | DashboardCodeReadErrorV1::Internal => {
             DashboardEnvelopeV1::error(scope, None, error.reason())

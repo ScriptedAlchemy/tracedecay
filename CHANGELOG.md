@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.61](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.60...v1.0.0-beta.61) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **code-index:** CodeIndexBuildPhaseV1 adds graph_publication, and estimated_remaining_seconds is null outside the batch phases. @tracedecay/sdk is 0.7.0.
+* **query:** every continuation cursor is an opaque bound string and cursors from earlier builds are refused. Fact store `after`/`next_after` are opaque; `fact_store_list` takes `after` and returns `next_after` (was `after_fact_id`/`next_after_fact_id`); `configuration_audit` takes `cursor` and returns `next_cursor` (was `after_event_id`/`next_after_event_id`); `WorkAttemptListCursorV1` is opaque; the work-views continuation, the retrieve-evidence continuation `binding`, and `branch_list` `cursor`/`next_cursor` (was `after`/`next_after`) replace the old unbound shapes. `tracedecay work|workflow --json` exits non-zero on a typed problem.
+* **kiro:** the host_cli_not_signed_in error code and the "not signed in" skip reason are gone; Kiro is configured whether or not kiro-cli is installed or signed in.
+* **doctor:** `tracedecay doctor` prints finding families by label (`storage_runtime:`), exits 75 instead of 1 when no daemon listens, and gains `--json`.
+* **retention:** collect unmounted scopes, size stores by kind ([#2531](https://github.com/ScriptedAlchemy/tracedecay/issues/2531))
+* **sessions:** CaptureClaudeObservation* and capture_claude_observation are gone; callers use CaptureObservation* and capture_observation. ClaudeRecordSanitizerV1, SanitizedClaudeRecordV1, and ClaudeSanitizationOutcomeV1 are gone; the canonical names are RecordSanitizerV1, SanitizedObservationRecordV1, and ObservationSanitizationOutcomeV1.
+* **hosts:** Context Scout startup reports Reset and does not replay receipts from a pre-provenance document. codex_additional_context_json is removed.
+* **domain:** Claude observation ids and receipt ids are derived on tracedecay.observation.v1 and privacy.observation.v1. Historical Claude digests and the idempotency_key alias are refused. @tracedecay/sdk is 0.4.0.
+* **workflow:** Workflow refusals change kind, code, owning_layer, and legal actions (see above); ApplicationProblemDetailV1 gains `stale_precondition`; the persisted Workflow effect problem shape changed and older records answer reset_required; handoff_issue refuses scopes that do not name an Active definition step and its admitted run. The TypeScript SDK moves to 0.4.0.
+* **maintenance:** code-index scope retention receipts, transactions, and liveness proofs move to schema v2; a pending v1 scope transaction is refused as an incompatible schema instead of replayed.
+* **hosts:** a host that is not installed or not signed in no longer makes install exit 1 or update-plugin/update/doctor exit 75; it is reported as skipped and exits 0.
+
+### simplify
+
+* **sessions:** drop claude observation aliases ([#2541](https://github.com/ScriptedAlchemy/tracedecay/issues/2541)) ([78bab96](https://github.com/ScriptedAlchemy/tracedecay/commit/78bab9644e20885772fc483ad77688f632c11632))
+
+
+### Features
+
+* **ci:** batch PR merge snapshots on warm Linux workers ([#2518](https://github.com/ScriptedAlchemy/tracedecay/issues/2518)) ([7205476](https://github.com/ScriptedAlchemy/tracedecay/commit/72054768b274056807a747914c2d29ae5fd03894))
+* **ci:** hand trusted PR checks to the Hauler pool ([#2546](https://github.com/ScriptedAlchemy/tracedecay/issues/2546)) ([8176213](https://github.com/ScriptedAlchemy/tracedecay/commit/8176213587332e24170248ebb90b3ecaf98b0f6e))
+* **ci:** pilot Hauler managed warm PR workers ([#2543](https://github.com/ScriptedAlchemy/tracedecay/issues/2543)) ([5375c9c](https://github.com/ScriptedAlchemy/tracedecay/commit/5375c9c938f6b00d1e35551c8afe844e1a483c26))
+
+
+### Bug Fixes
+
+* **ci:** guard PR cleanup and pin Clippy target ([#2488](https://github.com/ScriptedAlchemy/tracedecay/issues/2488)) ([fe6caf1](https://github.com/ScriptedAlchemy/tracedecay/commit/fe6caf1bed215cd601791a41bfc1193023220b08))
+* **code-index:** attribute callback and module-scope calls ([#2504](https://github.com/ScriptedAlchemy/tracedecay/issues/2504)) ([0f0d12f](https://github.com/ScriptedAlchemy/tracedecay/commit/0f0d12fba568efde91f43ab33859b38445d34cc0))
+* **code-index:** re-arm a seat refused by a store-lock holder ([#2507](https://github.com/ScriptedAlchemy/tracedecay/issues/2507)) ([abdbee4](https://github.com/ScriptedAlchemy/tracedecay/commit/abdbee4c6d8bdb87f564b317064580be8d49d40a))
+* **code-index:** stop per-row memory sampling and graph replay ([#2566](https://github.com/ScriptedAlchemy/tracedecay/issues/2566)) ([6c1627c](https://github.com/ScriptedAlchemy/tracedecay/commit/6c1627c241a51161c64a194ae5a6668ab91c58b1))
+* **code-index:** verify restarts and wait for the retained seat ([#2550](https://github.com/ScriptedAlchemy/tracedecay/issues/2550)) ([1321599](https://github.com/ScriptedAlchemy/tracedecay/commit/132159960f5818dd9414f90b1d31e0794f12127d))
+* **daemon:** authority-record clients name a held managed daemon ([#2564](https://github.com/ScriptedAlchemy/tracedecay/issues/2564)) ([767ff3f](https://github.com/ScriptedAlchemy/tracedecay/commit/767ff3fb6800451fdb2d088a48329b7a40ad709e))
+* **daemon:** project-routed clients name a held managed daemon ([#2524](https://github.com/ScriptedAlchemy/tracedecay/issues/2524)) ([28b77ac](https://github.com/ScriptedAlchemy/tracedecay/commit/28b77ac75b07d7bb937fdc49a94cac924a246d4a))
+* **daemon:** stop a retired project's automation loop first ([#2516](https://github.com/ScriptedAlchemy/tracedecay/issues/2516)) ([8930aa4](https://github.com/ScriptedAlchemy/tracedecay/commit/8930aa40367e81e58ec93b0fef4a2433a9bc2d30))
+* **doctor:** render the daemon's canonical findings in the CLI ([#2542](https://github.com/ScriptedAlchemy/tracedecay/issues/2542)) ([8a7c038](https://github.com/ScriptedAlchemy/tracedecay/commit/8a7c03801062320d8c54f192f9550e5b49b540ac))
+* fit Windows paths, CRLF field sites, and change witnesses ([#2540](https://github.com/ScriptedAlchemy/tracedecay/issues/2540)) ([6d6fa98](https://github.com/ScriptedAlchemy/tracedecay/commit/6d6fa9828fb1bc41b2a295015644086142563acc))
+* **hooks:** drain spools promptly and attribute every hook row ([#2480](https://github.com/ScriptedAlchemy/tracedecay/issues/2480)) ([aa0e324](https://github.com/ScriptedAlchemy/tracedecay/commit/aa0e3242dcc938978ae5c304533852e8ca66a373))
+* **hosts:** report absent hosts as skipped ([#2497](https://github.com/ScriptedAlchemy/tracedecay/issues/2497)) ([a8d36b4](https://github.com/ScriptedAlchemy/tracedecay/commit/a8d36b479ca52a25db9017ab0a3c16afdd147a2d))
+* **kiro:** edit Kiro's mcp.json directly, never run kiro-cli ([#2551](https://github.com/ScriptedAlchemy/tracedecay/issues/2551)) ([c2247fd](https://github.com/ScriptedAlchemy/tracedecay/commit/c2247fdbeb3b32bf5c8f35819130e40b02c577fa))
+* **maintenance:** collect scopes of removed worktrees ([#2500](https://github.com/ScriptedAlchemy/tracedecay/issues/2500)) ([b9dbe4e](https://github.com/ScriptedAlchemy/tracedecay/commit/b9dbe4e2499daed0a1e0489696ce3dc521a8139f))
+* **mcp:** unsafe_patterns reports unparseable files as gaps ([#2483](https://github.com/ScriptedAlchemy/tracedecay/issues/2483)) ([7e3a9a8](https://github.com/ScriptedAlchemy/tracedecay/commit/7e3a9a8e898c45ffb4774ed53e62e81dfb3e8a26)), closes [#2387](https://github.com/ScriptedAlchemy/tracedecay/issues/2387)
+* **memory:** count swap and size worker slab to measured headroom ([#2527](https://github.com/ScriptedAlchemy/tracedecay/issues/2527)) ([161eccf](https://github.com/ScriptedAlchemy/tracedecay/commit/161eccf06b4c50097ed88ca77114ce79b333c0cc))
+* **observation:** reset stores predating unified identity ([#2555](https://github.com/ScriptedAlchemy/tracedecay/issues/2555)) ([9f0f92f](https://github.com/ScriptedAlchemy/tracedecay/commit/9f0f92f5af477e6011911c32604d6996ce6a4281))
+* **query:** bind every continuation cursor to its request ([#2496](https://github.com/ScriptedAlchemy/tracedecay/issues/2496)) ([1c85d67](https://github.com/ScriptedAlchemy/tracedecay/commit/1c85d6777d944537d826ec60a7fd3a5d25297f35)), closes [#2352](https://github.com/ScriptedAlchemy/tracedecay/issues/2352) [#2372](https://github.com/ScriptedAlchemy/tracedecay/issues/2372)
+* resume interrupted HTTP socket waits ([#2511](https://github.com/ScriptedAlchemy/tracedecay/issues/2511)) ([9ac71a3](https://github.com/ScriptedAlchemy/tracedecay/commit/9ac71a3a0c69e0104b943e423437922e379da209))
+* **retention:** collect unmounted scopes, size stores by kind ([#2531](https://github.com/ScriptedAlchemy/tracedecay/issues/2531)) ([5396f34](https://github.com/ScriptedAlchemy/tracedecay/commit/5396f349c44cf4e3bb1b3d42bcec1d66d2922e15))
+* **sessions:** report session lookup store failures ([#2570](https://github.com/ScriptedAlchemy/tracedecay/issues/2570)) ([217c972](https://github.com/ScriptedAlchemy/tracedecay/commit/217c9724c88250b6d1411f67fde4d4c31116ed93))
+* **sessions:** show projection state, drop fake Cursor tool ids ([#2508](https://github.com/ScriptedAlchemy/tracedecay/issues/2508)) ([1321159](https://github.com/ScriptedAlchemy/tracedecay/commit/13211590f4c948b5cc12f34b809b29cc447287d9))
+* **source-edit:** honor sanitized rename bytes and file headers ([#2492](https://github.com/ScriptedAlchemy/tracedecay/issues/2492)) ([fd5825e](https://github.com/ScriptedAlchemy/tracedecay/commit/fd5825eaf3a32e3ff9eea50a8ef398b2da917b88))
+* superseded fact reads, help examples, adjudication evidence ([#2506](https://github.com/ScriptedAlchemy/tracedecay/issues/2506)) ([ff19050](https://github.com/ScriptedAlchemy/tracedecay/commit/ff1905033de0ef2e5e36d049bf22c6643a7f9d7a))
+* **workflow:** answer Workflow refusals with typed states ([#2486](https://github.com/ScriptedAlchemy/tracedecay/issues/2486)) ([6aac87f](https://github.com/ScriptedAlchemy/tracedecay/commit/6aac87f8aa73c3d798e835d7928a85fa94369288)), closes [#2379](https://github.com/ScriptedAlchemy/tracedecay/issues/2379) [#2380](https://github.com/ScriptedAlchemy/tracedecay/issues/2380)
+
+
+### Performance Improvements
+
+* **ci:** reuse completed warm PR verdicts in queued Linux jobs ([#2529](https://github.com/ScriptedAlchemy/tracedecay/issues/2529)) ([2eb3367](https://github.com/ScriptedAlchemy/tracedecay/commit/2eb33677d3bc00cccf7e662928b6ca11f11791af))
+* **hooks:** group-commit hook admission with its owed work ([#2544](https://github.com/ScriptedAlchemy/tracedecay/issues/2544)) ([c063a0d](https://github.com/ScriptedAlchemy/tracedecay/commit/c063a0d7fc51fb76f7c37007775a14477379f6c8))
+* **observability:** batch owner fact settlement and spool acks ([#2501](https://github.com/ScriptedAlchemy/tracedecay/issues/2501)) ([4c2b061](https://github.com/ScriptedAlchemy/tracedecay/commit/4c2b061db1593ae3f1b310632d25e7cb750125ba))
+* **search:** cache prefaces and skip impossible fuzzy terms ([#2459](https://github.com/ScriptedAlchemy/tracedecay/issues/2459)) ([6bf9406](https://github.com/ScriptedAlchemy/tracedecay/commit/6bf94062e23658051daf414f9f7b42a3e0456d44))
+
+
+### Code Refactoring
+
+* **domain:** drop legacy observation identity ([#2532](https://github.com/ScriptedAlchemy/tracedecay/issues/2532)) ([907b435](https://github.com/ScriptedAlchemy/tracedecay/commit/907b435cafd6734b8b132c214f7231463dd0656d))
+* **hosts:** reset scout provenance, drop aliases ([#2538](https://github.com/ScriptedAlchemy/tracedecay/issues/2538)) ([1abffbb](https://github.com/ScriptedAlchemy/tracedecay/commit/1abffbbe424960705097cd7b0c57ee0d5ed3fca0))
+
 ## [1.0.0-beta.60](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.59...v1.0.0-beta.60) (2026-09-28)
 
 

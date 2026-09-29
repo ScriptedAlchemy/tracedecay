@@ -149,12 +149,12 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
         )
         .await,
         format!(
-            r#"{{"examined":1,"limit":5,"next_after":null,"reason":null,"snapshot_count":1,"snapshots":[{{"branch":"{branch}","source_revision":"{commit}","source_tree":"{tree}"}}],"status":"complete"}}"#
+            r#"{{"examined":1,"limit":5,"next_cursor":null,"reason":null,"snapshot_count":1,"snapshots":[{{"branch":"{branch}","source_revision":"{commit}","source_tree":"{tree}"}}],"status":"complete"}}"#
         )
     );
     assert_invalid_request(
         &refusal(&fixture, "tracedecay_branch_list", json!({"limt": 5})).await,
-        "invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `after`",
+        "invalid arguments for tracedecay_branch_list: unknown field `limt`, expected `limit` or `cursor`",
     );
 
     fixture.harness.shutdown().await;
