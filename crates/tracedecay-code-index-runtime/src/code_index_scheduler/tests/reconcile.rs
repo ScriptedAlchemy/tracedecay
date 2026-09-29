@@ -3179,8 +3179,9 @@ async fn sealed_generation_serves_and_next_edit_seals_while_text_projection_is_h
     registry.shutdown().await;
 }
 
-/// Edits arriving faster than one lexical build must still converge. Each
-/// edit within the abort budget seals at once and aborts the held build; the
+/// Edits arriving faster than one lexical build must still converge. The
+/// first edit finds the mount's build finished and aborts nothing; each edit
+/// within the abort budget then seals at once and aborts the held build; the
 /// edit past it waits for that build to publish, then seals against the
 /// published parent and becomes lexical-ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3204,7 +3205,9 @@ async fn repeated_edits_during_held_projection_converge_to_lexical_ready() {
     // Every held build keeps its release: dropping one releases that build,
     // and an aborted build's sender is inert.
     let mut releases = Vec::new();
-    for edit in 0..PUBLISHED_PROJECTION_ABORT_BUDGET_V1 {
+    // Only an abort spends the budget. Edit 0 seals against the finished
+    // mount build, so BUDGET more edits are needed to exhaust it.
+    for edit in 0..=PUBLISHED_PROJECTION_ABORT_BUDGET_V1 {
         let (projection_started, release) = registry
             .pause_next_published_text_projection(canonical_root.clone())
             .await;
@@ -3230,7 +3233,9 @@ async fn repeated_edits_during_held_projection_converge_to_lexical_ready() {
             .sealed_publication_identity(fixture.path(), Some(&previous_id))
             .await
             .expect("sealed identity read")
-            .expect("an edit within the abort budget seals while the previous build is held");
+            .unwrap_or_else(|| {
+                panic!("edit {edit} within the abort budget seals while the previous build is held")
+            });
         previous_id = sealed.generation_id().clone();
     }
 
