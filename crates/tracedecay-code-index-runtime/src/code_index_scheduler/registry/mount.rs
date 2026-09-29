@@ -325,7 +325,7 @@ impl CodeIndexSchedulerRegistryV1 {
         serving_generation_changed: &tokio::sync::watch::Sender<()>,
         lexical_search_predecessor: &RwLock<Option<LatestCompleteCodeIndexV1>>,
         active_text: &RwLock<Option<LatestCodeTextGenerationV1>>,
-    ) -> bool {
+    ) {
         let (active_text_ready, active_text_generation) = {
             let text = active_text
                 .read()
@@ -366,7 +366,7 @@ impl CodeIndexSchedulerRegistryV1 {
         drop(retired_predecessor);
         drop(dropped_seat);
         if !displaced {
-            return false;
+            return;
         }
         serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
         *serving_source_witness
@@ -374,7 +374,86 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Self::record_serving_seat(serving_seats);
         serving_generation_changed.send_replace(());
-        true
+    }
+
+    /// Source evidence (a hint, an observed change, or a Git metadata move)
+    /// can land during a large text projection, after the proof established
+    /// before publication. The serving swap must bind to source truth
+    /// observed after that work, otherwise an exact current generation seats
+    /// without a witness and every readiness read schedules another
+    /// identical Noop.
+    ///
+    /// A plain write moves neither the source epoch nor Git metadata, so an
+    /// unmoved proof does not mean an unchanged tree. Whatever the proof
+    /// says, the sealed digests are swept again here: a write that landed
+    /// during the projection is observed now and leaves the seat stale. The
+    /// build task runs this before it wakes the seat pass, so a ready read
+    /// refuses the outdated generation while that pass waits for admission
+    /// instead of serving it as current.
+    ///
+    /// Returns whether this sweep moved the source epoch and so owes the
+    /// wake that carries it; a hint or observed change already pending
+    /// carries its own.
+    async fn source_moved_during_text_projection(
+        text: &LatestCodeTextGenerationV1,
+        scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+        shutting_down: Arc<AtomicBool>,
+        source_freshness: super::super::SourceFreshnessFenceV1,
+        project_root: &Path,
+    ) -> bool {
+        let proof_unmoved = source_freshness.serves_verified_source(
+            &text.metadata().snapshot().content_identity,
+            project_root,
+            &shutting_down,
+        );
+        let metadata = text.metadata().clone();
+        let source_current = tokio::task::spawn_blocking(move || {
+            let mut scheduler =
+                Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
+            if !proof_unmoved
+                && matches!(
+                    scheduler.reconcile_retained_text_generation_with(&metadata, false)?,
+                    Some(CodeIndexReconcileOutcomeV1::Noop(_))
+                )
+            {
+                return Ok(None);
+            }
+            // A pending hint or observed change already carries its own wake;
+            // sweeping on top of it would turn that targeted pass into an
+            // overflow rescan.
+            if source_freshness.source_change_pending() {
+                return Ok(Some(false));
+            }
+            let moved = scheduler.request_fresh_now_background();
+            Ok::<_, CodeIndexSchedulerErrorV1>(moved.then_some(true))
+        })
+        .await;
+        match source_current {
+            Ok(Ok(None)) => false,
+            Ok(Ok(Some(moved))) => {
+                tracing::info!(
+                    event = "code_index_post_projection_source_unverified",
+                    "source moved while text projection ran; the completed generation may only take a stale seat"
+                );
+                moved
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    event = "code_index_post_projection_source_verification_failed",
+                    error = %error,
+                    "source verification after text projection failed; the completed generation may only take a stale seat"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "code_index_post_projection_source_verification_task_failed",
+                    error = %error,
+                    "source verification after text projection did not complete; the completed generation may only take a stale seat"
+                );
+                false
+            }
+        }
     }
 
     /// A same-root remount keeps the incumbent owner: it may only refresh the
@@ -1524,10 +1603,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             // Drop the seat so that id follows this seal before
                             // the lexical artifact exists, and retain the
                             // predecessor only for search until those owners
-                            // are ready. An empty slot still records a seat:
-                            // cold-start waiters only watch that counter, and
-                            // the publication broadcast already fired while
-                            // the slot was empty.
+                            // are ready. An empty slot records no seat: the
+                            // counter means the slot was written, and the
+                            // per-root change below already wakes waiters
+                            // on the text owner.
                             let text_generation_id =
                                 published_text.metadata().manifest().generation_id.clone();
                             let seated_generation_id = worker_serving_generation
@@ -1536,7 +1615,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .as_ref()
                                 .map(|seated| seated.generation.manifest().generation_id.clone());
                             if seated_generation_id.as_ref() != Some(&text_generation_id) {
-                                let displaced = Self::release_superseded_serving_seat(
+                                Self::release_superseded_serving_seat(
                                     &worker_serving_generation,
                                     &worker_serving_generation_epoch,
                                     &worker_serving_source_witness,
@@ -1545,9 +1624,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_lexical_search_predecessor,
                                     &worker_text_generation,
                                 );
-                                if !displaced {
-                                    Self::record_serving_seat(&worker_serving_seats);
-                                }
                             }
                             worker_serving_generation_changed.send_replace(());
                             Some(published_text)
@@ -1592,10 +1668,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         let projection_pending_wake = Arc::clone(&worker_pending_wake);
                         let projection_wake = Arc::clone(&worker_wake);
                         let projection_memory_retry = Arc::clone(&worker_memory_retry);
-                        #[cfg(test)]
+                        let projection_scheduler = Arc::clone(&worker_scheduler);
+                        let projection_source_freshness = worker_source_freshness.clone();
                         let project_root = worker_project_root.clone();
                         published_projection_finished = Arc::new(AtomicBool::new(false));
                         let projection_finished = Arc::clone(&published_projection_finished);
+                        // Graph replay below waits only for the build to open
+                        // (its zero-work advance), not to finish: a projection
+                        // that parks before opening drops this sender, and
+                        // graph must not overlap its retry.
+                        let (opened, text_opened) = tokio::sync::oneshot::channel();
+                        published_text_opened = Some(text_opened);
                         retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             let outcome = Self::drive_text_projection(
@@ -1603,34 +1686,69 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Arc::clone(&shutting_down),
                                 park,
                                 None,
-                                None,
+                                Some(opened),
                                 #[cfg(test)]
                                 project_root.clone(),
                             )
                             .await;
-                            // Source verification and the decoded seat stay on the
-                            // worker, which observes this outcome before it
-                            // swaps. The wake is what brings a pass that
-                            // already moved on back to that observation. Slot,
-                            // then flag, then permit: a worker that reads the
-                            // flag mid-pass sees the wake already pending, and
-                            // one the permit wakes reads the build as done even
-                            // if this task has not exited.
+                            // The decoded seat stays on the worker, which
+                            // observes this outcome before it swaps. The wake
+                            // is what brings a pass that already moved on back
+                            // to that observation. Flag, then source sweep,
+                            // then slot and permit: the build released the
+                            // store lock when it stopped, so a pass whose
+                            // decode succeeds meanwhile reads the flag, joins
+                            // this task, and observes the sweep before it
+                            // seats; one the permit wakes reads the build as
+                            // done even if this task has not exited.
+                            //
+                            // Source verification runs here, ahead of the wake:
+                            // the pass it wakes reconciles before it seats, so
+                            // a write it finds publishes again and never
+                            // observes this build. A write found now moves the
+                            // epoch while the seat pass still waits for
+                            // admission, so no ready read serves the outdated
+                            // owner as current in between.
+                            projection_finished.store(true, Ordering::Release);
+                            let seats = match outcome {
+                                PublishedTextProjectionOutcomeV1::Finished => true,
+                                PublishedTextProjectionOutcomeV1::Unfinished => {
+                                    !super::text_projection_unfinished_withholds_seat(
+                                        exact_and_lexical_ready_for_graph(Some(&text)),
+                                    )
+                                }
+                                PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::Shutdown => false,
+                            };
+                            let source_moved = seats
+                                && Self::source_moved_during_text_projection(
+                                    &text,
+                                    projection_scheduler,
+                                    Arc::clone(&shutting_down),
+                                    projection_source_freshness,
+                                    &project_root,
+                                )
+                                .await;
                             match outcome {
                                 PublishedTextProjectionOutcomeV1::Finished
                                 | PublishedTextProjectionOutcomeV1::Unfinished => {
-                                    Self::stamp_worker_continuation(&projection_pending_wake);
-                                    projection_finished.store(true, Ordering::Release);
-                                    projection_wake.notify_one();
+                                    if source_moved {
+                                        // The write's own wake.
+                                        Self::note_wake(
+                                            &projection_pending_wake,
+                                            &projection_wake,
+                                            CodeIndexCadenceTriggerV1::Overflow,
+                                        );
+                                    } else {
+                                        Self::stamp_worker_continuation(&projection_pending_wake);
+                                        projection_wake.notify_one();
+                                    }
                                 }
                                 PublishedTextProjectionOutcomeV1::WaitingForMemory => {
-                                    projection_finished.store(true, Ordering::Release);
                                     projection_memory_retry
                                         .schedule(&projection_pending_wake, &projection_wake);
                                 }
-                                PublishedTextProjectionOutcomeV1::Shutdown => {
-                                    projection_finished.store(true, Ordering::Release);
-                                }
+                                PublishedTextProjectionOutcomeV1::Shutdown => {}
                             }
                             #[cfg(test)]
                             Self::wait_for_published_text_projection_completion_gate(&project_root)
@@ -2672,84 +2790,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     pending.owner = 0;
                                 }
                             }
-                            // Source evidence (a hint, an observed change, or a
-                            // Git metadata move) can land during a large text
-                            // projection, after the proof established before
-                            // publication. The serving swap must bind to source
-                            // truth observed after that work, otherwise an
-                            // exact current generation seats without a witness
-                            // and every readiness read schedules another
-                            // identical Noop.
+                            // Source truth after the projection was swept by
+                            // the build task before it woke this pass (see
+                            // `source_moved_during_text_projection`); a pass
+                            // that finds the write it observed publishes
+                            // instead of reaching this seat.
                             //
-                            // A plain write moves neither the source epoch nor
-                            // Git metadata, so an unmoved proof does not mean
-                            // an unchanged tree. Whatever the proof says, the
-                            // sealed digests are swept again here: a write that
-                            // landed during the projection is observed now,
-                            // leaves the seat stale, and wakes its successor.
-                            if let Some(text) = graph_text.as_ref() {
-                                let proof_unmoved = worker_source_freshness.serves_verified_source(
-                                    &text.metadata().snapshot().content_identity,
-                                    &worker_project_root,
-                                    &worker_shutting_down,
-                                );
-                                let scheduler = Arc::clone(&worker_scheduler);
-                                let shutting_down = Arc::clone(&worker_shutting_down);
-                                let pending_wake = Arc::clone(&worker_pending_wake);
-                                let wake = Arc::clone(&worker_wake);
-                                let source_freshness = worker_source_freshness.clone();
-                                let metadata = text.metadata().clone();
-                                let source_current = tokio::task::spawn_blocking(move || {
-                                    let mut scheduler = Self::lock_scheduler_unless_shutting_down(
-                                        &scheduler,
-                                        &shutting_down,
-                                    )?;
-                                    if !proof_unmoved
-                                        && matches!(
-                                            scheduler.reconcile_retained_text_generation_with(
-                                                &metadata, false,
-                                            )?,
-                                            Some(CodeIndexReconcileOutcomeV1::Noop(_))
-                                        )
-                                    {
-                                        return Ok(true);
-                                    }
-                                    // A pending hint or observed change already
-                                    // carries its own wake; sweeping on top of
-                                    // it would turn that targeted pass into an
-                                    // overflow rescan.
-                                    if source_freshness.source_change_pending() {
-                                        return Ok(false);
-                                    }
-                                    let moved = scheduler.request_fresh_now_background();
-                                    if moved {
-                                        Self::note_wake(
-                                            &pending_wake,
-                                            &wake,
-                                            CodeIndexCadenceTriggerV1::Overflow,
-                                        );
-                                    }
-                                    Ok::<_, CodeIndexSchedulerErrorV1>(!moved)
-                                })
-                                .await;
-                                match source_current {
-                                    Ok(Ok(true)) => {}
-                                    Ok(Ok(false)) => tracing::info!(
-                                        event = "code_index_post_projection_source_unverified",
-                                        "source moved while text projection ran; the completed generation may only take a stale seat"
-                                    ),
-                                    Ok(Err(error)) => tracing::warn!(
-                                        event = "code_index_post_projection_source_verification_failed",
-                                        error = %error,
-                                        "source verification after text projection failed; the completed generation may only take a stale seat"
-                                    ),
-                                    Err(error) => tracing::warn!(
-                                        event = "code_index_post_projection_source_verification_task_failed",
-                                        error = %error,
-                                        "source verification after text projection did not complete; the completed generation may only take a stale seat"
-                                    ),
-                                }
-                            }
                             // The ready text owner now serves this generation,
                             // with or without a decoded seat after it.
                             worker_serving_generation_changed.send_replace(());

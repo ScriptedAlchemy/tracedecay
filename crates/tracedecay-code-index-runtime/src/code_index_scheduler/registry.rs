@@ -2635,10 +2635,6 @@ impl CodeIndexSchedulerRegistryV1 {
         mut opened: Option<tokio::sync::oneshot::Sender<()>>,
         #[cfg(test)] project_root: PathBuf,
     ) -> PublishedTextProjectionOutcomeV1 {
-        #[cfg(test)]
-        if installed.is_none() {
-            Self::wait_for_published_text_projection_gate(&project_root).await;
-        }
         let mut advances = 0_usize;
         while text.text_projection_needs_work() {
             if shutting_down.load(Ordering::Acquire) {
@@ -2648,28 +2644,40 @@ impl CodeIndexSchedulerRegistryV1 {
             if installed.is_none() && text.query_owners_are_ready() {
                 break;
             }
-            advances += 1;
-            if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
-                tracing::warn!(
-                    event = "code_index_text_projection_advance_bound_reached",
-                    advances = TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1,
-                    "published text projection did not complete within its bounded advance \
-                     budget; graph seating waits for a later pass"
-                );
-                break;
-            }
+            // A publication's build opens before any page work: the zero-work
+            // advance takes the build reservation and validates the artifacts
+            // root, so `opened` reports the open rather than the first page
+            // batch, and a build that parks before opening drops the sender.
+            let maximum_work = if opened.is_some() {
+                0
+            } else {
+                advances += 1;
+                if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                    tracing::warn!(
+                        event = "code_index_text_projection_advance_bound_reached",
+                        advances = TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1,
+                        "published text projection did not complete within its bounded \
+                         advance budget; graph seating waits for a later pass"
+                    );
+                    break;
+                }
+                TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
+            };
             let advancing = text.clone();
             let advance = hotpath::future!(
-                tokio::task::spawn_blocking(
-                    move || advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
-                ),
+                tokio::task::spawn_blocking(move || advancing.advance_text_serving(maximum_work)),
                 label = "daemon.code_index.text_projection"
             )
             .await;
-            if matches!(advance, Ok(Ok(_)))
-                && let Some(opened) = opened.take()
-            {
-                let _ = opened.send(());
+            if let Some(opened) = opened.take() {
+                if matches!(advance, Ok(Ok(_))) {
+                    let _ = opened.send(());
+                }
+                // The gate holds the build between its open and its first
+                // page batch, whatever the open returned, so an armed gate
+                // never outlives the build it was armed for.
+                #[cfg(test)]
+                Self::wait_for_published_text_projection_gate(&project_root).await;
             }
             match advance {
                 Ok(Ok(true)) => {
@@ -2999,10 +3007,10 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    /// Observe serving-slot seating. Each advance means what serves changed:
-    /// the slot was written, or a seal installed its text owner and released
-    /// the predecessor seat ahead of its decode. The receiver re-probes to
-    /// learn what now answers.
+    /// Observe serving-slot seating. Each advance means the slot was written:
+    /// a decoded generation seated, or a seal released the predecessor seat
+    /// ahead of its own decode. The receiver re-probes to learn what now
+    /// answers.
     pub fn subscribe_serving_seats(&self) -> tokio::sync::watch::Receiver<u64> {
         self.serving_seats.subscribe()
     }

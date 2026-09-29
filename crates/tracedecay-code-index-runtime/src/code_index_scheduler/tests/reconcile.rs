@@ -3919,8 +3919,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
 /// A plain write lands while a publication's text projection runs: no hook
 /// hint, no Git metadata move, so the source epoch still equals the proof
 /// sealed before the projection. That proof does not cover the write. The
-/// seat must report the generation stale and the next pass must index the
-/// write without an explicit sync.
+/// seat must not report the generation current and the next pass must index
+/// the write without an explicit sync.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_without_sync() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -3968,9 +3968,60 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
             .is_none(),
         "the write is not a ready generation while its projection is unfinished"
     );
+    // The publishing pass released the admission before its projection; the
+    // pass the projection's completion wakes reconciles before it seats, so
+    // it notices the plain write and never decodes the generation the
+    // projection built. Hold the admission so that pass waits at its dequeue
+    // point while the text owner the write outdated finishes seating.
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the successor pass at its dequeue point");
     release_projection
         .send(())
         .expect("release publication projection");
+    wait_for_worker_phase(
+        &registry,
+        fixture.path(),
+        CodeIndexWorkerPhaseV1::AwaitingAdmission,
+    )
+    .await;
+    let seated = registry
+        .latest_text_serving_for_root(fixture.path())
+        .await
+        .expect("the finished projection seats its text owner");
+    assert_eq!(
+        &seated.metadata().manifest().generation_id,
+        sealed_before_write.generation_id(),
+        "the seated generation was sealed before the write"
+    );
+
+    // The build task swept the sealed digests before it woke that pass, so
+    // the write has already moved the source epoch: the ladder reports the
+    // seat refreshing, not merely verifying an unchanged tree, and a ready
+    // read refuses it while the pass that indexes the write waits.
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
+        "a seat whose source moved during its projection is not current"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "a ready read refuses the seat the write outdated"
+    );
+
+    // No hook hint and no explicit sync. The admitted pass has to notice the
+    // plain write and index it.
+    drop(admission);
     let simple_names = |latest: &LatestCompleteCodeIndexV1| {
         latest
             .generation
@@ -3980,8 +4031,6 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
             .map(|symbol| symbol.simple_name.clone())
             .collect::<BTreeSet<_>>()
     };
-    // No hook hint and no explicit sync. The post-projection sweep has to
-    // notice the plain write and the successor has to index it.
     let reconciled = wait_until_serving_seat(
         &registry,
         fixture.path(),
@@ -8516,10 +8565,11 @@ fn reparse_matches_full_parse_chunks() {
 /// Publication is broadcast when reconcile seals, before the sealed generation
 /// takes the serving slot, so `branch_add`'s exact-branch wait had no event for
 /// the seat and polled the slot every 10ms for up to thirty minutes instead.
-/// The seating counter replaces that poll. A seal now installs its text owner
-/// and records a seat before the decoded generation exists, so a wake means
-/// what serves changed and the waiter re-probes; it never fires while nothing
-/// answers, and the decoded seat arrives on a later wake, not by polling.
+/// The seating counter replaces that poll. A seal installs its text owner
+/// before the decoded generation exists, but only a written slot records a
+/// seat, so a wake means what serves changed and the waiter re-probes; it
+/// never fires while nothing answers, and the decoded seat arrives on its
+/// own wake, not by polling.
 #[tokio::test]
 async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);

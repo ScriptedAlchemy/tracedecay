@@ -18,8 +18,8 @@ use super::super::{
 };
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, core_search_request, git,
-    mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
-    wait_for_generation_change, wait_for_live_complete_generation,
+    mounted_core_query_worktree_at, mounted_core_query_worktree_in, settle_text_projection,
+    test_project_id, wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_worker_phase,
 };
 
@@ -69,6 +69,9 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     let decoded_bytes = used.measured_bytes;
     assert_ne!(decoded_bytes, 0, "the decode reports the bytes it holds");
 
+    // The seat precedes its lexical projection, and that build is owner work
+    // that refuses idle give-back until it joins. Idle means no owner work.
+    settle_text_projection(&registry, fixture.path()).await;
     let mut receipts = registry.subscribe_cadence_receipts();
     receipts.borrow_and_update();
     let later = Instant::now() + IDLE_WINDOW;
@@ -224,6 +227,10 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
     );
     assert_eq!(both.measured_bytes, 1_846_349);
 
+    // Each seat precedes its lexical projection, and either build is owner
+    // work that refuses idle give-back until it joins.
+    settle_text_projection(&registry, fixture.path()).await;
+    settle_text_projection(&registry, &linked).await;
     let later = Instant::now() + IDLE_WINDOW;
     let released = owners.release_idle(later);
     assert_eq!(
