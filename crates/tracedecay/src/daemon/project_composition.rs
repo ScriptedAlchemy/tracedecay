@@ -1779,20 +1779,21 @@ impl ProjectOpenInputs<'_> {
         resolved: &Arc<crate::mcp::McpServer>,
     ) {
         let cg = &opened.cg;
-        let session_db = self
-            .store_administration
-            .registered_project_session_database(cg.project_root(), cg.store_layout())
-            .await
-            .ok();
-        let user_session_db = self
-            .store_administration
-            .registered_profile_session_database()
-            .await
-            .ok();
-        match self
-            .doctor_report_reader(cg, core, user_session_db, session_db)
-            .await
-        {
+        let reader = async {
+            let session_db = reset_required_as_absent(
+                self.store_administration
+                    .registered_project_session_database(cg.project_root(), cg.store_layout())
+                    .await,
+            )?;
+            let user_session_db = reset_required_as_absent(
+                self.store_administration
+                    .registered_profile_session_database()
+                    .await,
+            )?;
+            self.doctor_report_reader(cg, core, user_session_db, session_db)
+                .await
+        };
+        match reader.await {
             Ok(reader) => resolved.publish_doctor_report(reader),
             Err(error) => self.log_phase(
                 "reset_required_doctor_report_unavailable",
@@ -1892,6 +1893,18 @@ impl ProjectOpenInputs<'_> {
         )
         .await;
         Err(error)
+    }
+}
+
+/// A session store held in its typed reset-required state is absent from
+/// Doctor's report; any other open failure stays an error.
+fn reset_required_as_absent(
+    opened: Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+) -> Result<Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>> {
+    match opened {
+        Ok(database) => Ok(Some(database)),
+        Err(error) if tracedecay_mcp::reset_required_context(&error).is_some() => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

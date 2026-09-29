@@ -1022,11 +1022,21 @@ pub fn production_doctor_report_reader(
                     .require_active_write_scope("read dashboard Doctor graph authority")
                     .is_ok()
             });
-            let profile_sessions_attached = profile_sessions
-                .as_ref()
-                .is_some_and(|database| database.writer_connection().is_ok());
-            let registered_authority_current =
-                registry.writer_connection().is_ok() && profile_sessions_attached;
+            let registry_attached = registry.writer_connection().is_ok();
+            let profile_authority = match profile_sessions.as_ref() {
+                Some(database) => ProfileAuthorityReadV1::Observed {
+                    registry_attached,
+                    profile_sessions_attached: database.writer_connection().is_ok(),
+                    coverage: DoctorCoverageCompletenessV1::Complete,
+                },
+                None => ProfileAuthorityReadV1::ProfileSessionsResetRequired { registry_attached },
+            };
+            // A reset-required profile session store is the operator's pending
+            // reset, not a runtime that failed to converge.
+            let registered_authority_current = registry_attached
+                && profile_sessions
+                    .as_ref()
+                    .is_none_or(|database| database.writer_connection().is_ok());
             let retention_secs = retention
                 .orphan_store_gc_days
                 .and_then(|days| i64::try_from(days).ok())
@@ -1106,28 +1116,6 @@ pub fn production_doctor_report_reader(
                     None => None,
                 }
             };
-            let session_retention = |database: Option<
-                &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-            >| async move {
-                match database {
-                    Some(database) => {
-                        tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
-                            database.as_ref(),
-                            &retention.session_lcm,
-                            now,
-                        )
-                        .await
-                    }
-                    None => DoctorStorageFamilyReadV1::Unknown,
-                }
-            };
-            let refusal_census =
-                |database: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>| async move {
-                    match database {
-                        Some(database) => database.observation_refusal_census().await,
-                        None => IngestRefusalCensusReadV1::Unknown,
-                    }
-                };
             let (
                 quick_check,
                 authority_audit_ok,
@@ -1151,8 +1139,8 @@ pub fn production_doctor_report_reader(
                         project_temporal,
                         profile_storage_reads,
                         collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
-                        session_retention(profile_sessions.as_ref()),
-                        session_retention(project_sessions.as_ref()),
+                        session_retention_read(profile_sessions.as_deref(), &retention, now),
+                        session_retention_read(project_sessions.as_deref(), &retention, now),
                         collect_code_generation_retention_findings(
                             &schedulers,
                             registry.as_ref(),
@@ -1166,8 +1154,8 @@ pub fn production_doctor_report_reader(
                         ),
                         async {
                             tokio::join!(
-                                refusal_census(profile_sessions.as_ref()),
-                                refusal_census(project_sessions.as_ref()),
+                                refusal_census_read(profile_sessions.as_deref()),
+                                refusal_census_read(project_sessions.as_deref()),
                             )
                         },
                         advisory_feedback_read,
@@ -1231,11 +1219,7 @@ pub fn production_doctor_report_reader(
                 }),
                 operational_audit: OperationalAuditReadV1 {
                     remote: remote_operational(),
-                    profile_authority: ProfileAuthorityReadV1::Observed {
-                        registry_attached: registry.writer_connection().is_ok(),
-                        profile_sessions_attached,
-                        coverage: DoctorCoverageCompletenessV1::Complete,
-                    },
+                    profile_authority,
                 },
                 host,
                 advisory_feedback,
@@ -1261,6 +1245,37 @@ pub fn production_doctor_report_reader(
             )
         })
     })
+}
+
+/// Retention backlog of a session store; unknown while the store is held
+/// reset-required.
+async fn session_retention_read(
+    database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+    retention: &tracedecay_configuration::RetentionConfig,
+    now: i64,
+) -> DoctorStorageFamilyReadV1 {
+    match database {
+        Some(database) => {
+            tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                database,
+                &retention.session_lcm,
+                now,
+            )
+            .await
+        }
+        None => DoctorStorageFamilyReadV1::Unknown,
+    }
+}
+
+/// Refusal census of a session store; unknown while the store is held
+/// reset-required.
+async fn refusal_census_read(
+    database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> IngestRefusalCensusReadV1 {
+    match database {
+        Some(database) => database.observation_refusal_census().await,
+        None => IngestRefusalCensusReadV1::Unknown,
+    }
 }
 
 pub fn doctor_report_request_context(
