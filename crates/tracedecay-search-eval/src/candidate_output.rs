@@ -75,7 +75,9 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
     lexical_query_parts, merge_lexical_routes,
 };
-use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, RETRIEVAL_CANDIDATE_BATCH_SIZE};
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+};
 use tracedecay_query::search_quality::candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, CorpusDocumentV1, EVALUATION_CACHE_STATE,
     EVALUATION_SEED, GenerateCandidateOutputsResultV1, HistoricalQueryExecutionV1,
@@ -205,10 +207,6 @@ struct OccurrenceMapEntry {
     display_anchors: Vec<String>,
 }
 
-/// Page byte bound for draining a sealed generation into its lexical artifact,
-/// the daemon's text-artifact page bound.
-const LEXICAL_ARTIFACT_PAGE_BYTES: usize = 4 * 1024 * 1024;
-
 /// One queried scope set's corpus: the generation published over exactly the
 /// files those scopes admit, its sealed lexical artifact, and its graph
 /// evidence. Each scope set is its own repository snapshot, so lexical
@@ -308,8 +306,8 @@ fn seal_lexical_artifact(
             buffer.extend_from_slice(bytes);
             Ok(())
         },
-        RETRIEVAL_CANDIDATE_BATCH_SIZE,
-        LEXICAL_ARTIFACT_PAGE_BYTES,
+        TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+        TEXT_ARTIFACT_PAGE_BYTES_V1,
     )
     .map_err(|error| contract(&error))?;
     let directory = tempfile::tempdir().map_err(|error| contract(&error))?;
