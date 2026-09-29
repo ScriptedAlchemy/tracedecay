@@ -547,6 +547,9 @@ public class Circle {\n\
     [Pure]\n\
     public double Area() { return r; }\n\
 \n\
+#if DEBUG\n\
+    [Pure]\n\
+#endif\n\
     public string Name() { return \"c\"; }\n\
 }\n";
     let result = CSharpExtractor.extract_artifact("Circle.cs", source).result;
@@ -564,7 +567,7 @@ public class Circle {\n\
             ("Circle", 1, 0),
             ("r", 3, 2),
             ("Area", 7, 5),
-            ("Name", 9, 9)
+            ("Name", 12, 9)
         ]
     );
 }

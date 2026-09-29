@@ -821,9 +821,9 @@ impl TypeScriptExtractor {
         );
         let visibility = Self::extract_ts_accessibility(state, node);
         let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
+        // Unlike a method's, a field's decorators are its own leading children.
+        let (start_line, start_column) = declaration_start(node, &["decorator"]);
         let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = local_node_id(
@@ -841,7 +841,7 @@ impl TypeScriptExtractor {
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
-            attrs_start_line: start_line,
+            attrs_start_line: node.start_position().row as u32,
             end_line,
             start_column,
             end_column,

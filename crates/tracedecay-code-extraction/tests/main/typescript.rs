@@ -1149,14 +1149,19 @@ class Circle {\n\
     let lines: Vec<_> = result
         .nodes
         .iter()
-        .filter(|n| ["Circle", "area", "name"].contains(&n.name.as_str()))
+        .filter(|n| ["Circle", "r", "area", "name"].contains(&n.name.as_str()))
         .filter(|n| n.kind != NodeKind::Decorator)
         .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
         .collect();
-    // Member decorators are `class_body` siblings of the member, so only the
-    // class declaration itself carries its decorators as leading children.
+    // Method decorators are `class_body` siblings of the method; class and
+    // field decorators are leading children of the declaration.
     assert_eq!(
         lines,
-        vec![("Circle", 1, 0), ("area", 7, 7), ("name", 9, 9)]
+        vec![
+            ("Circle", 1, 0),
+            ("r", 3, 2),
+            ("area", 7, 7),
+            ("name", 9, 9)
+        ]
     );
 }

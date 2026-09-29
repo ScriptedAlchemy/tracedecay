@@ -13,7 +13,7 @@ use crate::types::{
 };
 
 /// Attribute nodes a C# declaration may lead with.
-const CSHARP_ATTRIBUTE_KINDS: &[&str] = &["attribute_list"];
+const CSHARP_ATTRIBUTE_KINDS: &[&str] = &["attribute_list", "preproc_if_in_attribute_list"];
 
 /// Extracts code graph nodes and edges from C# source files using tree-sitter.
 pub struct CSharpExtractor;
