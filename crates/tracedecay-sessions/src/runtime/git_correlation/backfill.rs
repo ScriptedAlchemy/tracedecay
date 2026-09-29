@@ -940,6 +940,49 @@ pub(super) async fn session_activity_rows(
     Ok(out)
 }
 
+/// Keyset page of sessions whose activity is past `(?1, ?2)`, oldest first.
+///
+/// A session's activity is at or past the frontier only if one of its messages
+/// is (`idx_lcm_raw_timestamp`) or, with no timestamped message, its session
+/// bounds are (`idx_sessions_activity_fallback`), so the page reads what moved
+/// since the frontier rather than aggregating every session. The `IN` list,
+/// unlike a `UNION`, keeps SQLite from merging the two ranges over a full scan
+/// of `sessions`.
+const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH activity AS (
+         SELECT s.provider, s.session_id, s.project_path,
+                s.started_at, s.ended_at,
+                (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
+                 WHERE m.provider = s.provider AND m.session_id = s.session_id)
+                    AS first_ts,
+                (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
+                 WHERE m.provider = s.provider AND m.session_id = s.session_id)
+                    AS last_ts,
+                s.rowid AS source_rowid
+         FROM sessions s
+         WHERE s.rowid IN (
+             SELECT touched.rowid
+             FROM lcm_raw_messages m
+             JOIN sessions touched
+               ON touched.provider = m.provider
+              AND touched.session_id = m.session_id
+             WHERE m.timestamp >= ?1
+             UNION ALL
+             SELECT rowid FROM sessions
+             WHERE COALESCE(ended_at, started_at) >= ?1
+         )
+     )
+     SELECT provider, session_id, project_path, started_at, ended_at,
+            first_ts, last_ts, source_rowid,
+            COALESCE(last_ts, ended_at, started_at) AS activity_timestamp
+     FROM activity
+     WHERE COALESCE(last_ts, ended_at, started_at) > ?1
+        OR (
+           COALESCE(last_ts, ended_at, started_at) = ?1
+           AND source_rowid > ?2
+        )
+     ORDER BY activity_timestamp ASC, source_rowid ASC
+     LIMIT ?3";
+
 pub(super) async fn session_activity_page_after(
     conn: &(impl QueryExecutor + ?Sized),
     activity_timestamp: i64,
@@ -949,50 +992,9 @@ pub(super) async fn session_activity_page_after(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    // A session's activity is at or past the frontier only if one of its
-    // messages is (`idx_lcm_raw_timestamp`) or, with no timestamped message,
-    // its session bounds are (`idx_sessions_activity_fallback`). Seeding the
-    // page from those index ranges keeps a convergence pass proportional to
-    // the activity since the frontier; aggregating every session instead
-    // read the whole message index on each host drain. The `IN` list, unlike
-    // a `UNION`, keeps SQLite from merging the two ranges over a full scan
-    // of `sessions`.
     let mut rows = conn
         .query(
-            "WITH activity AS (
-                 SELECT s.provider, s.session_id, s.project_path,
-                        s.started_at, s.ended_at,
-                        (SELECT MIN(m.timestamp) FROM lcm_raw_messages m
-                         WHERE m.provider = s.provider AND m.session_id = s.session_id)
-                            AS first_ts,
-                        (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
-                         WHERE m.provider = s.provider AND m.session_id = s.session_id)
-                            AS last_ts,
-                        s.rowid AS source_rowid
-                 FROM sessions s
-                 WHERE s.rowid IN (
-                     SELECT touched.rowid
-                     FROM lcm_raw_messages m
-                     JOIN sessions touched
-                       ON touched.provider = m.provider
-                      AND touched.session_id = m.session_id
-                     WHERE m.timestamp >= ?1
-                     UNION ALL
-                     SELECT rowid FROM sessions
-                     WHERE COALESCE(ended_at, started_at) >= ?1
-                 )
-             )
-             SELECT provider, session_id, project_path, started_at, ended_at,
-                    first_ts, last_ts, source_rowid,
-                    COALESCE(last_ts, ended_at, started_at) AS activity_timestamp
-             FROM activity
-             WHERE COALESCE(last_ts, ended_at, started_at) > ?1
-                OR (
-                   COALESCE(last_ts, ended_at, started_at) = ?1
-                   AND source_rowid > ?2
-                )
-             ORDER BY activity_timestamp ASC, source_rowid ASC
-             LIMIT ?3",
+            SESSION_ACTIVITY_PAGE_AFTER_SQL,
             params![
                 activity_timestamp,
                 source_rowid,

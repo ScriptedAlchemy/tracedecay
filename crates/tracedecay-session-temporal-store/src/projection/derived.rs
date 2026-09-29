@@ -263,24 +263,25 @@ async fn persist_derived_record(
     Ok(())
 }
 
+/// The evidence foreign key binds its first occurrence to the same session
+/// generation; `occurrence_id` alone is unindexed and scanned every occurrence.
+const DERIVED_ANCHOR_OWNER_SQL: &str = "SELECT anchor.owner_json
+     FROM session_occurrences AS occurrence
+     JOIN retrieval_anchors AS anchor
+       ON anchor.anchor_id = occurrence.retrieval_anchor_id
+     WHERE occurrence.session_id = ?1
+       AND occurrence.generation = ?2
+       AND occurrence.occurrence_id = ?3";
+
 async fn ensure_derived_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &SessionId,
     generation: i64,
     record: &SessionDerivedEvidenceRecordV1,
 ) -> SessionStoreResult<()> {
-    // The evidence row's foreign key already binds its first occurrence to
-    // this session generation, and that key is the occurrence primary key;
-    // `occurrence_id` alone has no index and scanned every occurrence.
     let mut owner_rows = conn
         .query(
-            "SELECT anchor.owner_json
-             FROM session_occurrences AS occurrence
-             JOIN retrieval_anchors AS anchor
-               ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             WHERE occurrence.session_id = ?1
-               AND occurrence.generation = ?2
-               AND occurrence.occurrence_id = ?3",
+            DERIVED_ANCHOR_OWNER_SQL,
             params![
                 session_id.as_str(),
                 generation,
