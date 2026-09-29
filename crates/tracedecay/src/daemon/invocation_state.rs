@@ -1279,12 +1279,14 @@ mod shutdown_tests {
         assert_eq!(receipt.unfinished(), &["invocation"]);
     }
 
-    #[tokio::test]
+    /// Paused time advances only through timers, so the bound below measures
+    /// grace the shutdown waited out, not host scheduling.
+    #[tokio::test(start_paused = true)]
     async fn cancel_admissions_then_empty_shutdown_is_prompt() {
         let state = DaemonInvocationState::default();
         state.cancel_admissions();
         state.cancel_admissions();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         assert!(
             state.shutdown().await.is_clean(),
             "empty invocation shutdown must expire cleanly"

@@ -293,7 +293,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         serde_json::json!(true),
         "a linked worktree without the watch opt-in must not serve a file listing: {routed_result}"
     );
-    let problem = &routed_result["problem"];
+    let problem = &routed_result["structuredContent"]["problem"];
     assert_eq!(
         (&problem["kind"], &problem["code"], &problem["message"]),
         (

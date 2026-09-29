@@ -1566,6 +1566,10 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
             .expect("bind Remote Brain TLS egress service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
 
+    // The 5 s idle deadlines must not race 128 handshakes on a loaded host:
+    // paused time advances only once every task waits, so the bounds below
+    // catch a stall rather than host scheduling.
+    tokio::time::pause();
     let mut peer_tasks = Vec::with_capacity(128);
     for _ in 0..128 {
         let certificate = certificate.clone();
@@ -1605,7 +1609,6 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
     .expect("every large response must reach real TLS backpressure");
     assert_eq!(service.remote_tls_available_admissions(), Some(0));
 
-    tokio::time::pause();
     for _ in 0..4 {
         if service
             .remote_tls_egress_snapshot()
