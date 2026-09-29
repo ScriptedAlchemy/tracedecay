@@ -517,30 +517,35 @@ async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
     assert!(!payload.contains(secret));
 }
 
+const REPOSITORY_GIT_EMAIL: &str = "tracedecay@example.invalid";
+const SANITIZED_REPOSITORY_PAYLOAD: &str = r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"repository evidence","role":"user"},"type":"user"}"#;
+
+fn git_in(repository: &std::path::Path, args: &[&str]) {
+    let output = Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .args(args)
+    .current_dir(repository)
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[tokio::test]
 async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
     let repository = TempDir::new().unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .args(args)
-        .current_dir(repository.path())
-        .output()
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.name", "TraceDecay Test"]);
-    git(&["config", "user.email", "tracedecay@example.invalid"]);
-    fs::write(repository.path().join("tracked.txt"), "content").unwrap();
-    git(&["add", "--", "tracked.txt"]);
-    git(&["commit", "-q", "-m", "initial"]);
+    let root = repository.path();
+    git_in(root, &["init", "-q", "-b", "main"]);
+    git_in(root, &["config", "user.name", "TraceDecay Test"]);
+    git_in(root, &["config", "user.email", REPOSITORY_GIT_EMAIL]);
+    fs::write(root.join("tracked.txt"), "content").unwrap();
+    git_in(root, &["add", "--", "tracked.txt"]);
+    git_in(root, &["commit", "-q", "-m", "initial"]);
 
     let application = application();
     let request = request(&json!({
@@ -565,10 +570,7 @@ async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
         panic!("repository observation must persist");
     };
     let sanitized_payload = sanitized_record.payload().to_string();
-    assert_eq!(
-        sanitized_payload,
-        r#"{"api_key":"[TraceDecay redacted: sensitive field]","message":{"content":"repository evidence","role":"user"},"type":"user"}"#
-    );
+    assert_eq!(sanitized_payload, SANITIZED_REPOSITORY_PAYLOAD);
     assert!(!sanitized_payload.contains("sk-repository-provenance-secret"));
     let attachment = outcome.receipt().repository_provenance_attachment();
     let EvidenceAvailabilityV1::Known(provenance) = attachment.availability() else {
