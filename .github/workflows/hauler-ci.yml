@@ -3,6 +3,10 @@ name: Hauler CI
 on:
   workflow_dispatch:
     inputs:
+      retire_conflict_markers:
+        description: Cancel the eight audited orphan conflict checks without starting workers
+        type: boolean
+        default: false
       pull_requests:
         description: Comma-separated PR numbers; empty admits eligible open PRs
         type: string
@@ -26,6 +30,77 @@ on:
 permissions: {}
 
 jobs:
+  # Temporary migration: remove after its cancellation receipt is verified.
+  retire-conflict-markers:
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      github.ref == 'refs/heads/master' &&
+      github.event_name == 'workflow_dispatch' && inputs.retire_conflict_markers
+    concurrency:
+      group: hauler-retire-conflict-markers
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+      pull-requests: read
+    steps:
+      - name: Retire only the audited queued conflict checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          const repository = 'ScriptedAlchemy/tracedecay';
+          if (process.env.GITHUB_REPOSITORY !== repository || process.env.GITHUB_REF !== 'refs/heads/master' || process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') throw new Error('Unexpected cleanup context');
+          const records = [
+            {"pr":2452,"id":109222551323,"head":"5b5abbb98dd28bd09c55b629976306aa7f59fed5","name":"Hauler / Linux A","external":"hauler:linux-a:5b5abbb98dd28bd09c55b629976306aa7f59fed5:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510876254"},
+            {"pr":2452,"id":109222553265,"head":"5b5abbb98dd28bd09c55b629976306aa7f59fed5","name":"Hauler / Linux B","external":"hauler:linux-b:5b5abbb98dd28bd09c55b629976306aa7f59fed5:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510876254"},
+            {"pr":2452,"id":109222554832,"head":"5b5abbb98dd28bd09c55b629976306aa7f59fed5","name":"Hauler / Compile checks","external":"hauler:checks:5b5abbb98dd28bd09c55b629976306aa7f59fed5:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510876254"},
+            {"pr":2452,"id":109222556751,"head":"5b5abbb98dd28bd09c55b629976306aa7f59fed5","name":"Hauler / Shipped CLI and dashboard","external":"hauler:product:5b5abbb98dd28bd09c55b629976306aa7f59fed5:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510876254"},
+            {"pr":2441,"id":109222470573,"head":"d09b67592c118cdf860938ccf744113e406b93b0","name":"Hauler / Linux A","external":"hauler:linux-a:d09b67592c118cdf860938ccf744113e406b93b0:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510843456"},
+            {"pr":2441,"id":109222473353,"head":"d09b67592c118cdf860938ccf744113e406b93b0","name":"Hauler / Linux B","external":"hauler:linux-b:d09b67592c118cdf860938ccf744113e406b93b0:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510843456"},
+            {"pr":2441,"id":109222475466,"head":"d09b67592c118cdf860938ccf744113e406b93b0","name":"Hauler / Compile checks","external":"hauler:checks:d09b67592c118cdf860938ccf744113e406b93b0:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510843456"},
+            {"pr":2441,"id":109222477278,"head":"d09b67592c118cdf860938ccf744113e406b93b0","name":"Hauler / Shipped CLI and dashboard","external":"hauler:product:d09b67592c118cdf860938ccf744113e406b93b0:351f784a82b1e66a3943f2bf758d277433710c3ae9d304c1117179e8ce151a77:run:36510843456"},
+          ];
+          async function api(path, body) {
+            const response = await fetch(`https://api.github.com/repos/${repository}/${path}`, {
+              method: body ? 'PATCH' : 'GET', redirect: 'error', signal: AbortSignal.timeout(15000),
+              headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+              ...(body ? { body: JSON.stringify(body) } : {}),
+            });
+            if (!response.ok) throw new Error(`GitHub request failed (${response.status})`);
+            return response.json();
+          }
+          async function verifyPull(record) {
+            const pr = await api(`pulls/${record.pr}`);
+            if (pr.state !== 'open' || pr.draft || pr.user?.login !== 'ScriptedAlchemy' || pr.head?.repo?.full_name !== repository || pr.base?.repo?.full_name !== repository || pr.base?.ref !== 'master' || pr.head.sha !== record.head || pr.mergeable !== false) throw new Error(`PR ${record.pr} no longer matches the audited conflict`);
+          }
+          function verifyCheck(check, record, status) {
+            if (check.id !== record.id || check.name !== record.name || check.head_sha !== record.head || check.external_id !== record.external || check.app?.slug !== 'github-actions' || (check.status !== status && !(status === 'queued' && check.status === 'completed' && check.conclusion === 'cancelled'))) throw new Error(`Check ${record.id} changed; left untouched`);
+          }
+          // Read all eight identities before writing; cancelled markers make retries safe.
+          for (const record of records) {
+            await verifyPull(record);
+            verifyCheck(await api(`check-runs/${record.id}`), record, 'queued');
+          }
+          for (const record of records) {
+            await verifyPull(record);
+            const check = await api(`check-runs/${record.id}`);
+            verifyCheck(check, record, 'queued');
+            if (check.status === 'completed') continue;
+            await api(`check-runs/${record.id}`, {
+              status: 'completed', conclusion: 'cancelled', completed_at: new Date().toISOString(),
+              output: { title: 'Merge conflicts block testing', summary: 'This queued admission never started: the audited PR head has merge conflicts and no testable merge snapshot. No test success is inferred.' },
+            });
+          }
+          for (const record of records) {
+            const check = await api(`check-runs/${record.id}`);
+            verifyCheck(check, record, 'completed');
+            if (check.conclusion !== 'cancelled') throw new Error(`Check ${record.id} did not confirm cancellation`);
+          }
+          console.log('Confirmed cancellation of all eight audited queued conflict checks.');
+          NODE
+
   enqueue:
     concurrency:
       group: hauler-enqueue-${{ github.event.pull_request.number }}
@@ -60,6 +135,7 @@ jobs:
     if: >-
       github.repository == 'ScriptedAlchemy/tracedecay' &&
       github.event_name != 'pull_request_target' &&
+      !inputs.retire_conflict_markers &&
       (github.event_name == 'workflow_dispatch' || vars.HAULER_CI_ENABLED == 'true')
     name: Hauler pool / ${{ matrix.lane }}
     concurrency:
