@@ -174,7 +174,7 @@ async fn fact_feedback_persists_canonical_trust_events_and_status() {
         .await
         .expect("canonical memory status");
     assert!(status.get("status").is_none());
-    assert!(status["memory"]["fact_count"].as_u64().unwrap() >= 1);
+    assert_eq!(status["memory"]["fact_count"], 1);
     assert_eq!(status["memory"]["helpful_count"], 1);
     assert_eq!(status["memory"]["unhelpful_count"], 1);
 
