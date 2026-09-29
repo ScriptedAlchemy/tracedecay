@@ -331,7 +331,9 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             Ok(result) => result?,
             Err(_elapsed) => return Err(tool_dispatch_deadline_error(tool_name, budget)),
         };
-        completion.code_graph = options.served_code_graph.served();
+        if !completion.result.carries_freshness_verdict() {
+            completion.code_graph = options.served_code_graph.served();
+        }
         Ok(completion)
     })
 }

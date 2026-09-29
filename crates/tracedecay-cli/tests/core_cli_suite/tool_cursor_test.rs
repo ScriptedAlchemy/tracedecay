@@ -573,3 +573,57 @@ fn a_search_cursor_replayed_with_another_query_or_malformed_is_refused() {
         "page two repeated page one: {first_names:?} / {second_names:?}"
     );
 }
+
+/// `--format json` prints the whole typed search result even where the
+/// agent-bounded rendering of the same result is a truncated preview.
+#[test]
+fn search_format_json_prints_the_whole_typed_result() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &hub_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    hub_node_id(&home, &project);
+
+    let started = Instant::now();
+    let (stdout, printed) = loop {
+        let output = tracedecay_command_with_home(&home)
+            .current_dir(&project)
+            .args(["tool", "search", "--query", "leaf_01", "--format", "json"])
+            .output()
+            .expect("tracedecay tool should run");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let printed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            panic!(
+                "search printed non-JSON ({error}):\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        if printed.get("preview").is_some() || printed["freshness"]["state"] == "fresh" {
+            break (stdout, printed);
+        }
+        assert!(
+            started.elapsed() < INDEX_READY_TIMEOUT,
+            "search never answered fresh: {printed}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+
+    assert_eq!(printed.get("preview"), None, "{printed}");
+    let names = printed["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search printed no results: {printed}"))
+        .iter()
+        .map(|row| row["display"]["name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    // Ranking below the exact hit is not this test's subject; the whole
+    // body printed unbounded is.
+    assert_eq!(names.first(), Some(&"leaf_01"), "{printed}");
+    assert!(
+        stdout.len() > tracedecay_mcp::MAX_RESPONSE_CHARS,
+        "the typed result must exceed the agent response budget for this to prove \
+         anything: {} chars",
+        stdout.len()
+    );
+}
