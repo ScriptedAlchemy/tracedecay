@@ -1780,6 +1780,8 @@ async fn recent_test_results(
         .await
     {
         Ok(Some(record)) => record,
+        // No managed test run is retained for this root. Retrying cannot
+        // produce one.
         Ok(None) => {
             return problem(
                 context,

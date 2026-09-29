@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use serde_json::Value;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
@@ -899,6 +899,111 @@ fn ruby_receiver_call_of_the_same_name_is_not_recursion() {
         self_calls(&method("clamp")),
         0,
         "`x.clamp(lo, hi)` calls the receiver's method, not the enclosing one"
+    );
+}
+
+#[test]
+fn rust_calls_inside_macro_arguments_bind_like_calls_outside_them() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.macro.main",
+            "crates/app/src/main.rs",
+            "mod legacy;\nmod math;\nmod util;\n\nfn total() -> i64 { 0 }\n\nfn main() {\n    let store = util::Store;\n    println!(\"{} {}\", math::fact(5), util::normalize(\"x\"));\n    assert_eq!(store.total(), 0);\n}\n",
+        ),
+        (
+            "file.macro.math",
+            "crates/app/src/math.rs",
+            "pub fn fact(n: u64) -> u64 { n }\n",
+        ),
+        (
+            "file.macro.util",
+            "crates/app/src/util.rs",
+            "pub struct Store;\nimpl Store {\n    pub fn total(&self) -> i64 { 0 }\n}\npub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+        (
+            "file.macro.legacy",
+            "crates/app/src/legacy.rs",
+            "pub fn normalize(s: &str) -> String { s.to_owned() }\n",
+        ),
+    ]);
+    let main = symbol_occurrence(&generation, "crates/app/src/main.rs::main");
+    let calls_from_main = |qualified_name: &str| {
+        let target = symbol_occurrence(&generation, qualified_name);
+        generation.edges().iter().any(|edge| {
+            edge.from_occurrence == main
+                && edge.to_occurrence == target
+                && edge.kind == RelationEdgeKindV1::Calls
+        })
+    };
+
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/math.rs::fact"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert_resolved_edge(
+        &generation,
+        &main,
+        &symbol_occurrence(&generation, "crates/app/src/util.rs::normalize"),
+        RelationEdgeKindV1::Calls,
+    );
+    assert!(
+        !calls_from_main("crates/app/src/legacy.rs::normalize"),
+        "`util::normalize` names its module, not the same-named legacy function"
+    );
+    assert!(
+        !calls_from_main("crates/app/src/main.rs::total"),
+        "`store.total()` is a receiver call, not the same-file `total`"
+    );
+}
+
+#[test]
+fn rust_in_file_relative_calls_bind_the_same_file_item() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.relative.lib",
+            "crates/app/src/lib.rs",
+            "mod other;\n\npub fn helper() -> u32 { 0 }\n\npub fn via_self() -> u32 { self::helper() }\n\npub fn via_crate() -> u32 { crate::helper() }\n\nmod tests {\n    fn via_super() -> u32 { super::helper() }\n    fn via_super_in_macro() { assert_eq!(super::helper(), 0); }\n}\n",
+        ),
+        (
+            "file.relative.other",
+            "crates/app/src/other.rs",
+            "fn helper() -> u32 { 1 }\n\npub fn via_parent() -> u32 { super::helper() }\n",
+        ),
+    ]);
+    let callers_of = |qualified_name: &str| {
+        let target = symbol_occurrence(&generation, qualified_name);
+        let callers = generation
+            .edges()
+            .iter()
+            .filter(|edge| edge.to_occurrence == target && edge.kind == RelationEdgeKindV1::Calls)
+            .map(|edge| edge.from_occurrence.clone())
+            .collect::<Vec<_>>();
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .filter(|symbol| callers.contains(&symbol.occurrence))
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        callers_of("crates/app/src/lib.rs::helper"),
+        [
+            "crates/app/src/lib.rs::tests::via_super",
+            "crates/app/src/lib.rs::tests::via_super_in_macro",
+            "crates/app/src/lib.rs::via_crate",
+            "crates/app/src/lib.rs::via_self",
+            "crates/app/src/other.rs::via_parent",
+        ]
+        .into()
+    );
+    assert_eq!(
+        callers_of("crates/app/src/other.rs::helper"),
+        [].into(),
+        "`super::helper` in other.rs names the crate root's helper"
     );
 }
 
