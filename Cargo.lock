@@ -6187,6 +6187,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracing",
 ]
 
 [[package]]

@@ -305,20 +305,6 @@ impl ConfigurationRegistry {
                 });
             }
         }
-        if let ConfigurationValueV1::StringList(patterns) = value
-            && matches!(
-                key.as_str(),
-                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
-            )
-        {
-            validate_index_path_patterns(patterns).map_err(|error| {
-                ConfigurationRegistryError::InvalidPathPattern {
-                    key: key.clone(),
-                    pattern: error.pattern,
-                    message: error.message,
-                }
-            })?;
-        }
         if matches!(
             key.as_str(),
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY | USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY
@@ -338,6 +324,36 @@ impl ConfigurationRegistry {
                     actual: *actual,
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// [`Self::validate_value`] plus the checks that gate only a new write.
+    ///
+    /// Stored snapshots are revalidated with `validate_value` on every read,
+    /// so a rule that may tighten across releases must not live there: an
+    /// `index.exclude.v1` pattern an earlier release accepted has to keep
+    /// loading (the runtime skips what no longer compiles) while a new
+    /// write of it is refused.
+    pub fn validate_written_value(
+        &self,
+        key: &SettingKey,
+        value: &ConfigurationValueV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        self.validate_value(key, value)?;
+        if let ConfigurationValueV1::StringList(patterns) = value
+            && matches!(
+                key.as_str(),
+                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
+            )
+        {
+            validate_index_path_patterns(patterns).map_err(|error| {
+                ConfigurationRegistryError::InvalidPathPattern {
+                    key: key.clone(),
+                    pattern: error.pattern,
+                    message: error.message,
+                }
+            })?;
         }
         Ok(())
     }
@@ -504,7 +520,6 @@ impl Default for ProjectDefaults {
         let mut exclude: Vec<String> = vec![
             ".git/**".to_string(),
             ".tracedecay/**".to_string(),
-            "bin/**".to_string(),
             "**/*.min.*".to_string(),
         ];
         for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
@@ -737,6 +752,26 @@ mod proximity_threshold_tests {
                 &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod index_path_pattern_tests {
+    use super::*;
+
+    /// A stored pattern an earlier release never compiled must keep loading
+    /// while a new write of it is refused.
+    #[test]
+    fn a_malformed_index_pattern_loads_but_cannot_be_written() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).expect("key");
+        let value = ConfigurationValueV1::StringList(vec!["src/[abc".to_owned()]);
+
+        assert!(registry.validate_value(&key, &value).is_ok());
+        assert!(matches!(
+            registry.validate_written_value(&key, &value),
+            Err(ConfigurationRegistryError::InvalidPathPattern { .. })
         ));
     }
 }

@@ -33,7 +33,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
+use tracedecay_domain::{IndexPathPolicyV1, ProjectId, validate_index_path_patterns};
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
@@ -255,8 +255,8 @@ fn runtime_config_from_snapshot(
     })?;
     Ok(RuntimeTraceDecayConfig {
         index_paths: IndexPathPolicyV1::new(
-            required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
-            required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
+            compilable_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+            compilable_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
         )
         .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?,
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
@@ -376,6 +376,31 @@ pub fn required_string_list(
     }
 }
 
+/// The stored index path patterns that still compile. A new write is refused
+/// up front, but an earlier release persisted patterns it never compiled, so
+/// one that no longer compiles is skipped with a warning instead of failing
+/// the whole runtime configuration and with it every tool.
+fn compilable_index_patterns(
+    snapshot: &ConfigurationSnapshotV1,
+    key_name: &str,
+) -> Result<Vec<String>> {
+    let mut patterns = required_string_list(snapshot, key_name)?;
+    patterns.retain(
+        |pattern| match validate_index_path_patterns(std::slice::from_ref(pattern)) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    setting = key_name,
+                    %error,
+                    "skipping a stored index path pattern that no longer compiles"
+                );
+                false
+            }
+        },
+    );
+    Ok(patterns)
+}
+
 fn required_lcm_summarizer_executables(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<LcmSummarizerExecutablesV1> {
@@ -402,8 +427,8 @@ mod tests {
     use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-        ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-        SettingKey,
+        ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+        SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -506,6 +531,23 @@ mod tests {
             message.contains("expected unsigned"),
             "type mismatches must be reported as such: {message}"
         );
+    }
+
+    #[test]
+    fn pin_skips_a_stored_index_pattern_that_no_longer_compiles() {
+        // An earlier release accepted patterns it never compiled; loading
+        // one must not take every tool down with the configuration.
+        let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();
+        let stored = resolved(BTreeMap::from([(
+            key,
+            ConfigurationValueV1::StringList(vec!["src/[abc".to_owned(), "docs/**".to_owned()]),
+        )]));
+
+        let pinned = PinnedRuntimeConfiguration::new(target(), revision(), stored).unwrap();
+
+        assert_eq!(pinned.config().index_paths.exclude_patterns(), ["docs/**"]);
+        assert!(pinned.config().index_paths.excludes("docs/guide.md"));
+        assert!(!pinned.config().index_paths.excludes("src/a"));
     }
 
     #[test]

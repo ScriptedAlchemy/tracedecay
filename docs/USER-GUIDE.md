@@ -159,11 +159,13 @@ From that set, the project's `index.exclude.v1` patterns remove paths, and
 The shipped exclude list skips generated, vendored, and cache directories
 such as `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`,
 `.next`, `.turbo`, `.cache`, virtualenvs, and `__pycache__`, plus minified
-`*.min.*` assets and a top-level `bin/`.
+`*.min.*` assets.
 
 A pattern is a glob over the project-relative path: `*` and `?` stay inside
 one path segment, `**` spans segments, and a pattern that names a directory
-covers everything under it (`docs` and `docs/**` are equivalent). `grep`,
+covers everything under it (`docs` and `docs/**` are equivalent). A pattern
+without a slash matches only at the project root; write `**/docs` to match
+the directory at any depth. `grep`,
 `ast_grep_search`, and `unmounted_files` walk the same filtered file set.
 
 Both settings are project-scoped and apply when the daemon restarts; the next
