@@ -13,7 +13,7 @@ use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
     ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange, RestartRequirementV1,
-    RollbackModeV1, SettingKey, SettingSensitivityV1,
+    RollbackModeV1, SettingKey, SettingSensitivityV1, is_profile_setting_key,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -202,6 +202,35 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationProtectedApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
+}
+
+impl ConfigurationWireRequestV1 {
+    /// Whether the profile's own configuration store answers this request:
+    /// a read or direct write of profile settings only. Every other request,
+    /// a mixed batch included, is a project configuration request.
+    pub fn targets_profile_settings(&self) -> bool {
+        let mutation_key = |mutation: &ConfigurationDirectMutationRequestV1| match mutation {
+            ConfigurationDirectMutationRequestV1::Set { key, .. }
+            | ConfigurationDirectMutationRequestV1::Unset { key, .. } => {
+                is_profile_setting_key(key)
+            }
+        };
+        match self {
+            Self::Get(request) => is_profile_setting_key(&request.key),
+            Self::Set(request) => is_profile_setting_key(&request.key),
+            Self::Unset(request) => is_profile_setting_key(&request.key),
+            Self::Batch(request) => {
+                !request.mutations.is_empty() && request.mutations.iter().all(mutation_key)
+            }
+            Self::List(_)
+            | Self::ObservedState(_)
+            | Self::ProtectedPreview(_)
+            | Self::ProtectedApply(_)
+            | Self::RollbackPreview(_)
+            | Self::RollbackApply(_)
+            | Self::Audit(_) => false,
+        }
+    }
 }
 
 /// Decode an envelope-stripped configuration invocation payload.

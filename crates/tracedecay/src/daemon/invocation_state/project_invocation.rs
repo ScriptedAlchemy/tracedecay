@@ -66,6 +66,25 @@ impl DaemonInvocationState {
             )
             .await;
         }
+        if let DaemonInvocationPayload::ProfileConfiguration {
+            surface_operation,
+            request: configuration_request,
+            observed_at,
+            deadline,
+            cancellation,
+        } = request.payload
+        {
+            return super::super::profile_configuration::invoke_profile_configuration(
+                store_administration,
+                request.request_id,
+                surface_operation,
+                configuration_request,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+            .await;
+        }
         // The caller's project, when it names one, only marks that project
         // active in the profile's registry; the profile owner never opens it.
         if let DaemonInvocationPayload::ProfileGraphTool {

@@ -11,21 +11,21 @@ use tracedecay_domain::configuration::{
     INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
-    LcmSummarizerExecutablesV1, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
-    safe_work_topology_policy_v1,
+    LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
+    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
@@ -203,7 +203,7 @@ impl ConfigurationRegistry {
         register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
-            .filter(|key| **key != USER_CODE_INDEX_WORKERS_SETTING_KEY)
+            .filter(|key| !PROFILE_SETTING_KEYS_V1.contains(key))
             .map(|key| setting_key(key))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         let actual = registry
@@ -221,14 +221,30 @@ impl ConfigurationRegistry {
         Ok(registry)
     }
 
-    /// Build the exact profile-session registry for the daemon-wide code-index
-    /// worker selection. This setting must be available before any project is
-    /// opened, so it cannot share the project-session snapshot authority.
-    pub fn profile_code_index_workers() -> Result<Self, ConfigurationRegistryError> {
+    /// Build the exact profile-session registry of every setting in
+    /// [`PROFILE_SETTING_KEYS_V1`]. These settings resolve before and without
+    /// any project, so they cannot share a project snapshot authority.
+    pub fn profile() -> Result<Self, ConfigurationRegistryError> {
         let mut registry = Self {
             definitions: BTreeMap::new(),
         };
         registry.register(code_index_worker_definition()?)?;
+        register_profile_scalar_settings(&mut registry)?;
+        Ok(registry)
+    }
+
+    /// A registry of exactly `definitions`, for fixtures that reproduce a
+    /// store an earlier registry wrote.
+    #[cfg(test)]
+    pub(crate) fn from_definitions(
+        definitions: impl IntoIterator<Item = SettingDefinitionV1>,
+    ) -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        for definition in definitions {
+            registry.register(definition)?;
+        }
         Ok(registry)
     }
 
@@ -375,7 +391,12 @@ fn register_project_stored_user_profile_settings(
         scope: SettingScopeV1::UserProfile,
         restart_requirement: RestartRequirementV1::None,
         deprecation: DeprecationStateV1::Active,
-    })?;
+    })
+}
+
+fn register_profile_scalar_settings(
+    registry: &mut ConfigurationRegistry,
+) -> Result<(), ConfigurationRegistryError> {
     for (key, default_value, restart_requirement) in [
         (
             USER_UPLOAD_ENABLED_SETTING_KEY,
@@ -774,20 +795,21 @@ mod released_setting_keys_tests {
     ];
 
     /// A released key that is neither registered nor retired would turn every
-    /// persisted snapshot carrying it into a configuration reset on open.
+    /// persisted snapshot carrying it into a configuration reset on open. A
+    /// key the profile store took over is retired from project snapshots.
     #[test]
     fn every_released_setting_key_is_registered_or_retired() {
         let core = ConfigurationRegistry::core().expect("core registry");
-        let profile =
-            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        let profile = ConfigurationRegistry::profile().expect("profile registry");
         for raw_key in RELEASED_SETTING_KEYS {
             let key = SettingKey::new(*raw_key).expect("key");
-            let registered = core.definition(&key).is_ok() || profile.definition(&key).is_ok();
+            let in_core = core.definition(&key).is_ok();
+            let in_profile = profile.definition(&key).is_ok();
             let retired = RETIRED_CORE_SETTING_KEYS_V1.contains(raw_key);
             assert!(
-                registered != retired,
-                "released setting {raw_key} must be exactly one of registered or retired \
-                 (registered: {registered}, retired: {retired})"
+                !(in_core && (in_profile || retired)) && (in_core || in_profile || retired),
+                "released setting {raw_key} must be exactly one of core-registered or retired \
+                 from core (core: {in_core}, profile: {in_profile}, retired: {retired})"
             );
         }
         for raw_key in RETIRED_CORE_SETTING_KEYS_V1 {
@@ -805,7 +827,7 @@ mod user_profile_settings_tests {
 
     #[test]
     fn editable_profile_settings_are_registered_with_exact_scope_and_restart_semantics() {
-        let registry = ConfigurationRegistry::core().expect("registry");
+        let registry = ConfigurationRegistry::profile().expect("registry");
         for (raw_key, kind, restart) in [
             (
                 USER_UPLOAD_ENABLED_SETTING_KEY,
@@ -849,9 +871,15 @@ mod user_profile_settings_tests {
             Err(ConfigurationRegistryError::UnknownSetting(_))
         ));
 
-        let registry =
-            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
-        assert_eq!(registry.definitions().count(), 1);
+        let registry = ConfigurationRegistry::profile().expect("profile registry");
+        assert_eq!(
+            registry
+                .definitions()
+                .map(|definition| definition.key.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            PROFILE_SETTING_KEYS_V1.iter().copied().collect(),
+            "the profile route must send exactly the keys the profile store registers"
+        );
         let definition = registry.definition(&key).expect("definition");
 
         assert_eq!(definition.schema_revision, 7);
