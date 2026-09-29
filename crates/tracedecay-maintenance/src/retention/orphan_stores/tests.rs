@@ -278,27 +278,16 @@ fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
             },
         )
     });
-    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-    let second = std::thread::spawn(move || {
-        let result = super::unregistered_page::read_project_directory_page(
-            &second_profile,
-            None,
-            1,
-            &|| false,
-        );
-        finished_tx.send(result).unwrap();
-    });
-    let independent = finished_rx.recv_timeout(Duration::from_secs(1));
-    // Always release and join the stalled writer before asserting so the
-    // regression cannot strand a process-global lock on its failure path.
+    entered_rx.recv().unwrap();
+    // The first writer stays paused until this read returns, so a regression
+    // that serializes profiles deadlocks here instead of racing a wall clock.
+    let independent =
+        super::unregistered_page::read_project_directory_page(&second_profile, None, 1, &|| false);
+    // Release and join the stalled writer before asserting so a failure cannot
+    // strand a process-global lock.
     release_tx.send(()).unwrap();
     assert_eq!(first.join().unwrap().unwrap(), Some(false));
-    second.join().unwrap();
-    let page = independent
-        .expect("another profile must progress before the paused writer is released")
-        .unwrap()
-        .unwrap();
+    let page = independent.unwrap().unwrap();
     assert_eq!(page.entries, ["proj_independent"]);
 }
 
@@ -446,11 +435,8 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     let page =
-        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
             .unwrap()
             .expect("first bounded page creates a resumable inventory");
     let cursor = page
@@ -467,7 +453,7 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         &profile_root,
         Some(&cursor),
         1,
-        &interrupted,
+        &|| false,
     )
     .unwrap()
     .expect("a torn header is replaced before restart resume");

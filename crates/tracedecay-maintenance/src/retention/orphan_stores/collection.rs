@@ -93,8 +93,12 @@ pub(crate) fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
-        MonotonicDeadline::at(Instant::now() + std::time::Duration::from_hours(24)),
+        unbounded_deadline(),
     )
+}
+
+pub(crate) fn unbounded_deadline() -> MonotonicDeadline {
+    MonotonicDeadline::at(Instant::now() + std::time::Duration::from_hours(24))
 }
 
 pub(crate) fn store_finding_is_profile_contained(

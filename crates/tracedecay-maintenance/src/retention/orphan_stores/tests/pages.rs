@@ -746,11 +746,8 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     let page =
-        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
             .unwrap()
             .expect("first bounded portable page completes");
     let cursor = page
@@ -764,7 +761,7 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let interrupted = || cancelled.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || cancelled.is_cancelled();
     assert!(
         super::unregistered_page::read_project_directory_page(
             &profile_root,
@@ -779,7 +776,7 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
 
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || false;
     let hydration_page = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
