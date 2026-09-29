@@ -1199,6 +1199,16 @@ pub(crate) fn application_invalid_request_error(tool: &str, detail: &str) -> Val
     )
 }
 
+/// Asserts a JSON-RPC response is `tool`'s reviewed-schema refusal.
+#[cfg(feature = "test-transport")]
+pub(crate) fn assert_application_invalid_request(response: &Value, tool: &str, detail: &str) {
+    assert_eq!(
+        response["error"],
+        application_invalid_request_error(tool, detail),
+        "{response}"
+    );
+}
+
 /// The JSON-RPC `error` for any `application_surface_invalid_request`
 /// refusal, with its whole `detail`.
 #[cfg(feature = "test-transport")]

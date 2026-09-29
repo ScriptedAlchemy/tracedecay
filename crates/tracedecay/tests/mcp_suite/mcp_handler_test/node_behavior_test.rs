@@ -165,8 +165,9 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
         &node_call(&server, json!({"node_id": fetch_id, "limit": 1})).await,
         "invalid arguments for tracedecay_node: unknown field `limit`, expected `node_id`",
     );
-    assert_malformed_call(
+    crate::support::assert_application_invalid_request(
         &node_call(&server, json!([fetch_id])).await,
+        "tracedecay_node",
         "invalid arguments: tracedecay_node expects a JSON object",
     );
     assert_execution_failed(
@@ -515,14 +516,6 @@ fn parse_json(text: &str) -> Value {
 
 /// A non-object argument list never reaches the owner's typed parser: the
 /// MCP boundary rejects the call itself.
-fn assert_malformed_call(response: &Value, detail: &str) {
-    assert_eq!(
-        response["error"],
-        crate::support::application_invalid_request_error("tracedecay_node", detail),
-        "{response}"
-    );
-}
-
 fn assert_execution_failed(response: &Value, message: &str) {
     assert!(response["error"].is_null(), "{response}");
     let problem = refusal_problem(&response["result"]);
