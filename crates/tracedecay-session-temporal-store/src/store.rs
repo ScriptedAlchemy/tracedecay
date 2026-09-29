@@ -138,7 +138,11 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
         session_id: &tracedecay_domain::SessionId,
     ) -> SessionStoreResult<()> {
         let request = SessionTemporalAccess::new(self.db)
-            .pending_session_temporal_refresh_page_result(128, 0, None)
+            .pending_session_temporal_refresh_page_result(
+                128,
+                0,
+                &crate::SessionTemporalRefreshDiscoveryCursor::default(),
+            )
             .await?
             .into_parts()
             .0
@@ -148,7 +152,17 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
                 context: "test temporal fixture pending refresh",
             })?;
         self.begin_or_join_session_refresh(request).await?;
+        self.complete_running_session_refresh_for_test(session_id)
+            .await
+    }
 
+    /// Projects and completes the refresh already running for `session_id`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
+    pub async fn complete_running_session_refresh_for_test(
+        &self,
+        session_id: &tracedecay_domain::SessionId,
+    ) -> SessionStoreResult<()> {
         loop {
             let recovery = self.session_refresh_recovery(session_id).await?.ok_or(
                 SessionStoreError::InvalidStateTransition {

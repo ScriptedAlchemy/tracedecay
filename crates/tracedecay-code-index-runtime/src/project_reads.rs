@@ -15,7 +15,7 @@ use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedC
 
 use crate::code_index_scheduler::{
     CodeIndexAutomaticAdmissionV1, CodeIndexSchedulerRegistryV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1,
+    LatestCompleteCodeIndexV1, ServingReadLeaseV1,
 };
 
 /// Whether this route's code index is disabled by contract, so no generation
@@ -83,10 +83,20 @@ struct ProjectCodeGraphServingProjectionV1 {
 }
 
 impl ProjectCodeGraphServingAuthorityV1 {
-    async fn project(&self) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
+    /// `lease` is [`ServingReadLeaseV1::Renew`] for a graph read and
+    /// [`ServingReadLeaseV1::Observe`] for the census, which reports on the
+    /// seat without needing it resident.
+    async fn project(
+        &self,
+        lease: ServingReadLeaseV1,
+    ) -> Result<ProjectCodeGraphServingProjectionV1, CodeGraphReadError> {
         if let Some(latest) = self
             .schedulers
-            .latest_complete_ready_decoded_for_root_scope(&self.project_root, &self.scope)
+            .latest_complete_ready_decoded_for_root_scope_with(
+                &self.project_root,
+                &self.scope,
+                lease,
+            )
             .await
         {
             return Self::complete_projection(
@@ -120,7 +130,7 @@ impl ProjectCodeGraphServingAuthorityV1 {
         }
         let Some(seated) = self
             .schedulers
-            .latest_complete_serving_for_root_scope(&self.project_root, &self.scope)
+            .latest_complete_serving_for_root_scope(&self.project_root, &self.scope, lease)
             .await
         else {
             return Err(CodeGraphReadError::Unavailable {
@@ -201,7 +211,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 return Err(CodeGraphReadError::Denied);
             }
             refuse_projection_wait(&request)?;
-            let wait = self.authority.project();
+            let wait = self.authority.project(ServingReadLeaseV1::Renew);
             let projection = match (request.deadline.as_ref(), request.live_cancellation) {
                 (None, None) => wait.await,
                 (deadline, live_cancellation) => {
@@ -266,7 +276,7 @@ pub fn project_code_index_generation_census_reader(
     Arc::new(move || {
         let authority = authority.clone();
         Box::pin(async move {
-            let Ok(projection) = authority.project().await else {
+            let Ok(projection) = authority.project(ServingReadLeaseV1::Observe).await else {
                 return tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
                     reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
                 };

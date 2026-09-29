@@ -9,6 +9,11 @@
 //! exact and lexical reads keep serving from the text artifact, graph reads
 //! answer warming while the engine reopens from the durable graph, and the
 //! next read that needs the whole generation re-decodes it.
+//!
+//! Reads that only report on the seat (the status census, freshness) do not
+//! renew the lease, and a refresh of the worktree refused for memory takes
+//! the serving graph back between requests: that graph is what the refresh
+//! replaces, so protecting it until it idles would only hold the refresh.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,6 +36,15 @@ use super::reconcile::ReconcilePassesV1;
 use super::registry::ServingGenerationSlot;
 use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
+/// Whether a serving read renews its worktree's residency lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServingReadLeaseV1 {
+    /// The read serves from the decoded generation or its graph.
+    Renew,
+    /// The read only reports on the seat, so it must not keep it resident.
+    Observe,
+}
+
 pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
     serving_generation_epoch: Arc<AtomicU64>,
@@ -40,6 +54,7 @@ pub(super) struct WorktreeResidencyV1 {
     publication: DaemonCodeIndexPublicationStoreV1,
     text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     last_used: Mutex<Instant>,
+    refresh_waits_for_memory: AtomicBool,
 }
 
 pub(super) struct WorktreeResidencyPartsV1 {
@@ -63,6 +78,53 @@ impl WorktreeResidencyV1 {
             publication: parts.publication,
             text_generation: parts.text_generation,
             last_used: Mutex::new(Instant::now()),
+            refresh_waits_for_memory: AtomicBool::new(false),
+        }
+    }
+
+    /// Record whether this worktree's last reconcile was refused for resident
+    /// memory. While it is, memory given back anywhere in the process is its
+    /// retry.
+    pub(super) fn set_refresh_waits_for_memory(&self, waits: bool) {
+        self.refresh_waits_for_memory
+            .store(waits, Ordering::Release);
+    }
+
+    pub(super) fn refresh_waits_for_memory(&self) -> bool {
+        self.refresh_waits_for_memory.load(Ordering::Acquire)
+    }
+
+    /// Give back the serving graph a refused refresh of this worktree is
+    /// waiting on. An engine a graph read holds answers busy and stays, so
+    /// only the gaps between requests are taken; graph reads meanwhile answer
+    /// warming, as after an idle release. A release is announced as headroom.
+    pub(super) fn yield_serving_graph_to_refresh(self: &Arc<Self>, owners: &ResidentOwnersV1) {
+        let released = [
+            (
+                ResidentOwnerKindV1::GraphCatalog,
+                GraphCatalogOwnerV1(Arc::clone(self)).release(),
+            ),
+            (
+                ResidentOwnerKindV1::GraphEngine,
+                GraphEngineOwnerV1(Arc::clone(self)).release(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, release)| match release {
+            ResidentOwnerReleaseV1::Released { bytes } => Some((kind, bytes)),
+            ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+        })
+        .inspect(|(kind, bytes)| {
+            tracing::info!(
+                event = "code_index_serving_graph_yielded_to_refresh",
+                kind = kind.as_str(),
+                bytes = bytes.measured(),
+                "a refresh refused for memory took back the serving graph it replaces"
+            );
+        })
+        .count();
+        if released > 0 {
+            owners.note_headroom();
         }
     }
 
