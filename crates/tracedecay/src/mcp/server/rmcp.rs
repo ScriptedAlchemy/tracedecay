@@ -464,9 +464,20 @@ mod tests {
             .assert_last_response_matches_raw_dispatch(false)
             .await;
         assert_eq!(
-            fixture.last_response()["error"]["code"],
-            json!(-32603),
-            "handler error code is a host-visible protocol contract",
+            fixture.last_response()["error"],
+            json!({
+                "code": -32602,
+                "message": "tool project route failed: reason_code=unknown_tool retryable=false: unknown tool: tracedecay_not_a_tool",
+                "data": {
+                    "tool": "tracedecay_not_a_tool",
+                    "code": "unknown_tool",
+                    "reason_code": "unknown_tool",
+                    "kind": "invalid_request",
+                    "retryable": false,
+                    "detail": "unknown tool: tracedecay_not_a_tool",
+                },
+            }),
+            "an unknown tool is a non-retryable invalid-params refusal on the wire",
         );
         assert!(
             handler_error.to_string().contains("unknown tool"),
