@@ -13,8 +13,9 @@ pub mod work_executable_binding;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
@@ -380,20 +381,31 @@ pub fn required_string_list(
 /// up front, but an earlier release persisted patterns it never compiled, so
 /// one that no longer compiles is skipped with a warning instead of failing
 /// the whole runtime configuration and with it every tool.
+///
+/// The pin is rebuilt on every `current()` read, so the warning is logged
+/// once per setting and pattern for the process, not once per tool call.
 fn compilable_index_patterns(
     snapshot: &ConfigurationSnapshotV1,
     key_name: &str,
 ) -> Result<Vec<String>> {
+    static WARNED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
     let mut patterns = required_string_list(snapshot, key_name)?;
     patterns.retain(
         |pattern| match validate_index_path_patterns(std::slice::from_ref(pattern)) {
             Ok(()) => true,
             Err(error) => {
-                tracing::warn!(
-                    setting = key_name,
-                    %error,
-                    "skipping a stored index path pattern that no longer compiles"
-                );
+                let first = WARNED
+                    .get_or_init(Mutex::default)
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert((key_name.to_owned(), pattern.clone()));
+                if first {
+                    tracing::warn!(
+                        setting = key_name,
+                        %error,
+                        "skipping a stored index path pattern that no longer compiles"
+                    );
+                }
                 false
             }
         },
