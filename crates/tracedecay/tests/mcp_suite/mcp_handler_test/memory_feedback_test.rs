@@ -211,11 +211,12 @@ async fn fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases() {
         "helpful: unknown field `helpful`",
         "source: unknown field `source`",
     ]) {
-        assert!(
-            refusal.contains(&format!(
-                "invalid retained application request for tracedecay_fact_feedback: {expected}"
-            )),
-            "{refusal}"
+        assert_eq!(
+            refusal,
+            &format!(
+                "project route error (application_surface_invalid_request): application \
+                 surface request does not match its reviewed schema: {expected}"
+            )
         );
     }
     invoke_production_tool(
