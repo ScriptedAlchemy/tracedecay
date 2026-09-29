@@ -121,6 +121,8 @@ pub enum GraphSealedBaseAbsenceV1 {
     NoRowSum,
     /// The recorded row sum does not digest to the recorded head.
     RowSumMismatch,
+    /// The artifact's producer sealed no attachment to layer from.
+    NoAttachment,
 }
 
 /// A sealed cold generation a refresh may layer over, resolved from the
@@ -138,7 +140,7 @@ struct SealedBaseInner {
     relations: usize,
     row_sum: GraphRowDigestSum,
     container: PathBuf,
-    attachment: Option<PathBuf>,
+    attachment: PathBuf,
     /// An engine over the base container, for the point reads that derive a
     /// delta's digest. Resident when the base serves, which it does while a
     /// refresh replaces it.
@@ -165,7 +167,7 @@ impl GraphSealedBaseV1 {
         relations: usize,
         row_sum: GraphRowDigestSum,
         container: PathBuf,
-        attachment: Option<PathBuf>,
+        attachment: PathBuf,
         database: Arc<GraphDb>,
     ) -> Result<Self, GraphDbError> {
         let physical_namespace = identity.physical_namespace()?;
@@ -194,6 +196,13 @@ impl GraphSealedBaseV1 {
     #[must_use]
     pub fn row_counts(&self) -> (usize, usize) {
         (self.inner.entities, self.inner.relations)
+    }
+
+    /// Releases the base engine unless a reader holds it. A refresh reads
+    /// the base only when its delta seals, so the engine need not stay
+    /// resident beside the resolution that precedes it.
+    pub(crate) fn release_engine_when_idle(&self) -> Result<(), GraphDbError> {
+        self.inner.database.hibernate_if_lazy_when_idle().map(drop)
     }
 
     fn entity(&self, identity: &GraphEntityId) -> Result<Option<GraphEntity>, GraphDbError> {
@@ -309,13 +318,11 @@ impl GraphLayeredRowSpill {
             spill.directory().join(LAYERED_BASE_CONTAINER_FILE),
         )
         .map_err(|error| layered_io("base container pin", error))?;
-        if let Some(attachment) = &base.inner.attachment {
-            std::fs::hard_link(
-                attachment,
-                spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE),
-            )
-            .map_err(|error| layered_io("base attachment pin", error))?;
-        }
+        std::fs::hard_link(
+            &base.inner.attachment,
+            spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE),
+        )
+        .map_err(|error| layered_io("base attachment pin", error))?;
         Ok(Self {
             spill,
             base,
@@ -331,9 +338,8 @@ impl GraphLayeredRowSpill {
 
     /// The base's producer attachment, pinned with the spill.
     #[must_use]
-    pub fn base_attachment(&self) -> Option<PathBuf> {
-        let path = self.spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE);
-        path.is_file().then_some(path)
+    pub fn base_attachment(&self) -> PathBuf {
+        self.spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE)
     }
 
     /// Adds changed or new rows. A row whose identity the base also serves

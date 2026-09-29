@@ -437,6 +437,9 @@ impl SealedGenerationStore {
     ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
         if let Some(layer) = &self.layer {
             let receipt = &layer.base_receipt;
+            let Some(attachment) = crate::sealed_layer::layered_attachment(&self.directory) else {
+                return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
+            };
             return GraphSealedBaseV1::new(
                 receipt.identity(&self.locator.projection)?,
                 receipt.recovered_digest.clone(),
@@ -444,13 +447,16 @@ impl SealedGenerationStore {
                 receipt.relations,
                 GraphRowDigestSum::from_hex(&receipt.row_sum)?,
                 crate::sealed_layer::base_database_path(&self.directory),
-                crate::sealed_layer::layered_attachment(&self.directory),
+                attachment,
                 Arc::clone(&layer.base),
             )
             .map(Ok);
         }
         let Some(row_sum) = self.row_sum else {
             return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
+        };
+        let Some(attachment) = crate::sealed_layer::flat_attachment(&self.directory) else {
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
         };
         GraphSealedBaseV1::new(
             self.identity.clone(),
@@ -459,7 +465,7 @@ impl SealedGenerationStore {
             self.relation_count,
             row_sum,
             self.directory.join(SEALED_STORE_DATABASE_FILE),
-            crate::sealed_layer::flat_attachment(&self.directory),
+            attachment,
             Arc::clone(&self.database),
         )
         .map(Ok)
@@ -1345,10 +1351,14 @@ impl GraphDb {
         locator: &GenerationLocator,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
-        if let Some(store) = self.sealed_generation_reader(locator) {
-            return store.sealed_base();
+        let base = match self.sealed_generation_reader(locator) {
+            Some(store) => store.sealed_base()?,
+            None => self.sealed_base_from_disk(locator, check)?,
+        };
+        if let Ok(base) = &base {
+            base.release_engine_when_idle()?;
         }
-        self.sealed_base_from_disk(locator, check)
+        Ok(base)
     }
 
     /// A proven sealed artifact of `locator` on disk as a layered base,
@@ -1385,10 +1395,16 @@ impl GraphDb {
             return Ok(Err(GraphSealedBaseAbsenceV1::UnprovenArtifact));
         }
         let projection = &locator.projection;
-        let (container, attachment, digest, counts, row_sum, identity) = match &receipt.base {
+        let attachment = match &receipt.base {
+            Some(_) => crate::sealed_layer::layered_attachment(&directory),
+            None => crate::sealed_layer::flat_attachment(&directory),
+        };
+        let Some(attachment) = attachment else {
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
+        };
+        let (container, digest, counts, row_sum, identity) = match &receipt.base {
             Some(base) => (
                 crate::sealed_layer::base_database_path(&directory),
-                crate::sealed_layer::layered_attachment(&directory),
                 base.recovered_digest.clone(),
                 (base.entities, base.relations),
                 GraphRowDigestSum::from_hex(&base.row_sum)?,
@@ -1400,7 +1416,6 @@ impl GraphDb {
                 };
                 (
                     directory.join(SEALED_STORE_DATABASE_FILE),
-                    crate::sealed_layer::flat_attachment(&directory),
                     receipt.recovered_digest.clone(),
                     (receipt.entities, receipt.relations),
                     GraphRowDigestSum::from_hex(row_sum)?,

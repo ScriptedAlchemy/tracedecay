@@ -6,8 +6,8 @@
 use std::path::Path;
 
 use tracedecay_graph_db::{
-    GraphGenerationRows, GraphLabel, GraphTraversalDirection, TraversalRequest,
-    VerifiedGraphCommit, VerifiedGraphSnapshot,
+    GraphGenerationRows, GraphLabel, GraphSealedBaseAbsenceV1, GraphTraversalDirection,
+    TraversalRequest, VerifiedGraphCommit, VerifiedGraphSnapshot,
 };
 
 use super::*;
@@ -214,6 +214,7 @@ fn publish_cold(
     manifest: &GraphGenerationManifest,
     prior: Option<GraphVerifiedHeadV1>,
     input: char,
+    attachment: Option<&[u8]>,
 ) -> VerifiedGraphCommit {
     let mut spill = graph
         .registry
@@ -229,9 +230,15 @@ fn publish_cold(
             &|| Ok(()),
         )
         .unwrap();
+    if let Some(attachment) = attachment {
+        std::fs::write(spill.attachment_path(), attachment).unwrap();
+    }
     let spilled = spill.finish(manifest.identity(), &|| Ok(())).unwrap();
     publish_rows(graph, root, authority, spilled.into(), prior, input)
 }
+
+/// Opaque producer inputs a layerable cold generation seals beside its rows.
+const PRODUCER_INPUTS: &[u8] = b"producer resolution inputs";
 
 /// Publishes `child` as a delta over `parent`'s sealed store: only rows that
 /// differ are pushed, every parent identity the child lacks is hidden.
@@ -263,6 +270,11 @@ fn publish_layered(
             base,
         )
         .unwrap();
+    assert_eq!(
+        std::fs::read(spill.base_attachment()).unwrap(),
+        PRODUCER_INPUTS,
+        "the spill pins the base's producer attachment"
+    );
     let parent_entities = parent
         .entities
         .iter()
@@ -567,7 +579,20 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         &parent,
         None,
         '1',
+        None,
     );
+    assert!(matches!(
+        cold_graph
+            .registry
+            .sealed_generation_base(
+                registration(cold_graph.binding.clone(), cold_root.path()),
+                parent.projection.clone(),
+                parent.generation.clone(),
+                &|| Ok(()),
+            )
+            .unwrap(),
+        Err(GraphSealedBaseAbsenceV1::NoAttachment)
+    ));
     let cold_child = publish_cold(
         &cold_graph,
         cold_root.path(),
@@ -575,6 +600,7 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         &child,
         Some(cold_parent.head.clone()),
         '2',
+        None,
     );
 
     let layered_root = TempDir::new().unwrap();
@@ -587,6 +613,7 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         &parent,
         None,
         '1',
+        Some(PRODUCER_INPUTS),
     );
     let (layered_child, delta) = publish_layered(
         &layered_graph,

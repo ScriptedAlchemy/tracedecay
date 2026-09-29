@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionStore, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+    CodeGraphLayeredReportV1, CodeGraphProjectionStore, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolSummaryV1,
 };
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
@@ -431,6 +432,37 @@ async fn assert_matches_cold_build(
     drop(cold_runtime);
 }
 
+/// The report of the delta `runtime`'s publication builds its rows as, or
+/// `None` when it builds them cold. Taken before the publication, which
+/// retires the replay of the parent the delta layers over.
+fn layered_report(runtime: &super::RetainedCodeGraphRuntimeV1) -> Option<CodeGraphLayeredReportV1> {
+    let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+        runtime.authority.namespace().clone(),
+    )
+    .expect("code graph projection");
+    let authority_lease: Arc<dyn super::RetainedGraphStoreLeaseV1> = runtime.authority.clone();
+    let registration = || super::GraphDbRegistration {
+        authority_lease: Arc::clone(&authority_lease),
+        cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(super::AtomicGraphCancellationV1::new(Arc::clone(
+            &runtime.lifecycle_cancelled,
+        ))),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+    };
+    runtime
+        .build_graph_rows(
+            &projection,
+            &GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .expect("projector revision"),
+            &registration,
+            &|| Ok(()),
+        )
+        .expect("rebuild the generation's rows")
+        .1
+}
+
 /// The file identity of a sealed container, which a hard link shares.
 #[cfg(unix)]
 fn file_identity(path: &Path) -> (u64, u64) {
@@ -552,6 +584,17 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         )
         .await
         .expect("retain the child graph runtime");
+    // Work proportional to the edit: of 121 files only the three edited
+    // segments decode, the other 118 reuse the base's recorded inputs.
+    assert_eq!(
+        layered_report(&child_runtime),
+        Some(CodeGraphLayeredReportV1 {
+            reextracted_files: 3,
+            reused_files: 118,
+            removed_files: 3,
+            delta_rows: (31, 35),
+        })
+    );
     let child = child_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("publish the refresh");
@@ -593,6 +636,17 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         )
         .await
         .expect("retain the grandchild graph runtime");
+    // Still against the cold base: the three edited files and the added one
+    // decode; the base's versions of those and the deleted file drop.
+    assert_eq!(
+        layered_report(&grandchild_runtime),
+        Some(CodeGraphLayeredReportV1 {
+            reextracted_files: 4,
+            reused_files: 117,
+            removed_files: 4,
+            delta_rows: (34, 38),
+        })
+    );
     let grandchild = grandchild_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("publish the second refresh");

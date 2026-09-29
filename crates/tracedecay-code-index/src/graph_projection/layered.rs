@@ -55,8 +55,6 @@ pub struct CodeGraphLayeredReportV1 {
 /// Why a refresh declined to layer over its base; it seals cold instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeGraphLayeredDeclineV1 {
-    /// The base was sealed without resolution inputs.
-    NoBaseInputs,
     /// The base's inputs were recorded for another projector or revision.
     BaseInputsRevision,
     /// Files changed since the base exceed the share a delta may carry.
@@ -94,9 +92,7 @@ pub fn build_layered_code_graph_rows(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    let Some(inputs) = spill.base_attachment() else {
-        return Ok(Err(CodeGraphLayeredDeclineV1::NoBaseInputs));
-    };
+    let inputs = spill.base_attachment();
     let Some(resolution) = source.resolve_layered_code_graph(
         read_segment,
         &inputs,
@@ -137,6 +133,8 @@ pub fn build_layered_code_graph_rows(
             check,
         )
     )?;
+    // Sealing reads the base engine; the resolution is not needed beside it.
+    drop(resolution);
     let identity =
         code_graph_manifest_identity(projection_identity, &generation, projector_revision)?;
     let generation = hotpath::measure_block!(
