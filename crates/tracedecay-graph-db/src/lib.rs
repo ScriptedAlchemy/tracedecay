@@ -18,6 +18,7 @@ mod publication;
 mod read_meter;
 mod recovery;
 mod registry;
+mod row_index;
 mod runtime;
 mod schema;
 mod sealed_layer;

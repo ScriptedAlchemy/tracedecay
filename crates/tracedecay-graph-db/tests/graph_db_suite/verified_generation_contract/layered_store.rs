@@ -336,6 +336,14 @@ fn publish_layered(
             .filter(|identity| !child_relations.contains(*identity))
             .cloned(),
     );
+    // The producer carries every endpoint its relations reach: the base's
+    // own row where nothing changed.
+    let stubs = spill
+        .missing_endpoints()
+        .iter()
+        .map(|identity| (*parent_entities[identity]).clone())
+        .collect::<Vec<_>>();
+    spill.push_batch(stubs, Vec::new(), &|| Ok(())).unwrap();
     let layered = spill.finish(child.identity(), &|| Ok(())).unwrap();
     let delta = layered.delta_row_counts();
     (
@@ -682,4 +690,253 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         .unwrap();
     assert!(recovered.serves_from_sealed_store());
     assert_same_reads(&cold_child.snapshot, &recovered, &identity);
+}
+
+#[cfg(target_os = "linux")]
+const SEAL_PEAK_PROBE_SYMBOLS: &str = "TRACEDECAY_LAYERED_SEAL_PEAK_PROBE_SYMBOLS";
+#[cfg(target_os = "linux")]
+const SEAL_PEAK_PROBE_LINE: &str = "layered-seal-peak-kib ";
+#[cfg(target_os = "linux")]
+/// Allocator noise a base-independent seal stays within; loading the
+/// 32 000-symbol base engine alone adds over 2 MiB.
+const SEAL_PEAK_MARGIN_KIB: u64 = 512;
+
+#[cfg(target_os = "linux")]
+/// `symbols` symbols that each call the hub `entity:000` and reference their
+/// predecessor.
+fn hub_chain_rows(
+    identity: &GraphProjectionIdentity,
+    symbols: usize,
+) -> (Vec<GraphEntity>, Vec<GraphGenerationRelation>) {
+    let entities = (0..symbols).map(|index| symbol(index, "parent")).collect();
+    let mut relations = Vec::new();
+    for index in 1..symbols {
+        relations.push(edge(
+            identity,
+            format!("call:{index:03}"),
+            index,
+            0,
+            "calls",
+        ));
+        relations.push(edge(
+            identity,
+            format!("ref:{index:03}"),
+            index - 1,
+            index,
+            "references",
+        ));
+    }
+    (entities, relations)
+}
+
+#[cfg(target_os = "linux")]
+/// The same small refresh over a base of any size: ten symbols deleted with
+/// the relations they anchor, `entity:050` changed, and ten new symbols
+/// calling the hub and using `entity:050`.
+struct FixedDelta {
+    entities: Vec<GraphEntity>,
+    relations: Vec<GraphGenerationRelation>,
+    hidden_entities: Vec<GraphEntityId>,
+    hidden_relations: Vec<GraphRelationId>,
+}
+
+#[cfg(target_os = "linux")]
+fn fixed_delta(identity: &GraphProjectionIdentity, symbols: usize) -> FixedDelta {
+    let removed = 10..20_usize;
+    let mut entities = vec![symbol(50, "child")];
+    let mut relations = Vec::new();
+    for index in symbols..symbols + 10 {
+        entities.push(symbol(index, "new"));
+        relations.push(edge(
+            identity,
+            format!("call:{index:03}"),
+            index,
+            0,
+            "calls",
+        ));
+        relations.push(edge(identity, format!("use:{index:03}"), index, 50, "uses"));
+    }
+    let hidden_entities = removed
+        .clone()
+        .map(|index| GraphEntityId::new(format!("entity:{index:03}")).unwrap())
+        .collect();
+    let hidden_relations = removed
+        .clone()
+        .flat_map(|index| [format!("call:{index:03}"), format!("ref:{index:03}")])
+        .chain(std::iter::once(format!("ref:{:03}", removed.end)))
+        .map(|id| GraphRelationId::new(id).unwrap())
+        .collect();
+    FixedDelta {
+        entities,
+        relations,
+        hidden_entities,
+        hidden_relations,
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// The child the fixed delta leaves, as a cold build would hold it.
+fn fixed_child_rows(
+    identity: &GraphProjectionIdentity,
+    symbols: usize,
+) -> (Vec<GraphEntity>, Vec<GraphGenerationRelation>) {
+    let delta = fixed_delta(identity, symbols);
+    let hidden_entities = delta.hidden_entities.iter().collect::<BTreeSet<_>>();
+    let hidden_relations = delta.hidden_relations.iter().collect::<BTreeSet<_>>();
+    let (entities, relations) = hub_chain_rows(identity, symbols);
+    let mut entities = entities
+        .into_iter()
+        .filter(|entity| !hidden_entities.contains(&entity.identity))
+        .filter(|entity| entity.identity.as_str() != "entity:050")
+        .collect::<Vec<_>>();
+    entities.extend(delta.entities);
+    let mut relations = relations
+        .into_iter()
+        .filter(|relation| !hidden_relations.contains(&relation.identity))
+        .collect::<Vec<_>>();
+    relations.extend(delta.relations);
+    (entities, relations)
+}
+
+#[cfg(target_os = "linux")]
+fn status_kib(field: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
+        .and_then(|rest| rest.trim().strip_suffix(" kB"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("process status has no {field}"))
+}
+
+/// One base size's measurement, run alone in its own process by
+/// [`a_layered_seal_peak_does_not_grow_with_its_base`]: a cold base, a
+/// restart, then how far the resident set peaks above where it stood while
+/// the fixed delta is resolved against the base, sealed, and published.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "a measurement process that the seal peak test runs, one base size at a time"]
+fn layered_seal_peak_probe() {
+    let symbols: usize = std::env::var(SEAL_PEAK_PROBE_SYMBOLS)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let identity = projection("sealed-store:layered-peak", "code");
+    let parent = manifest(&identity, "peak-g1", hub_chain_rows(&identity, symbols));
+    let child = manifest(&identity, "peak-g2", fixed_child_rows(&identity, symbols));
+    let delta = fixed_delta(&identity, symbols);
+    let root = TempDir::new().unwrap();
+    let mut authority = RelationalAuthority::default();
+    let head = {
+        let graph = RegisteredGraph::new_mounted(root.path()).unwrap();
+        let commit = publish_cold(
+            &graph,
+            root.path(),
+            &mut authority,
+            &parent,
+            None,
+            '1',
+            Some(PRODUCER_INPUTS),
+        );
+        let head = commit.head.clone();
+        drop(commit);
+        assert!(graph.close().unwrap());
+        head
+    };
+    drop(parent);
+    let graph = RegisteredGraph::new_mounted(root.path()).unwrap();
+
+    std::fs::write("/proc/self/clear_refs", "5").unwrap();
+    let start = status_kib("VmRSS");
+    let base = graph
+        .registry
+        .sealed_generation_base(
+            registration(graph.binding.clone(), root.path()),
+            child.projection.clone(),
+            GraphGenerationId::new("peak-g1").unwrap(),
+            &|| Ok(()),
+        )
+        .unwrap()
+        .expect("a spilled cold generation is a layered base");
+    let mut spill = graph
+        .registry
+        .layered_row_spill(
+            registration(graph.binding.clone(), root.path()),
+            child.projection.clone(),
+            base,
+        )
+        .unwrap();
+    spill
+        .push_batch(delta.entities, delta.relations, &|| Ok(()))
+        .unwrap();
+    spill.hide(delta.hidden_entities, delta.hidden_relations);
+    let stubs = spill
+        .missing_endpoints()
+        .iter()
+        .map(|identity| {
+            symbol(
+                identity.as_str()["entity:".len()..].parse().unwrap(),
+                "parent",
+            )
+        })
+        .collect::<Vec<_>>();
+    spill.push_batch(stubs, Vec::new(), &|| Ok(())).unwrap();
+    let layered = spill.finish(child.identity(), &|| Ok(())).unwrap();
+    let commit = publish_rows(
+        &graph,
+        root.path(),
+        &mut authority,
+        layered.into(),
+        Some(head),
+        '2',
+    );
+    let peak = status_kib("VmHWM").saturating_sub(start);
+
+    assert_eq!(
+        commit.recovered_digest,
+        child.expected_recovered_digest(&|| Ok(())).unwrap()
+    );
+    println!("{SEAL_PEAK_PROBE_LINE}{peak}");
+}
+
+#[cfg(target_os = "linux")]
+fn measure_seal_peak(symbols: usize) -> u64 {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "verified_generation_contract::layered_store::layered_seal_peak_probe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(SEAL_PEAK_PROBE_SYMBOLS, symbols.to_string())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "seal peak probe for {symbols} symbols failed: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let peak = stdout
+        .lines()
+        .find_map(|line| line.split_once(SEAL_PEAK_PROBE_LINE))
+        .map(|(_, peak)| peak.trim().parse().unwrap())
+        .unwrap_or_else(|| panic!("seal peak probe printed no peak: {stdout}"));
+    println!("{symbols}-symbol base: layered seal +{peak} KiB");
+    peak
+}
+
+/// Fails when sealing a layer loads its base graph: the peak then carries
+/// the base engine and grows with it. The same ten-symbol refresh over
+/// bases eight times apart must peak the same, within one base-free margin.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_layered_seal_peak_does_not_grow_with_its_base() {
+    let small = measure_seal_peak(4_000);
+    let large = measure_seal_peak(32_000);
+    assert!(
+        large < small + SEAL_PEAK_MARGIN_KIB,
+        "the layered seal grew with its base: +{small} KiB -> +{large} KiB"
+    );
 }

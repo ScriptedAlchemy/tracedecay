@@ -70,7 +70,7 @@ use crate::schema::{
 };
 use crate::sealed_layer::{
     GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
-    LayeredReads, SealedBaseReceiptV1, SealedLayer,
+    LayeredReads, SealedBaseFilesV1, SealedBaseReceiptV1, SealedLayer,
 };
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation_by_locator_cached,
@@ -80,8 +80,8 @@ use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphRelation, GraphWriteBatch, NeverCancelled,
-    SpilledGraphGeneration,
+    GraphProjectionIdentity, GraphRelation, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, SpilledGraphGeneration,
 };
 
 /// A sealed generation opened without the shared staging database.
@@ -206,7 +206,7 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
-const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
+pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
 /// written before that proof is not release authority.
@@ -248,6 +248,10 @@ struct SealedStoreReceiptV1 {
     row_sum: Option<String>,
     /// The cold base a [`SEALED_STORE_FORM_LAYERED`] store's delta shadows.
     base: Option<SealedBaseReceiptV1>,
+    /// The generation's source generation and watermark, which a refresh
+    /// layering over it names without opening its container.
+    source_generation: Option<String>,
+    watermark: Option<String>,
 }
 
 impl SealedStoreReceiptV1 {
@@ -369,7 +373,7 @@ impl SealedGenerationStore {
     /// The engines this store serves from: its container, and a layered
     /// store's base.
     fn engines(&self) -> impl Iterator<Item = &Arc<GraphDb>> {
-        std::iter::once(&self.database).chain(self.layer.as_ref().map(|layer| &layer.base))
+        std::iter::once(&self.database).chain(self.layer.as_ref().map(SealedLayer::base_engine))
     }
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
@@ -414,7 +418,7 @@ impl SealedGenerationStore {
     pub(crate) fn pin_serving_engine(&self) -> Result<crate::GraphServingEnginePin, GraphDbError> {
         let pin = self.database.pin_serving_engine()?;
         match &self.layer {
-            Some(layer) => Ok(pin.with_companion(layer.base.pin_serving_engine()?)),
+            Some(layer) => Ok(pin.with_companion(layer.proven_base()?.pin_serving_engine()?)),
             None => Ok(pin),
         }
     }
@@ -434,41 +438,38 @@ impl SealedGenerationStore {
     /// itself when it is a spilled cold build, or its own base when layered.
     fn sealed_base(
         &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
         if let Some(layer) = &self.layer {
             let receipt = &layer.base_receipt;
-            let Some(attachment) = crate::sealed_layer::layered_attachment(&self.directory) else {
-                return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
+            let files = match SealedBaseFilesV1::layered(&self.directory) {
+                Ok(files) => files,
+                Err(absence) => return Ok(Err(absence)),
             };
-            return GraphSealedBaseV1::new(
+            return GraphSealedBaseV1::open(
                 receipt.identity(&self.locator.projection)?,
                 receipt.recovered_digest.clone(),
-                receipt.entities,
-                receipt.relations,
+                (receipt.entities, receipt.relations),
                 GraphRowDigestSum::from_hex(&receipt.row_sum)?,
-                crate::sealed_layer::base_database_path(&self.directory),
-                attachment,
-                Arc::clone(&layer.base),
-            )
-            .map(Ok);
+                files,
+                check,
+            );
         }
         let Some(row_sum) = self.row_sum else {
             return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
         };
-        let Some(attachment) = crate::sealed_layer::flat_attachment(&self.directory) else {
-            return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
+        let files = match SealedBaseFilesV1::flat(&self.directory) {
+            Ok(files) => files,
+            Err(absence) => return Ok(Err(absence)),
         };
-        GraphSealedBaseV1::new(
+        GraphSealedBaseV1::open(
             self.identity.clone(),
             self.recovered_digest.clone(),
-            self.entity_count,
-            self.relation_count,
+            (self.entity_count, self.relation_count),
             row_sum,
-            self.directory.join(SEALED_STORE_DATABASE_FILE),
-            attachment,
-            Arc::clone(&self.database),
+            files,
+            check,
         )
-        .map(Ok)
     }
 
     /// Best-effort teardown used only when the generation is quarantined or
@@ -1351,18 +1352,16 @@ impl GraphDb {
         locator: &GenerationLocator,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
-        let base = match self.sealed_generation_reader(locator) {
-            Some(store) => store.sealed_base()?,
-            None => self.sealed_base_from_disk(locator, check)?,
-        };
-        if let Ok(base) = &base {
-            base.release_engine_when_idle()?;
+        match self.sealed_generation_reader(locator) {
+            Some(store) => store.sealed_base(check),
+            None => self.sealed_base_from_disk(locator, check),
         }
-        Ok(base)
     }
 
-    /// A proven sealed artifact of `locator` on disk as a layered base,
-    /// re-proved against the digest its receipt and check record.
+    /// A proven sealed artifact of `locator` on disk as a layered base. Its
+    /// container is not opened: the refresh reads only its row index, bound
+    /// here to the receipt's row sum, and a layer proves the container
+    /// before its first base read.
     fn sealed_base_from_disk(
         &self,
         locator: &GenerationLocator,
@@ -1395,77 +1394,50 @@ impl GraphDb {
             return Ok(Err(GraphSealedBaseAbsenceV1::UnprovenArtifact));
         }
         let projection = &locator.projection;
-        let attachment = match &receipt.base {
-            Some(_) => crate::sealed_layer::layered_attachment(&directory),
-            None => crate::sealed_layer::flat_attachment(&directory),
+        let files = match &receipt.base {
+            Some(_) => SealedBaseFilesV1::layered(&directory),
+            None => SealedBaseFilesV1::flat(&directory),
         };
-        let Some(attachment) = attachment else {
-            return Ok(Err(GraphSealedBaseAbsenceV1::NoAttachment));
+        let files = match files {
+            Ok(files) => files,
+            Err(absence) => return Ok(Err(absence)),
         };
-        let (container, digest, counts, row_sum, identity) = match &receipt.base {
+        let (digest, counts, row_sum, identity) = match &receipt.base {
             Some(base) => (
-                crate::sealed_layer::base_database_path(&directory),
                 base.recovered_digest.clone(),
                 (base.entities, base.relations),
                 GraphRowDigestSum::from_hex(&base.row_sum)?,
-                Some(base.identity(projection)?),
+                base.identity(projection)?,
             ),
             None => {
                 let Some(row_sum) = receipt.row_sum.as_deref() else {
                     return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
                 };
+                let (Some(source_generation), Some(watermark)) =
+                    (&receipt.source_generation, &receipt.watermark)
+                else {
+                    return Ok(Err(GraphSealedBaseAbsenceV1::SupersededArtifact));
+                };
                 (
-                    directory.join(SEALED_STORE_DATABASE_FILE),
                     receipt.recovered_digest.clone(),
                     (receipt.entities, receipt.relations),
                     GraphRowDigestSum::from_hex(row_sum)?,
-                    None,
-                )
-            }
-        };
-        let database = GraphDb::open_lazy_with_store_state(
-            sealed_artifact_database_options(container.clone()),
-            PersistentGraphStoreState::Existing,
-        )
-        .map_err(|error| sealed_store_failure("base reopen failed", error))?;
-        let identity = match identity {
-            Some(identity) => identity,
-            None => {
-                let guard = database.read_guard()?;
-                let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-                let recovered =
-                    latest_projection(native, &physical_namespace, &projection.projection)?
-                        .ok_or_else(|| GraphDbError::GenerationMismatch {
-                            namespace: projection.namespace.to_string(),
-                            projection: projection.projection.to_string(),
-                            generation: locator.generation.to_string(),
-                            message: "sealed generation is missing its projection commit"
-                                .to_owned(),
-                        })?;
-                GraphGenerationManifestIdentity::new(
-                    projection.clone(),
-                    locator.generation.clone(),
-                    recovered.commit.source_generation,
-                    recovered.commit.watermark,
-                    Vec::new(),
+                    GraphGenerationManifestIdentity::new(
+                        projection.clone(),
+                        locator.generation.clone(),
+                        SourceGeneration::new(source_generation.clone())?,
+                        GraphWatermark::new(watermark.clone())?,
+                        Vec::new(),
+                    ),
                 )
             }
         };
         let expected = GraphRecoveredGenerationDigestV1::new(digest.clone())
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         if recovered_digest_from_row_sum(&identity, row_sum, check)? != expected {
-            let _ = database.close();
             return Ok(Err(GraphSealedBaseAbsenceV1::RowSumMismatch));
         }
-        if let Err(error) = sealed_copy_proof(&database, &identity, &expected, check) {
-            let _ = database.close();
-            return Err(sealed_store_failure("base verification failed", error));
-        }
-        database.mark_sealed_read_only();
-        GraphSealedBaseV1::new(
-            identity, digest, counts.0, counts.1, row_sum, container, attachment, database,
-        )
-        .map(Ok)
+        GraphSealedBaseV1::open(identity, digest, counts, row_sum, files, check)
     }
 
     /// A row spill for a delta of `projection` over `base`, pinning the
@@ -1728,8 +1700,8 @@ fn build_or_open_sealed_store(
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
-    // A layered build's base is the proven generation it replaces in this
-    // process, so its reopen proves the delta and trusts the base it names.
+    // A layered build names the base it derived its digest from; its reopen
+    // proves the delta now and the base before the layer's first base read.
     let trusted_base = match rows {
         SealedRowSource::Layered(layered) => Some(layered.base_receipt()),
         _ => None,
@@ -1817,8 +1789,12 @@ fn stage_sealed_artifact(
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SealedStoreReceiptV1, GraphDbError> {
-    let (row_sum, attachment, layered) = match rows {
-        SealedRowSource::Spilled(spilled) => (Some(spilled.row_sum()), spilled.attachment(), None),
+    let (row_sum, base_files, layered) = match rows {
+        SealedRowSource::Spilled(spilled) => (
+            Some(spilled.row_sum()),
+            spilled.attachment().zip(spilled.row_index()),
+            None,
+        ),
         SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None, Some(layered)),
         SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None, None),
         SealedRowSource::Staging(_) => (None, None, None),
@@ -1833,12 +1809,14 @@ fn stage_sealed_artifact(
         layered.install_base_files(staging)?;
         (entities, relations) = layered.row_counts();
     }
-    if let Some(attachment) = &attachment {
-        std::fs::hard_link(
-            attachment,
-            staging.join(crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
-        )
-        .map_err(|error| sealed_store_io_failure("attachment link failed", error))?;
+    if let Some((attachment, row_index)) = &base_files {
+        for (source, name) in [
+            (attachment, crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
+            (row_index, crate::row_index::ROW_INDEX_FILE),
+        ] {
+            std::fs::hard_link(source, staging.join(name))
+                .map_err(|error| sealed_store_io_failure("base file link failed", error))?;
+        }
     }
     Ok(SealedStoreReceiptV1 {
         version: SEALED_STORE_RECEIPT_VERSION,
@@ -1858,6 +1836,8 @@ fn stage_sealed_artifact(
         graph_format: GraphFormatVersion::current().get(),
         row_sum: row_sum.map(GraphRowDigestSum::to_hex),
         base: layered.map(LayeredGraphGeneration::base_receipt),
+        source_generation: Some(identity.source_generation.as_str().to_owned()),
+        watermark: Some(identity.watermark.as_str().to_owned()),
     })
 }
 
@@ -2439,7 +2419,7 @@ fn open_sealed_store_checked(
                 directory,
                 identity,
                 base,
-                trusted_base.is_some(),
+                trusted_base.is_none(),
                 &database,
                 check,
             ) {
@@ -2523,14 +2503,15 @@ fn container_proof_digest(
     }
 }
 
-/// Opens a layered store's hard-linked base and, unless this process already
-/// proved it as the generation being replaced, proves it against the digest
-/// its receipt records, by marker or by streaming its rows.
+/// Opens a layered store's hard-linked base. `prove_now` proves it against
+/// the digest its receipt records before returning, by marker or by
+/// streaming its rows; otherwise the layer proves it before its first base
+/// read, which lets a freshly sealed layer install without loading its base.
 fn open_layer_base(
     directory: &Path,
     identity: &GraphGenerationManifestIdentity,
     base: &SealedBaseReceiptV1,
-    trusted: bool,
+    prove_now: bool,
     delta: &GraphDb,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SealedLayer, GraphDbError> {
@@ -2554,7 +2535,7 @@ fn open_layer_base(
         )
         .map_err(|error| sealed_store_failure("layered base reopen failed", error))?,
     );
-    if !trusted
+    if prove_now
         && let Err(error) = sealed_copy_proof(&database, &base_identity, &base_digest, check)
     {
         let _ = database.close();
@@ -2570,6 +2551,7 @@ fn open_layer_base(
         base.clone(),
         delta,
         identity,
+        prove_now,
     );
     if let Err(error) = database.hibernate_if_lazy() {
         let _ = database.close();
@@ -2587,7 +2569,7 @@ fn open_layer_base(
 /// otherwise. A full proof files the marker so the next open of unchanged
 /// bytes resolves by marker. Returns the canonical byte count the proof
 /// covers.
-fn sealed_copy_proof(
+pub(crate) fn sealed_copy_proof(
     database: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,

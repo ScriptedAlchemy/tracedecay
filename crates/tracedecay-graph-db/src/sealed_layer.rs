@@ -10,6 +10,7 @@
 //!   generation.grafeo   <- delta rows, under this generation's namespace
 //!   base.grafeo         <- hard link to the base's container
 //!   base.attachment     <- hard link to the base's producer attachment
+//!   base.rows.index     <- hard link to the base's row digest index
 //!   hidden.json         <- base row identities this generation removes
 //!   sealed.json         <- receipt, naming the base and both row sums
 //! ```
@@ -23,23 +24,21 @@
 //!
 //! The recovered digest is a set digest (see [`GraphRowDigestSum`]), so the
 //! delta's digest is the base's row sum minus the base rows it hides or
-//! shadows plus its own rows, computed from point reads of those base rows
-//! alone. A cold build of the same rows records the same digest, which is
-//! what lets the journal replay a layered publication cold.
+//! shadows plus its own rows. The base's row index (see `row_index`) holds
+//! each base row's digest, so a refresh never opens the base graph. A cold
+//! build of the same rows records the same digest, which is what lets the
+//! journal replay a layered publication cold.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tracedecay_store::runtime::{
-    GraphRecoveredGenerationDigestV1, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-};
+use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
-use crate::generation::{
-    GraphRowDigestSum, checked_canonical_bytes, recovered_digest_from_row_sum,
-};
+use crate::generation::{GraphRowDigestSum, RowLanes, recovered_digest_from_row_sum};
 use crate::projection_read::{IdentityScope, query_identity_page};
+use crate::row_index::{ROW_INDEX_FILE, RowIndex};
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_label, relation_projection_label,
@@ -59,6 +58,7 @@ use crate::{
 
 pub(crate) const LAYERED_BASE_CONTAINER_FILE: &str = "base.grafeo";
 pub(crate) const LAYERED_BASE_ATTACHMENT_FILE: &str = "base.attachment";
+pub(crate) const LAYERED_BASE_ROW_INDEX_FILE: &str = "base.rows.index";
 pub(crate) const LAYERED_HIDDEN_FILE: &str = "hidden.json";
 /// A flat generation's producer attachment, sealed beside its container.
 pub(crate) const GENERATION_ATTACHMENT_FILE: &str = "attachment";
@@ -124,6 +124,60 @@ pub enum GraphSealedBaseAbsenceV1 {
     RowSumMismatch,
     /// The artifact's producer sealed no attachment to layer from.
     NoAttachment,
+    /// The artifact carries no row index to derive a delta's digest from.
+    NoRowIndex,
+    /// The row index does not record the rows the base's row sum holds.
+    RowIndexMismatch,
+}
+
+/// The files a sealed base is made of, beside its receipt.
+pub(crate) struct SealedBaseFilesV1 {
+    pub(crate) container: PathBuf,
+    pub(crate) attachment: PathBuf,
+    pub(crate) row_index: PathBuf,
+}
+
+impl SealedBaseFilesV1 {
+    /// A flat generation's container and base files, or why it has none.
+    pub(crate) fn flat(directory: &Path) -> Result<Self, GraphSealedBaseAbsenceV1> {
+        Self::find(
+            directory,
+            crate::sealed_store::SEALED_STORE_DATABASE_FILE,
+            GENERATION_ATTACHMENT_FILE,
+            ROW_INDEX_FILE,
+        )
+    }
+
+    /// A layered generation's linked base files, or why it has none.
+    pub(crate) fn layered(directory: &Path) -> Result<Self, GraphSealedBaseAbsenceV1> {
+        Self::find(
+            directory,
+            LAYERED_BASE_CONTAINER_FILE,
+            LAYERED_BASE_ATTACHMENT_FILE,
+            LAYERED_BASE_ROW_INDEX_FILE,
+        )
+    }
+
+    fn find(
+        directory: &Path,
+        container: &str,
+        attachment: &str,
+        row_index: &str,
+    ) -> Result<Self, GraphSealedBaseAbsenceV1> {
+        let attachment = directory.join(attachment);
+        if !attachment.is_file() {
+            return Err(GraphSealedBaseAbsenceV1::NoAttachment);
+        }
+        let row_index = directory.join(row_index);
+        if !row_index.is_file() {
+            return Err(GraphSealedBaseAbsenceV1::NoRowIndex);
+        }
+        Ok(Self {
+            container: directory.join(container),
+            attachment,
+            row_index,
+        })
+    }
 }
 
 /// A sealed cold generation a refresh may layer over, resolved from the
@@ -142,10 +196,9 @@ struct SealedBaseInner {
     row_sum: GraphRowDigestSum,
     container: PathBuf,
     attachment: PathBuf,
-    /// An engine over the base container, for the point reads that derive a
-    /// delta's digest. Resident when the base serves, which it does while a
-    /// refresh replaces it.
-    database: Arc<GraphDb>,
+    /// Every base row's digest, for the point lookups that derive a delta's
+    /// digest; the base graph itself is never opened.
+    index: RowIndex,
 }
 
 impl std::fmt::Debug for GraphSealedBaseV1 {
@@ -160,19 +213,31 @@ impl std::fmt::Debug for GraphSealedBaseV1 {
 }
 
 impl GraphSealedBaseV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    /// A base over `files` whose receipt records `rows` and `row_sum`, or
+    /// [`GraphSealedBaseAbsenceV1::RowIndexMismatch`] when the row index does
+    /// not record exactly those rows.
+    pub(crate) fn open(
         identity: GraphGenerationManifestIdentity,
         recovered_digest: String,
-        entities: usize,
-        relations: usize,
+        (entities, relations): (usize, usize),
         row_sum: GraphRowDigestSum,
-        container: PathBuf,
-        attachment: PathBuf,
-        database: Arc<GraphDb>,
-    ) -> Result<Self, GraphDbError> {
+        files: SealedBaseFilesV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<Self, GraphSealedBaseAbsenceV1>, GraphDbError> {
         let physical_namespace = identity.physical_namespace()?;
-        Ok(Self {
+        let index = match RowIndex::open(&files.row_index) {
+            Ok(index) => index,
+            Err(GraphDbError::Corrupt { .. }) => {
+                return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
+            }
+            Err(error) => return Err(error),
+        };
+        if index.row_counts() != (entities as u64, relations as u64)
+            || index.row_sum(check)? != row_sum
+        {
+            return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
+        }
+        Ok(Ok(Self {
             inner: Arc::new(SealedBaseInner {
                 identity,
                 physical_namespace,
@@ -180,11 +245,11 @@ impl GraphSealedBaseV1 {
                 entities,
                 relations,
                 row_sum,
-                container,
-                attachment,
-                database,
+                container: files.container,
+                attachment: files.attachment,
+                index,
             }),
-        })
+        }))
     }
 
     /// The base's graph generation.
@@ -197,62 +262,6 @@ impl GraphSealedBaseV1 {
     #[must_use]
     pub fn row_counts(&self) -> (usize, usize) {
         (self.inner.entities, self.inner.relations)
-    }
-
-    /// Releases the base engine unless a reader holds it. A refresh reads
-    /// the base only when its delta seals, so the engine need not stay
-    /// resident beside the resolution that precedes it.
-    pub(crate) fn release_engine_when_idle(&self) -> Result<(), GraphDbError> {
-        self.inner.database.hibernate_if_lazy_when_idle().map(drop)
-    }
-
-    fn entity(&self, identity: &GraphEntityId) -> Result<Option<GraphEntity>, GraphDbError> {
-        let guard = self.inner.database.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        Ok(
-            load_entity(database, &self.inner.physical_namespace, identity)?
-                .map(|stored| stored.entity),
-        )
-    }
-
-    /// Every base relation either end of which is `identity`.
-    fn incident_relations(
-        &self,
-        identity: &GraphEntityId,
-    ) -> Result<Vec<GraphRelationId>, GraphDbError> {
-        let starts = std::slice::from_ref(identity);
-        let kinds = BTreeSet::new();
-        let mut incident = Vec::new();
-        for batch in [
-            self.inner.database.outgoing_relation_ids(
-                &self.inner.physical_namespace,
-                starts,
-                &kinds,
-                usize::MAX,
-                Arc::new(crate::NeverCancelled),
-            )?,
-            self.inner.database.incoming_relation_ids(
-                &self.inner.physical_namespace,
-                starts,
-                &kinds,
-                usize::MAX,
-                Arc::new(crate::NeverCancelled),
-            )?,
-        ] {
-            incident.extend(batch.into_iter().flatten());
-        }
-        Ok(incident)
-    }
-
-    fn relation(
-        &self,
-        identity: &GraphRelationId,
-    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
-        let guard = self.inner.database.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        load_relation(database, &self.inner.physical_namespace, identity)?
-            .map(|stored| generation_relation(&self.inner.identity.projection, stored.relation))
-            .transpose()
     }
 }
 
@@ -269,21 +278,13 @@ fn generation_relation(
     )
 }
 
-fn canonical(value: &impl Serialize) -> Result<Vec<u8>, GraphDbError> {
-    checked_canonical_bytes(
-        value,
-        &|| Ok(()),
-        "layered generation row",
-        MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
-    )
-}
-
 /// Rows a refresh changes relative to a sealed base, spilled like a cold
 /// generation's rows, plus the base identities it removes.
 ///
-/// The spill holds hard links to the base's container and attachment from
-/// the moment it is created, so the base bytes this delta is derived from
-/// survive the base generation's retirement until the delta seals.
+/// The spill holds hard links to the base's container, attachment, and row
+/// index from the moment it is created, so the base bytes this delta is
+/// derived from survive the base generation's retirement until the delta
+/// seals.
 pub struct GraphLayeredRowSpill {
     spill: GraphGenerationRowSpill,
     base: GraphSealedBaseV1,
@@ -328,11 +329,16 @@ impl GraphLayeredRowSpill {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(layered_io("base marker pin", error)),
         }
-        std::fs::hard_link(
-            &base.inner.attachment,
-            spill.directory().join(LAYERED_BASE_ATTACHMENT_FILE),
-        )
-        .map_err(|error| layered_io("base attachment pin", error))?;
+        for (source, name) in [
+            (&base.inner.attachment, LAYERED_BASE_ATTACHMENT_FILE),
+            (
+                &base.inner.index.path().to_path_buf(),
+                LAYERED_BASE_ROW_INDEX_FILE,
+            ),
+        ] {
+            std::fs::hard_link(source, spill.directory().join(name))
+                .map_err(|error| layered_io("base file pin", error))?;
+        }
         Ok(Self {
             spill,
             base,
@@ -353,7 +359,8 @@ impl GraphLayeredRowSpill {
     }
 
     /// Adds changed or new rows. A row whose identity the base also serves
-    /// replaces it; a relation may reach an endpoint only the base carries.
+    /// replaces it. Every endpoint a relation names must be pushed too, the
+    /// base's own row where nothing changed; see [`Self::missing_endpoints`].
     pub fn push_batch(
         &mut self,
         entities: Vec<GraphEntity>,
@@ -388,7 +395,7 @@ impl GraphLayeredRowSpill {
             .collect::<BTreeSet<_>>()
         {
             check()?;
-            if self.base.entity(id)?.is_some() {
+            if self.base.inner.index.entity(id.as_str())?.is_some() {
                 present += 1;
             }
         }
@@ -399,9 +406,15 @@ impl GraphLayeredRowSpill {
             })
     }
 
-    /// Copies every base endpoint the delta's relations reach, merges the
-    /// delta, and derives the layered generation's row sum and digest from
-    /// the base's without reading any other base row.
+    /// Relation endpoints pushed so far that no pushed entity carries. The
+    /// producer pushes each one's row before [`Self::finish`], which refuses
+    /// a delta that still misses one.
+    pub fn missing_endpoints(&mut self) -> Vec<GraphEntityId> {
+        self.spill.missing_endpoints()
+    }
+
+    /// Merges the delta and derives the layered generation's row sum and
+    /// digest from the base's, reading only the base row index.
     #[hotpath::measure(label = "graph_db.sealed_layer.finish")]
     pub fn finish(
         mut self,
@@ -414,7 +427,11 @@ impl GraphLayeredRowSpill {
                 "a layered generation names a projection its base does not serve",
             ));
         }
-        self.copy_base_endpoints(check)?;
+        if let Some(endpoint) = self.spill.missing_endpoints().first() {
+            return Err(GraphDbError::invalid(format!(
+                "layered relation endpoint `{endpoint}` is not carried by the delta"
+            )));
+        }
         let Self {
             spill,
             base,
@@ -449,31 +466,6 @@ impl GraphLayeredRowSpill {
             expected_recovered_digest,
         })
     }
-
-    /// Pushes the base's copy of every endpoint the delta's relations reach
-    /// but the delta does not carry. A hidden or absent endpoint refuses.
-    fn copy_base_endpoints(
-        &mut self,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(), GraphDbError> {
-        let mut stubs = Vec::new();
-        for endpoint in self.spill.missing_endpoints() {
-            check()?;
-            let entity = (!self.hidden_entities.contains(&endpoint))
-                .then(|| self.base.entity(&endpoint))
-                .transpose()?
-                .flatten()
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: format!(
-                        "layered relation endpoint `{endpoint}` is in neither the delta nor its base"
-                    ),
-                })?;
-            stubs.push(entity);
-        }
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!("graph_db.sealed_layer.endpoint_stubs").inc(stubs.len() as u64);
-        self.spill.push_batch(stubs, Vec::new(), check)
-    }
 }
 
 /// The base rows the finished `delta` shadows or the layer hides: their
@@ -485,65 +477,21 @@ fn shadowed_base_rows(
     delta: &SpilledGraphGeneration,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<ShadowedBaseRows, GraphDbError> {
-    let over_count = || GraphDbError::Corrupt {
-        message: "a layered generation hides more rows than its base holds".to_owned(),
-    };
     let mut shadowed = ShadowedBaseRows {
         sum: GraphRowDigestSum::default(),
         hidden: HiddenRowsV1::default(),
         base_entities: base.inner.entities,
         base_relations: base.inner.relations,
     };
-    let delta_entities = delta.entity_identities();
-    for id in delta_entities
-        .iter()
-        .chain(hidden_entities.iter())
-        .collect::<BTreeSet<_>>()
-    {
-        check()?;
-        if let Some(row) = base.entity(id)? {
-            shadowed.sum.add_row("entity", &canonical(&row)?)?;
-            shadowed.base_entities = shadowed
-                .base_entities
-                .checked_sub(1)
-                .ok_or_else(over_count)?;
-        }
-        if hidden_entities.contains(id) && delta_entities.binary_search(id).is_err() {
-            shadowed.hidden.entities.push(id.clone());
-        }
-    }
-    // A removed entity leaves the generation only with every base
-    // relation it anchors, or the layered reads would reach a row that
-    // no longer exists.
-    for id in &shadowed.hidden.entities {
-        check()?;
-        for incident in base.incident_relations(id)? {
-            if !hidden_relations.contains(&incident) {
-                return Err(GraphDbError::Corrupt {
-                    message: format!(
-                        "layered generation removes entity `{id}` but keeps its base relation `{incident}`"
-                    ),
-                });
-            }
-        }
-    }
-    let delta_relations = delta.relation_identities()?;
-    for id in delta_relations
-        .iter()
-        .chain(hidden_relations.iter())
-        .collect::<BTreeSet<_>>()
-    {
-        check()?;
-        if let Some(row) = base.relation(id)? {
-            shadowed.sum.add_row("relation", &canonical(&row)?)?;
-            shadowed.base_relations = shadowed
-                .base_relations
-                .checked_sub(1)
-                .ok_or_else(over_count)?;
-        }
-        if hidden_relations.contains(id) && delta_relations.binary_search(id).is_err() {
-            shadowed.hidden.relations.push(id.clone());
-        }
+    let index = &base.inner.index;
+    let mut removed = shadowed.shadow_entities(index, hidden_entities, delta, check)?;
+    shadowed.shadow_relations(index, hidden_relations, delta, &mut removed, check)?;
+    if let Some((id, _)) = removed.values().find(|(_, degree)| *degree != 0) {
+        return Err(GraphDbError::Corrupt {
+            message: format!(
+                "layered generation removes entity `{id}` but keeps a base relation it anchors"
+            ),
+        });
     }
     Ok(shadowed)
 }
@@ -555,6 +503,98 @@ struct ShadowedBaseRows {
     /// Base rows that still serve.
     base_entities: usize,
     base_relations: usize,
+}
+
+/// Removed entities by identity-order ordinal, with the count of base
+/// relations they still anchor, which must all leave with them.
+type RemovedEntities = BTreeMap<u32, (GraphEntityId, u32)>;
+
+fn hides_more_than_base() -> GraphDbError {
+    GraphDbError::Corrupt {
+        message: "a layered generation hides more rows than its base holds".to_owned(),
+    }
+}
+
+fn take_base_row(
+    sum: &mut GraphRowDigestSum,
+    remaining: &mut usize,
+    lanes: RowLanes,
+) -> Result<(), GraphDbError> {
+    sum.add_row_lanes(lanes);
+    *remaining = remaining.checked_sub(1).ok_or_else(hides_more_than_base)?;
+    Ok(())
+}
+
+impl ShadowedBaseRows {
+    fn shadow_entities(
+        &mut self,
+        index: &RowIndex,
+        hidden: &BTreeSet<GraphEntityId>,
+        delta: &SpilledGraphGeneration,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<RemovedEntities, GraphDbError> {
+        let mut removed = RemovedEntities::new();
+        let delta_ids = delta.entity_identities();
+        for id in delta_ids.iter().chain(hidden).collect::<BTreeSet<_>>() {
+            check()?;
+            let indexed = index.entity(id.as_str())?;
+            if let Some(indexed) = indexed {
+                take_base_row(&mut self.sum, &mut self.base_entities, indexed.lanes)?;
+            }
+            if !hidden.contains(id) || delta_ids.binary_search(id).is_ok() {
+                continue;
+            }
+            self.hidden.entities.push(id.clone());
+            if let Some(indexed) = indexed {
+                removed.insert(indexed.ordinal, (id.clone(), indexed.degree));
+            }
+        }
+        Ok(removed)
+    }
+
+    fn shadow_relations(
+        &mut self,
+        index: &RowIndex,
+        hidden: &BTreeSet<GraphRelationId>,
+        delta: &SpilledGraphGeneration,
+        removed: &mut RemovedEntities,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        let delta_ids = delta.relation_identities()?;
+        for id in delta_ids.iter().chain(hidden).collect::<BTreeSet<_>>() {
+            check()?;
+            let indexed = index.relation(id.as_str())?;
+            if let Some(indexed) = indexed {
+                take_base_row(&mut self.sum, &mut self.base_relations, indexed.lanes)?;
+            }
+            if !hidden.contains(id) {
+                continue;
+            }
+            // Only a hidden relation leaves its endpoints unanchored; a
+            // shadowing delta relation must carry its endpoints itself.
+            if let Some(indexed) = indexed {
+                release_endpoints(removed, indexed.from, indexed.to)?;
+            }
+            if delta_ids.binary_search(id).is_err() {
+                self.hidden.relations.push(id.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn release_endpoints(
+    removed: &mut RemovedEntities,
+    from: u32,
+    to: u32,
+) -> Result<(), GraphDbError> {
+    let ends: &[u32] = if from == to { &[from] } else { &[from, to] };
+    for end in ends {
+        if let Some((_, degree)) = removed.get_mut(end) {
+            *degree = degree.checked_sub(1).ok_or_else(hides_more_than_base)?;
+        }
+    }
+    Ok(())
 }
 
 /// A layered generation's rows, ready to seal over its base.
@@ -634,7 +674,11 @@ impl LayeredGraphGeneration {
     /// rows, completing a layered artifact directory beside its container.
     pub(crate) fn install_base_files(&self, staging: &Path) -> Result<(), GraphDbError> {
         let pinned = self.delta.directory();
-        for file in [LAYERED_BASE_CONTAINER_FILE, LAYERED_BASE_ATTACHMENT_FILE] {
+        for file in [
+            LAYERED_BASE_CONTAINER_FILE,
+            LAYERED_BASE_ATTACHMENT_FILE,
+            LAYERED_BASE_ROW_INDEX_FILE,
+        ] {
             std::fs::hard_link(pinned.join(file), staging.join(file))
                 .map_err(|error| layered_io("base link", error))?;
         }
@@ -657,7 +701,12 @@ impl LayeredGraphGeneration {
 /// The read side of an installed layered generation: the base engine, the
 /// namespace its rows live under, and what the delta hides or shadows.
 pub(crate) struct SealedLayer {
-    pub(crate) base: Arc<GraphDb>,
+    base: Arc<GraphDb>,
+    /// Set once the base container is proven against its receipt's digest,
+    /// which happens before the first read of a base row.
+    base_proven: OnceLock<()>,
+    base_identity: GraphGenerationManifestIdentity,
+    base_digest: GraphRecoveredGenerationDigestV1,
     pub(crate) base_receipt: SealedBaseReceiptV1,
     base_namespace: GraphNamespace,
     hidden_entities: HashSet<GraphEntityId>,
@@ -673,7 +722,12 @@ impl SealedLayer {
         base_receipt: SealedBaseReceiptV1,
         delta: &GraphDb,
         identity: &GraphGenerationManifestIdentity,
+        base_proven: bool,
     ) -> Result<Self, GraphDbError> {
+        let base_identity = base_receipt.identity(&identity.projection)?;
+        let base_digest =
+            GraphRecoveredGenerationDigestV1::new(base_receipt.recovered_digest.clone())
+                .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let hidden: HiddenRowsV1 = serde_json::from_slice(
             &std::fs::read(directory.join(LAYERED_HIDDEN_FILE))
                 .map_err(|error| layered_io("hidden rows read", error))?,
@@ -705,8 +759,15 @@ impl SealedLayer {
             .collect::<Result<HashSet<_>, _>>()?;
             (entities, relations)
         };
+        let proven = OnceLock::new();
+        if base_proven {
+            proven.get_or_init(|| ());
+        }
         Ok(Self {
             base,
+            base_proven: proven,
+            base_identity,
+            base_digest,
             base_namespace: GraphNamespace::new(base_receipt.physical_namespace.clone())?,
             base_receipt,
             hidden_entities: hidden.entities.into_iter().collect(),
@@ -714,6 +775,28 @@ impl SealedLayer {
             delta_entities,
             delta_relations,
         })
+    }
+
+    /// The base engine for lifecycle work that reads no row: census,
+    /// hibernation, close.
+    pub(crate) fn base_engine(&self) -> &Arc<GraphDb> {
+        &self.base
+    }
+
+    /// The base engine for a read, proven first: a layer installed right
+    /// after its seal defers the proof to here, so the seal never loads the
+    /// base graph, and the carried verify-once marker keeps it cheap.
+    pub(crate) fn proven_base(&self) -> Result<&GraphDb, GraphDbError> {
+        if self.base_proven.get().is_none() {
+            crate::sealed_store::sealed_copy_proof(
+                &self.base,
+                &self.base_identity,
+                &self.base_digest,
+                &|| Ok(()),
+            )?;
+            self.base_proven.get_or_init(|| ());
+        }
+        Ok(&self.base)
     }
 
     /// Rows a base read may return that the layer then drops, the headroom a
@@ -766,7 +849,7 @@ impl LayeredReads<'_> {
             return Ok(None);
         }
         self.layer
-            .base
+            .proven_base()?
             .entity(&self.layer.base_namespace, identity, cancellation)
     }
 
@@ -783,7 +866,7 @@ impl LayeredReads<'_> {
         } else if self.layer.hidden_relations.contains(identity) {
             return Ok(None);
         } else {
-            (&*self.layer.base, &self.layer.base_namespace)
+            (self.layer.proven_base()?, &self.layer.base_namespace)
         };
         let guard = database.read_database(cancellation)?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -799,7 +882,7 @@ impl LayeredReads<'_> {
         if self.layer.hidden_entities.contains(identity) {
             return Ok(false);
         }
-        let guard = self.layer.base.read_guard()?;
+        let guard = self.layer.proven_base()?.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         Ok(load_entity(native, &self.layer.base_namespace, identity)?.is_some())
     }
@@ -811,7 +894,7 @@ impl LayeredReads<'_> {
         if self.layer.hidden_relations.contains(identity) {
             return Ok(false);
         }
-        let guard = self.layer.base.read_guard()?;
+        let guard = self.layer.proven_base()?.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         Ok(load_relation(native, &self.layer.base_namespace, identity)?.is_some())
     }
@@ -859,7 +942,7 @@ impl LayeredReads<'_> {
         let mut cursor = after.map(str::to_owned);
         loop {
             let fetched = page(
-                &self.layer.base,
+                self.layer.proven_base()?,
                 &self.layer.base_namespace,
                 cursor.as_deref(),
             )?;
@@ -1045,7 +1128,7 @@ impl LayeredReads<'_> {
             error => error,
         };
         let delta = read(self.delta, &self.namespace).map_err(refused)?;
-        let base = read(&self.layer.base, &self.layer.base_namespace).map_err(refused)?;
+        let base = read(self.layer.proven_base()?, &self.layer.base_namespace).map_err(refused)?;
         Ok(delta
             .into_iter()
             .zip(base)
@@ -1158,7 +1241,7 @@ impl LayeredReads<'_> {
             }
         };
         let delta = read(self.delta, &self.namespace)?;
-        let base = read(&self.layer.base, &self.layer.base_namespace)?;
+        let base = read(self.layer.proven_base()?, &self.layer.base_namespace)?;
         Ok(delta
             .into_iter()
             .zip(base)
@@ -1360,16 +1443,4 @@ impl LayeredReads<'_> {
 /// A layered generation's hard-linked base container.
 pub(crate) fn base_database_path(directory: &Path) -> PathBuf {
     directory.join(LAYERED_BASE_CONTAINER_FILE)
-}
-
-/// A flat generation's attachment, when its producer sealed one.
-pub(crate) fn flat_attachment(directory: &Path) -> Option<PathBuf> {
-    let path = directory.join(GENERATION_ATTACHMENT_FILE);
-    path.is_file().then_some(path)
-}
-
-/// A layered generation's pinned base attachment.
-pub(crate) fn layered_attachment(directory: &Path) -> Option<PathBuf> {
-    let path = directory.join(LAYERED_BASE_ATTACHMENT_FILE);
-    path.is_file().then_some(path)
 }

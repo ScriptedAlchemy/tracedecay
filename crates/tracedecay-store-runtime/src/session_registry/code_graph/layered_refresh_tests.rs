@@ -43,9 +43,9 @@ fn git(root: &Path, args: &[&str]) {
 /// A module that defines a type, a value, and a function calling two other
 /// modules' values through crate paths, so every module has cross-file
 /// callers and callees.
-fn module_source(index: usize, value: &str) -> String {
-    let previous = (index + MODULES - 1) % MODULES;
-    let far = (index + 7) % MODULES;
+fn module_source(modules: usize, index: usize, value: &str) -> String {
+    let previous = (index + modules - 1) % modules;
+    let far = (index + 7) % modules;
     format!(
         "pub struct Item{index:03} {{ pub value: usize }}\n\
          impl Item{index:03} {{\n    pub fn get(&self) -> usize {{ self.value }}\n}}\n\
@@ -55,14 +55,14 @@ fn module_source(index: usize, value: &str) -> String {
     )
 }
 
-fn write_corpus(project_root: &Path) {
+fn write_corpus(project_root: &Path, modules: usize) {
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
     let mut lib = String::new();
-    for index in 0..MODULES {
+    for index in 0..modules {
         lib.push_str(&format!("pub mod m{index:03};\n"));
         std::fs::write(
             project_root.join(format!("src/m{index:03}.rs")),
-            module_source(index, &index.to_string()),
+            module_source(modules, index, &index.to_string()),
         )
         .expect("module source");
     }
@@ -72,15 +72,20 @@ fn write_corpus(project_root: &Path) {
 /// Three files change: one body edit that moves every symbol occurrence of
 /// its file, one new function called in its own file, and one deleted
 /// function whose two cross-file callers stay behind unchanged.
-fn edit_three_files(project_root: &Path) {
-    std::fs::write(project_root.join("src/m003.rs"), module_source(3, "3 + 1")).expect("edit m003");
+fn edit_three_files(project_root: &Path, modules: usize) {
+    std::fs::write(
+        project_root.join("src/m003.rs"),
+        module_source(modules, 3, "3 + 1"),
+    )
+    .expect("edit m003");
     std::fs::write(
         project_root.join("src/m010.rs"),
-        module_source(10, "added_010()")
+        module_source(modules, 10, "added_010()")
             + "pub fn added_010() -> usize { crate::m050::value_050() }\n",
     )
     .expect("edit m010");
-    let without_value = module_source(20, "20").replace("pub fn value_020() -> usize { 20 }\n", "");
+    let without_value =
+        module_source(modules, 20, "20").replace("pub fn value_020() -> usize { 20 }\n", "");
     std::fs::write(project_root.join("src/m020.rs"), without_value).expect("edit m020");
 }
 
@@ -287,6 +292,37 @@ struct RefreshFixture {
 }
 
 impl RefreshFixture {
+    /// A committed corpus of `modules` modules under `root`.
+    fn create(root: &Path, modules: usize) -> Self {
+        let project_root = root.join("project");
+        write_corpus(&project_root, modules);
+        git(&project_root, &["init", "-q", "-b", "main"]);
+        git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            &project_root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        let project_id = ProjectId::new("project.layered-refresh").expect("project id");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+        let canonical_project = project_root.canonicalize().expect("canonical project root");
+        let fixture = Self {
+            scoped_store: scoped_code_index_store_root(
+                &root.join("code-index-store"),
+                &canonical_project,
+            ),
+            root: root.to_path_buf(),
+            project_root,
+            canonical_project,
+            project_id,
+        };
+        fixture.commit("layered refresh corpus");
+        fixture
+    }
+
     fn commit(&self, message: &str) {
         git(&self.project_root, &["add", "-A"]);
         git(&self.project_root, &["commit", "-qm", message]);
@@ -512,32 +548,8 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .path()
         .canonicalize()
         .expect("canonical fixture root");
-    let project_root = root.join("project");
-    write_corpus(&project_root);
-    git(&project_root, &["init", "-q", "-b", "main"]);
-    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
-    git(
-        &project_root,
-        &["config", "user.email", "tracedecay@example.invalid"],
-    );
-    let project_id = ProjectId::new("project.layered-refresh").expect("project id");
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
-        &project_root,
-        project_id.as_str(),
-    )
-    .expect("project enrollment");
-    let canonical_project = project_root.canonicalize().expect("canonical project root");
-    let fixture = RefreshFixture {
-        scoped_store: scoped_code_index_store_root(
-            &root.join("code-index-store"),
-            &canonical_project,
-        ),
-        root: root.clone(),
-        project_root: project_root.clone(),
-        canonical_project,
-        project_id,
-    };
-    fixture.commit("layered refresh corpus");
+    let fixture = RefreshFixture::create(&root, MODULES);
+    let project_root = fixture.project_root.clone();
     let (source, base_generation, _, base_binding) = fixture.seal();
     let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
     let base_runtime = source
@@ -571,7 +583,7 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .expect("recover the base graph after a restart");
 
     // A three-file edit.
-    edit_three_files(&project_root);
+    edit_three_files(&project_root, MODULES);
     fixture.commit("edit three files");
     let (source, child_generation, child_parent, child_binding) = fixture.seal();
     assert_eq!(child_parent.as_ref(), Some(&base_generation));
@@ -668,4 +680,150 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     )
     .await;
     drop((base_runtime, child_runtime, grandchild_runtime));
+}
+
+const PEAK_PROBE_MODULES: &str = "TRACEDECAY_LAYERED_PEAK_PROBE_MODULES";
+const PEAK_PROBE_LINE: &str = "layered-refresh-peak-kib ";
+
+/// Kibibytes one `/proc/self/status` field holds.
+#[cfg(target_os = "linux")]
+fn status_kib(field: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("process status");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.trim_start_matches(':').trim().strip_suffix(" kB"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("process status has no {field}"))
+}
+
+/// Runs `work` and returns how far the process's resident set peaked above
+/// where it stood when `work` began, in KiB. Freed allocator pages are
+/// returned first, so the peak is new memory `work` needed.
+#[cfg(target_os = "linux")]
+fn peak_kib_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let _ = tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1();
+    std::fs::write("/proc/self/clear_refs", "5").expect("reset the peak resident set");
+    let start = status_kib("VmRSS");
+    let value = work();
+    (value, status_kib("VmHWM").saturating_sub(start))
+}
+
+/// One corpus size's measurement, run alone in its own process by
+/// [`a_layered_refresh_peaks_below_a_cold_build_at_both_base_sizes`] so no
+/// other test's memory lands in it: after a restart, a three-file refresh
+/// published as a delta over its cold base, then the same generation
+/// published cold in a fresh profile.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "a measurement process that the peak test runs, one corpus size at a time"]
+async fn layered_refresh_peak_probe() {
+    let modules: usize = std::env::var(PEAK_PROBE_MODULES)
+        .expect("the probe runs under the peak test")
+        .parse()
+        .expect("module count");
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, modules);
+    let (source, base_generation, _, base_binding) = fixture.seal();
+    {
+        let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
+        source
+            .retain(&registry, &database, &base_generation, base_binding.clone())
+            .await
+            .expect("retain the base graph runtime")
+            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .expect("publish the base graph cold");
+    }
+    edit_three_files(&fixture.project_root, modules);
+    fixture.commit("edit three files");
+    let (source, child_generation, _, child_binding) = fixture.seal();
+
+    let (_scope, registry, database) = fixture.open_profile("profile", 45).await;
+    let child_runtime = source
+        .retain(
+            &registry,
+            &database,
+            &child_generation,
+            child_binding.clone(),
+        )
+        .await
+        .expect("retain the child graph runtime");
+    let (child, layered_kib) = peak_kib_during(|| {
+        child_runtime
+            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .expect("publish the refresh")
+    });
+    let (_, receipt) = receipt_for(&root.join("profile"), child.generation().as_str());
+    assert_eq!(receipt["form"], "layered");
+    drop((child, child_runtime, registry, database, _scope));
+
+    let (_scope, registry, database) = fixture.open_profile("profile-cold", 46).await;
+    let cold_runtime = source
+        .retain(&registry, &database, &child_generation, child_binding)
+        .await
+        .expect("retain the cold graph runtime");
+    let (cold, cold_kib) = peak_kib_during(|| {
+        cold_runtime
+            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .expect("publish the generation cold")
+    });
+    let (_, receipt) = receipt_for(&root.join("profile-cold"), cold.generation().as_str());
+    assert_eq!(receipt["form"], "compact");
+    println!("{PEAK_PROBE_LINE}{layered_kib} {cold_kib}");
+}
+
+/// `(layered, cold)` peak KiB of one corpus size, measured in a process of
+/// its own.
+#[cfg(target_os = "linux")]
+fn measure_peaks(modules: usize) -> (u64, u64) {
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "session_registry::code_graph::layered_refresh_tests::layered_refresh_peak_probe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PEAK_PROBE_MODULES, modules.to_string())
+        .output()
+        .expect("run the peak probe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "peak probe for {modules} modules failed: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find_map(|line| line.split_once(PEAK_PROBE_LINE).map(|(_, peaks)| peaks))
+        .unwrap_or_else(|| panic!("peak probe for {modules} modules printed no peaks: {stdout}"));
+    let mut peaks = line
+        .split_whitespace()
+        .map(|value| value.parse::<u64>().expect("peak KiB"));
+    let layered = peaks.next().expect("layered peak");
+    let cold = peaks.next().expect("cold peak");
+    println!("{modules} modules: layered refresh +{layered} KiB, cold build +{cold} KiB");
+    (layered, cold)
+}
+
+/// Fails when a layered refresh loads its base graph: its peak then carries
+/// the whole base engine, rising above the cold build of the same tree and
+/// growing with the base like it. At two base sizes the refresh must peak
+/// below the cold build, and grow less than the cold build does between
+/// them; what still grows is the whole-corpus resolution both builds run.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_layered_refresh_peaks_below_a_cold_build_at_both_base_sizes() {
+    let small = measure_peaks(MODULES);
+    let large = measure_peaks(MODULES * 4);
+    assert!(small.0 < small.1, "{MODULES} modules: {small:?}");
+    assert!(large.0 < large.1, "{} modules: {large:?}", MODULES * 4);
+    assert!(
+        large.0.saturating_sub(small.0) < large.1.saturating_sub(small.1),
+        "the refresh grew with its base like a cold build: {small:?} -> {large:?}"
+    );
 }

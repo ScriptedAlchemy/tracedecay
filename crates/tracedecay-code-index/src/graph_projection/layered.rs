@@ -13,7 +13,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use tracedecay_domain::{CanonicalRelationEdgeV1, SymbolOccurrenceId};
-use tracedecay_runtime_core::resident_memory::release_process_allocator_memory_v1;
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use tracedecay_graph_db::{
@@ -134,10 +133,7 @@ pub fn build_layered_code_graph_rows(
             check,
         )
     )?;
-    // Sealing reopens the base engine, a whole sealed graph. Returning the
-    // resolution's pages first keeps the two from stacking in the peak.
     drop(resolution);
-    let _ = release_process_allocator_memory_v1();
     let identity =
         code_graph_manifest_identity(projection_identity, &generation, projector_revision)?;
     let generation = hotpath::measure_block!(
@@ -270,7 +266,18 @@ fn emit_delta(
         true,
     )?;
     spill.hide(Vec::new(), retention_lost);
-    diff_placeholders(spill, resolution, &unresolved_by_source, check)?;
+    let child_placeholders = diff_placeholders(spill, resolution, &unresolved_by_source, check)?;
+    emit_endpoint_stubs(
+        &emitter,
+        spill,
+        resolution,
+        &child_placeholders,
+        resolution
+            .added
+            .iter()
+            .flat_map(|batch| batch.edges.iter())
+            .chain(&retention_gained),
+    )?;
     reseal_generation_marker(spill, generation, check)?;
     Ok(CodeGraphLayeredReportV1 {
         reextracted_files: resolution.reextracted_files,
@@ -344,13 +351,13 @@ fn emit_unchanged_moves(
 }
 
 /// Edge targets no file binds are placeholder entities; emits the ones only
-/// the child has and hides the ones only the base had.
+/// the child has and hides the ones only the base had. Returns the child's.
 fn diff_placeholders(
     spill: &mut GraphLayeredRowSpill,
     resolution: &CodeGraphLayeredResolutionV1<'_>,
     unresolved_by_source: &UnresolvedBySource<'_>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), SealedCodeGraphRowsError> {
+) -> Result<BTreeSet<SymbolOccurrenceId>, SealedCodeGraphRowsError> {
     let unchanged_edges = || {
         resolution
             .unchanged
@@ -392,6 +399,87 @@ fn diff_placeholders(
             .collect::<Result<Vec<_>, _>>()?,
         Vec::new(),
     );
+    Ok(child)
+}
+
+/// Pushes the row of every endpoint the delta's relations reach but no
+/// delta row carries: a symbol an unchanged file binds or describes, or a
+/// placeholder both sides hold. Each is emitted from the recorded inputs
+/// exactly as the base emitted it, so the delta never reads the base graph.
+fn emit_endpoint_stubs<'e>(
+    emitter: &DeltaEmitter<'_>,
+    spill: &mut GraphLayeredRowSpill,
+    resolution: &CodeGraphLayeredResolutionV1<'_>,
+    placeholders: &BTreeSet<SymbolOccurrenceId>,
+    edges: impl Iterator<Item = &'e CanonicalRelationEdgeV1>,
+) -> Result<(), SealedCodeGraphRowsError> {
+    let missing = spill
+        .missing_endpoints()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut wanted = BTreeSet::new();
+    for edge in edges {
+        (emitter.check)()?;
+        for occurrence in [&edge.from_occurrence, &edge.to_occurrence] {
+            if missing.contains(&symbol_entity_id(occurrence)?) {
+                wanted.insert(occurrence.clone());
+            }
+        }
+    }
+    for batch in &resolution.unchanged {
+        (emitter.check)()?;
+        let symbols = batch
+            .symbols
+            .iter()
+            .filter(|symbol| wanted.contains(&symbol.occurrence))
+            .cloned()
+            .collect::<Vec<_>>();
+        let bindings = batch
+            .bindings
+            .iter()
+            .filter(|(occurrence, _)| wanted.contains(*occurrence))
+            .map(|(occurrence, binding)| (occurrence.clone(), binding.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if symbols.is_empty() && bindings.is_empty() {
+            continue;
+        }
+        emitter.emit(
+            spill,
+            CodeGraphRowBatch {
+                files: &[],
+                imports: &[],
+                chunks: &[],
+                symbols: &symbols,
+                edges: &[],
+                bindings: Some(&bindings),
+            },
+            false,
+        )?;
+    }
+    let mut stubs = Vec::new();
+    for occurrence in wanted
+        .iter()
+        .filter(|occurrence| placeholders.contains(*occurrence))
+    {
+        stubs.push(symbol_entity(
+            symbol_entity_id(occurrence)?,
+            SymbolRecordV1 {
+                occurrence: occurrence.clone(),
+                binding: None,
+                metadata: None,
+                unresolved_calls: emitter
+                    .context
+                    .unresolved_by_source
+                    .get(occurrence)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+        )?);
+    }
+    spill.push_batch(stubs, Vec::new(), emitter.check)?;
     Ok(())
 }
 
