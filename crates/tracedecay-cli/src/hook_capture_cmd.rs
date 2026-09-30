@@ -8,7 +8,7 @@ use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
 use tracedecay_hooks::{
-    HookDeliveryReceiptSpoolV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
+    HookDeliveryReceiptWriterV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
 };
 
 use crate::cli::Commands;
@@ -304,8 +304,8 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 fn open_delivery_receipt_spool(
     data_root: &Path,
     host: NativeHostIdentityV1,
-) -> Result<HookDeliveryReceiptSpoolV1, HookDeliverySpoolError> {
-    HookDeliveryReceiptSpoolV1::open_within(
+) -> Result<HookDeliveryReceiptWriterV1, HookDeliverySpoolError> {
+    HookDeliveryReceiptWriterV1::open_within(
         tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
         tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
     )
@@ -498,7 +498,7 @@ fn retain_delivery_receipt(
         return false;
     };
     open_delivery_receipt_spool(data_root, source.host())
-        .and_then(|writer| writer.append(&receipt))
+        .and_then(|writer| writer.retain(&receipt))
         .is_ok()
 }
 

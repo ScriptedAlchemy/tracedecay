@@ -167,7 +167,7 @@ pub fn publish_daemon_bindings(
             })?,
         );
         drop(
-            tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
+            tracedecay_hooks::HookDeliveryReceiptWriterV1::open_within(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, *host),
                 tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             )

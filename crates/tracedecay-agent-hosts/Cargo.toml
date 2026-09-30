@@ -80,6 +80,7 @@ xattr = "1"
 
 [dev-dependencies]
 tempfile = "3"
+tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }

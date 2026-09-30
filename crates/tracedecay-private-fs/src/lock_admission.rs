@@ -1,4 +1,4 @@
-//! Deadline-aware admission to an exclusive advisory file lock.
+//! Deadline-aware admission to an exclusive or shared advisory file lock.
 use std::fs::File;
 use std::io;
 use std::time::{Duration, Instant};
@@ -16,11 +16,26 @@ const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// A lock taken after the deadline is released and the call times out.
 #[hotpath::measure(label = "private_fs.lock.admission")]
 pub fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
+    admit_until(file, deadline, File::try_lock)
+}
+
+/// Shared-locks `file`, waiting until `deadline` for any exclusive holder.
+/// A lock taken after the deadline is released and the call times out.
+#[hotpath::measure(label = "private_fs.lock.shared_admission")]
+pub fn lock_shared_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
+    admit_until(file, deadline, File::try_lock_shared)
+}
+
+fn admit_until(
+    file: &File,
+    deadline: Instant,
+    try_lock: impl Fn(&File) -> Result<(), std::fs::TryLockError>,
+) -> Result<(), LockAdmissionError> {
     loop {
         if Instant::now() >= deadline {
             return Err(LockAdmissionError::TimedOut);
         }
-        match file.try_lock() {
+        match try_lock(file) {
             Ok(()) => {
                 if Instant::now() >= deadline {
                     file.unlock().map_err(LockAdmissionError::Io)?;
