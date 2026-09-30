@@ -411,20 +411,21 @@ pub mod sync_latency {
     }
 }
 
-fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+fn before_sync(path: &Path) {
     #[cfg(feature = "test-helpers")]
     sync_latency::before_sync(path);
     #[cfg(not(feature = "test-helpers"))]
     let _ = path;
+}
+
+fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
     hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
 }
 
 /// `File::sync_data` on a caller-held handle of `path`.
 pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
-    #[cfg(feature = "test-helpers")]
-    sync_latency::before_sync(path);
-    #[cfg(not(feature = "test-helpers"))]
-    let _ = path;
+    before_sync(path);
     hotpath::measure_block!("private_fs.framed_log.fdatasync", file.sync_data())
 }
 
