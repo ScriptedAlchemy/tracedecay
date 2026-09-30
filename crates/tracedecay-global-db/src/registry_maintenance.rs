@@ -87,14 +87,3 @@ impl RegistryGcReport {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
-
-#[cfg(test)]
-fn graph_scope_location_drift_is_repairable(existing: &str, expected: &GraphScopeUpsert) -> bool {
-    serde_json::from_str::<(String, String, String, String, Option<String>)>(existing).is_ok_and(
-        |(project_id, store_id, branch_name, _, _)| {
-            project_id == expected.project_id
-                && store_id == expected.store_id
-                && branch_name == expected.branch_name
-        },
-    )
-}

@@ -1325,7 +1325,6 @@ pub(crate) async fn seed_project_registry(
             project_id: project.project_id.clone(),
             store_id: store.store_id.clone(),
             branch_name: "main".to_string(),
-            db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
             parent_scope_id: None,
             last_synced_at: Some(1_800_000_002),
             writable: true,

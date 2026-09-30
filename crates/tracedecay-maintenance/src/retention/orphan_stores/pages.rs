@@ -249,13 +249,6 @@ async fn build_store_census_for_projects(
             if control.is_some_and(|control| control.completion().is_some()) {
                 return Ok(None);
             }
-            let graph_scope_relpaths = context
-                .stores
-                .iter()
-                .filter(|candidate| candidate.store.store_id == store.store_id)
-                .flat_map(|candidate| candidate.graph_scopes.iter())
-                .map(|scope| PathBuf::from(&scope.db_relpath))
-                .collect::<Vec<_>>();
             if store.storage_mode != "profile_sharded" {
                 continue;
             }
@@ -289,7 +282,6 @@ async fn build_store_census_for_projects(
                 expected_data_root_fence: cheap.expected_data_root_fence,
                 expected_content_fence: StoreContentFence::Missing,
                 expected_manifest_bytes: cheap.expected_manifest_bytes,
-                graph_scope_relpaths,
             });
         }
     }

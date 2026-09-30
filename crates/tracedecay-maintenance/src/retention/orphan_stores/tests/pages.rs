@@ -568,16 +568,11 @@ fn cancelled_content_census_stops_before_hashing_or_mutation() {
     let data_root = profile_root.join("stores/cancelled-census");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("large.bin"), vec![7_u8; 512 * 1024]).unwrap();
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
 
     let result = super::fence::capture_store_content_fence_controlled(
         &profile_root,
         &data_root,
-        CollectionControl::new(
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-        ),
+        cancelled_collection_control(),
     );
 
     assert_eq!(result, Err(CollectionFailureKind::Cancelled));
@@ -593,12 +588,7 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
     let data_root = tmp.path().join("deep");
     std::fs::create_dir_all(data_root.join("a/b/c")).unwrap();
     std::fs::write(data_root.join("a/b/c/payload.bin"), vec![3_u8; 4096]).unwrap();
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
-    let control = CollectionControl::new(
-        &cancellation,
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-    );
+    let control = cancelled_collection_control();
 
     assert_eq!(
         newest_mtime_secs_controlled(&data_root, control),

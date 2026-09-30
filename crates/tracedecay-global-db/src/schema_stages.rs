@@ -77,7 +77,6 @@ const REGISTRY_SCHEMA: &str = "
         project_id TEXT NOT NULL,
         store_id TEXT NOT NULL,
         branch_name TEXT NOT NULL,
-        db_relpath TEXT NOT NULL,
         parent_scope_id TEXT,
         last_synced_at INTEGER,
         writable INTEGER NOT NULL DEFAULT 1,
@@ -1565,6 +1564,98 @@ mod tests {
                 .unwrap();
             assert_eq!(columns, columns_after_refusal, "{drift}");
         }
+    }
+
+    /// Released registries (through v1.0.0-beta.63) record a per-scope
+    /// `db_relpath`. That shape is refused with the project-registry reset
+    /// state, and its rows are left exactly as admission found them.
+    #[tokio::test]
+    async fn registry_with_released_graph_scope_relpath_requires_typed_reset() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_schema(&database_path).await;
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let dependents = connection
+                .prepare(
+                    "SELECT sql FROM sqlite_schema
+                     WHERE tbl_name = 'graph_scopes' AND type IN ('index', 'trigger')
+                       AND sql IS NOT NULL",
+                )
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE graph_scopes;
+                     CREATE TABLE graph_scopes (
+                         graph_scope_id TEXT PRIMARY KEY,
+                         project_id TEXT NOT NULL,
+                         store_id TEXT NOT NULL,
+                         branch_name TEXT NOT NULL,
+                         db_relpath TEXT NOT NULL,
+                         parent_scope_id TEXT,
+                         last_synced_at INTEGER,
+                         writable INTEGER NOT NULL DEFAULT 1,
+                         FOREIGN KEY(project_id) REFERENCES code_projects(project_id)
+                             ON DELETE CASCADE,
+                         FOREIGN KEY(store_id) REFERENCES store_instances(store_id)
+                             ON DELETE CASCADE
+                     );",
+                )
+                .unwrap();
+            for sql in dependents {
+                connection.execute_batch(&sql).unwrap();
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO code_projects
+                        (project_id, canonical_root, display_root, created_at, last_seen_at)
+                     VALUES ('released', '/released', '/released', 1, 1);
+                     INSERT INTO store_instances
+                        (store_id, project_id, store_kind, storage_mode, store_relpath,
+                         created_at)
+                     VALUES ('store', 'released', 'code_project', 'profile_sharded',
+                             'projects/released', 1);
+                     INSERT INTO graph_scopes
+                        (graph_scope_id, project_id, store_id, branch_name, db_relpath)
+                     VALUES ('store:branch:main', 'released', 'store', 'main',
+                             'projects/released/tracedecay.db');",
+                )
+                .unwrap();
+        }
+
+        let error = registered_admission_error(&database_path).await;
+
+        assert_eq!(
+            error.reset_required_context(),
+            Some((
+                super::project_registry::PROJECT_REGISTRY_AUTHORITY,
+                "database error: table 'graph_scopes' has an incompatible number of \
+                 columns (operation: validate global database authority schema)"
+            ))
+        );
+        let row: (String, String) = rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT group_concat(name, ',') FROM pragma_table_xinfo('graph_scopes')),
+                        db_relpath
+                 FROM graph_scopes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "graph_scope_id,project_id,store_id,branch_name,db_relpath,parent_scope_id,\
+                 last_synced_at,writable"
+                    .to_owned(),
+                "projects/released/tracedecay.db".to_owned()
+            )
+        );
     }
 
     #[tokio::test]

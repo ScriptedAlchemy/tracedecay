@@ -334,12 +334,12 @@ fn reconstruct_graph_scopes(
         }
     };
     let graph_db_path = branch_dir.join(DB_FILENAME);
-    let Some(profile_db_relpath) = strip_profile_root(profile_root, &graph_db_path) else {
+    if strip_profile_root(profile_root, &graph_db_path).is_none() {
         return invalid(format!(
             "project graph database '{}' is missing or escapes profile root",
             graph_db_path.display()
         ));
-    };
+    }
     let mut scopes = Vec::new();
     for (branch_name, entry) in &meta.branches {
         scopes.push(GraphScopeUpsert {
@@ -347,7 +347,6 @@ fn reconstruct_graph_scopes(
             project_id: project_id.to_string(),
             store_id: store_id.to_string(),
             branch_name: branch_name.clone(),
-            db_relpath: tracedecay_domain::forward_slash_path(&profile_db_relpath),
             parent_scope_id: entry
                 .parent
                 .as_ref()
@@ -439,7 +438,6 @@ mod tests {
             project_id: "project".to_string(),
             store_id: "store".to_string(),
             branch_name: branch.to_string(),
-            db_relpath: "projects/p/tracedecay.db".to_string(),
             parent_scope_id: parent.map(|parent| format!("store:branch:{parent}")),
             last_synced_at: Some(synced),
             writable: true,
