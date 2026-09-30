@@ -478,13 +478,7 @@ fn run<E: ReaderQueryExecutor>(
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
-    loop {
-        collect_idle_thread_heap_v1();
-        let command = match receiver.recv_timeout(IDLE_THREAD_COLLECTION_WAIT_V1) {
-            Ok(command) => command,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
+    while let Some(command) = next_command(&receiver) {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::ReleaseMemory { reply } => {
@@ -519,6 +513,19 @@ fn run<E: ReaderQueryExecutor>(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
+        }
+    }
+}
+
+/// Wait for the next command, returning this thread's heap whenever the
+/// sampler asked for it while the worker idles.
+fn next_command(receiver: &Receiver<WorkerCommand>) -> Option<WorkerCommand> {
+    loop {
+        collect_idle_thread_heap_v1();
+        match receiver.recv_timeout(IDLE_THREAD_COLLECTION_WAIT_V1) {
+            Ok(command) => return Some(command),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
 }

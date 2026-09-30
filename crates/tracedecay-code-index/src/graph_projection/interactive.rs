@@ -1462,29 +1462,21 @@ impl CodeGraphInteractiveReader {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         // Built in a heap of its own, the catalog's pages hold nothing else,
         // are charged as the catalog's, and return whole when it is dropped.
-        let heap = OwnerHeapV1::new();
-        let build = || {
-            catalog::build_interactive_catalog(
-                &self.snapshot,
-                &self.projection,
-                self.projection_node_count,
-                Arc::clone(&cancellation),
-            )
-        };
-        let result = hotpath::measure_block!("code_graph.catalog.build", {
-            match &heap {
-                Some(heap) => heap.scope(build),
-                None => build(),
-            }
-        })
-        .and_then(|mut catalog| {
+        let (built, heap) = hotpath::measure_block!("code_graph.catalog.build", {
+            OwnerHeapV1::build(|| {
+                catalog::build_interactive_catalog(
+                    &self.snapshot,
+                    &self.projection,
+                    self.projection_node_count,
+                    Arc::clone(&cancellation),
+                )
+            })
+        });
+        let result = built.and_then(|mut catalog| {
             if cancellation.is_cancelled() {
                 Err(CodeGraphProjectionError::Cancelled)
             } else {
-                catalog.heap = heap.map(|heap| {
-                    let bytes = heap.resident_bytes();
-                    (heap, bytes)
-                });
+                catalog.heap = heap;
                 Ok(Arc::new(catalog))
             }
         });

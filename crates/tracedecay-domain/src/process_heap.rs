@@ -62,6 +62,18 @@ pub struct OwnerHeapV1 {
 }
 
 impl OwnerHeapV1 {
+    /// Run `build` in a fresh owner heap and return its result with the heap
+    /// and the bytes of the heap's pages once `build` returned. Without an
+    /// allocator that has heaps, `build` runs in the process heap.
+    pub fn build<R>(build: impl FnOnce() -> R) -> (R, Option<(Self, u64)>) {
+        let Some(heap) = Self::new() else {
+            return (build(), None);
+        };
+        let built = heap.scope(build);
+        let bytes = heap.resident_bytes();
+        (built, Some((heap, bytes)))
+    }
+
     #[must_use]
     pub fn new() -> Option<Self> {
         let calls = PROCESS_ALLOCATOR_RELEASE_V1.get()?.owner_heaps?;

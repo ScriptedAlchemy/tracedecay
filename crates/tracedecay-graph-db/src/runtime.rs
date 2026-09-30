@@ -1681,16 +1681,9 @@ impl GraphDb {
         // The engine's long-lived state is built in a heap of its own: its
         // pages then hold nothing else, are charged as the engine's, and are
         // returned whole when it hibernates.
-        let heap = OwnerHeapV1::new();
-        let open = || open_lazy_engine(&validated, persistent_store_state);
-        let opened = match &heap {
-            Some(heap) => heap.scope(open),
-            None => open(),
-        }?;
-        let heap = heap.map(|heap| {
-            let bytes = heap.resident_bytes();
-            (heap, bytes)
-        });
+        let (opened, heap) =
+            OwnerHeapV1::build(|| open_lazy_engine(&validated, persistent_store_state));
+        let opened = opened?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
         }
