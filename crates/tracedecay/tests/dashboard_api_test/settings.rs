@@ -139,7 +139,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_array()
             .unwrap_or_else(|| panic!("expected environment variables array: {settings}"));
         for name in [
-            "TRACEDECAY_ENABLE_GLOBAL_DB",
             "TRACEDECAY_DISABLE_GLOBAL_DB",
             "TRACEDECAY_GLOBAL_DB",
             "TRACEDECAY_DATA_DIR",
@@ -156,6 +155,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "env variable {name} needs a description"
             );
         }
+        assert!(
+            variables
+                .iter()
+                .all(|variable| variable["name"] != "TRACEDECAY_ENABLE_GLOBAL_DB"),
+            "the retired enable override must not be advertised: {settings}"
+        );
         let global_db_var = variables
             .iter()
             .find(|variable| variable["name"] == "TRACEDECAY_GLOBAL_DB")

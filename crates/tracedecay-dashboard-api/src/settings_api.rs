@@ -772,10 +772,6 @@ fn environment_payload() -> EnvironmentSettingsPayloadV1 {
         pricing_offline: true,
         variables: vec![
             env_variable(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                "Force-enables (truthy) or disables (falsy) global savings-ledger recording. Wins over TRACEDECAY_DISABLE_GLOBAL_DB.",
-            ),
-            env_variable(
                 "TRACEDECAY_DISABLE_GLOBAL_DB",
                 "A truthy value disables global savings/accounting recording.",
             ),

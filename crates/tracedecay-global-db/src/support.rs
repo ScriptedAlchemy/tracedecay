@@ -28,10 +28,7 @@ pub(crate) fn global_db_operation_message(
 pub enum AccountingMode {
     /// No env override, global accounting is on by default.
     Default,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` explicitly enabled it.
-    EnabledByEnv,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
-    /// `TRACEDECAY_DISABLE_GLOBAL_DB` explicitly disabled it.
+    /// A truthy `TRACEDECAY_DISABLE_GLOBAL_DB` disabled it.
     DisabledByEnv,
 }
 
@@ -43,7 +40,6 @@ impl AccountingMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
-            Self::EnabledByEnv => "enabled_by_env",
             Self::DisabledByEnv => "disabled_by_env",
         }
     }
@@ -71,26 +67,14 @@ pub fn env_flag(name: &str) -> bool {
 /// Enabled **by default**: every other writer of the user-level `global.db`
 /// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the
 /// Savings dashboard reads the ledger, an opt-in gate here silently left
-/// the ledger empty while lifetime counters kept growing. Precedence:
-///
-/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.
-/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
-/// 3. Otherwise → enabled.
+/// the ledger empty while lifetime counters kept growing. A truthy
+/// `TRACEDECAY_DISABLE_GLOBAL_DB` is the one opt-out.
 pub fn global_accounting_mode() -> AccountingMode {
-    if let Ok(value) = std::env::var("TRACEDECAY_ENABLE_GLOBAL_DB") {
-        return if env_value_truthy(&value) {
-            AccountingMode::EnabledByEnv
-        } else {
-            AccountingMode::DisabledByEnv
-        };
+    if env_flag("TRACEDECAY_DISABLE_GLOBAL_DB") {
+        AccountingMode::DisabledByEnv
+    } else {
+        AccountingMode::Default
     }
-    if std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB")
-        .ok()
-        .is_some_and(|value| env_value_truthy(&value))
-    {
-        return AccountingMode::DisabledByEnv;
-    }
-    AccountingMode::Default
 }
 
 pub fn global_accounting_enabled() -> bool {

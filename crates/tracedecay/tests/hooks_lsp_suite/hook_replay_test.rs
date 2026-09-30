@@ -25,9 +25,9 @@ use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_comman
 /// processes never touch the operator's real accounting store. This test's
 /// subject is the bridge from hook JSONL into the durable `analytics_events`
 /// table, which lives in the registered profile accounting database, so it must
-/// opt back in, against its own hermetic temp profile, never a live one.
+/// drop that opt-out, against its own hermetic temp profile, never a live one.
 fn enable_profile_accounting(command: &mut Command) -> &mut Command {
-    command.env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+    command.env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
 }
 
 struct Replay {

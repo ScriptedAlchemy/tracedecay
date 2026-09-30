@@ -347,14 +347,13 @@ pub(crate) use collection::{CollectionControl, execute_unregistered_collection_c
 pub(crate) use collection::{execute_unregistered_collection, unbounded_collection_control};
 pub use pages::{
     OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
-    build_store_census, build_store_census_page, plan_unregistered_collection,
+    build_store_census, build_store_census_page, dir_size_bytes, plan_unregistered_collection,
     sweep_unregistered_stores,
 };
 #[cfg(test)]
 pub(crate) use pages::{census_unregistered_project_dirs, sweep_orphan_stores};
 pub(crate) use pages::{
-    dir_size_bytes, dir_size_bytes_controlled, manifest_names_abandoned_root,
-    newest_mtime_secs_controlled,
+    dir_size_bytes_controlled, manifest_names_abandoned_root, newest_mtime_secs_controlled,
 };
 
 #[cfg(test)]
