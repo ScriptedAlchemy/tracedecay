@@ -25,9 +25,7 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_source, validate_supplied_rows_binding};
-use crate::generation_runtime::{
-    GenerationContentsDeletion, GenerationStageOutcome, SealedReleaseReceiptAuthority,
-};
+use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutcome};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
@@ -229,8 +227,7 @@ impl GraphDbRegistry {
         }
         database.release_sealed_generation_staging_rows_with(
             &locator,
-            Some(relational_recovered_digest.as_str()),
-            SealedReleaseReceiptAuthority::Permitted,
+            relational_recovered_digest.as_str(),
             &|| check_all(&registration, context, "generation.release_sealed_staging"),
         )
     }
