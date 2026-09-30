@@ -264,7 +264,6 @@ pub(super) const TABLES: &[Table] = &[
             column("project_id", "TEXT", true, None, 0),
             column("store_id", "TEXT", true, None, 0),
             column("branch_name", "TEXT", true, None, 0),
-            column("db_relpath", "TEXT", true, None, 0),
             column("parent_scope_id", "TEXT", false, None, 0),
             column("last_synced_at", "INTEGER", false, None, 0),
             column("writable", "INTEGER", true, Some("1"), 0),

@@ -63,7 +63,6 @@ async fn register_project_fixture(
         project_id: project.project_id.clone(),
         store_id: store.store_id.clone(),
         branch_name: "main".to_string(),
-        db_relpath: format!("projects/{project_id}/tracedecay.db"),
         parent_scope_id: None,
         last_synced_at: Some(102),
         writable: true,

@@ -457,7 +457,6 @@ mod tests {
             expected_data_root_fence: StoreDirectoryFence::Missing,
             expected_content_fence: StoreContentFence::Missing,
             expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
         }
     }
 

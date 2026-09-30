@@ -26,6 +26,18 @@ fn functional_sweep_deadline() -> MonotonicDeadline {
     MonotonicDeadline::at(Instant::now() + Duration::from_hours(24))
 }
 
+fn cancelled_collection_control() -> CollectionControl<'static> {
+    static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
+    CollectionControl::new(
+        CANCELLATION.get_or_init(|| {
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            cancellation
+        }),
+        functional_sweep_deadline(),
+    )
+}
+
 async fn open_registered_db(
     profile_root: &Path,
 ) -> (
@@ -77,7 +89,6 @@ fn entry(
         expected_data_root_fence: StoreDirectoryFence::Missing,
         expected_content_fence: StoreContentFence::Missing,
         expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
     }
 }
 
@@ -727,6 +738,5 @@ fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> Or
         // reached when this control is interrupted.
         expected_content_fence: StoreContentFence::Missing,
         expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
     }
 }

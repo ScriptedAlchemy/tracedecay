@@ -256,67 +256,6 @@ async fn durable_memory_rows_block_orphan_store_collection() {
     );
 }
 
-/// Store registration records graph-scope databases relative to the profile
-/// root. A durable row in a registered scope that is not the manifest graph
-/// must protect the store, which requires resolving the scope from the
-/// profile root rather than from the store directory.
-#[tokio::test]
-async fn durable_memory_in_registered_graph_scope_blocks_collection() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let dead_root = tmp.path().join("moved-away-repo");
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let base = 1_700_000_000i64;
-    let data_root = seed_store(
-        &db,
-        &profile_root,
-        "proj_scope",
-        "store_scope",
-        &dead_root,
-        base - 100 * DAY,
-    )
-    .await;
-    assert_eq!(data_root, profile_root.join("stores/store_scope"));
-    {
-        let connection = rusqlite::Connection::open(data_root.join("tracedecay.db")).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'scope fact');",
-            )
-            .unwrap();
-    }
-    db.upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
-        graph_scope_id: "scope_store_scope_main".to_string(),
-        project_id: "proj_scope".to_string(),
-        store_id: "store_scope".to_string(),
-        branch_name: "main".to_string(),
-        db_relpath: "stores/store_scope/tracedecay.db".to_string(),
-        parent_scope_id: None,
-        last_synced_at: None,
-        writable: true,
-    })
-    .await
-    .unwrap();
-
-    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, true)
-        .await
-        .unwrap();
-
-    assert_eq!(report.outcome.collected, Vec::new());
-    assert_eq!(
-        report
-            .outcome
-            .errors
-            .iter()
-            .map(|error| (error.store_id.as_str(), error.kind.clone()))
-            .collect::<Vec<_>>(),
-        [("store_scope", CollectionFailureKind::DurableDataProtected)]
-    );
-    assert!(data_root.join("tracedecay.db").is_file());
-}
-
 /// The guard is schema-discovered, so current and future Memory V2 tables are
 /// protected without adding every table name to a second hand-maintained list.
 #[tokio::test]
@@ -867,9 +806,8 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     assert_eq!(after.unregistered_stores, DoctorStorageFamilyReadV1::Absent);
 }
 
-/// The durable-data check covers the manifest-selected project graph and every
-/// registered project graph scope, and refuses to answer when the manifest
-/// that names them cannot be read.
+/// The durable-data check covers the manifest-selected project graph and
+/// refuses to answer when the manifest that names it cannot be read.
 mod durable_inventory {
     use super::*;
 
@@ -892,21 +830,14 @@ mod durable_inventory {
     }
 
     #[test]
-    fn registered_graph_scopes_at_custom_paths_are_covered() {
-        let custom = PathBuf::from("stores/inventory/scopes/custom-scope.db");
-
-        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
-            Some(&manifest_bytes("custom-main.db")),
-            Path::new("stores/inventory"),
-            std::slice::from_ref(&custom),
-            unbounded_collection_control(),
-        ) else {
-            panic!("a readable manifest must resolve an inventory");
-        };
-
+    fn the_manifest_graph_path_is_honoured() {
         assert_eq!(
-            inventory,
-            [PathBuf::from("stores/inventory/custom-main.db"), custom],
+            durable_database_inventory(
+                Some(&manifest_bytes("custom-main.db")),
+                Path::new("stores/inventory"),
+                unbounded_collection_control(),
+            ),
+            DurableDatabaseInventoryV1::Resolved(PathBuf::from("stores/inventory/custom-main.db")),
             "the manifest's custom main graph path must be honoured, not the default filename"
         );
     }
@@ -917,7 +848,6 @@ mod durable_inventory {
             durable_database_inventory(
                 None,
                 Path::new("stores/inventory"),
-                &[],
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -933,7 +863,6 @@ mod durable_inventory {
                 durable_database_inventory(
                     Some(&bytes),
                     Path::new("stores/inventory"),
-                    &[],
                     unbounded_collection_control(),
                 ),
                 DurableDatabaseInventoryV1::Unverifiable,
@@ -945,7 +874,6 @@ mod durable_inventory {
             durable_database_inventory(
                 Some(&manifest_bytes("/tmp/graph.db")),
                 Path::new("stores/inventory"),
-                &[],
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -954,41 +882,12 @@ mod durable_inventory {
     }
 
     #[test]
-    fn registered_graph_scope_path_must_be_normalized_relative() {
-        assert_eq!(
-            durable_database_inventory(
-                Some(&manifest_bytes("graph.db")),
-                Path::new("stores/inventory"),
-                &[PathBuf::from("scopes/../../escape.db")],
-                unbounded_collection_control(),
-            ),
-            DurableDatabaseInventoryV1::Unverifiable
-        );
-        assert_eq!(
-            durable_database_inventory(
-                Some(&manifest_bytes("graph.db")),
-                Path::new("stores/inventory"),
-                &[PathBuf::from("/tmp/escape.db")],
-                unbounded_collection_control(),
-            ),
-            DurableDatabaseInventoryV1::Unverifiable
-        );
-    }
-
-    #[test]
     fn cancelled_control_interrupts_the_inventory() {
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-
         assert_eq!(
             durable_database_inventory(
                 Some(&manifest_bytes("graph.db")),
                 Path::new("stores/inventory"),
-                &[],
-                CollectionControl::new(
-                    &cancellation,
-                    MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-                ),
+                cancelled_collection_control(),
             ),
             DurableDatabaseInventoryV1::Interrupted,
             "a cancelled admission must not resolve an inventory"
@@ -1005,7 +904,6 @@ mod durable_inventory {
             profile.path(),
             &data_root,
             Some(b"{ not json"),
-            &[],
             &durable_check_scratch_root(profile.path()),
             unbounded_collection_control(),
         )
@@ -1025,18 +923,12 @@ mod durable_inventory {
         std::fs::create_dir_all(&data_root).unwrap();
         rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
 
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
         let check = check_store_durable_memory(
             profile.path(),
             &data_root,
             Some(&manifest_bytes("graph.db")),
-            &[],
             &durable_check_scratch_root(profile.path()),
-            CollectionControl::new(
-                &cancellation,
-                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-            ),
+            cancelled_collection_control(),
         )
         .await;
 

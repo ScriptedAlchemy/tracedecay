@@ -404,7 +404,6 @@ pub(super) async fn collect_registered_finding(
         profile_root,
         &finding.data_root,
         finding.expected_manifest_bytes.as_deref(),
-        &finding.graph_scope_relpaths,
         &durable_check_scratch_root(profile_root),
         control,
     )
@@ -555,20 +554,18 @@ pub(super) enum DurableMemoryCheck {
     Unverifiable,
 }
 
-/// Every database under a store that can carry durable rows, or a typed
-/// statement that the inventory itself could not be trusted.
-///
-/// The databases registered as project authorities for durable memory.
+/// The store graph database that can carry durable rows, or a typed
+/// statement that it could not be located.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DurableDatabaseInventoryV1 {
-    /// The bounded scan stopped before it could establish a complete durable
-    /// database inventory. This is not an unverifiable green light: callers
-    /// preserve the exact cancellation/deadline state for the coordinator.
+    /// The bounded scan stopped before it could locate the durable database.
+    /// This is not an unverifiable green light: callers preserve the exact
+    /// cancellation/deadline state for the coordinator.
     Interrupted,
-    /// The complete set of database paths, relative to the profile root.
-    Resolved(Vec<PathBuf>),
-    /// The set could not be enumerated, a missing or malformed manifest, or a
-    /// directory that could not be listed. Never a green light for deletion.
+    /// The graph database path, relative to the profile root.
+    Resolved(PathBuf),
+    /// A missing or malformed manifest, or a graph path that escapes the
+    /// store. Never a green light for deletion.
     Unverifiable,
 }
 
@@ -646,10 +643,9 @@ fn safe_store_path(data_root: &Path, relative: &Path) -> bool {
     true
 }
 
-/// Enumerates every durable database a store's manifest and registered graph
-/// scopes name, relative to the profile root. The manifest names its graph
-/// relative to the store at `store_relpath`; registered scopes are already
-/// profile-relative.
+/// Locates the durable graph database a store's manifest names, relative to
+/// the profile root. The manifest names its graph relative to the store at
+/// `store_relpath`.
 ///
 /// Fails closed. The manifest is the store's own record of where its graph
 /// lives; if it is absent or will not parse, guessing the default filename
@@ -658,7 +654,6 @@ fn safe_store_path(data_root: &Path, relative: &Path) -> bool {
 pub(super) fn durable_database_inventory(
     manifest_bytes: Option<&[u8]>,
     store_relpath: &Path,
-    graph_scope_relpaths: &[PathBuf],
     control: CollectionControl<'_>,
 ) -> DurableDatabaseInventoryV1 {
     if control.completion().is_some() {
@@ -685,29 +680,15 @@ pub(super) fn durable_database_inventory(
         return DurableDatabaseInventoryV1::Unverifiable;
     }
 
-    let mut inventory = vec![store_relpath.join(&manifest.graph_db_relpath)];
-    for relpath in graph_scope_relpaths {
-        if control.completion().is_some() {
-            return DurableDatabaseInventoryV1::Interrupted;
-        }
-        if !safe_store_relative_path(relpath) {
-            return DurableDatabaseInventoryV1::Unverifiable;
-        }
-        if !inventory.contains(relpath) {
-            inventory.push(relpath.clone());
-        }
-    }
-
-    DurableDatabaseInventoryV1::Resolved(inventory)
+    DurableDatabaseInventoryV1::Resolved(store_relpath.join(&manifest.graph_db_relpath))
 }
 
-/// Runs [`check_durable_memory_rows`] over every database in the store's
-/// inventory. Any single `Present` or `Unverifiable` protects the whole store.
+/// Runs [`check_durable_memory_rows`] over the store's manifest-named graph
+/// database. `Present` or `Unverifiable` protects the store.
 pub(super) async fn check_store_durable_memory(
     profile_root: &Path,
     data_root: &Path,
     manifest_bytes: Option<&[u8]>,
-    graph_scope_relpaths: &[PathBuf],
     scratch_root: &Path,
     control: CollectionControl<'_>,
 ) -> DurableMemoryCheck {
@@ -717,26 +698,13 @@ pub(super) async fn check_store_durable_memory(
     let Ok(store_relpath) = data_root.strip_prefix(profile_root) else {
         return DurableMemoryCheck::Unverifiable;
     };
-    let inventory = match durable_database_inventory(
-        manifest_bytes,
-        store_relpath,
-        graph_scope_relpaths,
-        control,
-    ) {
-        DurableDatabaseInventoryV1::Interrupted => return DurableMemoryCheck::Interrupted,
-        DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
-        DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
-    };
-    for relpath in inventory {
-        if control.completion().is_some() {
-            return DurableMemoryCheck::Interrupted;
+    match durable_database_inventory(manifest_bytes, store_relpath, control) {
+        DurableDatabaseInventoryV1::Interrupted => DurableMemoryCheck::Interrupted,
+        DurableDatabaseInventoryV1::Resolved(relpath) => {
+            check_durable_memory_rows(profile_root, &relpath, scratch_root, control).await
         }
-        match check_durable_memory_rows(profile_root, &relpath, scratch_root, control).await {
-            DurableMemoryCheck::Empty => {}
-            protected => return protected,
-        }
+        DurableDatabaseInventoryV1::Unverifiable => DurableMemoryCheck::Unverifiable,
     }
-    DurableMemoryCheck::Empty
 }
 
 /// The read-snapshot scratch directory for durable-memory checks.
@@ -978,13 +946,10 @@ pub(super) async fn collect_unregistered_finding(
         .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let check = match read_regular_file(&manifest_path) {
         RegularFileSnapshot::Bytes(manifest_bytes) => {
-            // An unregistered store has no registry graph scopes by
-            // definition; the manifest remains the canonical graph path.
             check_store_durable_memory(
                 profile_root,
                 &finding.data_root,
                 Some(&manifest_bytes),
-                &[],
                 &scratch_root,
                 control,
             )

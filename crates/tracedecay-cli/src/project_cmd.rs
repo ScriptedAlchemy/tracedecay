@@ -309,10 +309,9 @@ fn render_project_context(
             {
                 let _ = writeln!(
                     out,
-                    "    scope {} branch={} db={} writable={}",
+                    "    scope {} branch={} writable={}",
                     scope["graph_scope_id"].as_str().unwrap_or("-"),
                     scope["branch_name"].as_str().unwrap_or("-"),
-                    scope["db_relpath"].as_str().unwrap_or("-"),
                     scope["writable"].as_bool().unwrap_or(false)
                 );
             }
@@ -406,8 +405,8 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
             for scope in &store_context.graph_scopes {
                 let _ = writeln!(
                     out,
-                    "    scope {} branch={} db={} writable={}",
-                    scope.graph_scope_id, scope.branch_name, scope.db_relpath, scope.writable
+                    "    scope {} branch={} writable={}",
+                    scope.graph_scope_id, scope.branch_name, scope.writable
                 );
             }
             for artifact in &store_context.artifacts {
@@ -471,7 +470,6 @@ mod tests {
                     project_id: "proj_test".to_string(),
                     store_id: "store:test".to_string(),
                     branch_name: "main".to_string(),
-                    db_relpath: "projects/proj_test/branches/main.db".to_string(),
                     parent_scope_id: None,
                     last_synced_at: Some(230),
                     writable: true,

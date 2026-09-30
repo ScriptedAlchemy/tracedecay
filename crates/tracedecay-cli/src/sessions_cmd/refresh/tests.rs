@@ -288,7 +288,6 @@ fn registry_context(project_root: &Path, git_common_dir: &Path) -> Value {
                     "project_id": "project.registered",
                     "store_id": "store.authoritative",
                     "branch_name": "master",
-                    "db_relpath": "codegraph-master.db",
                     "writable": true
                 },
                 {
@@ -296,7 +295,6 @@ fn registry_context(project_root: &Path, git_common_dir: &Path) -> Value {
                     "project_id": "project.registered",
                     "store_id": "store.authoritative",
                     "branch_name": "feature/selected",
-                    "db_relpath": "codegraph-selected.db",
                     "writable": true
                 }
             ],

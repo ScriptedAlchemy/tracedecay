@@ -525,15 +525,14 @@ impl RegisteredGlobalDb {
             transaction
                 .execute(
                     "INSERT INTO graph_scopes (
-                        graph_scope_id, project_id, store_id, branch_name, db_relpath,
+                        graph_scope_id, project_id, store_id, branch_name,
                         parent_scope_id, last_synced_at, writable
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     tracedecay_runtime_core::db::engine::params![
                         scope.graph_scope_id,
                         target_project_id.as_str(),
                         scope.store_id,
                         scope.branch_name,
-                        scope.db_relpath,
                         scope.parent_scope_id,
                         scope.last_synced_at,
                         i64::from(scope.writable)
@@ -734,7 +733,7 @@ async fn load_store_graph_scopes(
 ) -> Result<Vec<GraphScopeRecord>> {
     let mut rows = transaction
         .query(
-            "SELECT graph_scope_id, project_id, store_id, branch_name, db_relpath,
+            "SELECT graph_scope_id, project_id, store_id, branch_name,
                     parent_scope_id, last_synced_at, writable
              FROM graph_scopes
              WHERE store_id = ?1
@@ -851,7 +850,7 @@ async fn contexts_for_projects(
     if !store_ids.is_empty() {
         let mut rows = query_ids(
             snapshot,
-            "SELECT graph_scope_id, project_id, store_id, branch_name, db_relpath,
+            "SELECT graph_scope_id, project_id, store_id, branch_name,
                     parent_scope_id, last_synced_at, writable
              FROM graph_scopes
              WHERE store_id IN ({})
@@ -983,10 +982,9 @@ fn decode_graph_scope(row: &Row) -> Option<GraphScopeRecord> {
         project_id: row.get(1).ok()?,
         store_id: row.get(2).ok()?,
         branch_name: row.get(3).ok()?,
-        db_relpath: row.get(4).ok()?,
-        parent_scope_id: row.get(5).ok()?,
-        last_synced_at: row.get(6).ok()?,
-        writable: row.get::<i64>(7).ok()? != 0,
+        parent_scope_id: row.get(4).ok()?,
+        last_synced_at: row.get(5).ok()?,
+        writable: row.get::<i64>(6).ok()? != 0,
     })
 }
 
