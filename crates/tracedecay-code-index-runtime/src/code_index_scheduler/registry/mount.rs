@@ -13,6 +13,7 @@ use std::{
 use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexPublicationStoreErrorV1,
 };
+use tracedecay_code_index_retention::code_index_generations::wait_for_code_generation_store_release;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
@@ -33,10 +34,10 @@ use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
-    CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+    CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
@@ -52,8 +53,8 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 enum PublicationAuthorityResetV1 {
     /// The derived store was deleted; the next pass rebuilds it from source.
     Rebuilding,
-    /// Another owner holds the store lock; the reset is retried like any
-    /// held shared capacity and does not spend the one-shot budget.
+    /// Another owner holds the store lock; the reset is retried when it is
+    /// released and does not spend the one-shot budget.
     StoreBusy,
     /// The mount is parked until the operator acts.
     Terminal {
@@ -88,6 +89,66 @@ impl CodeIndexSchedulerRegistryV1 {
             retry_wake.notify_one();
         });
         true
+    }
+
+    /// Wake the worker when the holder of this scope's generation-store lock
+    /// releases it. A refused pass has nothing to do until then, and the
+    /// holder may be another process, so the kernel lock wait is the signal.
+    /// One waiter serves the worktree; a wait that cannot complete parks it
+    /// typed.
+    fn wake_on_store_release(
+        store_root: &Path,
+        waiting: &Arc<AtomicBool>,
+        wake: &Arc<tokio::sync::Notify>,
+        convergence_park: &Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
+    ) {
+        if waiting.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let root = store_root.to_path_buf();
+        let thread_waiting = Arc::clone(waiting);
+        let thread_wake = Arc::downgrade(wake);
+        let thread_park = Arc::downgrade(convergence_park);
+        let spawned = std::thread::Builder::new()
+            .name("code-index-store-release".to_owned())
+            .spawn(move || {
+                let released = wait_for_code_generation_store_release(&root);
+                thread_waiting.store(false, Ordering::Release);
+                match released {
+                    Ok(()) => {
+                        if let Some(wake) = thread_wake.upgrade() {
+                            wake.notify_one();
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(park) = thread_park.upgrade() {
+                            Self::park_store_release_unavailable(&park, error.to_string());
+                        }
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            waiting.store(false, Ordering::Release);
+            Self::park_store_release_unavailable(convergence_park, error.to_string());
+        }
+    }
+
+    fn park_store_release_unavailable(
+        convergence_park: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+        reason: String,
+    ) {
+        tracing::warn!(
+            event = "code_index_store_release_wait_failed",
+            error = %reason,
+            "the worktree cannot wait for the code-generation store lock; parked until the next wake"
+        );
+        park_convergence(
+            convergence_park,
+            reason,
+            CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
+            Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
+            true,
+        );
     }
 
     /// Spend this mount's single automatic reset on a corrupt publication.
@@ -129,9 +190,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 );
                 PublicationAuthorityResetV1::Rebuilding
             }
-            Err(busy) if busy.is_transient_capacity_failure() => {
-                PublicationAuthorityResetV1::StoreBusy
-            }
+            Err(busy) if busy.is_store_lock_contended() => PublicationAuthorityResetV1::StoreBusy,
             Err(failure) => {
                 *reset_attempted = true;
                 tracing::warn!(
@@ -413,6 +472,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root =
             super::super::scoped_code_index_store_root(&store_root, &project_root);
+        let worker_scope_store_root = scoped_store_root.clone();
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
@@ -628,6 +688,9 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            // Set while a thread waits for this scope's store lock to be
+            // released; that release is the only retry a refused pass needs.
+            let store_release_waiting = Arc::new(AtomicBool::new(false));
             // Whether this worker already deleted and rebuilt a corrupt derived
             // publication. One reset per mount bounds the work: a store that
             // is corrupt again after its own rebuild parks instead of looping
@@ -1860,9 +1923,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 // projection still holds the build memory is sequencing, not
                 // a stall: it runs again as soon as that projection joins.
                 let mut graph_waits_for_text = false;
-                // A decode refused by a store-lock holder outside this pass is
-                // not progress, so the capacity retry keeps its bound.
-                let mut graph_store_busy = false;
                 let mut graph_publication_budget_spent = false;
                 let text_projection_running = published_text_projection.is_some();
                 let mut result = match source_result {
@@ -2186,26 +2246,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                         );
                                     }
                                     GraphPrepareStopV1::StoreBusy(detail) => {
-                                        // Any other holder releases without
-                                        // waking this worktree.
-                                        let retry_armed = if graph_waits_for_text {
-                                            true
-                                        } else {
-                                            graph_store_busy = true;
-                                            Self::arm_capacity_retry(
-                                                &mut capacity_retry,
+                                        if !graph_waits_for_text {
+                                            Self::wake_on_store_release(
+                                                &worker_scope_store_root,
+                                                &store_release_waiting,
                                                 &worker_wake,
-                                            )
-                                        };
-                                        if !retry_armed && !converged {
-                                            park_convergence(
                                                 &worker_convergence_park,
-                                                detail.clone(),
-                                                CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
-                                                Some(
-                                                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
-                                                ),
-                                                true,
                                             );
                                         }
                                         tracing::warn!(
@@ -2213,7 +2259,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                             published_pass,
                                             converged,
                                             graph_waits_for_text,
-                                            retry_armed,
+                                            detail = %detail,
                                             "the sealed generation waits to decode until the \
                                              code-generation store lock is released"
                                         );
@@ -2871,9 +2917,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // panicking input nor the capacity contention is still
                     // reproducing, so both bounded retry states restart.
                     panic_guard.record_progress();
-                    if !graph_store_busy {
-                        capacity_retry.record_progress();
-                    }
+                    capacity_retry.record_progress();
                     let _service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
@@ -2941,13 +2985,15 @@ impl CodeIndexSchedulerRegistryV1 {
                             panic_guard.record_progress();
                             let publication_corruption =
                                 error.is_publication_authority_corruption();
-                            let mut transient_capacity = error.is_transient_capacity_failure();
+                            let mut store_lock_held = error.is_store_lock_contended();
+                            let transient_capacity =
+                                !store_lock_held && error.is_transient_capacity_failure();
                             // A corrupt derived publication is deleted and
                             // rebuilt from source, once per mount. A store
                             // that is corrupt again after its own rebuild, or
                             // that cannot be deleted, is the terminal park;
-                            // a store another owner holds is retried like any
-                            // held capacity. `None` here means the failure was
+                            // a store another owner holds is retried when it
+                            // is released. `None` here means the failure was
                             // not corruption or the reset is being retried.
                             let publication_reset = if publication_corruption {
                                 match Self::reset_corrupt_publication_authority(
@@ -2962,7 +3008,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         None
                                     }
                                     PublicationAuthorityResetV1::StoreBusy => {
-                                        transient_capacity = true;
+                                        store_lock_held = true;
                                         None
                                     }
                                     PublicationAuthorityResetV1::Terminal {
@@ -2975,6 +3021,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     event = "code_index_reconcile_failed",
                                     path = "background_worker",
                                     transient_capacity,
+                                    store_lock_held,
                                     trigger = trigger.label(),
                                     error = %error,
                                     "code-index background reconcile failed; the served generation stays stale"
@@ -3002,15 +3049,21 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // serving-generation notifications. The next
                                 // wake reads that same slot; no local flag.
                                 worker_serving_generation_changed.send_replace(());
+                            } else if store_lock_held {
+                                capacity_retry.record_progress();
+                                Self::wake_on_store_release(
+                                    &worker_scope_store_root,
+                                    &store_release_waiting,
+                                    &worker_wake,
+                                    &worker_convergence_park,
+                                );
                             } else if transient_capacity {
-                                // Shared process capacity was held by another
-                                // holder when this pass asked for it. Releasing
-                                // it emits no wake, so without a self-scheduled
-                                // retry this worktree stayed stale until some
-                                // unrelated query or edit happened to wake it.
-                                // Permanent refusals deliberately never reach
-                                // here: retrying those forever is the failure
-                                // this loop already had.
+                                // Resident memory was held when this pass
+                                // asked for it, and RSS can fall with no owner
+                                // releasing anything, so this worker schedules
+                                // its own bounded retry. Permanent refusals
+                                // deliberately never reach here: retrying those
+                                // forever is the failure this loop already had.
                                 if !Self::arm_capacity_retry(&mut capacity_retry, &worker_wake) {
                                     tracing::warn!(
                                         event = "code_index_reconcile_capacity_retry_exhausted",
