@@ -355,8 +355,11 @@ pub struct McpServer {
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
-    dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
-    doctor_report_published: AtomicBool,
+    /// Set once the route that owns this server can compose its Doctor
+    /// report: when the full server publishes, or when a reset-required
+    /// session store leaves the core serving the route.
+    dashboard_doctor_report_reader:
+        std::sync::OnceLock<tracedecay_dashboard_api::DoctorReportReader>,
     dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     code_index_readiness_waiter:
@@ -562,8 +565,7 @@ impl MountedProjectApplicationRetrievalV1 {
 
 impl McpServer {
     pub(crate) fn doctor_report_ready(&self) -> bool {
-        self.dashboard_doctor_report_reader.is_some()
-            && self.doctor_report_published.load(Ordering::Acquire)
+        self.dashboard_doctor_report_reader.get().is_some()
     }
 
     /// Daemon-owned route liveness for a retained project server. `None` when
@@ -574,9 +576,13 @@ impl McpServer {
             .map(|live| live.load(Ordering::Acquire))
     }
 
-    pub(crate) fn publish_doctor_report(&self) {
-        debug_assert!(self.dashboard_doctor_report_reader.is_some());
-        self.doctor_report_published.store(true, Ordering::Release);
+    /// Publish the route's Doctor report reader; a server keeps the first
+    /// reader it was given.
+    pub(crate) fn publish_doctor_report(
+        &self,
+        reader: tracedecay_dashboard_api::DoctorReportReader,
+    ) {
+        let _ = self.dashboard_doctor_report_reader.set(reader);
     }
 
     /// Index freshness for source-editing tools is maintained by a lazy
@@ -811,7 +817,6 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             remote_operational_status,
-            dashboard_doctor_report_reader,
             dashboard_code_index_freshness_reader,
             code_index_readiness_waiter,
             dashboard_feedback_status_reader,
@@ -1032,8 +1037,7 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             remote_operational_status,
-            dashboard_doctor_report_reader,
-            doctor_report_published: AtomicBool::new(false),
+            dashboard_doctor_report_reader: std::sync::OnceLock::new(),
             dashboard_code_index_freshness_reader,
             code_index_readiness_waiter,
             dashboard_feedback_status_reader,

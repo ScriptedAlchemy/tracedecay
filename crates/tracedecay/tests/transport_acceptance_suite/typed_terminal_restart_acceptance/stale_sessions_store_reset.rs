@@ -517,6 +517,33 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
         !doctor_text.contains("Stalled"),
         "doctor must not report project open stalled on a session store:\n{doctor_text}"
     );
+    let (exit, report, stderr) = mounted_doctor_report(&home_path, &project_path);
+    assert_eq!(
+        (exit, &report["daemon_findings"]["state"], &report["issues"]),
+        (Some(75), &json!("observed"), &json!(0)),
+        "a reset-required session store leaves the canonical report serving and is \
+         only a pending operator action:\n{stderr}"
+    );
+    let mut pending: Vec<&str> = report["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|check| check["level"] == "pending_operator_action")
+        .filter_map(|check| check["message"].as_str())
+        .collect();
+    pending.sort_unstable();
+    let mut expected_pending: Vec<String> = aged
+        .iter()
+        .map(|(_, store)| {
+            format!(
+                "Store {store} requires reset ({}). Pending operator action: run \
+                 `{STALE_STORE_RESET}`",
+                refusal.reason
+            )
+        })
+        .collect();
+    expected_pending.sort_unstable();
+    assert_eq!(pending, expected_pending, "{stderr}");
 
     let mut before_reset = BTreeMap::new();
     let (reset_status, reset_output) =
@@ -688,11 +715,11 @@ fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
         .expect("seed the refusal");
 }
 
-/// `tracedecay doctor --json` exit code and its ingest-coverage finding, once
-/// the project runtime that owns the canonical report has mounted.
-fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+/// `tracedecay doctor --json` exit code, document, and stderr once the
+/// canonical Doctor report of the project has mounted.
+fn mounted_doctor_report(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
     let started = Instant::now();
-    let (doctor, stderr, report) = loop {
+    loop {
         let doctor = tracedecay_command_with_home(home)
             .args(["doctor", "--json"])
             .current_dir(project)
@@ -704,14 +731,20 @@ fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, S
             panic!("doctor --json printed no document ({error}):\n{stderr}")
         });
         if report["daemon_findings"]["state"] != "mounting" {
-            break (doctor, stderr, report);
+            return (doctor.status.code(), report, stderr);
         }
         assert!(
             started.elapsed() < SERVE_TIMEOUT,
             "the canonical Doctor report never mounted within {SERVE_TIMEOUT:?}:\n{stderr}"
         );
         std::thread::sleep(Duration::from_millis(500));
-    };
+    }
+}
+
+/// `tracedecay doctor --json` exit code and its ingest-coverage finding, once
+/// the project runtime that owns the canonical report has mounted.
+fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let (exit, report, stderr) = mounted_doctor_report(home, project);
     let finding = report["daemon_findings"]["payload"]["entries"]
         .as_array()
         .into_iter()
@@ -725,7 +758,7 @@ fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, S
         .cloned()
         .unwrap_or_else(|| panic!("doctor reported no ingest-coverage finding: {report}"));
     (
-        doctor.status.code(),
+        exit,
         json!({
             "state": finding["state"],
             "reference": finding["evidence"][0]["reference"],

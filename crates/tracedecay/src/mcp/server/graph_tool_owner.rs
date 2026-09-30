@@ -138,7 +138,7 @@ impl McpServer {
                 .map(|identity| identity.profile_id().clone()),
             automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
             automation_writer: self.dashboard_automation_writer.clone(),
-            doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
+            doctor_report_reader: self.dashboard_doctor_report_reader.get().cloned(),
             remote_operational_status: self.remote_operational_status.clone(),
             feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
             pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
