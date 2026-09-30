@@ -6,9 +6,9 @@ use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
-    JsonlFrameDeferral, JsonlResumeState, RawJsonlSkippedReason, TranscriptCursorCheckpoint,
-    TranscriptCursorKey, TranscriptIngestError, TranscriptIngestResult,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlFrameDeferral, JsonlPrefixRecovery, JsonlResumeState, MAX_JSONL_FRAMES_PER_BATCH,
+    RawJsonlSkippedReason, TranscriptCursorCheckpoint, TranscriptCursorKey, TranscriptIngestError,
+    TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
 use tracedecay_privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ParsedObservationRecordV1,
@@ -48,6 +48,7 @@ pub enum ClaudeSkippedFrameReason {
     OutOfScope,
     Malformed,
     Oversized,
+    RetainedPrefix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,8 @@ pub struct ClaudeSourceFrameScan {
     pub frames: Vec<ClaudeSourceFrame>,
     pub skipped_frames: Vec<ClaudeSkippedFrame>,
     pub coverage: ClaudeFrameCoverage,
+    /// See [`crate::runtime::source::RawNewJsonl::prefix_diverged`].
+    pub prefix_diverged: bool,
 }
 
 /// Identify a Claude transcript before loading its durable cursor.
@@ -118,7 +121,13 @@ pub fn scan_claude_source_frames(
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
 ) -> Option<ClaudeSourceFrameScan> {
-    match try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, None) {
+    match try_scan_claude_source_frames_with_resume(
+        identity,
+        previous,
+        max_new_bytes,
+        None,
+        JsonlPrefixRecovery::rescan(),
+    ) {
         Ok(scan) => scan,
         Err(error) => {
             tracing::debug!(error = %error, "skipping Claude transcript scan");
@@ -133,13 +142,16 @@ pub fn try_scan_claude_source_frames_with_resume(
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
 ) -> TranscriptIngestResult<Option<ClaudeSourceFrameScan>> {
-    let mut raw = match try_stream_new_jsonl_raw_strict_with_resume(
+    let mut raw = match try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
         &identity.source_path,
         previous,
         max_new_bytes,
         MAX_OBSERVATION_RECORD_BYTES,
         resume_state,
+        prefix_recovery,
+        MAX_JSONL_FRAMES_PER_BATCH,
     ) {
         // Discovery lists the symlink. A removed target is not a retry: the
         // next pass would fail the provider on the same missing file.
@@ -161,6 +173,7 @@ pub fn try_scan_claude_source_frames_with_resume(
             reason: match range.reason {
                 RawJsonlSkippedReason::Whitespace => ClaudeSkippedFrameReason::Whitespace,
                 RawJsonlSkippedReason::Oversized => ClaudeSkippedFrameReason::Oversized,
+                RawJsonlSkippedReason::RetainedPrefix => ClaudeSkippedFrameReason::RetainedPrefix,
             },
         })
         .collect::<Vec<_>>();
@@ -242,6 +255,7 @@ pub fn try_scan_claude_source_frames_with_resume(
         frames,
         skipped_frames,
         coverage,
+        prefix_diverged: raw.prefix_diverged,
     }))
 }
 
@@ -275,6 +289,7 @@ mod tests {
             StoredCursor::default(),
             None,
             None,
+            JsonlPrefixRecovery::rescan(),
         )
         .unwrap()
         .unwrap();

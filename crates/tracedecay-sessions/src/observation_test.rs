@@ -214,6 +214,22 @@ impl ObservationStore for FakeStore {
             .cloned())
     }
 
+    async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+        Ok(self
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(StoredObservation::committed_cursor)
+            .filter(|cursor| cursor.source() == source && cursor.scope() == scope)
+            .cloned()
+            .collect())
+    }
+
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,

@@ -244,6 +244,25 @@ impl ObservationExecutor {
                 let cursor = read_cursor(snapshot, &encode(source)?, &encode(scope)?)?;
                 Ok(ObservationReadResultV1::SourceCursor(cursor))
             }
+            ObservationReadOperationV1::CommittedSourceCursors { source, scope } => {
+                let mut statement = snapshot.prepare(
+                    "SELECT committed_cursor_json FROM observations
+                     WHERE json_valid(observation_json)
+                       AND json_extract(observation_json, '$.identity.source.session_id') = ?1
+                     ORDER BY sequence ASC",
+                )?;
+                let rows = statement.query_map([source.session_id().as_str()], |row| {
+                    row.get::<_, String>(0)
+                })?;
+                let mut cursors = Vec::new();
+                for row in rows {
+                    let cursor: ObservationSourceCursorV1 = decode(row?)?;
+                    if cursor.source() == source && cursor.scope() == scope {
+                        cursors.push(cursor);
+                    }
+                }
+                Ok(ObservationReadResultV1::CommittedSourceCursors(cursors))
+            }
             ObservationReadOperationV1::Observation { observation_id } => {
                 let row = snapshot
                     .query_row(

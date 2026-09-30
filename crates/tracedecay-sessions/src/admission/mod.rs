@@ -398,6 +398,15 @@ pub trait HostAdmission: Send + Sync {
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>>;
 
+    /// Reads the cursors this source's observations committed in every
+    /// generation. A rewritten transcript resumes after the longest prefix
+    /// whose record-end checkpoint is still among them.
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>>;
+
     /// Drains up to `max` queued projections for one provider.
     fn drain_projection_queue<'a>(
         &'a self,
@@ -615,6 +624,14 @@ pub(crate) mod test_support {
             _scope: &'a ObservationScopeV1,
         ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
             panic!("pre-cancelled ingest attempted cursor read")
+        }
+
+        fn committed_source_cursors<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+        ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+            panic!("pre-cancelled ingest attempted committed cursor read")
         }
 
         fn drain_projection_queue<'a>(
@@ -843,6 +860,22 @@ pub(crate) mod test_support {
             scope: &ObservationScopeV1,
         ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
             Ok(Self::current_cursor(&self.state(), source, scope))
+        }
+
+        #[hotpath::skip]
+        async fn committed_source_cursors(
+            &self,
+            source: &ObservationSourceIdentityV1,
+            scope: &ObservationScopeV1,
+        ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+            Ok(self
+                .state()
+                .observations
+                .iter()
+                .map(StoredObservation::committed_cursor)
+                .filter(|cursor| cursor.source() == source && cursor.scope() == scope)
+                .cloned()
+                .collect())
         }
 
         #[hotpath::skip]
@@ -1107,6 +1140,19 @@ pub(crate) mod test_support {
                 }
                 self.store
                     .get_source_cursor(source, scope)
+                    .await
+                    .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
+            })
+        }
+
+        fn committed_source_cursors<'a>(
+            &'a self,
+            source: &'a ObservationSourceIdentityV1,
+            scope: &'a ObservationScopeV1,
+        ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+            Box::pin(async move {
+                self.store
+                    .committed_source_cursors(source, scope)
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
             })

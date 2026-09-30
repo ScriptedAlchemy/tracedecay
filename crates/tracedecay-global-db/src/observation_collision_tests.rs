@@ -2523,6 +2523,23 @@ impl tracedecay_sessions::admission::HostAdmission for ProductionJsonlAdmission 
         })
     }
 
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(async move {
+            self.store
+                .committed_source_cursors(source, scope)
+                .await
+                .map_err(|_| {
+                    tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                        "authority_read_failed",
+                    )
+                })
+        })
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         _provider: &'a str,
@@ -2724,6 +2741,15 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
     replace_vibe_eof(&transcript, "rewritten eof record");
+    let identical_calls = admission.capture_count();
+    let identical = run_vibe_trigger(&source, &workspace, &admission)
+        .await
+        .expect("a byte-identical replacement resumes its recorded prefix");
+    assert_eq!(identical.bytes_consumed, 0);
+    assert_eq!(admission.capture_count() - identical_calls, 0);
+    assert_eq!(only_source_cursor(&runtime).await, refused_cursor);
+
+    replace_vibe_eof(&transcript, "rewritten eof record again");
     let generation_calls = admission.capture_count();
     let generation_collision = run_vibe_trigger(&source, &workspace, &admission)
         .await
@@ -2764,7 +2790,8 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
         )
         .await
         .expect("apply post-generation observation retention");
-    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    // One marker per distinct refused EOF body.
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 2);
     assert!(identity_collision_advance_total(&runtime).await >= 1);
     assert_eq!(
         raw_observation_json(&runtime, &retained_observation_id).await,
@@ -2789,7 +2816,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     assert_eq!(restart.bytes_consumed, 0);
     assert_eq!(reopened_admission.capture_count() - restart_calls, 0);
     assert_eq!(only_source_cursor(&reopened).await, generation_cursor);
-    assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
+    assert_eq!(admission_refusal_rows(&reopened).await.len(), 2);
     assert_eq!(
         raw_observation_json(&reopened, &retained_observation_id).await,
         retained_row

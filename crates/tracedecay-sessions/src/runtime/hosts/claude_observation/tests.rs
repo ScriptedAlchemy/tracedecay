@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::runtime::hosts::claude::scan_claude_source_frames;
+use crate::runtime::source::{JsonlPrefixRecovery, spin_until_jsonl_change_settled};
 
 #[path = "tests/projection.rs"]
 mod projection;
@@ -230,6 +231,7 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
         StoredCursor::default(),
         Some(STRICT_JSONL_BATCH_BYTES),
         None,
+        JsonlPrefixRecovery::rescan(),
     )
     .unwrap()
     .unwrap();
@@ -754,4 +756,79 @@ fn claude_rotation_tail_stops_deferring_after_one_full_walk() {
         1,
         "a walk that never listed the rest of the tree is still deferred"
     );
+}
+
+#[tokio::test]
+async fn edited_middle_record_rescans_only_the_claude_bytes_after_the_edit() {
+    let session_id = "edited-middle-session";
+    let fixture = Fixture::new(session_id);
+    let record = |uuid: &str, content: &str| {
+        let record = json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": uuid,
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": content},
+        });
+        format!("{record}\n")
+    };
+    let lines = (0..40)
+        .map(|index| {
+            record(
+                &format!("message-{index:04}"),
+                &format!("original-{index:04}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let line_bytes = lines[0].len() as u64;
+    assert!(lines.iter().all(|line| line.len() as u64 == line_bytes));
+    fs::write(&fixture.transcript, lines.concat()).unwrap();
+    spin_until_jsonl_change_settled(&fixture.transcript);
+    let source_adapter = fixture.source(session_id);
+    let source = observation_source(&fixture.transcript);
+
+    let cold = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+    assert_eq!(cold.observations_committed, 40);
+    assert_eq!(cold.source_bytes_scanned, 40 * line_bytes);
+
+    let mut edited = lines;
+    edited[20] = record("revised-0020", "replaced-0020");
+    assert_eq!(edited[20].len() as u64, line_bytes);
+    fs::write(&fixture.transcript, edited.concat()).unwrap();
+    spin_until_jsonl_change_settled(&fixture.transcript);
+    let rescan = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rescan.source_bytes_scanned,
+        20 * line_bytes,
+        "only the edited record and those after it are framed again"
+    );
+    assert_eq!(rescan.observations_committed, 1);
+    let retained = fixture
+        .admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 20 * line_bytes).unwrap()]
+    );
+    assert_eq!(fixture.admission.observations().len(), 41);
+    assert_eq!(fixture.matching_observation_count("replaced-0020"), 1);
+    let cursor = fixture
+        .admission
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cursor.byte_offset(), 40 * line_bytes);
 }

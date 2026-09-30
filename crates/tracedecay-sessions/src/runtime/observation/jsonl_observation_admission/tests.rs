@@ -24,7 +24,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass, SessionId,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
+    SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::ParseOffset;
@@ -45,7 +46,9 @@ use crate::runtime::hosts::codex::{
     try_admit_codex_jsonl_observations_for_project_with_admission,
 };
 use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::{JsonlResumeState, TranscriptIngestError};
+use crate::runtime::source::{
+    JsonlChangeKind, JsonlResumeState, TranscriptIngestError, spin_until_jsonl_change_settled,
+};
 
 /// Wraps [`MemoryHostAdmission`] so a test can script the capture verdict and
 /// observe every cover-past cursor write the seam attempts.
@@ -167,6 +170,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         max_new_bytes: Some(1024),
         max_frames: None,
         resume: None,
+        prefix_recovery: super::JsonlPrefixRecovery::Report,
         preparation: false.into(),
     };
     let cache = super::SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
@@ -776,6 +780,14 @@ impl HostAdmission for SeamSpyAdmission {
             return Box::pin(async { Ok(None) });
         }
         self.inner.get_source_cursor(source, scope)
+    }
+
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        self.inner.committed_source_cursors(source, scope)
     }
 
     fn drain_projection_queue<'a>(
@@ -1626,4 +1638,207 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
         },
         "the exact-hook path must overlap independent frame preparation"
     );
+}
+
+const EDITED_RECORD_BYTES: usize = 128;
+
+fn identified_record_line(id: &str) -> String {
+    let framing = json!({"id": id, "content": ""}).to_string().len() + 1;
+    let mut line =
+        json!({"id": id, "content": "x".repeat(EDITED_RECORD_BYTES - framing)}).to_string();
+    line.push('\n');
+    assert_eq!(line.len(), EDITED_RECORD_BYTES);
+    line
+}
+
+async fn admit_identified_records(
+    admission: &MemoryHostAdmission,
+    path: &Path,
+) -> super::JsonlObservationAdmissionProgress {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("kimi").unwrap(),
+        SessionId::new("session.edited-middle").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "kimi",
+        path,
+        admission,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+    super::admit_jsonl_observations(
+        request,
+        |_| (),
+        |_, bytes, range, _, _, _| {
+            let native: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let native_record_id = ObservationId::new(native["id"].as_str().unwrap()).unwrap();
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("kimi").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.edited-middle").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "kimi" })?;
+            Ok(super::JsonlFrameAdmission::durable(
+                parsed,
+                native_record_id,
+            ))
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// Editing one record in the middle of a transcript keeps every record before
+/// it: only the bytes from the edited record on are framed and admitted again.
+#[tokio::test]
+async fn edited_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("edited-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+
+    let cold = admit_identified_records(&admission, &path).await;
+    assert_eq!(cold.frames_persisted, 400);
+    assert_eq!(cold.io.content_bytes, 51_200);
+    let original_generation = admission.observations()[0]
+        .observation()
+        .identity()
+        .generation();
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    std::fs::write(&path, &edited).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.change, JsonlChangeKind::Rewritten);
+    assert_eq!(
+        rescan.io.content_bytes, 25_600,
+        "only bytes after the edit are framed"
+    );
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    assert_eq!(
+        rescan.io.prefix_validation_bytes,
+        51_200 + 25_728,
+        "divergence check walks the recorded prefix, recovery stops one record past the edit"
+    );
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    // The 199 unchanged records after the edit resolve to their retained
+    // identities; only the edited record is new, in the rewritten generation.
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 401);
+    let rewritten = observations
+        .iter()
+        .filter(|stored| stored.observation().identity().generation() != original_generation)
+        .map(|stored| stored.observation().identity().position())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rewritten,
+        [ObservationSourceRangeV1::new(25_600, 25_728).unwrap()]
+    );
+    let edited_payloads = observations
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("edited-0200")
+        })
+        .count();
+    assert_eq!(edited_payloads, 1);
+
+    let settled = admit_identified_records(&admission, &path).await;
+    assert_eq!(settled.io.content_bytes, 0);
+    assert_eq!(settled.bytes_consumed, 0);
+    assert_eq!(settled.frames_persisted, 0);
+}
+
+/// A host that rewrites its transcript by atomic rename gets the same
+/// proportional resume: the committed checkpoints prove the retained prefix,
+/// not the replaced file's identity.
+#[tokio::test]
+async fn renamed_rewrite_of_a_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("renamed-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    assert_eq!(
+        admit_identified_records(&admission, &path)
+            .await
+            .frames_persisted,
+        400
+    );
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    let replacement = temp.path().join("renamed-middle.jsonl.next");
+    std::fs::write(&replacement, &edited).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.content_bytes, 25_600);
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    assert_eq!(admission.observations().len(), 401);
 }

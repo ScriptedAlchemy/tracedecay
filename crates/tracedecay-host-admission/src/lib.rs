@@ -311,6 +311,16 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         Box::pin(HostAdmissionFacade::get_source_cursor(self, source, scope))
     }
 
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(HostAdmissionFacade::committed_source_cursors(
+            self, source, scope,
+        ))
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         provider: &'a str,
@@ -550,6 +560,19 @@ impl<'a> HostAdmissionFacade<'a> {
         let store = self.store(source.provider().as_str(), scope)?;
         store
             .get_source_cursor(source, scope)
+            .await
+            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
+    }
+
+    #[hotpath::measure(label = "usecases.admission.committed_source_cursors", future = true)]
+    pub async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> Result<Vec<ObservationSourceCursorV1>, HostAdmissionOutcome> {
+        let store = self.store(source.provider().as_str(), scope)?;
+        store
+            .committed_source_cursors(source, scope)
             .await
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
@@ -1015,9 +1038,15 @@ async fn project_captured_outcomes(
     let mut receipts = Vec::new();
     let mut persisted_slots = Vec::new();
     for (slot, outcome) in outcomes.iter().enumerate() {
+        // A covered duplicate writes no row: its retained observation was
+        // projected under its original receipt, and only the cursor moved.
         if let CaptureObservationOutcome::Persisted {
             outcome: persisted, ..
         } = outcome
+            && !matches!(
+                persisted.as_ref(),
+                ObservationPersistOutcome::CoveredDuplicate(_)
+            )
         {
             persisted_slots.push(slot);
             receipts.push(persisted.receipt().clone());

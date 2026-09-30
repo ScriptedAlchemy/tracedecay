@@ -1653,6 +1653,27 @@ impl ObservationStore for GlobalDbObservationStore {
     }
 
     #[hotpath::skip]
+    async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> ObservationStoreResult<Vec<ObservationSourceCursorV1>> {
+        match dispatch_runtime_observation_read(
+            &self.runtime,
+            ObservationReadOperationV1::CommittedSourceCursors {
+                source: source.clone(),
+                scope: scope.clone(),
+            },
+        )? {
+            ObservationReadResultV1::CommittedSourceCursors(cursors) => Ok(cursors),
+            _ => Err(runtime_storage_error(
+                "read committed observation source cursors",
+                "runtime returned a mismatched observation read result",
+            )),
+        }
+    }
+
+    #[hotpath::skip]
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,

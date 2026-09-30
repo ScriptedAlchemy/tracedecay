@@ -78,6 +78,17 @@ fn sequential_capture_requests(
     session_id: &SessionId,
     count: usize,
 ) -> Vec<CaptureObservationRequest> {
+    generation_capture_requests(session_id, count, 1, None)
+}
+
+/// The same records under one source generation; `previous` is the cursor
+/// the generation's first record must replace.
+fn generation_capture_requests(
+    session_id: &SessionId,
+    count: usize,
+    generation: u64,
+    previous: Option<ObservationSourceCursorV1>,
+) -> Vec<CaptureObservationRequest> {
     let mut requests = Vec::with_capacity(count);
     let mut offset = 0_u64;
     for ordinal in 0..u64::try_from(count).expect("batch fits u64") {
@@ -120,23 +131,27 @@ fn sequential_capture_requests(
             session_id.clone(),
         )
         .unwrap();
-        let expected_cursor = (start != 0).then(|| {
-            ObservationSourceCursorV1::for_ordering(
-                source.clone(),
-                ObservationScopeV1::Profile,
-                ObservationSourceGenerationV1::new(1).unwrap(),
-                ordering_domain,
-                start,
+        let expected_cursor = if start == 0 {
+            previous.clone()
+        } else {
+            Some(
+                ObservationSourceCursorV1::for_ordering(
+                    source.clone(),
+                    ObservationScopeV1::Profile,
+                    ObservationSourceGenerationV1::new(generation).unwrap(),
+                    ordering_domain,
+                    start,
+                )
+                .unwrap(),
             )
-            .unwrap()
-        });
+        };
         requests.push(
             CaptureObservationRequest::new(
                 parsed,
                 ObservationIdentityMaterialV1::for_native_record(
                     source,
                     ObservationScopeV1::Profile,
-                    ObservationSourceGenerationV1::new(1).unwrap(),
+                    ObservationSourceGenerationV1::new(generation).unwrap(),
                     range,
                     ordering_domain,
                     record,
@@ -774,4 +789,69 @@ async fn n_capture_observation_calls_open_at_least_n_writer_transactions() {
         committed >= BATCH_SIZE as u64,
         "N capture_observation calls must open at least N writer transactions: committed_transactions={committed} frames={BATCH_SIZE}"
     );
+}
+
+/// A rewritten transcript re-offers its unchanged records under a new source
+/// generation. Each resolves to its retained row as a covered duplicate, and
+/// that row's projection already landed, so re-offering it must not collide
+/// with its own external-source receipt.
+#[tokio::test]
+async fn records_reoffered_under_a_new_generation_settle_as_covered_duplicates() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let session_id = SessionId::new("session.host-admission-capture.regeneration").unwrap();
+    HostAdmission::capture_observations(
+        &facade,
+        sequential_capture_requests(&session_id, BATCH_SIZE),
+    )
+    .await
+    .unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(BATCH_PROVIDER).unwrap(),
+        session_id.clone(),
+    )
+    .unwrap();
+    let first_generation_end = facade
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("first generation cursor");
+
+    let before = committed_transactions(database);
+    let outcomes = HostAdmission::capture_observations(
+        &facade,
+        generation_capture_requests(
+            &session_id,
+            BATCH_SIZE,
+            2,
+            Some(first_generation_end.clone()),
+        ),
+    )
+    .await
+    .expect("re-offered records settle instead of colliding with their own receipts");
+
+    assert_eq!(outcomes.len(), BATCH_SIZE);
+    assert!(outcomes.iter().all(|outcome| matches!(
+        outcome,
+        CaptureObservationOutcome::Persisted { outcome, .. }
+            if matches!(**outcome, ObservationPersistOutcome::CoveredDuplicate(_))
+    )));
+    assert_eq!(
+        committed_transactions(database) - before,
+        1,
+        "only the observation batch commits; retained rows project nothing"
+    );
+    let cursor = facade
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("second generation cursor");
+    assert_eq!(
+        cursor.generation(),
+        ObservationSourceGenerationV1::new(2).unwrap()
+    );
+    assert_eq!(cursor.position(), first_generation_end.position());
 }

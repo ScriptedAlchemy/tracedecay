@@ -279,6 +279,10 @@ pub enum ObservationCoverageReason {
     /// terminal identity defect from another admission refusal without ever
     /// retaining transcript content in the coverage ledger.
     ObservationIdentityCollision,
+    /// A rewritten generation's leading bytes hash to a record-end checkpoint
+    /// an earlier generation of this source already committed, so the records
+    /// in that range stay retained under the generation that admitted them.
+    RetainedPrefix,
 }
 
 impl ObservationCoverageReason {
@@ -296,6 +300,7 @@ impl ObservationCoverageReason {
             Self::SanitizerQuarantined => "sanitizer_quarantined",
             Self::AdmissionRefused => "admission_refused",
             Self::ObservationIdentityCollision => "observation_identity_collision",
+            Self::RetainedPrefix => "retained_prefix",
         }
     }
 
@@ -351,7 +356,8 @@ impl ObservationCoverageReason {
                     | Self::UnknownVersion
                     | Self::UnsupportedFact
                     | Self::AdmissionRefused
-                    | Self::ObservationIdentityCollision,
+                    | Self::ObservationIdentityCollision
+                    | Self::RetainedPrefix,
                 None
             )
         )
@@ -394,6 +400,7 @@ impl TryFrom<&str> for ObservationCoverageReason {
             "sanitizer_quarantined" => Ok(Self::SanitizerQuarantined),
             "admission_refused" => Ok(Self::AdmissionRefused),
             "observation_identity_collision" => Ok(Self::ObservationIdentityCollision),
+            "retained_prefix" => Ok(Self::RetainedPrefix),
             other => Err(UnknownObservationCoverageReason {
                 fingerprint: CursorAdvanceLedgerOpaqueValueHashV1::for_raw_value(other),
             }),
@@ -1192,6 +1199,14 @@ pub trait ObservationStore: Send + Sync {
         source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> impl Future<Output = ObservationStoreResult<Option<ObservationSourceCursorV1>>> + Send;
+
+    /// Cursors committed by this source's observations in every generation,
+    /// in commit order. Each carries the prefix checkpoint at its record end.
+    fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> impl Future<Output = ObservationStoreResult<Vec<ObservationSourceCursorV1>>> + Send;
 
     fn advance_source_cursor(
         &self,

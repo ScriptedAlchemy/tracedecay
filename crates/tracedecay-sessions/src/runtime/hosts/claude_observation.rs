@@ -35,8 +35,9 @@ use crate::runtime::observation::jsonl_observation_admission::is_deterministic_c
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
-    TranscriptIngestError, persist_host_provider_coverage, run_blocking_transcript_section,
+    HostProviderCoverage, JsonlPrefixRecovery, JsonlResumeState, STRICT_JSONL_BATCH_BYTES,
+    TranscriptDiscoveryBounds, TranscriptIngestError, persist_host_provider_coverage,
+    run_blocking_transcript_section,
 };
 use tracedecay_privacy::PrivacySanitizerError;
 
@@ -636,18 +637,33 @@ where
             fingerprint: cursor.resume_fingerprint()?,
         })
     });
-    let Some(mut scan) = hotpath::measure_block!(
-        "sessions.hosts.claude.scan_blocking",
-        run_blocking_transcript_section(|| {
-            try_scan_claude_source_frames_with_resume(
-                identity,
-                previous,
-                max_new_bytes,
-                resume_state,
-            )
-        })
-    )?
-    else {
+    let mut prefix_recovery = JsonlPrefixRecovery::Report;
+    let scan = loop {
+        let scan = hotpath::measure_block!(
+            "sessions.hosts.claude.scan_blocking",
+            run_blocking_transcript_section(|| {
+                try_scan_claude_source_frames_with_resume(
+                    identity.clone(),
+                    previous,
+                    max_new_bytes,
+                    resume_state,
+                    prefix_recovery.clone(),
+                )
+            })
+        )?;
+        // Only `Report` stops at a diverged prefix, and the retry supplies
+        // checkpoints, so this runs at most twice.
+        if !scan.as_ref().is_some_and(|scan| scan.prefix_diverged) {
+            break scan;
+        }
+        let committed = context
+            .admission
+            .committed_source_cursors(&source, context.scope)
+            .await
+            .map_err(|outcome| host_admission_error("claude", outcome))?;
+        prefix_recovery = JsonlPrefixRecovery::committed(&committed);
+    };
+    let Some(mut scan) = scan else {
         return Ok(SourcePreparation::Finished(
             ClaudeObservationIngestStats::default(),
         ));
@@ -731,6 +747,9 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
             let reason = match skipped.reason {
                 ClaudeSkippedFrameReason::Whitespace => ObservationCoverageReason::BlankFrame,
                 ClaudeSkippedFrameReason::OutOfScope => ObservationCoverageReason::OutOfScope,
+                ClaudeSkippedFrameReason::RetainedPrefix => {
+                    ObservationCoverageReason::RetainedPrefix
+                }
                 ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized => {
                     stats.deferred_sources = 1;
                     return Ok(false);
