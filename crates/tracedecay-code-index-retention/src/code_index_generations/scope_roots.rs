@@ -381,20 +381,15 @@ impl ScopeRootLivenessProofV1 {
 
 /// Derive the liveness proof for the repository `project_root` belongs to.
 ///
-/// A mounted root that is gone from disk proves nothing: Git no longer lists
-/// it and nothing can publish into its scope again, so it is left out rather
-/// than pinning a removed worktree's index until the daemon restarts.
+/// Every mounted root is live even once it is gone from disk: its scheduler
+/// can still write into its scope until the owner is retired and joined.
 pub fn scope_root_liveness_proof(
     project_root: &Path,
     mounted_roots: &BTreeSet<PathBuf>,
 ) -> Result<ScopeRootLivenessProofV1, &'static str> {
     let (mut live_roots, git_worktrees) = git_worktree_scope_root_inventory(project_root)?;
     for root in mounted_roots {
-        match std::fs::symlink_metadata(root) {
-            Ok(_) => insert_live_root_variants(&mut live_roots, root),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("mounted_root_unreadable"),
-        }
+        insert_live_root_variants(&mut live_roots, root);
     }
     ScopeRootLivenessProofV1::new(
         live_roots
@@ -1135,7 +1130,7 @@ mod worktree_inventory_tests {
     }
 
     #[test]
-    fn liveness_proof_drops_a_removed_worktree_and_a_vanished_mount() {
+    fn liveness_proof_drops_a_removed_worktree_only_once_nothing_mounts_it() {
         let temporary = tempfile::TempDir::new().expect("repository root");
         let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
         let (primary, linked) = repository_with_linked_worktree(&base);
@@ -1143,19 +1138,23 @@ mod worktree_inventory_tests {
         let mounted_elsewhere = base.join("mounted-elsewhere");
         let vanished = base.join("vanished");
         std::fs::create_dir_all(&mounted_elsewhere).expect("create mounted root");
-        let mounted = BTreeSet::from([linked.clone(), mounted_elsewhere.clone(), vanished.clone()]);
+        let mounted = BTreeSet::from([mounted_elsewhere.clone(), vanished.clone()]);
+        let mut linked_mounted = mounted.clone();
+        linked_mounted.insert(linked.clone());
 
         let before = scope_root_liveness_proof(&primary, &mounted).expect("proof");
         run_git(&primary, &["worktree", "remove", "--force", linked_arg]);
         let after = scope_root_liveness_proof(&primary, &mounted).expect("proof");
+        let still_mounted = scope_root_liveness_proof(&primary, &linked_mounted).expect("proof");
 
         let hash = |root: &Path| code_index_scope_hash(root);
         assert!(before.live_scope_hashes.contains(&hash(&linked)));
         assert!(!after.live_scope_hashes.contains(&hash(&linked)));
-        for proof in [&before, &after] {
+        assert!(still_mounted.live_scope_hashes.contains(&hash(&linked)));
+        for proof in [&before, &after, &still_mounted] {
             assert!(proof.live_scope_hashes.contains(&hash(&primary)));
             assert!(proof.live_scope_hashes.contains(&hash(&mounted_elsewhere)));
-            assert!(!proof.live_scope_hashes.contains(&hash(&vanished)));
+            assert!(proof.live_scope_hashes.contains(&hash(&vanished)));
         }
         assert_ne!(before.git_worktrees, after.git_worktrees);
         assert_ne!(before.proof_digest, after.proof_digest);
