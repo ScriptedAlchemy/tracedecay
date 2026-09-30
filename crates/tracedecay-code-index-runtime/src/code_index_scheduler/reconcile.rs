@@ -425,19 +425,12 @@ impl CodeIndexSchedulerErrorV1 {
     /// real RSS falls back to the low watermark. Retrying is the only way the
     /// pass ever runs, because falling pressure emits no wake either.
     pub fn is_transient_capacity_failure(&self) -> bool {
-        if self.is_resident_memory_refusal() {
-            return true;
-        }
-        match self {
-            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
-            // The code-generation store lock is bounded shared capacity: a
-            // concurrent publication or retention pass in the same store root
-            // holds it and releases it on its own without waking this worktree.
-            Self::Production(CodeIndexProductionErrorV1::Publication(
-                CodeIndexPublicationStoreErrorV1::StoreLockContended,
-            )) => true,
-            _ => false,
-        }
+        self.is_resident_memory_refusal()
+            || self.is_store_lock_contended()
+            || matches!(
+                self,
+                Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. })
+            )
     }
 
     /// Another owner, in this or another process, holds this scope's
