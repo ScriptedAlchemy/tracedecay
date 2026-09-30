@@ -165,7 +165,7 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         // production client would, instead of treating it as a verdict.
         let problem = serde_json::from_slice::<Value>(&output.stdout)
             .ok()
-            .map(|envelope| envelope["problem"].clone())
+            .map(|printed| printed["structuredContent"]["problem"].clone())
             .filter(|problem| problem["terminality"] == "pre_admission")
             .filter(|problem| problem["retry"] == "after_delay");
         match problem {
@@ -182,8 +182,7 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let envelope: Value =
-        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    let envelope: Value = crate::common::tool_json_structured_content(&output.stdout);
     assert!(
         envelope["problem"].is_null() && !envelope["outcome"].is_null(),
         "storage_status must complete before the typed-terminal journey starts: {envelope}"

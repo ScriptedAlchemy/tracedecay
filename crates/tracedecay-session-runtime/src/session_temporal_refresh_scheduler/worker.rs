@@ -545,6 +545,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 }
             }
         }
+        state.observe_quiescence();
         state.mark_worker_idle();
         state.idle.notify_waiters();
         let wake = hotpath::future!(

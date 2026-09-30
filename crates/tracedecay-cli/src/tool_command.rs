@@ -76,7 +76,7 @@ use tracedecay_mcp::tools::response_trailers::{
     TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, get_tool_definitions, render_tool_cli_help,
     short_tool_name,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -178,7 +178,7 @@ fn print_settled_route_refusal(tool_name: &str, error: &TraceDecayError) -> Resu
         error,
         &serde_json::json!({ "format": "json" }),
     ) {
-        print_tool_output(&rendered?.value, true);
+        print_tool_output(&rendered?, CliToolOutput::Document)?;
     }
     Ok(())
 }
@@ -272,7 +272,7 @@ fn run_inner(
                 )
                 .await;
             }
-            let (request, requested_format) =
+            let (request, requested_format, output) =
                 cli_surface_invocation(tool_name, tool_args, raw_json)
                     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
@@ -282,6 +282,7 @@ fn run_inner(
                 DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
                     .project_path,
                 requested_format,
+                output,
                 deadline,
             )
             .await;
@@ -402,7 +403,7 @@ fn run_inner(
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && RetainedSurfaceOperation::from_application(operation).is_none()
         {
-            let (request, requested_format) =
+            let (request, requested_format, output) =
                 cli_surface_invocation(&def.name, tool_args, raw_json)
                     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
@@ -412,6 +413,7 @@ fn run_inner(
                 DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
                     .project_path,
                 requested_format,
+                output,
                 deadline,
             )
             .await;
@@ -454,7 +456,7 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
     let deadline = Instant::now()
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
-    let (request, requested_format) =
+    let (request, requested_format, output) =
         cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json)
             .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatch_cli_application_surface(
@@ -463,6 +465,7 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
         request,
         project,
         requested_format,
+        output,
         deadline,
     )
     .await
@@ -475,14 +478,18 @@ fn cli_surface_invocation(
     tool_name: &str,
     tool_args: Value,
     raw_json: bool,
-) -> std::result::Result<(Value, RequestedOutputFormat), ApplicationSurfaceAdapterError> {
+) -> std::result::Result<
+    (Value, RequestedOutputFormat, CliToolOutput),
+    ApplicationSurfaceAdapterError,
+> {
     let normalized = adapt_application_tool_request(tool_name, tool_args)?;
+    let output = CliToolOutput::new(raw_json, normalized.requested_format);
     let requested_format = if raw_json {
         RequestedOutputFormat::Json
     } else {
         normalized.requested_format
     };
-    Ok((normalized.request, requested_format))
+    Ok((normalized.request, requested_format, output))
 }
 
 /// Every application-surface operation is project-scoped on the daemon side
@@ -498,6 +505,7 @@ async fn dispatch_cli_application_surface(
     tool_args: Value,
     project: Option<PathBuf>,
     requested_format: RequestedOutputFormat,
+    output: CliToolOutput,
     deadline: Instant,
 ) -> Result<()> {
     dispatch_cli_application_surface_inner(
@@ -506,6 +514,7 @@ async fn dispatch_cli_application_surface(
         tool_args,
         project,
         requested_format,
+        output,
         deadline,
     )
     .await
@@ -517,6 +526,7 @@ fn dispatch_cli_application_surface_inner(
     tool_args: Value,
     project: Option<PathBuf>,
     requested_format: RequestedOutputFormat,
+    output: CliToolOutput,
     deadline: Instant,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested application-surface future before it reaches
@@ -606,12 +616,7 @@ fn dispatch_cli_application_surface_inner(
             }
             tokio::time::sleep(delay).await;
         };
-        print_cli_application_surface(
-            profile,
-            project.as_deref(),
-            result,
-            requested_format == RequestedOutputFormat::Json,
-        )
+        print_cli_application_surface(profile, project.as_deref(), result, output)
     })
 }
 
@@ -693,7 +698,7 @@ async fn dispatch_cli_retained(
     )?;
     account_tool_result(dispatch.project_path.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -760,7 +765,7 @@ async fn dispatch_cli_source_edit(
     )?;
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -786,37 +791,17 @@ async fn dispatch_cli_graph_tool(
     let outcome =
         invoke_cli_graph_tool(profile, handshake, operation, &tool_args, deadline).await?;
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    // `--format json` prints the whole typed result. The rendered body is
-    // bounded for agent contexts, so it feeds only the human view, `--json`'s
-    // exact tool-result object, the beside-result blocks, and the exit status.
-    let typed_format_json =
-        !raw_json && requested_output_format(&tool_args) == RequestedOutputFormat::Json;
-    let (mut result, typed_json) = match outcome {
-        Ok(completion) => {
-            let typed_json = typed_format_json
-                .then(|| completion.result.result_value())
-                .transpose()?;
-            let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                response_handle_root.as_deref(),
-                &tool_args,
-                completion,
-            )?;
-            (rendered, typed_json)
-        }
-        Err(refusal) => (
-            refusal.render(response_handle_root.as_deref(), &tool_args)?,
-            None,
-        ),
+    let mut result = match outcome {
+        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+            response_handle_root.as_deref(),
+            &tool_args,
+            completion,
+        )?,
+        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
     };
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    match typed_json {
-        Some(typed_json) => {
-            println!("{typed_json}");
-            print_beside_result_blocks(&result.value);
-        }
-        None => print_tool_output(&result.value, raw_json),
-    }
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -972,7 +957,7 @@ async fn dispatch_cli_profile_registry(
     };
     account_tool_result(dispatch.project_path.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -993,13 +978,12 @@ fn cli_response_handle_root(
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 
 /// Prints one settled application-surface call through the renderer its MCP
-/// call uses. `--json` keeps the whole canonical envelope on stdout; the
-/// beside-result trailer and footer go to stderr on every format.
+/// call uses, as every other tool call prints.
 fn print_cli_application_surface(
     profile: &ProfileRoot,
     project: Option<&Path>,
     result: ApplicationSurfaceInvocationResult,
-    raw_json: bool,
+    output: CliToolOutput,
 ) -> Result<()> {
     let application_problem = result.result.as_ref().err().map(|problem| {
         TraceDecayError::tool_refused(
@@ -1015,15 +999,7 @@ fn print_cli_application_surface(
     )?;
     account_tool_result(project, &mut rendered);
     mark_semantic_tool_error(&mut rendered);
-    match (&result.result, raw_json) {
-        // A refusal prints as the tool result every route answers.
-        (Err(_), true) => print_tool_output(&rendered.value, true),
-        (Ok(_), true) => {
-            print!("{}", crate::cli::output::json::json_line(&result.result)?);
-            print_beside_result_blocks(&rendered.value);
-        }
-        (_, false) => print_tool_output(&rendered.value, false),
-    }
+    print_tool_output(&rendered, output)?;
     if application_problem.is_some() {
         std::io::stdout().flush()?;
     }
@@ -1241,11 +1217,40 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     ))
 }
 
-fn print_tool_output(result_value: &Value, raw_json: bool) {
-    println!("{}", rendered_tool_output(result_value, raw_json));
-    if !raw_json {
-        print_beside_result_blocks(result_value);
+/// How `tracedecay tool` prints a completed call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CliToolOutput {
+    /// `--json`: the one tool-result document.
+    Document,
+    /// `format: "json"`: an answer's whole typed result, or a refusal's
+    /// rendered envelope.
+    TypedResult,
+    /// The rendered text body.
+    Text,
+}
+
+impl CliToolOutput {
+    fn new(raw_json: bool, requested_format: RequestedOutputFormat) -> Self {
+        match (raw_json, requested_format) {
+            (true, _) => Self::Document,
+            (false, RequestedOutputFormat::Json) => Self::TypedResult,
+            (false, RequestedOutputFormat::Markdown) => Self::Text,
+        }
     }
+
+    fn for_args(raw_json: bool, tool_args: &Value) -> Self {
+        Self::new(raw_json, requested_output_format(tool_args))
+    }
+}
+
+/// Prints one completed tool call; the beside-result blocks go to stderr
+/// unless the document on stdout already carries them.
+fn print_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<()> {
+    println!("{}", rendered_tool_output(result, output)?);
+    if output != CliToolOutput::Document {
+        print_beside_result_blocks(&result.value);
+    }
+    Ok(())
 }
 
 fn print_beside_result_blocks(result_value: &Value) {
@@ -1254,16 +1259,47 @@ fn print_beside_result_blocks(result_value: &Value) {
     }
 }
 
-/// The bytes `tracedecay tool` writes to stdout for a completed compatibility
-/// result: the exact daemon JSON object when `--json` is set, otherwise the
-/// joined `content[*].text` markdown. Status is decided separately from
-/// top-level `isError`.
-fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
-    if raw_json {
-        serde_json::to_string_pretty(result_value).unwrap_or_default()
-    } else {
-        join_content_text(result_value)
+/// The bytes `tracedecay tool` writes to stdout for a completed call. Status
+/// is decided separately from `isError`.
+fn rendered_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<String> {
+    match (output, result.structured_result()) {
+        (CliToolOutput::Document, _) => {
+            Ok(serde_json::to_string_pretty(&json_tool_document(result)?)?)
+        }
+        (CliToolOutput::TypedResult, Some(structured)) if !is_error_result(&result.value) => {
+            Ok(structured.to_string())
+        }
+        (CliToolOutput::TypedResult | CliToolOutput::Text, _) => {
+            Ok(join_content_text(&result.value))
+        }
     }
+}
+
+fn is_error_result(result_value: &Value) -> bool {
+    result_value.get("isError").and_then(Value::as_bool) == Some(true)
+}
+
+/// The one `tracedecay tool --json` document for every tool: the MCP tool
+/// result's `content`, its `isError`, and `structuredContent` holding the
+/// refusal's typed problem record or the answer's whole typed result.
+fn json_tool_document(result: &ToolResult) -> Result<Value> {
+    let mut document = result.value.clone();
+    let is_error = is_error_result(&document);
+    let Some(object) = document.as_object_mut() else {
+        return Err(TraceDecayError::Config {
+            message: "the tool rendered a result that is not a JSON object".to_owned(),
+        });
+    };
+    object.insert("isError".to_owned(), serde_json::json!(is_error));
+    if !is_error {
+        let structured = result
+            .structured_result()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "the tool rendered its answer without its typed result".to_owned(),
+            })?;
+        object.insert("structuredContent".to_owned(), structured.clone());
+    }
+    Ok(document)
 }
 
 /// Joins every payload `content[*].text` block in an MCP tool result,

@@ -938,7 +938,9 @@ pub async fn compose_doctor_report(
 /// server. Every read re-resolves exact project/worktree identity, observes the
 /// current registered runtimes, and composes through the sole application
 /// kernel. The dashboard receives no database handles or authority-bearing
-/// inputs.
+/// inputs. A session store the daemon holds in its typed reset-required state
+/// is `None`: the families it feeds report unknown while every other family
+/// composes, so a reset only disables session features.
 #[allow(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
@@ -950,8 +952,8 @@ pub fn production_doctor_report_reader(
     layout: tracedecay_runtime_core::storage::StoreLayout,
     graph: tracedecay_runtime_core::db::Database,
     registry: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    project_sessions: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     profile_root: PathBuf,
     host_profile: tracedecay_runtime_core::config::ProfileRoot,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
@@ -997,10 +999,13 @@ pub fn production_doctor_report_reader(
                 telemetry_ports.push(port);
             }
             for database in [
-                registry.as_ref(),
-                profile_sessions.as_ref(),
-                project_sessions.as_ref(),
-            ] {
+                Some(registry.as_ref()),
+                profile_sessions.as_deref(),
+                project_sessions.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 if telemetry_paths.insert(database.db_path().to_path_buf())
                     && let Some(port) = store_telemetry_sampling
                         .registered_port(database.db_path(), context.scope())
@@ -1017,8 +1022,8 @@ pub fn production_doctor_report_reader(
                     .require_active_write_scope("read dashboard Doctor graph authority")
                     .is_ok()
             });
-            let registered_authority_current = registry.writer_connection().is_ok()
-                && profile_sessions.writer_connection().is_ok();
+            let (profile_authority, registered_authority_current) =
+                profile_authority_read(&registry, profile_sessions.as_deref());
             let retention_secs = retention
                 .orphan_store_gc_days
                 .and_then(|days| i64::try_from(days).ok())
@@ -1088,11 +1093,11 @@ pub fn production_doctor_report_reader(
                         })
                 })
             });
-            let project_temporal = SessionTemporalAccess::new(&*project_sessions);
+            let project_temporal = session_temporal_ok(project_sessions.as_deref());
             let (
                 quick_check,
                 authority_audit_ok,
-                temporal,
+                temporal_ok,
                 profile_storage,
                 store_telemetry,
                 profile_retention_backlog,
@@ -1104,59 +1109,42 @@ pub fn production_doctor_report_reader(
                 advisory_feedback,
                 host_read,
                 code_index,
-            ) =
-                hotpath::future!(
-                    Box::pin(async {
-                        tokio::join!(
-                    graph.quick_check_report(),
-                    observation_authority_audit_ok(registry.as_ref()),
-                    project_temporal.session_temporal_doctor_health(),
-                    profile_storage_reads,
-                    collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
-                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
-                        profile_sessions.as_ref(),
-                        &retention.session_lcm,
-                        now,
-                    ),
-                    tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
-                        project_sessions.as_ref(),
-                        &retention.session_lcm,
-                        now,
-                    ),
-                    collect_code_generation_retention_findings(
-                        &schedulers,
-                        registry.as_ref(),
-                        &code_index_store_root,
-                        &project_root,
-                        &graph,
-                    ),
-                    language_server_read_from_broker(&diagnostic_broker),
-                    tracedecay_application::feedback::concrete::feedback_observation_read_model(
-                        &graph,
-                    ),
-                    async {
-                        tokio::join!(
-                            profile_sessions.observation_refusal_census(),
-                            project_sessions.observation_refusal_census(),
-                        )
-                    },
-                    advisory_feedback_read,
-                    host_scan,
-                    code_index_read_from_registry(&schedulers, &project_root),
-                )
-                    }),
-                    label = "daemon.doctor.collect"
-                )
-                .await;
+            ) = hotpath::future!(
+                Box::pin(async {
+                    tokio::join!(
+                        graph.quick_check_report(),
+                        observation_authority_audit_ok(registry.as_ref()),
+                        project_temporal,
+                        profile_storage_reads,
+                        collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
+                        session_retention_read(profile_sessions.as_deref(), &retention, now),
+                        session_retention_read(project_sessions.as_deref(), &retention, now),
+                        collect_code_generation_retention_findings(
+                            &schedulers,
+                            registry.as_ref(),
+                            &code_index_store_root,
+                            &project_root,
+                            &graph,
+                        ),
+                        language_server_read_from_broker(&diagnostic_broker),
+                        tracedecay_application::feedback::concrete::feedback_observation_read_model(
+                            &graph,
+                        ),
+                        async {
+                            tokio::join!(
+                                refusal_census_read(profile_sessions.as_deref()),
+                                refusal_census_read(project_sessions.as_deref()),
+                            )
+                        },
+                        advisory_feedback_read,
+                        host_scan,
+                        code_index_read_from_registry(&schedulers, &project_root),
+                    )
+                }),
+                label = "daemon.doctor.collect"
+            )
+            .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
-            let temporal_ok = match temporal.status() {
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
-                    Some(temporal.findings().is_empty())
-                }
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
-            };
             let schema_convergence = schema_convergence();
             let storage = [
                 profile_storage.orphan_stores,
@@ -1201,11 +1189,7 @@ pub fn production_doctor_report_reader(
                 }),
                 operational_audit: OperationalAuditReadV1 {
                     remote: remote_operational(),
-                    profile_authority: ProfileAuthorityReadV1::Observed {
-                        registry_attached: registry.writer_connection().is_ok(),
-                        profile_sessions_attached: profile_sessions.writer_connection().is_ok(),
-                        coverage: DoctorCoverageCompletenessV1::Complete,
-                    },
+                    profile_authority,
                 },
                 host,
                 advisory_feedback,
@@ -1231,6 +1215,83 @@ pub fn production_doctor_report_reader(
             )
         })
     })
+}
+
+/// The profile authority read and whether the registered authority is
+/// current. A reset-required profile session store is the operator's pending
+/// reset, not a runtime that failed to converge.
+fn profile_authority_read(
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
+    profile_sessions: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> (ProfileAuthorityReadV1, bool) {
+    let registry_attached = registry.writer_connection().is_ok();
+    match profile_sessions {
+        Some(database) => {
+            let profile_sessions_attached = database.writer_connection().is_ok();
+            (
+                ProfileAuthorityReadV1::Observed {
+                    registry_attached,
+                    profile_sessions_attached,
+                    coverage: DoctorCoverageCompletenessV1::Complete,
+                },
+                registry_attached && profile_sessions_attached,
+            )
+        }
+        None => (
+            ProfileAuthorityReadV1::ProfileSessionsResetRequired { registry_attached },
+            registry_attached,
+        ),
+    }
+}
+
+/// Whether the project session store's temporal authority is clean; `None`
+/// when it could not be observed, including while the store is held
+/// reset-required.
+async fn session_temporal_ok(
+    project_sessions: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> Option<bool> {
+    let temporal = SessionTemporalAccess::new(project_sessions?)
+        .session_temporal_doctor_health()
+        .await;
+    match temporal.status() {
+        tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
+            Some(temporal.findings().is_empty())
+        }
+        tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
+        | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
+        | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
+    }
+}
+
+/// Retention backlog of a session store; unknown while the store is held
+/// reset-required.
+async fn session_retention_read(
+    database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+    retention: &tracedecay_configuration::RetentionConfig,
+    now: i64,
+) -> DoctorStorageFamilyReadV1 {
+    match database {
+        Some(database) => {
+            tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(
+                database,
+                &retention.session_lcm,
+                now,
+            )
+            .await
+        }
+        None => DoctorStorageFamilyReadV1::Unknown,
+    }
+}
+
+/// Refusal census of a session store; unknown while the store is held
+/// reset-required.
+async fn refusal_census_read(
+    database: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> IngestRefusalCensusReadV1 {
+    match database {
+        Some(database) => database.observation_refusal_census().await,
+        None => IngestRefusalCensusReadV1::Unknown,
+    }
 }
 
 pub fn doctor_report_request_context(

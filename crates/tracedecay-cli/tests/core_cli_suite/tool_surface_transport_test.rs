@@ -69,6 +69,8 @@ fn init_indexed_git_project(home: &Path, project: &Path) {
 }
 
 struct SurfaceOutcome {
+    /// Printed with `--json`: the tool-result document.
+    json: bool,
     success: bool,
     code: Option<i32>,
     stdout: String,
@@ -85,10 +87,30 @@ impl SurfaceOutcome {
         })
     }
 
+    /// The typed result an answer printed: the `--json` document's
+    /// `structuredContent`, or the `format: "json"` result itself.
+    fn answer(&self) -> Value {
+        let payload = self.payload();
+        if self.json {
+            payload["structuredContent"].clone()
+        } else {
+            payload
+        }
+    }
+
+    /// The typed problem record a refusal printed.
+    fn problem(&self) -> Value {
+        let payload = self.payload();
+        if self.json {
+            payload["structuredContent"]["problem"].clone()
+        } else {
+            payload["problem"].clone()
+        }
+    }
+
     fn problem_code(&self) -> Option<String> {
-        self.payload()
-            .pointer("/structuredContent/problem")
-            .and_then(|problem| problem.get("code"))
+        self.problem()
+            .get("code")
             .and_then(Value::as_str)
             .map(str::to_owned)
     }
@@ -229,27 +251,10 @@ fn run_tool_from(
     command
         .current_dir(working_directory)
         .args(["tool", tool])
-        .args(tool_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("tracedecay tool {tool} should spawn: {error}"));
-    let started = Instant::now();
-    loop {
-        if child.try_wait().expect("poll tool child").is_some() {
-            break;
-        }
-        assert!(
-            started.elapsed() < SURFACE_TIMEOUT,
-            "tracedecay tool {tool} hung for {:?}",
-            started.elapsed()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let output = child.wait_with_output().expect("collect tool output");
+        .args(tool_args);
+    let output = crate::common::output_with_timeout(command, SURFACE_TIMEOUT);
     SurfaceOutcome {
+        json: tool_args.contains(&"--json"),
         success: output.status.success(),
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -271,27 +276,10 @@ fn run_git_read_from(
         .current_dir(working_directory)
         .arg("git")
         .args(command_args)
-        .arg("--json")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|error| panic!("tracedecay git {command_args:?} should spawn: {error}"));
-    let started = Instant::now();
-    loop {
-        if child.try_wait().expect("poll git child").is_some() {
-            break;
-        }
-        assert!(
-            started.elapsed() < SURFACE_TIMEOUT,
-            "tracedecay git {command_args:?} hung for {:?}",
-            started.elapsed()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let output = child.wait_with_output().expect("collect git output");
+        .arg("--json");
+    let output = crate::common::output_with_timeout(command, SURFACE_TIMEOUT);
     SurfaceOutcome {
+        json: true,
         success: output.status.success(),
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -322,7 +310,7 @@ fn assert_surface_resolves_project(
         outcome.stdout,
         outcome.stderr
     );
-    let payload = outcome.payload();
+    let payload = outcome.answer();
     assert!(
         payload.get("scope").is_some(),
         "`{tool}` must answer with an authenticated scope, got:\n{}",
@@ -347,7 +335,7 @@ fn await_graph_ready(home: &Path, project: &Path) {
         outcome.stdout, outcome.stderr
     );
     assert_eq!(
-        outcome.payload()["wait"],
+        outcome.answer()["wait"],
         serde_json::json!({ "outcome": "reached" }),
         "the daemon never served a published code graph: {}",
         outcome.stdout
@@ -400,7 +388,7 @@ fn first_class_git_reads_wait_for_full_publication_then_dispatch() {
              route\nstdout:\n{}\nstderr:\n{}",
             command_args[0], outcome.stdout, outcome.stderr
         );
-        let payload = outcome.payload();
+        let payload = outcome.answer();
         assert!(
             payload.get("scope").is_some(),
             "first-class git {} must preserve the authenticated scope, got:\n{}",
@@ -476,7 +464,7 @@ fn await_published_cli_diagnostics(home: &Path, project: &Path, args: &str) -> s
     loop {
         let outcome = run_surface_tool_from(home, project, "diagnostics", args);
         match outcome.problem_code().as_deref() {
-            None => break outcome.payload(),
+            None => break outcome.answer(),
             Some("application.diagnostics.pending" | "application.diagnostics.stale") => {
                 assert!(
                     started.elapsed() < SURFACE_TIMEOUT,
@@ -560,7 +548,7 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
         outcome.stdout,
         outcome.stderr
     );
-    let problem = &outcome.payload()["structuredContent"]["problem"];
+    let problem = &outcome.problem();
     assert_eq!(
         problem["legal_actions"],
         serde_json::json!(["refresh"]),
@@ -588,7 +576,7 @@ fn tool_diagnostics_json_carries_the_unowned_scope_detail() {
         r#"{"scope":"file","path":"src/lib.rs"}"#,
     );
     assert!(!outcome.success, "stdout:\n{}", outcome.stdout);
-    let problem = &outcome.payload()["structuredContent"]["problem"];
+    let problem = &outcome.problem();
     assert_eq!(
         (&problem["code"], &problem["detail"]),
         (
@@ -630,7 +618,7 @@ fn tool_diagnostics_json_carries_the_pending_producer_detail() {
             r#"{"scope":"file","path":"src/index.ts"}"#,
         );
         match outcome.problem_code().as_deref() {
-            Some("application.diagnostics.pending") => break outcome.payload(),
+            Some("application.diagnostics.pending") => break outcome.problem(),
             Some("application.diagnostics.stale") => {
                 assert!(
                     started.elapsed() < SURFACE_TIMEOUT,
@@ -646,7 +634,7 @@ fn tool_diagnostics_json_carries_the_pending_producer_detail() {
         }
     };
     assert_eq!(
-        pending["structuredContent"]["problem"]["detail"],
+        pending["detail"],
         serde_json::json!({
             "kind": "diagnostics_pending",
             "producer": "node_modules/.bin/tsc",
@@ -713,7 +701,7 @@ fn tool_diagnostics_names_pnpm_install_for_an_uninstalled_monorepo() {
         outcome.stdout,
         outcome.stderr
     );
-    let problem = &outcome.payload()["structuredContent"]["problem"];
+    let problem = &outcome.problem();
     assert_eq!(
         problem["legal_actions"],
         serde_json::json!(["refresh"]),
@@ -959,7 +947,7 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
         "an unknown tool must fail: {}",
         unknown.stderr
     );
-    let problem = &unknown.payload()["structuredContent"]["problem"];
+    let problem = &unknown.problem();
     assert_eq!(
         (&problem["code"], &problem["kind"], &problem["retryable"]),
         (
