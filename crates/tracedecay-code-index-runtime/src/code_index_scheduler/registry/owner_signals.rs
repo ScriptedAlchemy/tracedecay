@@ -404,17 +404,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let mut reconcile_requested = false;
         loop {
-            if self
-                .latest_text_serving_freshness_for_scope(scope)
-                .await
-                .is_some()
-                && (self.query_authority_for_scope(scope).await.is_some()
-                    || matches!(
-                        self.mount_query_authority_from_project_peer(project_root, scope)
-                            .await,
-                        Ok(true)
-                    ))
-            {
+            if self.text_serves_search(project_root, scope).await {
                 return CodeIndexRetainedTextServingWaitV1::Serving;
             }
             if !reconcile_requested {
@@ -433,6 +423,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 Ok(Ok(())) => {}
             }
         }
+    }
+
+    /// Whether `scope`'s text owners serve exact and lexical search under a
+    /// query authority, its own or one reused from a project peer.
+    async fn text_serves_search(&self, project_root: &Path, scope: &ResolvedScope) -> bool {
+        self.latest_text_serving_freshness_for_scope(scope)
+            .await
+            .is_some()
+            && (self.query_authority_for_scope(scope).await.is_some()
+                || matches!(
+                    self.mount_query_authority_from_project_peer(project_root, scope)
+                        .await,
+                    Ok(true)
+                ))
     }
 
     /// Whether the mounted worktree's durable publication names a sealed

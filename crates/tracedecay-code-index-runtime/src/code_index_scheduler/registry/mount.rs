@@ -1673,7 +1673,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                     retained_graph_head_recovery_attempted = true;
                     #[cfg(any(test, feature = "test-helpers"))]
-                    Self::wait_for_retained_graph_head_recovery_gate(&worker_project_root).await;
+                    Self::wait_for_retained_graph_recovery_gate(
+                        &worker_project_root,
+                        super::RetainedGraphRecoveryPauseV1::BeforeHeadRecovery,
+                    )
+                    .await;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1763,8 +1767,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // the rebuild past that observation window.
                     #[cfg(any(test, feature = "test-helpers"))]
                     if !worker_complete_generation_requested.load(Ordering::Acquire) {
-                        Self::wait_for_retained_graph_recovery_successor_gate(&worker_project_root)
-                            .await;
+                        Self::wait_for_retained_graph_recovery_gate(
+                            &worker_project_root,
+                            super::RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+                        )
+                        .await;
                     }
                     // The reserved pass deliberately did not capture the
                     // checkout, and it consumed whatever wake ran it. Schedule

@@ -698,24 +698,6 @@ mod tests {
         assert_eq!(unavailable.exact, CodeIndexLaneStatusV1::Complete);
         assert_eq!(unavailable.lexical, CodeIndexLaneStatusV1::Complete);
 
-        let warming = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
-            &fallback,
-            &std::collections::BTreeMap::from([(
-                tracedecay_domain::RetrieverKind::Graph,
-                tracedecay_domain::RetrieverOutcome::Unavailable(
-                    tracedecay_domain::RetrievalFailure::GraphWarming,
-                ),
-            )]),
-            "generation.current",
-            false,
-        );
-        assert_eq!(
-            warming.graph,
-            CodeIndexLaneStatusV1::Unavailable {
-                reason: "graph_warming",
-            }
-        );
-
         let mut partial_fallback = fallback;
         partial_fallback.insert(
             tracedecay_domain::RetrieverKind::Graph,
@@ -735,6 +717,45 @@ mod tests {
             }
         );
         assert!(partial.graph.is_servable());
+    }
+
+    /// A graph lane that cannot serve because its generation's graph has not
+    /// seated yet says so, while any other unavailable graph keeps the
+    /// generic reason.
+    #[test]
+    fn an_unseated_graph_lane_reports_warming() {
+        let fallback = std::collections::BTreeMap::from([(
+            tracedecay_domain::RetrieverKind::Graph,
+            tracedecay_domain::PublicRetrieverStatus::Unavailable,
+        )]);
+        let graph_reason = |failure| {
+            CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+                &fallback,
+                &std::collections::BTreeMap::from([(
+                    tracedecay_domain::RetrieverKind::Graph,
+                    tracedecay_domain::RetrieverOutcome::Unavailable(failure),
+                )]),
+                "generation.current",
+                false,
+            )
+            .graph
+        };
+        assert_eq!(
+            (
+                graph_reason(tracedecay_domain::RetrievalFailure::GraphWarming),
+                graph_reason(tracedecay_domain::RetrievalFailure::AuthorityUnavailable {
+                    detail: "code graph activation was refused by project configuration".to_owned(),
+                }),
+            ),
+            (
+                CodeIndexLaneStatusV1::Unavailable {
+                    reason: "graph_warming",
+                },
+                CodeIndexLaneStatusV1::Unavailable {
+                    reason: "retriever_unavailable",
+                },
+            )
+        );
     }
 
     /// A natural-language task whose common terms exceed the lexical

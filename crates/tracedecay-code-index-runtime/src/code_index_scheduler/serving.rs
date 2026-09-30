@@ -2142,11 +2142,18 @@ impl LatestCodeTextGenerationV1 {
     pub(super) fn production_graph_serving(
         &self,
     ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
-        match &*self
-            .graph_activation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
+        Self::graph_serving_in(
+            &self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn graph_serving_in(
+        activation: &CodeGraphActivationStateV1,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
+        match activation {
             CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
             CodeGraphActivationStateV1::Refused(reason) => {
                 Err(RetrievalPortError::Contract((*reason).to_owned()))
@@ -2161,8 +2168,9 @@ impl LatestCodeTextGenerationV1 {
     }
 
     /// The graph a search lane expands through, or the typed reason it
-    /// cannot. A pending activation on a graph-enabled worktree is warming;
-    /// one on a graph-disabled worktree never activates.
+    /// cannot, from one activation read. A pending activation on a
+    /// graph-enabled worktree is warming; on a graph-disabled one it never
+    /// activates.
     pub(super) fn search_graph_serving(
         &self,
         graph_activation_enabled: bool,
@@ -2172,23 +2180,17 @@ impl LatestCodeTextGenerationV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
-            CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
             CodeGraphActivationStateV1::Pending if graph_activation_enabled => {
                 Err(RetrievalFailure::GraphWarming)
             }
             CodeGraphActivationStateV1::Pending => Err(RetrievalFailure::AuthorityUnavailable {
                 detail: "graph_activation_disabled".to_owned(),
             }),
-            CodeGraphActivationStateV1::Refused(reason) => {
-                Err(RetrievalFailure::AuthorityUnavailable {
-                    detail: (*reason).to_owned(),
-                })
-            }
-            CodeGraphActivationStateV1::Unavailable(reason) => {
-                Err(RetrievalFailure::AuthorityUnavailable {
-                    detail: reason.clone(),
-                })
-            }
+            activation => Self::graph_serving_in(activation).map_err(|error| {
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: error.to_string(),
+                }
+            }),
         }
     }
 }

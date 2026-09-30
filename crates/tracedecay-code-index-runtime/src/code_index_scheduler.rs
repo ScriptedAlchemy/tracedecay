@@ -209,6 +209,8 @@ pub use ignored_dependencies::{
 };
 pub use registry::CodeIndexReconcileAdmissionV1;
 pub use registry::CodeIndexSchedulerRegistryV1;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use registry::RetainedGraphRecoveryPauseV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
     CodeIndexOwnerActivityV1, CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1,

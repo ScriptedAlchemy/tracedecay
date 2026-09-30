@@ -394,25 +394,26 @@ struct RetainedGraphRecoveryGateV1 {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
+/// Where a restart's retained graph recovery pauses for a fixture.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RetainedGraphRecoveryPauseV1 {
+    /// Before the verified head is opened: the graph is not seated yet.
+    BeforeHeadRecovery,
+    /// After the head is queryable, before its dirty-checkout successor.
+    BeforeSuccessor,
+}
+
 /// Armed gates, keyed by the exact worktree they fence. The slot is process
 /// wide while the tests that arm it run concurrently in one binary, so a
 /// single slot made two unrelated restart fixtures collide by scheduling
 /// accident; the key is the isolation the fixtures already have.
 #[cfg(any(test, feature = "test-helpers"))]
-fn retained_graph_recovery_successor_gate()
--> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>>> =
-        std::sync::OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-/// Armed gates, keyed by the exact worktree they fence, on the same
-/// per-worktree isolation as the successor gate above.
-#[cfg(any(test, feature = "test-helpers"))]
-fn retained_graph_head_recovery_gate()
--> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>>> =
-        std::sync::OnceLock::new();
+fn retained_graph_recovery_gate()
+-> &'static Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>> {
+    static GATE: std::sync::OnceLock<
+        Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>>,
+    > = std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -1982,73 +1983,49 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    /// Pause a revision-7 retained-head recovery after it is queryable and
-    /// before its dirty-checkout successor starts. This makes the recovery
-    /// boundary observable without admitting the successor's partition decode.
+    /// Pause the next retained graph recovery of `project_root` `at` one of
+    /// its boundaries. Before head recovery, reads observe a restart whose
+    /// graph is not seated yet, which a large store holds open by itself for
+    /// tens of seconds while it loads the graph container. Before the
+    /// successor, the recovered head is queryable and the dirty checkout's
+    /// successor has not started its partition decode.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_retained_graph_recovery_before_successor(
+    pub async fn pause_next_retained_graph_recovery(
         &self,
         project_root: PathBuf,
+        at: RetainedGraphRecoveryPauseV1,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
         let (entered, entered_observed) = tokio::sync::oneshot::channel();
         let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = retained_graph_recovery_successor_gate()
+        let mut gates = retained_graph_recovery_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             gates
                 .insert(
-                    project_root.clone(),
+                    (project_root.clone(), at),
                     RetainedGraphRecoveryGateV1 { entered, release },
                 )
                 .is_none(),
-            "one retained graph recovery successor gate per worktree: {}",
+            "one retained graph recovery {at:?} gate per worktree: {}",
             project_root.display()
         );
         (entered_observed, released)
     }
 
-    /// Hold a restart's retained graph-head recovery before it opens the
-    /// graph container, so a fixture can observe what reads answer while the
-    /// graph is not seated yet. A real store holds this open by itself: the
-    /// container load takes seconds to tens of seconds on a large corpus.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_retained_graph_head_recovery(
-        &self,
-        project_root: PathBuf,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
+    async fn wait_for_retained_graph_recovery_gate(
+        project_root: &Path,
+        at: RetainedGraphRecoveryPauseV1,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = retained_graph_head_recovery_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            gates
-                .insert(
-                    project_root.clone(),
-                    RetainedGraphRecoveryGateV1 { entered, release },
-                )
-                .is_none(),
-            "one retained graph head recovery gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn wait_for_retained_graph_head_recovery_gate(project_root: &Path) {
-        let gate = retained_graph_head_recovery_gate()
+        let gate = retained_graph_recovery_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+            .remove(&(project_root.to_path_buf(), at));
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
@@ -2097,19 +2074,6 @@ impl CodeIndexSchedulerRegistryV1 {
             let _ = gate.release.await;
         }
     }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn wait_for_retained_graph_recovery_successor_gate(project_root: &Path) {
-        let gate = retained_graph_recovery_successor_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
-    }
-
     /// Construct a registry with an explicit background-reconcile permit count so
     /// tests can deterministically exercise the bounded-admission behavior
     /// (parallelism across distinct stores vs. serialization at a bound of one)
