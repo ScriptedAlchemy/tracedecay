@@ -490,15 +490,178 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     harness.shutdown().await;
 }
 
+/// Ingest through the session stores until the full server has mounted them,
+/// returning the first settled answer, or `None` once the bound expires.
+async fn settled_session_ingest(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Option<serde_json::Value> {
+    settled_server_session_ingest(&harness.server(project).expect("mounted project")).await
+}
+
+async fn settled_server_session_ingest(
+    server: &crate::mcp::McpServer,
+) -> Option<serde_json::Value> {
+    let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_hook_runtime",
+            "arguments": {
+                "action": "ingest_transcript",
+                "provider": "codex",
+                "user_scope": false,
+            },
+        },
+    }))
+    .expect("hook runtime request");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let response = server
+            .handle_request(&request)
+            .await
+            .expect("hook runtime response");
+        assert!(
+            response.error.is_none(),
+            "hook runtime failed: {response:?}"
+        );
+        let answer = response.result.expect("hook runtime result");
+        if !answer.to_string().contains("application.runtime.mounting") {
+            return Some(answer);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reopen() {
+    let isolation = TempDir::new().expect("production harness isolation");
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("project source root");
+    std::fs::write(project.join("src/lib.rs"), "pub fn reopen_probe() {}\n")
+        .expect("project source");
+    git(&project, &["init", "-q"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "seed project"]);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("first production composition");
+    let first = settled_session_ingest(&harness, &project).await;
+    assert!(
+        first.is_some(),
+        "the first composition mounts its session stores"
+    );
+    let project_data_root = harness
+        .project_data_root(&project)
+        .await
+        .expect("project data root");
+    let stores = [
+        harness.profile_root().join("global.db"),
+        harness.profile_root().join("user-sessions.db"),
+        project_data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME),
+        project_data_root.join("tracedecay.db"),
+    ];
+    harness.shutdown().await;
+    let wal_bytes = stores
+        .iter()
+        .map(|store| {
+            let mut wal = store.as_os_str().to_owned();
+            wal.push("-wal");
+            let bytes = std::fs::metadata(std::path::PathBuf::from(wal))
+                .map_or(0, |metadata| metadata.len());
+            (store.file_name().expect("store name").to_owned(), bytes)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wal_bytes,
+        [
+            ("global.db".into(), 0),
+            ("user-sessions.db".into(), 0),
+            ("sessions.db".into(), 0),
+            ("tracedecay.db".into(), 0),
+        ],
+        "shutdown releases every store lease, so each writer truncates its WAL"
+    );
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("reopened production composition");
+    let reopened = settled_session_ingest(&harness, &project).await;
+    assert_eq!(
+        reopened
+            .as_ref()
+            .map(|answer| answer.to_string().contains("accepted_for_replay")),
+        Some(true),
+        "the reopened composition must remount the session stores: {reopened:?}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capacity_retirement_releases_session_stores_its_owner_used_on_the_first_attempt() {
+    let isolation = TempDir::new().expect("production harness isolation");
+    let mut projects = Vec::new();
+    for ordinal in 0..12 {
+        let project = isolation.path().join(format!("project-{ordinal}"));
+        std::fs::create_dir_all(project.join("src")).expect("project source root");
+        std::fs::write(
+            project.join("src/lib.rs"),
+            format!("pub fn sessions_{ordinal}_probe() -> usize {{ {ordinal} }}\n"),
+        )
+        .expect("project source");
+        git(&project, &["init", "-q"]);
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-qm", "seed project"]);
+        projects.push(project);
+    }
+    let mut harness = ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        std::iter::once(projects[0].clone()),
+    )
+    .await
+    .expect("production harness authority");
+    let first_root = canonical_existing_identity(&projects[0]).expect("canonical first project");
+    drop(
+        harness
+            .resources
+            .as_mut()
+            .expect("production harness resources")
+            .servers
+            .remove(&first_root)
+            .expect("harness retains its initial client handle"),
+    );
+
+    let mut opened_projects = 0_usize;
+    for (ordinal, project) in projects.iter().enumerate() {
+        let opened = open_project_composition(&harness, project, &format!("sessions-{ordinal}"))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("project {ordinal} must open over released capacity: {error}")
+            });
+        assert!(
+            settled_server_session_ingest(&opened.server)
+                .await
+                .is_some(),
+            "project {ordinal} mounts its session stores"
+        );
+        drop(opened);
+        opened_projects += 1;
+    }
+    assert_eq!(opened_projects, 12);
+    harness.shutdown().await;
+}
+
 fn assert_retirement_blocked(error: &TraceDecayError, project_id: &str) {
     let Some((reason_code, retryable, detail)) = error.project_route_context() else {
         panic!("a blocked retirement must be a typed capacity refusal: {error:?}");
     };
     assert_eq!(reason_code, PROJECT_SERVER_CAPACITY_REASON_CODE);
-    assert!(
-        retryable,
-        "a blocked retirement clears when its lease drops"
-    );
+    assert!(retryable, "the next open retires another idle owner");
     assert!(
         detail.contains(&format!("retiring idle project '{project_id}' is blocked"))
             && detail.contains("ClientLeases"),
@@ -507,7 +670,7 @@ fn assert_retirement_blocked(error: &TraceDecayError, project_id: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refused_capacity_retirement_is_typed_and_clears_once_its_store_lease_drops() {
+async fn capacity_retirement_blocked_by_a_foreign_store_lease_is_typed_and_not_replayed() {
     let isolation = TempDir::new().expect("production harness isolation");
     let mut projects = Vec::new();
     for ordinal in 0..14 {
@@ -545,8 +708,8 @@ async fn refused_capacity_retirement_is_typed_and_clears_once_its_store_lease_dr
             .expect("harness retains its initial client handle"),
     );
 
-    // Lease the oldest project's session store the way its automation loop
-    // once did, then leave the project idle so capacity picks it to retire.
+    // Lease the oldest project's session store from outside its owner, then
+    // leave the project idle so capacity picks it to retire.
     let leased = open_project_composition(&harness, &projects[0], "leased")
         .await
         .expect("the leased project opens");
@@ -585,36 +748,22 @@ async fn refused_capacity_retirement_is_typed_and_clears_once_its_store_lease_dr
     let (blocked, refused) = refusal.expect("capacity must retire the leased idle project");
     assert_retirement_blocked(&refused, project_id.as_str());
 
-    // The refused owner's servers are already gone, so an open can still use
-    // their slot; the next open that needs capacity retries the release and
-    // reports the live blocker again.
-    let mut refusal = None;
+    // The refused owner's servers are already gone and its refusal was
+    // reported once: every later open retires another idle owner and serves
+    // while the foreign lease is still held.
     for (ordinal, project) in projects.iter().enumerate().skip(blocked) {
-        match open_project_composition(&harness, project, &format!("still-leased-{ordinal}")).await
-        {
-            Ok(opened) => drop(opened),
-            Err(error) => {
-                refusal = Some((ordinal, error));
-                break;
-            }
-        }
+        let opened = open_project_composition(&harness, project, &format!("after-{ordinal}"))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("project {ordinal} must not replay the reported refusal: {error}")
+            });
+        drop(opened);
     }
-    let (blocked, still_blocked) =
-        refusal.expect("an open that needs capacity reports the live lease");
-    assert_retirement_blocked(&still_blocked, project_id.as_str());
 
     drop(session_lease);
-    let opened = open_project_composition(&harness, &projects[blocked], "lease-released")
-        .await
-        .expect("the next open retries the retirement and serves without a restart");
-    assert_eq!(
-        opened.canonical_project_path,
-        canonical_existing_identity(&projects[blocked]).expect("canonical blocked project")
-    );
-    drop(opened);
     let reopened = open_project_composition(&harness, &projects[0], "retired-reopen")
         .await
-        .expect("the retired project reopens once its stores are released");
+        .expect("the retired project reopens over its retained stores");
     assert_eq!(reopened.canonical_project_path, first_root);
     drop(reopened);
     harness.shutdown().await;

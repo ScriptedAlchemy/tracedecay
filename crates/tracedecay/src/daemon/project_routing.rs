@@ -17,8 +17,9 @@ pub(super) fn project_server_capacity_error() -> TraceDecayError {
     )
 }
 
-/// Capacity refusal while the idle owner chosen for retirement still holds a
-/// store the release could not close. The next open retries that release.
+/// Capacity refusal when a store client outside the retired owner still holds
+/// a store its release could not close. The owner's servers are already gone,
+/// so the next open retires another idle owner.
 pub(super) fn project_server_retirement_blocked_error(
     owner: &StoreOwnerKey,
     blocker: &TraceDecayError,
