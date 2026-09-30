@@ -80,12 +80,13 @@ pub async fn sessions_for(
         && relation == CommitRelationFilter::Produced
     {
         match hotpath::future!(
-            correlation.sessions_for_with_relation(&query, CommitRelationFilter::Observed),
+            correlation
+                .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
             label = "daemon.retained.session.sessions_for.observed_fallback"
         )
         .await
         {
-            Ok(observed) if !observed.is_empty() => Some(observed),
+            Ok((observed, _)) if !observed.is_empty() => Some(observed),
             Ok(_) | Err(GitCorrelationError::Unavailable(_)) => None,
             Err(error) => return Err(map_git_error(error)),
         }

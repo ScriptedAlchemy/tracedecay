@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -54,61 +54,8 @@ const CLI_CHILD_KILL_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Spawn a CLI child with stdin closed and drain stdout/stderr on dedicated
 /// threads so a large or stalled response cannot deadlock the pipe buffers.
-fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut out) = stdout {
-            out.read_to_end(&mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
-        }
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut err) = stderr {
-            err.read_to_end(&mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
-        }
-        buf
-    });
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
-        {
-            let stdout = stdout_handle.join().expect("stdout reader");
-            let stderr = stderr_handle.join().expect("stderr reader");
-            return Output {
-                status,
-                stdout,
-                stderr,
-            };
-        }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child
-                .wait()
-                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
-            let stdout = stdout_handle.join().unwrap_or_default();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            panic!(
-                "tracedecay hung after {:?}\nstdout:\n{}\nstderr:\n{}",
-                started.elapsed(),
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+fn run_command_with_timeout(command: Command, timeout: Duration) -> Output {
+    common::output_with_timeout(command, timeout)
 }
 
 enum FakeDaemonResponse {
@@ -563,14 +510,14 @@ fn configuration_tool_success(
                 String::from_utf8_lossy(&output.stderr)
             )
         });
-        if payload.get("outcome").is_some() {
+        if payload["structuredContent"].get("outcome").is_some() {
             assert!(
                 output.status.success(),
                 "{tool_name} returned an outcome with a failing status\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            return payload;
+            return payload["structuredContent"].clone();
         }
         if Instant::now() >= deadline {
             panic!(
@@ -3623,7 +3570,7 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
     let (code, enabled) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
     assert_eq!(code, Some(0), "{enabled}");
     assert_eq!(
-        enabled["outcome"]["value"]["payload"]["effective_value"],
+        enabled["structuredContent"]["outcome"]["value"]["payload"]["effective_value"],
         json!({ "kind": "boolean", "value": true }),
         "{enabled}"
     );
@@ -3632,7 +3579,7 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
     let (code, disabled) = configuration_get_from(&home, &project, "user.upload_enabled.v1");
     assert_eq!(code, Some(0), "{disabled}");
     assert_eq!(
-        disabled["outcome"]["value"]["payload"]["effective_value"],
+        disabled["structuredContent"]["outcome"]["value"]["payload"]["effective_value"],
         json!({ "kind": "boolean", "value": false }),
         "a write made outside a project must be the value the project reads: {disabled}"
     );

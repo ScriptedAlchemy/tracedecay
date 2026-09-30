@@ -481,15 +481,12 @@ fn find_model<'a>(rows: &'a Value, model: &Value) -> &'a Value {
 #[test]
 fn savings_overview_reflects_seeded_ledger() {
     // `.cargo/config.toml` disables global accounting for cargo-launched
-    // processes; the journey runs in a child that opts back in so the
+    // processes; the journey runs in a child without that opt-out so the
     // recording state reads "enabled".
     if !in_child_test() {
         rerun_test_in_child(
             "savings::savings_overview_reflects_seeded_ledger",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }
@@ -517,7 +514,7 @@ fn savings_overview_reflects_seeded_ledger() {
         // The dashboard surfaces the ledger-recording gate state so an
         // empty ledger is explained honestly instead of "no events yet".
         assert_eq!(savings["recording"]["enabled"], true);
-        assert_eq!(savings["recording"]["mode"], "enabled_by_env");
+        assert_eq!(savings["recording"]["mode"], "default");
         assert_eq!(savings["ledger"]["all_time"]["saved_tokens"], 16_150);
         assert_eq!(savings["ledger"]["all_time"]["calls"], 3);
         assert_eq!(savings["ledger"]["today"]["saved_tokens"], 14_250);
@@ -528,15 +525,12 @@ fn savings_overview_reflects_seeded_ledger() {
 #[test]
 fn daily_model_series_limits_days_not_model_rows() {
     // `.cargo/config.toml` disables global accounting for cargo-launched
-    // processes; the journey runs in a child that opts back in so the
+    // processes; the journey runs in a child without that opt-out so the
     // recording state reads "enabled".
     if !in_child_test() {
         rerun_test_in_child(
             "savings::daily_model_series_limits_days_not_model_rows",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }
@@ -615,15 +609,12 @@ fn daily_model_series_limits_days_not_model_rows() {
 #[test]
 fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence() {
     // `.cargo/config.toml` disables global accounting for cargo-launched
-    // processes; the journey runs in a child that opts back in so the
+    // processes; the journey runs in a child without that opt-out so the
     // recording state reads "enabled".
     if !in_child_test() {
         rerun_test_in_child(
             "savings::session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }
@@ -724,15 +715,12 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
 #[test]
 fn overview_pricing_reports_bundled_snapshot_provenance() {
     // `.cargo/config.toml` disables global accounting for cargo-launched
-    // processes; the journey runs in a child that opts back in so the
+    // processes; the journey runs in a child without that opt-out so the
     // recording state reads "enabled".
     if !in_child_test() {
         rerun_test_in_child(
             "savings::overview_pricing_reports_bundled_snapshot_provenance",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }

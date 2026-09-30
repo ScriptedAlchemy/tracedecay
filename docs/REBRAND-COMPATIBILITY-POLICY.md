@@ -162,7 +162,7 @@ The following `TRACEDECAY_*` variables remain accepted as fallbacks for their
 
 - Generic `TRACEDECAY_<suffix>` values read through the brand env helper.
 - `TRACEDECAY_GLOBAL_DB`.
-- `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB`.
+- `TRACEDECAY_DISABLE_GLOBAL_DB`.
 - `TRACEDECAY_RESEARCH_BLOCK_REASON`.
 - `TRACEDECAY_PROJECT_ROOT`.
 - `TRACEDECAY_DISABLE_SUBPROCESS`.
@@ -273,7 +273,7 @@ Every audited surface maps to exactly one policy category below.
 | Generic `TRACEDECAY_*` env prefix | C | `brand_env` reads only `TRACEDECAY_<suffix>`; there is no second-prefix fallback. |
 | `DISABLE_TRACEDECAY=true` | C | Exact-string `true` is the clean serve opt-out. |
 | `TRACEDECAY_GLOBAL_DB` | C | Accept fallback with warning; `TRACEDECAY_GLOBAL_DB` wins. |
-| `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
+| `TRACEDECAY_DISABLE_GLOBAL_DB` | C | The one global-accounting opt-out; a truthy value disables recording and keeps cargo-launched tests hermetic. |
 | Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
 | Hermes historical project pins | B | Read only as cleanup provenance, then remove generated routing state; never use for runtime routing or store conversion. |
 | Hermes plugin list, memory provider, and context-engine aliases named `tracedecay` | B | Rewrite/remove to canonical `tracedecay` behavior. |

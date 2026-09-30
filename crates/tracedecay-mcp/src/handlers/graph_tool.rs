@@ -373,6 +373,7 @@ pub fn render_graph_tool(
             .with_semantic_error(true)
             .with_failure_message(message);
     }
+    rendered = rendered.with_structured_result(result.result_value()?);
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),

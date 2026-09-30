@@ -46,6 +46,41 @@ pub enum SessionProjectionWorkerRetryClass {
     Deadline,
 }
 
+/// Whether the worker has settled historical discovery, projection
+/// publication, and summary convergence for everything its sources hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionConvergenceState {
+    /// A stage still owes committed work, or the worker has not yet observed
+    /// that it owes none.
+    Converging,
+    /// The last pass committed the final owed item and no stage has work
+    /// pending.
+    Converged,
+    /// Every runnable stage settled, but historical discovery is blocked.
+    Blocked { reason_code: String },
+    /// No worker is serving this store.
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionConvergenceStatus {
+    pub state: SessionConvergenceState,
+    /// Times this worker has reached `Converged`; a new value is a new
+    /// convergence event.
+    pub epoch: u64,
+    pub converged_at_unix_micros: Option<i64>,
+}
+
+impl SessionConvergenceStatus {
+    pub const fn unavailable() -> Self {
+        Self {
+            state: SessionConvergenceState::Unavailable,
+            epoch: 0,
+            converged_at_unix_micros: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionProjectionServingStatus {
     pub state: SessionProjectionServingState,
@@ -53,6 +88,7 @@ pub struct SessionProjectionServingStatus {
     pub backlog: usize,
     pub blocker: Option<SessionProjectionWorkerBlocker>,
     pub retry_class: Option<SessionProjectionWorkerRetryClass>,
+    pub convergence: SessionConvergenceStatus,
 }
 
 pub trait SessionProjectionServingStatusPort: Send + Sync {
@@ -77,6 +113,7 @@ impl SessionProjectionServingStatusPort for RefreshWorkerMissing {
             backlog: 0,
             blocker: Some(SessionProjectionWorkerBlocker::WorkerMissing),
             retry_class: None,
+            convergence: SessionConvergenceStatus::unavailable(),
         }
     }
 }

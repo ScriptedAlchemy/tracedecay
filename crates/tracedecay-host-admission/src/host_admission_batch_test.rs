@@ -359,8 +359,8 @@ async fn canonical_capture_records_git_evidence_rows_without_a_graph_runtime() {
     let correlation = tracedecay_global_db::GlobalDbGitCorrelationStore::new(database);
     let health = correlation.correlation_index_health().await.unwrap();
     assert_eq!((health.span_count, health.commit_count), (1, 0));
-    let hits = correlation
-        .sessions_for_with_relation(
+    let (hits, _) = correlation
+        .sessions_for_with_relation_and_presence(
             &tracedecay_sessions::runtime::git_correlation::SessionsForQuery {
                 git_ref: tracedecay_sessions::runtime::git_correlation::GitRefFilter::Branch(
                     "capture-branch".to_owned(),

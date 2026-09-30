@@ -201,9 +201,14 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     assert!(!codex_skill.contains("targets:"));
     assert!(!codex_skill.contains("checksum:"));
 
-    let mcp = std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap();
-    assert!(mcp.contains("\"command\": \"tracedecay-bin\""));
-    assert!(mcp.contains("\"TRACEDECAY_ENABLE_GLOBAL_DB\": \"1\""));
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plugin_root.join(".mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        mcp,
+        serde_json::json!({"mcpServers": {"graph": {"type": "stdio", "command": "tracedecay-bin",
+            "args": ["serve"], "startup_timeout_sec": 120, "tool_timeout_sec": 900}}})
+    );
 }
 
 #[tokio::test]

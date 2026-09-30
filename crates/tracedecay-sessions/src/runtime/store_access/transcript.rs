@@ -96,62 +96,26 @@ pub async fn get_parse_offset(
 ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
     let path = path_identity_key(path);
     let path = path.as_str();
-    match conn
+    let mut rows = conn
         .query(
             "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
             params![path],
         )
         .await
-    {
-        Ok(mut rows) => {
-            let Some(row) = rows.next().await.map_err(|error| {
-                TranscriptPersistenceError::storage("read transcript parse offset", error)
-            })?
-            else {
-                return Ok(None);
-            };
-            Ok(Some(ParseOffset {
-                byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
-                mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
-                file_id: decode_u64_bits(&row, 2, "decode transcript file id")?,
-            }))
-        }
-        Err(error) if sqlite_missing_column(&error, "file_id") => {
-            let mut legacy_rows = conn
-                .query(
-                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
-                    params![path],
-                )
-                .await
-                .map_err(|error| {
-                    TranscriptPersistenceError::storage("read transcript parse offset", error)
-                })?;
-            let Some(row) = legacy_rows.next().await.map_err(|error| {
-                TranscriptPersistenceError::storage("read transcript parse offset", error)
-            })?
-            else {
-                return Ok(None);
-            };
-            Ok(Some(ParseOffset {
-                byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
-                mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
-                file_id: 0,
-            }))
-        }
-        Err(error) => Err(TranscriptPersistenceError::storage(
-            "read transcript parse offset",
-            error,
-        )),
-    }
-}
-
-fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, column: &str) -> bool {
-    match error {
-        tracedecay_runtime_core::db::engine::Error::Sqlite { message, .. } => {
-            message.contains(&format!("no such column: {column}"))
-        }
-        _ => false,
-    }
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("read transcript parse offset", error)
+        })?;
+    let Some(row) = rows.next().await.map_err(|error| {
+        TranscriptPersistenceError::storage("read transcript parse offset", error)
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ParseOffset {
+        byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
+        mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
+        file_id: decode_u64_bits(&row, 2, "decode transcript file id")?,
+    }))
 }
 
 /// Every `parse_offsets` numeric column carries the full `u64` domain of its

@@ -772,7 +772,7 @@ async fn assert_application_transport_parity(
 ) -> Value {
     let cli = run_application_tool(fixture.home(), &fixture.project, operation, &arguments);
     assert_command_success(operation.as_str(), &cli);
-    let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
+    let cli: Value = common::tool_json_structured_content(&cli.stdout);
     let mcp = resolve_mcp_application_surface(
         operation,
         RequestId::new(format!("request.primitive-parity.mcp.{case}")).expect("MCP request id"),
@@ -1511,7 +1511,7 @@ async fn project_open_application_boundary() {
 
     let cli = run_storage_status(fixture.home(), &fixture.project, true);
     assert_command_success("CLI storage_status", &cli);
-    let cli_value: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
+    let cli_value: Value = common::tool_json_structured_content(&cli.stdout);
     assert_eq!(cli_value["outcome"]["outcome"], "evidence");
     assert!(cli_value["scope"]["project_id"].as_str().is_some());
     assert_eq!(
@@ -1795,7 +1795,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_command_success("CLI git_status", &cli_status);
     let cli_status: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&cli_status.stdout).expect("CLI status envelope");
+        serde_json::from_value(common::tool_json_structured_content(&cli_status.stdout))
+            .expect("CLI status envelope");
     assert_eq!(
         cli_status.scope.project_id, scope.project_id,
         "CLI and MCP must resolve the same project for one repository"
@@ -1840,7 +1841,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_command_success("CLI git_preview", &cli_preview);
     let cli_preview: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&cli_preview.stdout).expect("CLI preview envelope");
+        serde_json::from_value(common::tool_json_structured_content(&cli_preview.stdout))
+            .expect("CLI preview envelope");
     let ApplicationOutcome::Preview(cli_preview) = cli_preview.outcome else {
         panic!("CLI git_preview must return a preview outcome");
     };
@@ -1928,7 +1930,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         &apply_arguments,
     );
     assert_command_success("CLI git_apply", &cli_apply);
-    let cli_apply_wire: Value = serde_json::from_slice(&cli_apply.stdout).expect("CLI apply JSON");
+    let cli_apply_wire: Value = common::tool_json_structured_content(&cli_apply.stdout);
     assert!(
         cli_apply_wire.get("problem").is_none(),
         "CLI git_apply problem: {cli_apply_wire:#}"
@@ -2083,8 +2085,10 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         &stale_apply_arguments,
     );
     assert_command_success("CLI stale git_apply", &stale_cli_apply);
-    let stale_cli_apply: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&stale_cli_apply.stdout).expect("CLI stale apply envelope");
+    let stale_cli_apply: ApplicationEnvelope<Value> = serde_json::from_value(
+        common::tool_json_structured_content(&stale_cli_apply.stdout),
+    )
+    .expect("CLI stale apply envelope");
     let ApplicationOutcome::Effect(stale_cli_apply) = stale_cli_apply.outcome else {
         panic!("stale CLI git_apply must return an authoritative no-change effect");
     };
@@ -2779,7 +2783,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
         let cli = run_feedback_diagnostics(fixture.home(), &fixture.project, canonical_handle);
         assert_command_success("CLI feedback_diagnostics", &cli);
-        let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback JSON");
+        let cli: Value = common::tool_json_structured_content(&cli.stdout);
         let mcp = resolve_mcp_application_surface(
             ApplicationSurfaceOperation::FeedbackDiagnostics,
             RequestId::new("request.feedback-parity.mcp").expect("request id"),
@@ -2839,8 +2843,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
                 &feedback_arguments,
             );
             assert_command_success(operation.as_str(), &cli);
-            let cli: Value =
-                serde_json::from_slice(&cli.stdout).expect("CLI feedback projection JSON");
+            let cli: Value = common::tool_json_structured_content(&cli.stdout);
             let mcp = resolve_mcp_application_surface(
                 operation,
                 RequestId::new(format!(

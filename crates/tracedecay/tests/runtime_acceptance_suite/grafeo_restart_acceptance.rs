@@ -99,8 +99,7 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
         .output()
         .expect("run storage_status");
     assert_command_success("read admitted project identity", &output);
-    let envelope: Value =
-        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    let envelope: Value = common::tool_json_structured_content(&output.stdout);
     envelope["scope"]["project_id"]
         .as_str()
         .unwrap_or_else(|| panic!("admission omitted its public project id: {envelope}"))

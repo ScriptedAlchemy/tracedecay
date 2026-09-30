@@ -86,13 +86,3 @@ pub(super) fn authority_key(
     ))
     .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
-
-pub(super) fn classify_runtime_error(error: String) -> RemoteRecoveryPhysicalEffectErrorV1 {
-    if error.contains("cancel") {
-        RemoteRecoveryPhysicalEffectErrorV1::Cancelled
-    } else if error.contains("timed out") || error.contains("deadline") {
-        RemoteRecoveryPhysicalEffectErrorV1::TimedOut
-    } else {
-        RemoteRecoveryPhysicalEffectErrorV1::Unavailable
-    }
-}
