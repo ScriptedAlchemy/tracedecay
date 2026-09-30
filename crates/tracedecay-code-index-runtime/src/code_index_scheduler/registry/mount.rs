@@ -25,7 +25,6 @@ use super::super::{
     RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
-    publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
     reconcile_panic_guard::{
         ReconcileCapacityRetryV1, ReconcilePanicDecisionV1, ReconcilePanicGuardV1,
     },
@@ -2050,11 +2049,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                             CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
                                                 detail,
                                             ) => GraphPrepareStopV1::ResidentMemory(detail),
-                                            CodeIndexPublicationStoreErrorV1::Unavailable(detail)
-                                                if detail
-                                                    == CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1 =>
-                                            {
-                                                GraphPrepareStopV1::StoreBusy(detail)
+                                            error @ CodeIndexPublicationStoreErrorV1::StoreLockContended => {
+                                                GraphPrepareStopV1::StoreBusy(error.to_string())
                                             }
                                             error => {
                                                 tracing::warn!(

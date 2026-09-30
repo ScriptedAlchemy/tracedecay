@@ -695,11 +695,15 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
 
     let publication = open_cold(store.path(), fixture.path());
     let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
-    let refusal = CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
-        publication
-            .load_active_shared()
-            .expect_err("an exclusive writer refuses the shared decode"),
-    ));
+    let refused = publication
+        .load_active_shared()
+        .expect_err("an exclusive writer refuses the shared decode");
+    assert_eq!(
+        refused,
+        CodeIndexPublicationStoreErrorV1::StoreLockContended
+    );
+    let refusal =
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(refused));
     assert!(
         refusal.is_transient_capacity_failure() && !refusal.reproduces_on_unchanged_input(),
         "a decode refused by a held store writer must be retried by the worker, not parked \
