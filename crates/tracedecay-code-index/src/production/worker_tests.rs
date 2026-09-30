@@ -16,7 +16,7 @@ use crate::receipts::ChunkProjectionDecisionV1;
 use super::*;
 
 #[derive(Clone, Default)]
-struct WorkerPublicationStore {
+pub(super) struct WorkerPublicationStore {
     active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
 }
 
@@ -52,7 +52,7 @@ impl CodeIndexAtomicPublicationPort for WorkerPublicationStore {
     }
 }
 
-struct WorkerProjectionSink;
+pub(super) struct WorkerProjectionSink;
 
 impl CodeChunkProjectionSink for WorkerProjectionSink {
     fn project_changed_chunks(
@@ -64,14 +64,15 @@ impl CodeChunkProjectionSink for WorkerProjectionSink {
             .changes
             .added_or_changed
             .iter()
+            .chain(&request.changes.deleted)
             .map(|change| ChunkProjectionDecisionV1 {
                 chunk_id: change.chunk_id.clone(),
                 prior_chunk_digest: change.prior_digest.clone(),
                 current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
+                operation: match (&change.prior_digest, &change.current_digest) {
+                    (_, None) => ProjectionOperationV1::Deleted,
+                    (None, Some(_)) => ProjectionOperationV1::Added,
+                    (Some(_), Some(_)) => ProjectionOperationV1::Updated,
                 },
                 outcome: ProjectionOutcomeV1::Applied,
                 output_digest: change.current_digest.clone(),
@@ -83,7 +84,7 @@ impl CodeChunkProjectionSink for WorkerProjectionSink {
     }
 }
 
-fn worker_id<T>(value: &str) -> T
+pub(super) fn worker_id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
     <T as TryFrom<String>>::Error: std::fmt::Debug,
@@ -91,7 +92,7 @@ where
     T::try_from(value.to_owned()).expect("valid fixture identity")
 }
 
-fn worker_config() -> CodeIndexProductionConfigV1 {
+pub(super) fn worker_config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
         project_id: worker_id("project.worker"),
         repository: worker_id("repository.worker"),
@@ -104,7 +105,7 @@ fn worker_config() -> CodeIndexProductionConfigV1 {
     }
 }
 
-fn worker_request_with_source(
+pub(super) fn worker_request_with_source(
     file_occurrence: &str,
     sealed_at: i64,
     source: &[u8],

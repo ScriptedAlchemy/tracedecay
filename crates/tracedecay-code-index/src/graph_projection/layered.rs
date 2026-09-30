@@ -48,6 +48,8 @@ pub struct CodeGraphLayeredReportV1 {
     pub reused_files: usize,
     /// Base files the child dropped or changed.
     pub removed_files: usize,
+    /// Retained references cross-file resolution re-decided.
+    pub resolved_references: usize,
     /// `(entities, relations)` the delta container encodes.
     pub delta_rows: (usize, usize),
 }
@@ -283,6 +285,7 @@ fn emit_delta(
         reextracted_files: resolution.reextracted_files,
         reused_files: resolution.unchanged.len(),
         removed_files: resolution.removed.len(),
+        resolved_references: resolution.resolved_references,
         delta_rows: (0, 0),
     })
 }

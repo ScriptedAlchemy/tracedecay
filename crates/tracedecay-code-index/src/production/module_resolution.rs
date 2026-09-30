@@ -316,18 +316,16 @@ impl<'a> ModuleImportIndexV1<'a> {
     }
 
     /// Every retained Python, Go, Java, and Ruby call that is a caller gap.
-    pub(super) fn call_gaps(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| is_module_import_language(file.extraction.language.as_str()))
-            .flat_map(|(index, file)| {
-                file.artifacts
-                    .unresolved_references
-                    .iter()
-                    .filter(move |reference| self.is_call_gap(index, reference))
+    pub(super) fn call_gaps<'r>(
+        &self,
+        references: impl Iterator<Item = (usize, &'r CodeIndexUnresolvedReferenceV1)>,
+    ) -> Vec<CodeIndexUnresolvedReferenceV1> {
+        references
+            .filter(|&(index, reference)| {
+                is_module_import_language(self.files[index].extraction.language.as_str())
+                    && self.is_call_gap(index, reference)
             })
-            .cloned()
+            .map(|(_, reference)| reference.clone())
             .collect()
     }
 

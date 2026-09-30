@@ -20,6 +20,7 @@ use crate::graph_projection::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
+use super::changed_resolution::{ChangedSitesV1, pair_edited_files};
 use super::graph_base_inputs::{
     CodeGraphBaseFileV1, CodeGraphBaseInputsWriterV1, read_code_graph_base_inputs,
 };
@@ -194,9 +195,11 @@ impl SealedGenerationFileWindowsV1 {
 
 /// A refresh's graph inputs relative to the base it layers over.
 ///
-/// Resolution runs over every child file exactly as a cold build runs it,
+/// Resolution yields exactly what a cold build derives over the child files,
 /// but a file whose segment the base already sealed contributes the base's
-/// recorded inputs instead of being decoded. Emission then needs only the
+/// recorded inputs instead of being decoded, and an in-place edit re-decides
+/// only the sites it can move against the base's recorded outputs.
+/// Emission then needs only the
 /// files the base does not carry, the base files the child dropped, and the
 /// whole-generation resolution outputs of both sides.
 pub(crate) struct CodeGraphLayeredResolutionV1<'a> {
@@ -214,6 +217,8 @@ pub(crate) struct CodeGraphLayeredResolutionV1<'a> {
     pub(crate) base_unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     /// Segments decoded because the base did not carry them.
     pub(crate) reextracted_files: usize,
+    /// Retained references cross-file resolution re-decided.
+    pub(crate) resolved_references: usize,
     /// The code generation the base's inputs were recorded for.
     pub(crate) base_generation: tracedecay_domain::CodeGenerationId,
 }
@@ -289,6 +294,16 @@ impl SealedGenerationFileWindowsV1 {
                 !unchanged
             })
             .collect::<Vec<_>>();
+        // The base pages no reused file claimed: its versions of the edited
+        // files and of the files the refresh dropped.
+        let unclaimed = base
+            .files
+            .values()
+            .filter_map(|file| file.page.clone())
+            .map(resolution_file)
+            .collect::<Result<Vec<_>, _>>()?;
+        let edited = pair_edited_files(&files, |index| !placed[index].2, unclaimed.into_iter())
+            .filter(|(_, dropped)| *dropped == 0);
         let removed = base
             .files
             .into_values()
@@ -300,7 +315,16 @@ impl SealedGenerationFileWindowsV1 {
                 .zip(&files)
                 .map(|((_, bindings, _), file)| (bindings, file.artifacts.symbols.as_slice())),
         );
-        let (cross_file_edges, unresolved_calls) = resolve_files(&files, check)?;
+        let (cross_file_edges, unresolved_calls, resolved_references) = resolve_over_base(
+            &files,
+            edited.as_ref().map(|(edited, _)| edited.as_slice()),
+            &base.cross_file_edges,
+            &base.unresolved_calls,
+            check,
+        )?;
+        #[cfg(feature = "hotpath")]
+        hotpath::gauge!("code_index.graph.layered.references_resolved")
+            .inc(resolved_references as u64);
 
         let mut added = Vec::new();
         let mut unchanged = Vec::new();
@@ -342,6 +366,7 @@ impl SealedGenerationFileWindowsV1 {
             unresolved_calls,
             base_unresolved_calls: base.unresolved_calls,
             reextracted_files,
+            resolved_references,
             base_generation: base.generation,
         }))
     }
@@ -452,9 +477,46 @@ impl From<CodeGraphBaseFileV1> for CodeGraphRemovedFileV1 {
     }
 }
 
+/// `files`' cross-file edges and call limitations, with the count of
+/// references re-decided: from the base's outputs when the `edited` files
+/// keep what name lookups land in, else resolved whole.
+fn resolve_over_base(
+    files: &[Arc<FileGenerationArtifactsV1>],
+    edited: Option<&[(usize, Arc<FileGenerationArtifactsV1>)]>,
+    base_cross_file_edges: &[CanonicalRelationEdgeV1],
+    base_unresolved_calls: &[CodeIndexUnresolvedReferenceV1],
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<
+    (
+        Vec<CanonicalRelationEdgeV1>,
+        Vec<CodeIndexUnresolvedReferenceV1>,
+        usize,
+    ),
+    SealedCodeGraphRowsError,
+> {
+    let Some(sites) = edited.and_then(|edited| ChangedSitesV1::new(files, edited)) else {
+        let (cross_file_edges, unresolved_calls) = resolve_files(files, check)?;
+        let resolved_references = files
+            .iter()
+            .map(|file| file.artifacts.unresolved_references.len())
+            .sum();
+        return Ok((cross_file_edges, unresolved_calls, resolved_references));
+    };
+    check()?;
+    let cross_file_edges = sites.cross_file_edges(files, base_cross_file_edges.iter())?;
+    check()?;
+    let unresolved_calls =
+        sites.unresolved_calls(files, &cross_file_edges, base_unresolved_calls, check)?;
+    Ok((
+        cross_file_edges,
+        unresolved_calls,
+        sites.resolved_references(),
+    ))
+}
+
 /// Whole-generation resolution over every file's inputs: the cross-file
 /// edges and the call limitations each source symbol discloses.
-fn resolve_files(
+pub(super) fn resolve_files(
     files: &[Arc<FileGenerationArtifactsV1>],
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<
@@ -467,7 +529,7 @@ fn resolve_files(
     check()?;
     let cross_file_edges = resolve_cross_file_references(files)?;
     check()?;
-    let import_unresolved = unresolved_import_calls(files);
+    let import_unresolved = unresolved_import_calls(files, None);
     let references = files
         .iter()
         .flat_map(|file| {
