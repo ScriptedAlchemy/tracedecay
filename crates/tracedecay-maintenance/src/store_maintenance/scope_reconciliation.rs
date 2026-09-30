@@ -7,7 +7,7 @@
 //! generation-retention pass then sweeps the shared files nothing names.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
@@ -60,18 +60,7 @@ pub async fn run_code_index_scope_reconciliation(
         Err(failure) => return scope_reconciliation_failed(failure, None),
     };
     let project_root = lease.project_root().to_path_buf();
-
-    let removed_owners = scheduler_owner_roots(schedulers)
-        .await
-        .into_iter()
-        .filter(|root| {
-            matches!(
-                std::fs::symlink_metadata(root),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            ) && scoped_code_index_store_root(&store_root, root).is_dir()
-        })
-        .collect::<BTreeSet<_>>();
-    if !removed_owners.is_empty() && !schedulers.retire_project_roots(&removed_owners).await {
+    if !retire_removed_scope_owners(schedulers, &store_root).await {
         return scope_reconciliation_failed("scope_owner_retirement_pending", None);
     }
 
@@ -148,6 +137,25 @@ pub async fn run_code_index_scope_reconciliation(
         Ok(Err((failure, error))) => scope_reconciliation_failed(failure, error),
         Err(_) => scope_reconciliation_failed("scope_task_panicked", None),
     }
+}
+
+/// Retire and join the scheduler of every scope in `store_root` whose root is
+/// gone from disk. `false` when one did not drain in time.
+async fn retire_removed_scope_owners(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    store_root: &Path,
+) -> bool {
+    let removed = scheduler_owner_roots(schedulers)
+        .await
+        .into_iter()
+        .filter(|root| {
+            matches!(
+                std::fs::symlink_metadata(root),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ) && scoped_code_index_store_root(store_root, root).is_dir()
+        })
+        .collect::<BTreeSet<_>>();
+    removed.is_empty() || schedulers.retire_project_roots(&removed).await
 }
 
 /// Every root with a scheduler owner: mounted, or retired but still draining.
