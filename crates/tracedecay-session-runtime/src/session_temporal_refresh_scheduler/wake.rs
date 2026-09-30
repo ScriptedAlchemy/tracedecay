@@ -10,6 +10,7 @@ use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionTemporalRefreshDiscoveryCursor,
 };
 use tracedecay_sessions::serving::{
+    RefreshWorkerMissing, SessionConvergenceState, SessionConvergenceStatus,
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
@@ -88,6 +89,11 @@ struct SessionTemporalRefreshWorkerTelemetry {
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
     depths_published: bool,
+    /// The worker went idle with no dirty flag and no queued request, and
+    /// nothing has requeued work since.
+    quiescent: bool,
+    convergence_epoch: u64,
+    converged_at_unix_micros: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,6 +116,9 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
             depths_published: true,
+            quiescent: false,
+            convergence_epoch: 0,
+            converged_at_unix_micros: None,
         }
     }
 }
@@ -267,6 +276,7 @@ impl SessionTemporalRefreshWakeState {
         let backlog = requests.len();
         drop(requests);
         self.observe_queued_backlog(backlog);
+        self.mark_converging();
     }
 
     pub fn transfer_requests_to(&self, target: &Self) {
@@ -344,13 +354,48 @@ impl SessionTemporalRefreshWakeState {
         if !self.dirty.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(1.0);
         }
+        self.mark_converging();
     }
 
     pub fn wake_history(&self) {
         if !self.historical_dirty.swap(true, Ordering::AcqRel) {
             hotpath::gauge!("session_temporal_refresh_history_dirty").inc(1.0);
         }
+        self.mark_converging();
         self.wake.notify_one();
+    }
+
+    /// Work was requeued after the flag it sets, so a concurrent
+    /// [`Self::observe_quiescence`] either sees that flag or is overwritten
+    /// here.
+    fn mark_converging(&self) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .quiescent = false;
+    }
+
+    /// Records that the worker went idle having committed every pass it
+    /// owed. A convergence event is published only when historical
+    /// discovery also reached its source frontier.
+    pub(super) fn observe_quiescence(&self) {
+        let mut telemetry = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if telemetry.quiescent
+            || self.has_pending_work()
+            || telemetry.queued_backlog > 0
+            || telemetry.durable_backlog > 0
+        {
+            return;
+        }
+        telemetry.quiescent = true;
+        if telemetry.historical_state == SessionHistoricalServingState::Current {
+            telemetry.convergence_epoch = telemetry.convergence_epoch.saturating_add(1);
+            telemetry.converged_at_unix_micros =
+                Some(tracedecay_runtime_core::tracedecay::saturating_utc_now().0);
+        }
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -426,10 +471,12 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn mark_history_pending(&self) {
-        self.telemetry
+        let mut telemetry = self
+            .telemetry
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .historical_state = SessionHistoricalServingState::Pending;
+            .unwrap_or_else(PoisonError::into_inner);
+        telemetry.historical_state = SessionHistoricalServingState::Pending;
+        telemetry.quiescent = false;
     }
 
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
@@ -576,12 +623,16 @@ impl SessionTemporalRefreshWakeState {
 
     fn serving_status(&self) -> SessionProjectionServingStatus {
         let worker = self.status();
-        let historical_state = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .historical_state
-            .clone();
+        let (historical_state, convergence) = {
+            let telemetry = self
+                .telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (
+                telemetry.historical_state.clone(),
+                convergence_status(&telemetry, worker.unavailable_reason),
+            )
+        };
         SessionProjectionServingStatus {
             state: match worker.unavailable_reason {
                 Some(reason) => SessionProjectionServingState::Unavailable {
@@ -650,6 +701,7 @@ impl SessionTemporalRefreshWakeState {
                     SessionProjectionWorkerRetryClass::Deadline
                 }
             }),
+            convergence,
         }
     }
 
@@ -705,6 +757,45 @@ impl Drop for SessionTemporalRefreshWakeState {
     fn drop(&mut self) {
         self.clear_worker_instrumentation();
         self.clear_depth_instrumentation();
+    }
+}
+
+fn convergence_status(
+    telemetry: &SessionTemporalRefreshWorkerTelemetry,
+    unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+) -> SessionConvergenceStatus {
+    let state = match unavailable_reason {
+        Some(
+            SessionTemporalRefreshUnavailableReason::Missing
+            | SessionTemporalRefreshUnavailableReason::Stopped,
+        ) => SessionConvergenceState::Unavailable,
+        Some(
+            SessionTemporalRefreshUnavailableReason::Recovering
+            | SessionTemporalRefreshUnavailableReason::Stalled,
+        )
+        | None => {
+            if telemetry.quiescent {
+                match &telemetry.historical_state {
+                    SessionHistoricalServingState::Current => SessionConvergenceState::Converged,
+                    SessionHistoricalServingState::Blocked(reason_code) => {
+                        SessionConvergenceState::Blocked {
+                            reason_code: reason_code.clone(),
+                        }
+                    }
+                    SessionHistoricalServingState::Pending
+                    | SessionHistoricalServingState::Retryable(_) => {
+                        SessionConvergenceState::Converging
+                    }
+                }
+            } else {
+                SessionConvergenceState::Converging
+            }
+        }
+    };
+    SessionConvergenceStatus {
+        state,
+        epoch: telemetry.convergence_epoch,
+        converged_at_unix_micros: telemetry.converged_at_unix_micros,
     }
 }
 
@@ -1000,15 +1091,7 @@ impl tracedecay_contracts::SessionTemporalRefreshWakePort for SessionTemporalRef
 impl SessionProjectionServingStatusPort for SessionTemporalRefreshWake {
     fn serving_status(&self) -> SessionProjectionServingStatus {
         self.target().map_or_else(
-            || SessionProjectionServingStatus {
-                state: SessionProjectionServingState::Unavailable {
-                    reason: SessionProjectionUnavailableReason::WorkerMissing,
-                },
-                last_progress_at_unix_micros: None,
-                backlog: 0,
-                blocker: Some(SessionProjectionWorkerBlocker::WorkerMissing),
-                retry_class: None,
-            },
+            || RefreshWorkerMissing.serving_status(),
             |state| state.serving_status(),
         )
     }

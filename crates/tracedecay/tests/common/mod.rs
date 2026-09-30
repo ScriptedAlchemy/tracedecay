@@ -880,6 +880,84 @@ pub fn tracedecay_bin() -> PathBuf {
     binary
 }
 
+/// Runs `command` to completion while draining its pipes, so a large stdout
+/// cannot block the child; panics with both streams once `timeout` passes.
+pub fn output_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::process::Output {
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout {
+            std::io::Read::read_to_end(&mut out, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr {
+            std::io::Read::read_to_end(&mut err, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
+        }
+        buf
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
+        {
+            let stdout = stdout_handle.join().expect("stdout reader");
+            let stderr = stderr_handle.join().expect("stderr reader");
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child
+                .wait()
+                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            panic!(
+                "tracedecay hung after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// What a `tracedecay tool --json` call printed under `structuredContent`:
+/// an answer's whole typed result, or a refusal's `{"problem": <record>}`.
+pub fn tool_json_structured_content(stdout: &[u8]) -> serde_json::Value {
+    let printed: serde_json::Value = serde_json::from_slice(stdout).unwrap_or_else(|error| {
+        panic!(
+            "tool --json printed non-JSON ({error}):\n{}",
+            String::from_utf8_lossy(stdout)
+        )
+    });
+    assert!(
+        printed["structuredContent"].is_object(),
+        "tool --json printed no structuredContent: {printed:#}"
+    );
+    printed["structuredContent"].clone()
+}
+
 pub fn tracedecay_command_with_home(home: &Path) -> Command {
     let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);

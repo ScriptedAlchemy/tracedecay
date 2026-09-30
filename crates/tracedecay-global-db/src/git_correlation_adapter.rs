@@ -243,21 +243,6 @@ where
         })
     }
 
-    #[hotpath::measure(label = "global_db.git_correlation.sessions_for", future = true)]
-    pub async fn sessions_for_with_relation(
-        &self,
-        query: &SessionsForQuery,
-        relation: CommitRelationFilter,
-    ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
-        self.require_project_sessions_authority()?;
-        let snapshot = self.read_snapshot().await?;
-        match open_git_evidence_view(&snapshot).await? {
-            Some(view) => view.sessions_for(query, relation).await,
-            // No evidence has ever been recorded, so no session correlates.
-            None => Ok(Vec::new()),
-        }
-    }
-
     /// The sessions a Git scope selects. A store that never recorded
     /// evidence cannot prove that no durable session matches, so it answers
     /// typed unavailable rather than an empty set.
@@ -445,9 +430,13 @@ mod tests {
         assert_eq!((hits[0].first_ts, hits[0].last_ts), (Some(10), Some(12)));
         assert_eq!(
             store
-                .sessions_for_with_relation(&branch_query("elsewhere"), CommitRelationFilter::All)
+                .sessions_for_with_relation_and_presence(
+                    &branch_query("elsewhere"),
+                    CommitRelationFilter::All
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
             Vec::new()
         );
         assert_eq!(

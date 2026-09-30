@@ -21,9 +21,11 @@ const INTERRUPTION_NONE: u8 = 0;
 const INTERRUPTION_CANCELLED: u8 = 1;
 const INTERRUPTION_DEADLINE: u8 = 2;
 
+#[cfg(test)]
+mod interruption_tests;
 mod support;
 
-use support::{RecoveryRuntimeProbeV1, authority_key, classify_runtime_error};
+use support::{RecoveryRuntimeProbeV1, authority_key};
 
 #[derive(Clone)]
 pub(super) struct DaemonRemoteRecoveryPhysicalEffectsV1 {
@@ -94,8 +96,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let authority_key = authority_key(expected)?;
         match self
             .replay
-            .current_writer_fence(project_id, authority_key)
-            .map_err(classify_runtime_error)?
+            .current_writer_fence(project_id, authority_key)?
         {
             Some((fence, frontier)) if fence == writer.authority.fence => {
                 Ok((writer.authority, frontier))
@@ -159,7 +160,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let (binding, _) = self
             .replay
             .target_descriptor(&project_id)
-            .map_err(classify_runtime_error)?;
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let install = RemoteWriterFenceInstallV1 {
             project_id: project_id.clone(),
             target_binding: binding,
@@ -177,12 +178,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let project_for_install = project_id.clone();
         let receipt = run_controlled(control, request_id, &interruption, move || {
             replay.install_writer_fence(project_for_install, install, probe)
-        })?
-        .map_err(classify_runtime_error)?;
+        })??;
         let (_, published_frontier_sequence) = self
             .replay
-            .current_writer_fence(project_id, authority_key)
-            .map_err(classify_runtime_error)?
+            .current_writer_fence(project_id, authority_key)?
             .filter(|(fence, _)| fence == replacement)
             .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let receipt_id = format!("remote.promotion.{}", safe_suffix(operation_id)?);

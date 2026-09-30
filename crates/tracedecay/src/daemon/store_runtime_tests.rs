@@ -4,13 +4,23 @@
 //! root daemon fixtures and therefore cannot live in
 //! `tracedecay-store-runtime` itself.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::protocol::RemoteProtocolRequestV1;
+use tracedecay_contracts::remote::recovery::{
+    PromotionConfirmationV1, RemoteRecoveryCallerV1, RemoteRecoveryControlPortV1,
+    RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1, RemoteRecoveryOperationPortV1,
+};
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
-    BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
-    FactOwnerV1, FactRelationKindV1,
+    BrainNodeId, Confidence, CurrentRemoteAuthorityStateV1, EntityId, FactCategoryV1,
+    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -33,8 +43,8 @@ use tracedecay_store::{
     StoreShardIdV1,
 };
 use tracedecay_store_runtime::{
-    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
-    registry_open_error,
+    DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, RemoteRecoveryAdmission,
+    RemoteRecoveryProjectLifecycle, process_runtime_generation, registry_open_error,
 };
 
 /// Bound for the assertions in this file that read "must not wait for
@@ -683,6 +693,222 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
             .await
             .is_some(),
         "daemon startup must remount the persisted RemoteNode recovery authority"
+    );
+}
+
+struct AdmitRemoteRecovery;
+
+impl RemoteRecoveryProjectLifecycle for AdmitRemoteRecovery {
+    fn authorize_project_recovery<'a>(
+        &'a self,
+        _project_id: &'a ProjectId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = tracedecay_domain::errors::Result<RemoteRecoveryAdmission>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(RemoteRecoveryAdmission::hold(())) })
+    }
+}
+
+struct PromotionControl(Option<RemoteRecoveryInterruptionV1>);
+
+impl RemoteRecoveryControlPortV1 for PromotionControl {
+    fn interruption(&self, _request_id: &RequestId) -> Option<RemoteRecoveryInterruptionV1> {
+        self.0
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_not_cancellation() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-runtime.sock"));
+    #[cfg(not(unix))]
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote failover classification",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    registry
+        .install_remote_recovery_project_lifecycle(Arc::new(AdmitRemoteRecovery))
+        .expect("install recovery project lifecycle");
+    let node_id = BrainNodeId::new("node.remote.cancel-test").expect("remote node identity");
+    let grant = crate::daemon::remote_protocol_tests::grant(
+        identity.brain_id().clone(),
+        node_id.clone(),
+        &[5_u8; 32],
+    );
+    registry
+        .provision_remote_node(
+            grant.clone(),
+            crate::daemon::remote_protocol_tests::admission(&grant),
+        )
+        .await
+        .expect("provision RemoteNode");
+    let storage = registry
+        .remote_node_storage(
+            node_id.clone(),
+            Arc::new(TestRemoteKeyring(Arc::new(
+                RemoteSpoolKeyV1::from_secret_bytes(1, vec![7; 32]).expect("remote spool key"),
+            ))),
+        )
+        .await
+        .expect("mount RemoteNode");
+    let recovery = registry
+        .remote_recovery_authority(&node_id)
+        .await
+        .expect("mounted remote recovery authority");
+
+    let project_id = ProjectId::new("project.cancel-test").expect("project identity");
+    let project_root = temporary.path().join("cancel-test");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let project_sessions = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("project sessions mount registers the replay target");
+
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(serde_json::json!({
+        "project_id": project_id.as_str(),
+        "scope": {
+            "project_id": project_id.as_str(),
+            "repository_id": "repository.cancel-test",
+            "worktree_id": "worktree.cancel-test",
+            "reference": "refs/heads/main",
+            "snapshot_id": "snapshot.cancel-test"
+        },
+        "authority": {
+            "fence": {
+                "brain_id": identity.brain_id().as_str(),
+                "shard_id": "shard.cancel-test",
+                "generation_id": "generation.cancel-test",
+                "placement_revision": 1,
+                "authority_epoch": 1,
+                "authority_node_id": "node.remote.previous-writer"
+            },
+            "credential_revision": 1,
+            "observed_at": 1
+        }
+    }))
+    .expect("remote writer authority");
+    let fence = writer.authority.fence.clone();
+    let authority_key = canonical_sha256(&(
+        "tracedecay.remote-recovery-authority.v1",
+        &fence.brain_id,
+        &fence.shard_id,
+        &fence.generation_id,
+    ))
+    .expect("recovery authority key");
+    let caller = RemoteRecoveryCallerV1 {
+        node_id: node_id.clone(),
+        enrollment_id: EntityId::new("enrollment.cancel-test").expect("enrollment identity"),
+        enrollment_revision: 1,
+        scope: writer.scope.clone(),
+    };
+    let promotion = |request_id: &str| {
+        RemoteProtocolRequestV1::new(
+            RequestId::new(request_id).expect("request identity"),
+            identity.brain_id().clone(),
+            node_id.clone(),
+            1,
+            Some(fence.clone()),
+            UtcMicros(2),
+            PromotionConfirmationV1 {
+                preview_id: format!("promotion.{request_id}"),
+                expected_authority_epoch: 1,
+                expected_placement_revision: 1,
+                expires_at_micros: i64::MAX,
+            },
+        )
+        .expect("promotion request")
+    };
+    let corrupt = promotion("request.cancel-test.corrupt");
+    let interrupted = promotion("request.cancel-test.interrupted");
+    let seed_writer = writer.clone();
+    tokio::task::spawn_blocking(move || {
+        storage.publish_authority(
+            &CurrentRemoteAuthorityStateV1::Available(seed_writer.authority.clone()),
+            &seed_writer,
+            UtcMicros(1),
+        )
+    })
+    .await
+    .expect("publish thread")
+    .expect("publish the current writer on the RemoteNode");
+
+    // The fence row is valid JSON of the wrong shape; its decode error quotes
+    // the text "cancel-test".
+    project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch(&format!(
+            "INSERT INTO remote_writer_fences
+                 (authority_key, writer_fence_json, frontier_sequence, updated_at)
+             VALUES ('{}', '\"cancel-test\"', 0, 1);",
+            authority_key.as_str()
+        ))
+        .await
+        .expect("seed corrupt writer fence");
+    let promote_recovery = Arc::clone(&recovery);
+    let promote_caller = caller.clone();
+    let corrupt_outcome = tokio::task::spawn_blocking(move || {
+        promote_recovery
+            .promote(&corrupt, &promote_caller, &PromotionControl(None))
+            .err()
+    })
+    .await
+    .expect("corrupt failover thread");
+
+    project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch(&format!(
+            "UPDATE remote_writer_fences SET writer_fence_json = '{}'
+             WHERE authority_key = '{}';",
+            serde_json::to_string(&fence).expect("encode writer fence"),
+            authority_key.as_str()
+        ))
+        .await
+        .expect("repair writer fence");
+    let interrupted_outcome = tokio::task::spawn_blocking(move || {
+        recovery
+            .promote(
+                &interrupted,
+                &caller,
+                &PromotionControl(Some(RemoteRecoveryInterruptionV1::Cancelled)),
+            )
+            .err()
+    })
+    .await
+    .expect("cancelled failover thread");
+
+    assert_eq!(
+        (corrupt_outcome, interrupted_outcome),
+        (
+            Some(RemoteRecoveryOperationErrorV1::Corruption),
+            Some(RemoteRecoveryOperationErrorV1::Cancelled),
+        )
     );
 }
 
