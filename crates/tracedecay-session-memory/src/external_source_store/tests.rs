@@ -13,6 +13,20 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_store::{AnchoredObservationWrite, ObservationStore, ObservationWrite};
 
+fn objects_of<'a>(
+    receipts: impl IntoIterator<Item = &'a tracedecay_store::ObservationCommitReceipt>,
+) -> BTreeSet<SourceNativeObjectIdV1> {
+    receipts
+        .into_iter()
+        .map(|receipt| {
+            host_source_object(receipt.observation())
+                .unwrap()
+                .native_object()
+                .clone()
+        })
+        .collect()
+}
+
 struct Fixture {
     retained: RuntimeExternalSourceStore,
     observations: tracedecay_global_db::GlobalDbObservationStore,
@@ -185,7 +199,7 @@ async fn cline_retained_cutover_keeps_objects_and_replays_historical_receipts() 
             host_source_authority(&old, fixture.retained.runtime.binding()).unwrap();
         let old_state = fixture
             .retained
-            .read_state(binding.clone())
+            .read_state(binding.clone(), objects_of([&old]))
             .await
             .unwrap()
             .unwrap();
@@ -207,17 +221,22 @@ async fn cline_retained_cutover_keeps_objects_and_replays_historical_receipts() 
             .unwrap();
         let new_state = fixture
             .retained
-            .read_state(binding.clone())
+            .read_state(binding.clone(), objects_of([&new]))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(new_state.observed_objects().len(), 1);
-        assert_eq!(
-            old_state.observed_objects().keys().collect::<Vec<_>>(),
-            new_state.observed_objects().keys().collect::<Vec<_>>()
-        );
+        assert_eq!(objects_of([&old]), objects_of([&new]));
         let object = host_source_object(new.observation()).unwrap();
-        let mutation = new_state.latest_mutation(object.native_object()).unwrap();
+        assert!(
+            old_state
+                .observed_object(object.native_object())
+                .unwrap()
+                .is_some()
+        );
+        let mutation = new_state
+            .latest_mutation(object.native_object())
+            .unwrap()
+            .unwrap();
         assert_eq!(mutation.transition(), SourceObjectTransitionV1::Successor);
         assert_eq!(
             mutation.predecessor(),
@@ -233,7 +252,7 @@ async fn cline_retained_cutover_keeps_objects_and_replays_historical_receipts() 
         );
         let after_replay = fixture
             .retained
-            .read_state(binding.clone())
+            .read_state(binding.clone(), objects_of([&new]))
             .await
             .unwrap()
             .unwrap();
@@ -256,17 +275,17 @@ async fn cline_retained_cutover_keeps_objects_and_replays_historical_receipts() 
             .capture_host_observation(&old)
             .await
             .unwrap();
-        assert_eq!(
-            fixture
-                .retained
-                .read_state(binding)
-                .await
-                .unwrap()
-                .unwrap()
-                .observed_objects()
-                .len(),
-            2
-        );
+        let objects = objects_of([&new, &append]);
+        let state = fixture
+            .retained
+            .read_state(binding, objects.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(objects.len(), 2);
+        for object in &objects {
+            assert!(state.observed_object(object).unwrap().is_some());
+        }
     }
 }
 
@@ -294,7 +313,7 @@ async fn cline_retained_cutover_denies_changed_facts_and_wrong_stream() {
             host_source_authority(&old, fixture.retained.runtime.binding()).unwrap();
         let state = fixture
             .retained
-            .read_state(binding.clone())
+            .read_state(binding.clone(), objects_of([&old]))
             .await
             .unwrap()
             .unwrap();
@@ -320,7 +339,12 @@ async fn cline_retained_cutover_denies_changed_facts_and_wrong_stream() {
             Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
         ));
         assert_eq!(
-            fixture.retained.read_state(binding).await.unwrap().unwrap(),
+            fixture
+                .retained
+                .read_state(binding, objects_of([&old]))
+                .await
+                .unwrap()
+                .unwrap(),
             state
         );
     }
@@ -330,6 +354,7 @@ async fn cline_retained_cutover_denies_changed_facts_and_wrong_stream() {
 async fn fresh_cline_stream_appends_share_one_task_without_object_duplicates() {
     let fixture = Fixture::open().await;
     let mut binding = None;
+    let mut receipts = Vec::new();
     for (stream, ordinal, native) in [
         (ClineTranscriptStream::UiMessages, 0, "ui-1"),
         (ClineTranscriptStream::ApiHistory, 0, "api-1"),
@@ -356,15 +381,20 @@ async fn fresh_cline_stream_appends_share_one_task_without_object_duplicates() {
             .capture_host_observation(&receipt)
             .await
             .unwrap();
+        receipts.push(receipt);
     }
     let binding = binding.unwrap();
+    let objects = objects_of(&receipts);
+    assert_eq!(objects.len(), 4);
     let pending = fixture
         .retained
-        .read_state(binding.clone())
+        .read_state(binding.clone(), objects.clone())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending.observed_objects().len(), 4);
+    for object in &objects {
+        assert!(pending.observed_object(object).unwrap().is_some());
+    }
     assert!(pending.projected_objects().is_empty());
     // Capture persists a pending projection. The daemon's admission drain
     // owns replay; a direct store fixture must run that same bounded step.
@@ -378,9 +408,18 @@ async fn fresh_cline_stream_appends_share_one_task_without_object_duplicates() {
         .unwrap();
     assert!(replay.projected > 0);
     assert!(!replay.deferred);
-    let state = fixture.retained.read_state(binding).await.unwrap().unwrap();
-    assert_eq!(state.observed_objects().len(), 4);
-    assert_eq!(state.projected_objects(), state.observed_objects());
+    let state = fixture
+        .retained
+        .read_state(binding, objects.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    for object in &objects {
+        let observed = state.observed_object(object).unwrap();
+        assert!(observed.is_some());
+        assert_eq!(state.projected_objects().get(object), observed);
+    }
+    assert_eq!(state.projected_objects().len(), 4);
     assert_eq!(state.source_frontier().partitions().len(), 1);
 }
 
@@ -445,7 +484,7 @@ async fn cline_cutover_requires_the_durable_retained_receipt_and_exact_revision(
         .2;
     let wrong_revision = other
         .retained
-        .read_state(other_binding)
+        .read_state(other_binding, objects_of([&changed_old]))
         .await
         .unwrap()
         .unwrap();
