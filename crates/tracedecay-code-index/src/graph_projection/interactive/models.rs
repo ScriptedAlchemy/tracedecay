@@ -6,6 +6,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use serde::{Serialize, Serializer};
+use tracedecay_domain::process_heap::OwnerHeapV1;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
     SymbolOccurrenceId, UnmodeledImportShapeV1,
@@ -305,6 +306,9 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) largest_files: Vec<CodeGraphFileSymbolCountV1>,
     pub(super) semantic_edges: u64,
     pub(super) file_dependencies: CodeGraphFileDependenciesV1,
+    /// The heap the catalog was built in, with the bytes of its pages when
+    /// the build returned. Last, so every map above drops before the heap.
+    pub(super) heap: Option<(OwnerHeapV1, u64)>,
 }
 
 /// The catalog while a scan fills it: ordered maps that take one entry at a
@@ -383,6 +387,7 @@ impl CatalogBuilder {
             largest_files,
             semantic_edges,
             file_dependencies,
+            heap: None,
         }
     }
 
@@ -427,6 +432,13 @@ impl CatalogBuilder {
 }
 
 impl InteractiveCatalog {
+    /// What the catalog keeps resident: the pages of the heap it was built
+    /// in, fragmentation included, and never less than [`Self::retained_bytes`].
+    pub(in crate::graph_projection) fn resident_bytes(&self) -> u64 {
+        self.retained_bytes()
+            .max(self.heap.as_ref().map_or(0, |(_, bytes)| *bytes))
+    }
+
     /// Bytes the catalog holds: every entry slice and the strings, lists,
     /// and records each entry owns, and the shared dependency adjacency.
     pub(in crate::graph_projection) fn retained_bytes(&self) -> u64 {

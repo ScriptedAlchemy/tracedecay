@@ -5,6 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use tracedecay_domain::process_heap::{
+    ProcessAllocatorReleaseV1, collect_calling_thread_allocator_v1, collect_idle_thread_heap_v1,
+    install_process_allocator_release_v1, request_idle_thread_collection_v1,
+};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
@@ -1125,9 +1129,10 @@ fn count_installed_thread_collect() {
     INSTALLED_THREAD_COLLECTS.with(|count| count.set(count.get() + 1));
 }
 
-const COUNTING_RELEASE: super::ProcessAllocatorReleaseV1 = super::ProcessAllocatorReleaseV1 {
+const COUNTING_RELEASE: ProcessAllocatorReleaseV1 = ProcessAllocatorReleaseV1 {
     release: count_installed_release,
     collect_calling_thread: count_installed_thread_collect,
+    owner_heaps: None,
 };
 
 /// The allocator the composition root installed is released: glibc's
@@ -1136,7 +1141,7 @@ const COUNTING_RELEASE: super::ProcessAllocatorReleaseV1 = super::ProcessAllocat
 /// call. Installation happens once; a second is refused.
 #[test]
 fn allocator_release_runs_the_installed_allocator_release() {
-    super::install_process_allocator_release_v1(COUNTING_RELEASE).expect("first installation");
+    install_process_allocator_release_v1(COUNTING_RELEASE).expect("first installation");
     let (releases, collects) = (
         INSTALLED_RELEASES.with(Cell::get),
         INSTALLED_THREAD_COLLECTS.with(Cell::get),
@@ -1145,13 +1150,25 @@ fn allocator_release_runs_the_installed_allocator_release() {
     assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
     assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects);
     assert!(trim.trimmed);
-    super::collect_calling_thread_allocator_v1();
+    collect_calling_thread_allocator_v1();
     assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
     assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
     assert_eq!(
-        super::install_process_allocator_release_v1(COUNTING_RELEASE),
+        install_process_allocator_release_v1(COUNTING_RELEASE),
         Err("the process allocator release is already installed".to_owned())
     );
+
+    // An idle long-lived thread collects once per sampler request: never
+    // before one, once after it, and not again until the next request.
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 2);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 3);
 }
 
 #[cfg(target_os = "linux")]

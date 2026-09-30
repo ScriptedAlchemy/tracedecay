@@ -10,6 +10,9 @@ use std::{
 };
 
 use rusqlite::{Connection, InterruptHandle, Transaction, TransactionBehavior};
+use tracedecay_domain::process_heap::{
+    IDLE_THREAD_COLLECTION_WAIT_V1, collect_idle_thread_heap_v1,
+};
 use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     StorageRuntimeErrorV1, UnavailableReasonV1,
@@ -475,7 +478,7 @@ fn run<E: ReaderQueryExecutor>(
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    while let Some(command) = next_command(&receiver) {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::ReleaseMemory { reply } => {
@@ -510,6 +513,19 @@ fn run<E: ReaderQueryExecutor>(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
+        }
+    }
+}
+
+/// Wait for the next command, returning this thread's heap whenever the
+/// sampler asked for it while the worker idles.
+fn next_command(receiver: &Receiver<WorkerCommand>) -> Option<WorkerCommand> {
+    loop {
+        collect_idle_thread_heap_v1();
+        match receiver.recv_timeout(IDLE_THREAD_COLLECTION_WAIT_V1) {
+            Ok(command) => return Some(command),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
 }

@@ -21,6 +21,7 @@ use tokio::{
     runtime::Runtime,
     sync::{mpsc, watch},
 };
+use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
     RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
@@ -417,6 +418,7 @@ impl Worker {
         };
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_time()
+            .on_thread_park(collect_idle_thread_heap_v1)
             .build()
         {
             Ok(runtime) => runtime,
