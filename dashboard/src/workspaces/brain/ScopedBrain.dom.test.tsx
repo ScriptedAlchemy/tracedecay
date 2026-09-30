@@ -18,7 +18,7 @@ vi.mock('./BrainField.tsx', () => ({
 
 /**
  * Wire-true bodies come from the shared fixture module, which is gated against
- * the generated contracts by `endpoint-fixtures.test.ts`. Taking them from
+ * the generated contracts by `stories/fixtures/data.test.ts`. Taking them from
  * there rather than restating them means these five reads cannot drift into
  * shapes the daemon does not send, and each test overrides only the figures its
  * assertions actually name.
