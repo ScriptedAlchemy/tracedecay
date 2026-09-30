@@ -13,10 +13,10 @@ pub mod work_executable_binding;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
+use tracedecay_contracts::{ConfigurationSettingActionV1, ConfigurationSettingFindingV1};
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
@@ -256,8 +256,8 @@ fn runtime_config_from_snapshot(
     })?;
     Ok(RuntimeTraceDecayConfig {
         index_paths: IndexPathPolicyV1::new(
-            compilable_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
-            compilable_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
+            applied_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+            applied_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
         )
         .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?,
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
@@ -377,40 +377,58 @@ pub fn required_string_list(
     }
 }
 
-/// The stored index path patterns that still compile. A new write is refused
-/// up front, but an earlier release persisted patterns it never compiled, so
-/// one that no longer compiles is skipped with a warning instead of failing
-/// the whole runtime configuration and with it every tool.
+/// Splits a stored index path pattern list into the patterns indexing
+/// applies and a finding for each one that does not compile.
 ///
-/// The pin is rebuilt on every `current()` read, so the warning is logged
-/// once per setting and pattern for the process, not once per tool call.
-fn compilable_index_patterns(
+/// Writes refuse such a pattern, but an earlier release stored patterns it
+/// never compiled. Refusing the whole pin would also refuse the `set` and
+/// `unset` that repair it, so the pin applies the rest and
+/// [`setting_findings`] reports each skipped pattern.
+fn partition_index_patterns(
+    patterns: Vec<String>,
+) -> (Vec<String>, Vec<ConfigurationSettingFindingV1>) {
+    let mut applied = Vec::with_capacity(patterns.len());
+    let mut findings = Vec::new();
+    for pattern in patterns {
+        match validate_index_path_patterns(std::slice::from_ref(&pattern)) {
+            Ok(()) => applied.push(pattern),
+            Err(error) => findings.push(ConfigurationSettingFindingV1::InvalidIndexPathPattern {
+                pattern,
+                message: error.message,
+                legal_actions: vec![
+                    ConfigurationSettingActionV1::Set,
+                    ConfigurationSettingActionV1::Unset,
+                ],
+            }),
+        }
+    }
+    (applied, findings)
+}
+
+fn applied_index_patterns(
     snapshot: &ConfigurationSnapshotV1,
     key_name: &str,
 ) -> Result<Vec<String>> {
-    static WARNED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
-    let mut patterns = required_string_list(snapshot, key_name)?;
-    patterns.retain(
-        |pattern| match validate_index_path_patterns(std::slice::from_ref(pattern)) {
-            Ok(()) => true,
-            Err(error) => {
-                let first = WARNED
-                    .get_or_init(Mutex::default)
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert((key_name.to_owned(), pattern.clone()));
-                if first {
-                    tracing::warn!(
-                        setting = key_name,
-                        %error,
-                        "skipping a stored index path pattern that no longer compiles"
-                    );
-                }
-                false
-            }
-        },
-    );
-    Ok(patterns)
+    Ok(partition_index_patterns(required_string_list(snapshot, key_name)?).0)
+}
+
+/// The parts of a stored `value` for `key` that the runtime configuration
+/// does not apply.
+pub fn setting_findings(
+    key: &SettingKey,
+    value: &ConfigurationValueV1,
+) -> Vec<ConfigurationSettingFindingV1> {
+    match value {
+        ConfigurationValueV1::StringList(patterns)
+            if matches!(
+                key.as_str(),
+                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
+            ) =>
+        {
+            partition_index_patterns(patterns.clone()).1
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn required_lcm_summarizer_executables(

@@ -333,8 +333,8 @@ impl ConfigurationRegistry {
     /// Stored snapshots are revalidated with `validate_value` on every read,
     /// so a rule that may tighten across releases must not live there: an
     /// `index.exclude.v1` pattern an earlier release accepted has to keep
-    /// loading (the runtime skips what no longer compiles) while a new
-    /// write of it is refused.
+    /// loading (the runtime pin leaves it unapplied and reports it as a
+    /// setting finding) while a new write of it is refused.
     pub fn validate_written_value(
         &self,
         key: &SettingKey,

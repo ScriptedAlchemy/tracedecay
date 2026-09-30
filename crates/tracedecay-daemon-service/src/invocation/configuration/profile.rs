@@ -2,6 +2,7 @@
 //! profile's own `ProfileSessions` store owns. No project is opened or named.
 
 use super::*;
+use tracedecay_configuration::config::setting_findings;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
 };
@@ -116,6 +117,7 @@ async fn profile_configuration_outcome(
                 .cloned()
                 .ok_or(ConfigurationError::Unavailable)?;
             let setting = ResolvedSetting {
+                findings: setting_findings(&request.key, &effective_value),
                 candidates: current
                     .snapshot
                     .provenance

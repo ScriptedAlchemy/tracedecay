@@ -127,11 +127,11 @@ pub use configuration::{
     ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationMutationReceipt,
     ConfigurationObservedStateRequestV1, ConfigurationProtectedApplyRequestV1,
     ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackPreviewRequestV1,
-    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
-    ResolvedSetting, SettingSummary, configuration_surface_catalog_contribution,
-    configuration_surface_handler_descriptors, configuration_surface_operation,
-    configuration_surface_request_schema, configuration_surface_result_schema,
-    configuration_wire_request_from_invocation_payload,
+    ConfigurationSetRequestV1, ConfigurationSettingActionV1, ConfigurationSettingFindingV1,
+    ConfigurationUnsetRequestV1, ConfigurationWireRequestV1, ResolvedSetting, SettingSummary,
+    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
+    configuration_surface_operation, configuration_surface_request_schema,
+    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
 pub use context::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
