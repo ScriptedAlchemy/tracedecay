@@ -1022,21 +1022,8 @@ pub fn production_doctor_report_reader(
                     .require_active_write_scope("read dashboard Doctor graph authority")
                     .is_ok()
             });
-            let registry_attached = registry.writer_connection().is_ok();
-            let profile_authority = match profile_sessions.as_ref() {
-                Some(database) => ProfileAuthorityReadV1::Observed {
-                    registry_attached,
-                    profile_sessions_attached: database.writer_connection().is_ok(),
-                    coverage: DoctorCoverageCompletenessV1::Complete,
-                },
-                None => ProfileAuthorityReadV1::ProfileSessionsResetRequired { registry_attached },
-            };
-            // A reset-required profile session store is the operator's pending
-            // reset, not a runtime that failed to converge.
-            let registered_authority_current = registry_attached
-                && profile_sessions
-                    .as_ref()
-                    .is_none_or(|database| database.writer_connection().is_ok());
+            let (profile_authority, registered_authority_current) =
+                profile_authority_read(&registry, profile_sessions.as_deref());
             let retention_secs = retention
                 .orphan_store_gc_days
                 .and_then(|days| i64::try_from(days).ok())
@@ -1106,20 +1093,11 @@ pub fn production_doctor_report_reader(
                         })
                 })
             });
-            let project_temporal = async {
-                match project_sessions.as_ref() {
-                    Some(database) => Some(
-                        SessionTemporalAccess::new(&**database)
-                            .session_temporal_doctor_health()
-                            .await,
-                    ),
-                    None => None,
-                }
-            };
+            let project_temporal = session_temporal_ok(project_sessions.as_deref());
             let (
                 quick_check,
                 authority_audit_ok,
-                temporal,
+                temporal_ok,
                 profile_storage,
                 store_telemetry,
                 profile_retention_backlog,
@@ -1167,14 +1145,6 @@ pub fn production_doctor_report_reader(
             )
             .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
-            let temporal_ok = temporal.and_then(|temporal| match temporal.status() {
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
-                    Some(temporal.findings().is_empty())
-                }
-                tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
-                | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
-            });
             let schema_convergence = schema_convergence();
             let storage = [
                 profile_storage.orphan_stores,
@@ -1245,6 +1215,52 @@ pub fn production_doctor_report_reader(
             )
         })
     })
+}
+
+/// The profile authority read and whether the registered authority is
+/// current. A reset-required profile session store is the operator's pending
+/// reset, not a runtime that failed to converge.
+fn profile_authority_read(
+    registry: &tracedecay_global_db::RegisteredGlobalDb,
+    profile_sessions: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> (ProfileAuthorityReadV1, bool) {
+    let registry_attached = registry.writer_connection().is_ok();
+    match profile_sessions {
+        Some(database) => {
+            let profile_sessions_attached = database.writer_connection().is_ok();
+            (
+                ProfileAuthorityReadV1::Observed {
+                    registry_attached,
+                    profile_sessions_attached,
+                    coverage: DoctorCoverageCompletenessV1::Complete,
+                },
+                registry_attached && profile_sessions_attached,
+            )
+        }
+        None => (
+            ProfileAuthorityReadV1::ProfileSessionsResetRequired { registry_attached },
+            registry_attached,
+        ),
+    }
+}
+
+/// Whether the project session store's temporal authority is clean; `None`
+/// when it could not be observed, including while the store is held
+/// reset-required.
+async fn session_temporal_ok(
+    project_sessions: Option<&tracedecay_global_db::RegisteredGlobalDb>,
+) -> Option<bool> {
+    let temporal = SessionTemporalAccess::new(project_sessions?)
+        .session_temporal_doctor_health()
+        .await;
+    match temporal.status() {
+        tracedecay_session_temporal_store::SessionTemporalHealthStatus::Complete => {
+            Some(temporal.findings().is_empty())
+        }
+        tracedecay_session_temporal_store::SessionTemporalHealthStatus::Partial
+        | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Unavailable
+        | tracedecay_session_temporal_store::SessionTemporalHealthStatus::Locked => None,
+    }
 }
 
 /// Retention backlog of a session store; unknown while the store is held
