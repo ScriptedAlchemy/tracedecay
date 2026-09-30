@@ -60,19 +60,16 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 /// [`git_common_dir`] for callers that must not wait on another thread's
 /// walk, keeping a blocked discovery distinct from "not a repository".
 ///
-/// `Ok(None)` is a path that is not a readable repository. `Err` is only
-/// [`crate::git_repository::GitRepositoryError::DiscoveryBlocked`]: another
+/// `Ok(None)` is a path that is not a readable repository. `Err` means another
 /// thread owns the walk, and treating that as absence would mint a second
 /// project identity while the real one is still unresolved.
 pub fn git_common_dir_outcome(
     dir: &Path,
-) -> std::result::Result<Option<PathBuf>, crate::git_repository::GitRepositoryError> {
+) -> std::result::Result<Option<PathBuf>, crate::git_repository::DiscoveryBlocked> {
     match crate::git_repository::try_repository_topology(dir) {
         Ok(topology) => Ok(Some(topology.common_dir.clone())),
-        Err(error @ crate::git_repository::GitRepositoryError::DiscoveryBlocked { .. }) => {
-            Err(error)
-        }
-        Err(_) => Ok(None),
+        Err(crate::git_repository::GitTopologyProbeError::Blocked(blocked)) => Err(blocked),
+        Err(crate::git_repository::GitTopologyProbeError::Repository(_)) => Ok(None),
     }
 }
 
@@ -579,7 +576,7 @@ mod tests {
         block.wait_entered().await;
 
         match git_common_dir_outcome(&primary) {
-            Err(crate::git_repository::GitRepositoryError::DiscoveryBlocked { path }) => {
+            Err(crate::git_repository::DiscoveryBlocked { path }) => {
                 assert_eq!(path, primary.display().to_string());
             }
             outcome => panic!("the probe must not wait on the parked walk: {outcome:?}"),
@@ -588,16 +585,10 @@ mod tests {
             let primary = primary.clone();
             move || git_worktree_root(&primary)
         });
-        let joined_by = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while crate::git_repository::repository_topology_wait_count_for_test(&primary) == 0
-            && !joined.is_finished()
-        {
-            assert!(
-                std::time::Instant::now() < joined_by,
-                "the worktree read neither joined the parked walk nor returned"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        crate::git_repository::wait_for_topology_callers_for_test(&primary, 1, || {
+            u64::from(joined.is_finished())
+        })
+        .await;
         block.release();
 
         assert_eq!(parked.join().unwrap(), Some(common_dir));

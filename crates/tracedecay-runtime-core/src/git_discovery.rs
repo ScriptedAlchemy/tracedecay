@@ -494,12 +494,12 @@ fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryI
                 },
             ))
         }
-        Err(crate::git_repository::GitRepositoryError::NotARepository { .. }) => {
-            Some(GitRepositoryIdentityOutcome::NotRepository)
-        }
+        Err(crate::git_repository::GitTopologyProbeError::Repository(
+            crate::git_repository::GitRepositoryError::NotARepository { .. },
+        )) => Some(GitRepositoryIdentityOutcome::NotRepository),
         // The walk is already owned by another thread. Falling through to the
         // git CLI would start a second blocking probe of the same volume.
-        Err(crate::git_repository::GitRepositoryError::DiscoveryBlocked { .. }) => Some(
+        Err(crate::git_repository::GitTopologyProbeError::Blocked(_)) => Some(
             GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded),
         ),
         Err(_) => None,

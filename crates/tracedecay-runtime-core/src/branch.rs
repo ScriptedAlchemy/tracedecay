@@ -484,18 +484,10 @@ mod branch_memo_tests {
             let root = root.clone();
             move || super::detect_default_branch(&root)
         });
-        let joined_by = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while crate::git_repository::repository_topology_wait_count_for_test(&root)
-            + u64::from(head.is_finished())
-            + u64::from(default_branch.is_finished())
-            < 2
-        {
-            assert!(
-                std::time::Instant::now() < joined_by,
-                "branch reads neither joined the parked walk nor returned"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        crate::git_repository::wait_for_topology_callers_for_test(&root, 2, || {
+            u64::from(head.is_finished()) + u64::from(default_branch.is_finished())
+        })
+        .await;
         block.release();
 
         assert_eq!(owner.join().expect("owner").as_deref(), Some("main"));

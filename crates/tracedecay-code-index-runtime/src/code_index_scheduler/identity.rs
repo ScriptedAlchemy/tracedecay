@@ -283,7 +283,7 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
 fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
     if project_root.join(".git").exists()
         && let Ok(topology) =
-            tracedecay_runtime_core::git_repository::repository_topology(project_root)
+            tracedecay_runtime_core::git_repository::try_repository_topology(project_root)
     {
         return (topology.git_dir.clone(), topology.common_dir.clone());
     }

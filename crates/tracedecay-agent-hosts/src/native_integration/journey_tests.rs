@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::analysis::DaemonNativeIntegrationAnalysisV1;
 use super::registry::{DaemonNativeIntegrationServiceRegistry, NativeIntegrationTargetV1};
 use super::stack_signals::signal_from_preflight;
+use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
+use super::worktree::DaemonNativeWorktreeAuthority;
 use tracedecay_application::native_integration::{
     GixNativeIntegrationAdapter, NativeApplyEffectV1, NativeIntegrationAnalysisPort,
     NativeIntegrationAnalysisRevalidationV1, NativeIntegrationMechanics,
@@ -27,7 +29,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::identity::IndexingIdent
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalExpandPort,
     GitHubStackSignalExpandPortError, GitHubStackSignalExpandSurfaceRequest,
-    GitHubStackSignalExpandSurfaceResultV1,
+    GitHubStackSignalExpandSurfaceResultV1, NativeWorktreeTargetV1, WorktreeKindV1,
+    WorktreePresenceV1,
 };
 use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
@@ -1490,4 +1493,112 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
         )
     );
     registry.shutdown().await.expect("shutdown owner registry");
+}
+
+/// Cleanup inspection of an owned checkout, asked while another thread walks
+/// that checkout, classifies it from the shared walk. Reading the walk as
+/// "no repository" classified the checkout as foreign.
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_worktree_inspection_shares_the_discovery_walk_another_thread_owns() {
+    let directory = tempfile::tempdir().expect("temporary project directory");
+    let repository_root = directory.path().join("repo");
+    std::fs::create_dir_all(&repository_root).expect("repository root");
+    initialized_repository(&repository_root);
+    let repository_root = repository_root
+        .canonicalize()
+        .expect("canonical repository root");
+    let project_id = ProjectId::new("project.native.journey").expect("project id");
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        directory.path().join("profile"),
+        &repository_root,
+        project_id.clone(),
+    )
+    .await
+    .expect("canonical project test runtime");
+    let database = runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .expect("registered project database");
+    let (scope, _) = exact_pair_scopes(&repository_root);
+    let shard = &database.binding().shard_id;
+    let profile = SharedProfileStoreLocatorV1::new(
+        shard.brain_id.clone(),
+        shard.profile_id.clone(),
+        database.db_path().display().to_string(),
+    )
+    .expect("registered profile store");
+    let (capability, use_case) =
+        operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+    let scope_set = Arc::new(
+        AuthorizedScopeSetAuthority::authorize_registered(
+            ScopeSetId::new("scope-set.native.journey.inspect").expect("scope set id"),
+            ScopeSetRevision::new(1).expect("scope set revision"),
+            vec![
+                AuthorizedRootAdmission::new(
+                    context(scope.clone(), "request.native.journey.inspect"),
+                    RegisteredRootLocatorV1::new(project_id.clone(), profile, &repository_root)
+                        .expect("registered repository root"),
+                )
+                .expect("registered root admission"),
+            ],
+            &capability,
+            &use_case,
+            OBSERVED_AT,
+        )
+        .expect("registered authorized scope set"),
+    );
+    let store = SharedDaemonNativeIntegrationStore::from_arc(Arc::new(
+        DaemonNativeIntegrationStore::open(database).expect("native integration store"),
+    ));
+    let authority = Arc::new(
+        DaemonNativeWorktreeAuthority::open(
+            project_id.clone(),
+            scope.repository_id.clone(),
+            &repository_root,
+            store.clone(),
+        )
+        .expect("worktree authority"),
+    );
+    let target = NativeWorktreeTargetV1::Worktree {
+        project_id,
+        repository_id: scope.repository_id.clone(),
+        worktree_id: scope.worktree_id.clone(),
+    };
+    let inspect = || {
+        let (authority, scope_set, target) = (
+            Arc::clone(&authority),
+            Arc::clone(&scope_set),
+            target.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            authority.observe_target(&target, &scope_set, OBSERVED_AT, false)
+        })
+    };
+
+    let mut block = tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(
+        &repository_root,
+    );
+    let owner = inspect();
+    block.wait_entered().await;
+    let joined = inspect();
+    tracedecay_runtime_core::git_repository::wait_for_topology_callers_for_test(
+        &repository_root,
+        1,
+        || u64::from(joined.is_finished()),
+    )
+    .await;
+    block.release();
+
+    for inspection in [owner.await.unwrap(), joined.await.unwrap()] {
+        let inspection = inspection.expect("worktree inspection");
+        assert_eq!(inspection.presence, WorktreePresenceV1::Present);
+        assert_eq!(inspection.kind, Some(WorktreeKindV1::Main));
+    }
+    assert_eq!(
+        tracedecay_runtime_core::git_repository::repository_discovery_count_for_test(
+            &repository_root
+        ),
+        1
+    );
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&repository_root);
+    store.shutdown().expect("shutdown native integration store");
 }

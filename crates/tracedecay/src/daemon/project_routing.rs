@@ -167,15 +167,12 @@ pub(super) async fn project_open_gate(
     match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
         Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
         Ok(None) => {}
-        Err(tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
-            ..
-        }) => {
+        Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { .. }) => {
             return Err(super::core_proxy::repository_discovery_deferred(
                 &route.project_path,
                 tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
             ));
         }
-        Err(_) => {}
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates

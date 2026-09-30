@@ -42,12 +42,6 @@ pub enum GitRepositoryError {
     UnreadableRepository { path: String, detail: String },
     #[error("Git HEAD is unreadable: {detail}")]
     UnreadableHead { detail: String },
-    /// [`try_repository_topology`] found another thread walking this path.
-    ///
-    /// Only callers that must not wait on that blocking filesystem walk see
-    /// this; they answer it under their own deadline.
-    #[error("repository discovery blocked on {path}")]
-    DiscoveryBlocked { path: String },
     #[error("Git repository {operation} failed: {detail}")]
     Operation {
         operation: &'static str,
@@ -55,6 +49,25 @@ pub enum GitRepositoryError {
     },
     #[error(transparent)]
     Domain(#[from] tracedecay_domain::research::DomainError),
+}
+
+/// [`try_repository_topology`] found another thread walking this path.
+///
+/// Only callers that must not wait on that blocking filesystem walk see
+/// this; they answer it under their own deadline.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("repository discovery blocked on {path}")]
+pub struct DiscoveryBlocked {
+    pub path: String,
+}
+
+/// A failed [`try_repository_topology`] probe.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum GitTopologyProbeError {
+    #[error(transparent)]
+    Blocked(#[from] DiscoveryBlocked),
+    #[error(transparent)]
+    Repository(#[from] GitRepositoryError),
 }
 
 /// One resolved reference and its direct object target, if it has one.
@@ -236,60 +249,55 @@ impl HeadFileStamp {
 pub fn repository_topology(
     path: &Path,
 ) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
-    resolve_repository_topology(path, InFlightWalk::Join)
+    let slot = checkout_topology_slot(path);
+    loop {
+        match checkout_resolution(&slot) {
+            CheckoutResolution::Ready(topology) => return Ok(topology),
+            CheckoutResolution::Owner(walk) => return walk_checkout_topology(path, &slot, walk),
+            CheckoutResolution::InFlight(walk) => {
+                #[cfg(any(test, feature = "test-helpers"))]
+                observe_topology_wait(path);
+                if let Some(result) = walk.wait() {
+                    return result;
+                }
+            }
+        }
+    }
 }
 
 /// [`repository_topology`] for callers that must not wait on another
 /// thread's walk, because it is blocking filesystem IO with no deadline. A
-/// walk already in flight for `path` is
-/// [`GitRepositoryError::DiscoveryBlocked`].
+/// walk already in flight for `path` is [`DiscoveryBlocked`].
 pub fn try_repository_topology(
     path: &Path,
-) -> Result<Arc<GitRepositoryTopologyV1>, GitRepositoryError> {
-    resolve_repository_topology(path, InFlightWalk::Refuse)
-}
-
-#[derive(Clone, Copy)]
-enum InFlightWalk {
-    Join,
-    Refuse,
-}
-
-fn resolve_repository_topology(path: &Path, in_flight: InFlightWalk) -> TopologyResult {
+) -> Result<Arc<GitRepositoryTopologyV1>, GitTopologyProbeError> {
     let slot = checkout_topology_slot(path);
-    loop {
-        if let Some(topology) = live_ready_topology(&slot) {
-            return Ok(topology);
+    match checkout_resolution(&slot) {
+        CheckoutResolution::Ready(topology) => Ok(topology),
+        CheckoutResolution::Owner(walk) => Ok(walk_checkout_topology(path, &slot, walk)?),
+        CheckoutResolution::InFlight(_) => Err(DiscoveryBlocked {
+            path: path.display().to_string(),
         }
-        let walk = match claim_checkout_resolution(&slot) {
-            CheckoutResolution::Owner(walk) => walk,
-            CheckoutResolution::InFlight(walk) => match in_flight {
-                InFlightWalk::Refuse => {
-                    return Err(GitRepositoryError::DiscoveryBlocked {
-                        path: path.display().to_string(),
-                    });
-                }
-                InFlightWalk::Join => {
-                    #[cfg(any(test, feature = "test-helpers"))]
-                    observe_topology_wait(path);
-                    match walk.wait() {
-                        Some(result) => return result,
-                        None => continue,
-                    }
-                }
-            },
-        };
-        let guard = CheckoutResolutionGuard { slot: &slot, walk };
-        #[cfg(any(test, feature = "test-helpers"))]
-        observe_topology_resolution(path);
-        let resolved = hotpath::measure_block!(
-            "runtime_core.git.topology.resolve",
-            GitRepositoryAuthority::discover_uncached(path)
-        )
-        .map(|authority| Arc::new(authority.into_topology()));
-        guard.publish(path, resolved.clone());
-        return resolved;
+        .into()),
     }
+}
+
+/// Run the walk this caller claimed and hand its answer to every joiner.
+fn walk_checkout_topology(
+    path: &Path,
+    slot: &CheckoutTopologySlot,
+    walk: Arc<TopologyWalk>,
+) -> TopologyResult {
+    let guard = CheckoutResolutionGuard { slot, walk };
+    #[cfg(any(test, feature = "test-helpers"))]
+    observe_topology_resolution(path);
+    let resolved = hotpath::measure_block!(
+        "runtime_core.git.topology.resolve",
+        GitRepositoryAuthority::discover_uncached(path)
+    )
+    .map(|authority| Arc::new(authority.into_topology()));
+    guard.publish(path, resolved.clone());
+    resolved
 }
 
 /// A live retained topology, or `None` when the memo is empty, stale, or
@@ -307,16 +315,20 @@ fn live_ready_topology(slot: &CheckoutTopologySlot) -> Option<Arc<GitRepositoryT
 }
 
 enum CheckoutResolution {
+    Ready(Arc<GitRepositoryTopologyV1>),
     Owner(Arc<TopologyWalk>),
     InFlight(Arc<TopologyWalk>),
 }
 
-/// Claim the single in-flight walk for `slot`, or hand back the one another
-/// thread already owns.
+/// The live retained topology for `slot`, else the single in-flight walk:
+/// claimed by this caller, or the one another thread already owns.
 ///
 /// Joiners wait on that walk, never on this slot mutex: waiting on the
 /// mutex is the queue that stalled every other project open.
-fn claim_checkout_resolution(slot: &CheckoutTopologySlot) -> CheckoutResolution {
+fn checkout_resolution(slot: &CheckoutTopologySlot) -> CheckoutResolution {
+    if let Some(topology) = live_ready_topology(slot) {
+        return CheckoutResolution::Ready(topology);
+    }
     let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
     if let CheckoutTopologyState::Resolving(walk) = &*state {
         return CheckoutResolution::InFlight(Arc::clone(walk));
@@ -534,7 +546,7 @@ fn observe_repository_discovery(path: &Path) {
 /// The walk signals [`Self::entered`] and then waits on `release`. Other
 /// projects are not in this wait. Callers of the blocked root that join the
 /// walk wait for its release; [`try_repository_topology`] callers get
-/// [`GitRepositoryError::DiscoveryBlocked`].
+/// [`DiscoveryBlocked`].
 #[cfg(any(test, feature = "test-helpers"))]
 struct RepositoryDiscoveryBlockGate {
     entered_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -740,6 +752,27 @@ pub fn repository_topology_wait_count_for_test(root: &Path) -> u64 {
     repository_discovery_observations()
         .get(&observed_discovery_root(root))
         .map_or(0, |observation| observation.topology_waits)
+}
+
+/// Wait until `callers` callers under `root` have either joined the parked
+/// walk or already returned, as `returned` counts them.
+///
+/// A caller that returned without joining is the defect a test asserts on,
+/// so both end the wait; a caller that did neither within ten seconds fails.
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn wait_for_topology_callers_for_test(
+    root: &Path,
+    callers: u64,
+    returned: impl Fn() -> u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while repository_topology_wait_count_for_test(root) + returned() < callers {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "callers neither joined the parked discovery walk nor returned"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1517,7 +1550,7 @@ mod tests {
         GitRepositoryError, GitRepositoryTopologyV1, TopologyResult,
         block_repository_discovery_for_test, observe_repository_discovery,
         repository_discovery_count_for_test, repository_topology,
-        repository_topology_wait_count_for_test, reset_repository_discovery_for_test,
+        reset_repository_discovery_for_test, wait_for_topology_callers_for_test,
         wait_until_repository_discovery_blocks,
     };
 
@@ -1557,14 +1590,7 @@ mod tests {
             let path = path.to_path_buf();
             move || repository_topology(&path)
         });
-        let joined_by = std::time::Instant::now() + Duration::from_secs(10);
-        while repository_topology_wait_count_for_test(root) == 0 && !joined.is_finished() {
-            assert!(
-                std::time::Instant::now() < joined_by,
-                "the second caller neither joined the parked walk nor returned"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_for_topology_callers_for_test(root, 1, || u64::from(joined.is_finished())).await;
         block.release();
         let answers = (
             owner.join().expect("owner"),
