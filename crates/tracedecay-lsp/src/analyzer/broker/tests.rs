@@ -176,6 +176,7 @@ mod rustup_proxy {
         NOT_INSTALLED_FOR_TOOLCHAIN_MESSAGE, RUSTUP_AUTO_INSTALL_ENV,
         TOOLCHAIN_NOT_INSTALLED_MESSAGE,
     };
+    use tracedecay_runtime_core::test_executable::link_or_copy_executable;
 
     fn rust_project() -> tempfile::TempDir {
         let project = tempfile::tempdir().expect("project");
@@ -508,9 +509,9 @@ mod rustup_proxy {
         let real_binary = real.path().join("rust-analyzer");
         std::fs::write(&real_binary, "").expect("real analyzer binary");
         let installed = fake_rustup::install(Some(&real_binary));
-        std::fs::copy(
-            installed.path().join("rustup"),
-            rustup.path().join("rustup"),
+        link_or_copy_executable(
+            &installed.path().join("rustup"),
+            &rustup.path().join("rustup"),
         )
         .expect("swap in the fake with the component installed");
 
@@ -554,9 +555,9 @@ mod rustup_proxy {
         let real_binary = real.path().join("rust-analyzer");
         std::fs::write(&real_binary, "").expect("real analyzer binary");
         let installed = fake_rustup::install(Some(&real_binary));
-        std::fs::copy(
-            installed.path().join("rustup"),
-            rustup.path().join("rustup"),
+        link_or_copy_executable(
+            &installed.path().join("rustup"),
+            &rustup.path().join("rustup"),
         )
         .expect("swap in the fake with the component installed");
 

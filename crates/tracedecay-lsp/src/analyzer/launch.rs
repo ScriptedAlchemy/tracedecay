@@ -925,7 +925,8 @@ mod tests {
             std::fs::write(&real_binary, "").unwrap();
             let dir = fake_rustup_dir(Some(&real_binary));
             let copied = dir.path().join("rust-analyzer-copy");
-            std::fs::copy(dir.path().join("rustup"), &copied).unwrap();
+            write_executable_script(&copied, std::fs::read(dir.path().join("rustup")).unwrap())
+                .unwrap();
             assert!(
                 std::fs::symlink_metadata(&copied)
                     .unwrap()

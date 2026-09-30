@@ -6,6 +6,8 @@ use std::path::Path;
 use std::process::Output;
 
 use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
 use super::install_kimi_cli;
@@ -125,11 +127,7 @@ const DROID_NOT_INSTALLED: &str = "  droid: skipped, not installed (host CLI `dr
 /// A host CLI `program` on the isolated `PATH` running the shell `body`.
 #[cfg(unix)]
 fn install_host_cli(cli: &IsolatedCli, program: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = cli.bin_dir.join(program);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable_script(&cli.bin_dir.join(program), format!("#!/bin/sh\n{body}\n")).unwrap();
 }
 
 /// Kiro's CLI while signed out, as #2374 found it: it refuses every command
