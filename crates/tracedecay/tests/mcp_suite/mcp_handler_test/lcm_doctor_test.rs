@@ -29,6 +29,11 @@ fn empty_project_doctor_report() -> Value {
                 "backlog": 0,
                 "blocker": "worker_missing",
                 "retry_class": null
+            },
+            "convergence": {
+                "state": "unavailable",
+                "epoch": 0,
+                "converged_at_unix_micros": null
             }
         }
     })
