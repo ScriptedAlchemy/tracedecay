@@ -639,6 +639,8 @@ impl CodeIndexSchedulerRegistryV1 {
         ));
         let worker_residency = Arc::clone(&residency);
         let worker_resident_owners = Arc::clone(&self.resident_owners);
+        let mut worker_owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
         // activation + swap inline), and an unboxed `let` materializes the
@@ -683,10 +685,10 @@ impl CodeIndexSchedulerRegistryV1 {
             // reproduces on every pass over the same bytes. Without this the
             // loop re-dispatched the identical unit on every wake forever.
             let mut panic_guard = ReconcilePanicGuardV1::new();
-            // Bounded retry state for a reconcile refused because shared
-            // process capacity was momentarily held by a sibling worktree or
-            // artifact build. Releasing that capacity emits no wake, so this
-            // worker must schedule its own.
+            // Bounded retry state for a reconcile refused because a graph
+            // operation budget was momentarily held by a sibling worktree.
+            // Releasing that budget emits no wake, so this worker schedules
+            // its own. Memory refusals wait for the headroom wake instead.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
             // Set while a thread waits for this scope's store lock to be
             // released; that release is the only retry a refused pass needs.
@@ -721,6 +723,23 @@ impl CodeIndexSchedulerRegistryV1 {
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
             loop {
+                // Memory given back while the last pass was being refused
+                // reached the watcher before that refusal was visible.
+                let headroom_moved = worker_owner_headroom.has_changed().unwrap_or(false)
+                    || worker_admission_headroom.has_changed().unwrap_or(false);
+                if headroom_moved
+                    && worktree_waits_for_memory(
+                        &worker_text_generation,
+                        &worker_convergence_park,
+                        &worker_residency,
+                    )
+                {
+                    Self::note_wake(
+                        &worker_pending_wake,
+                        &worker_wake,
+                        CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                    );
+                }
                 let notified = worker_wake.notified();
                 tokio::pin!(notified);
                 // Parked only while registered with no banked permit: a
@@ -733,6 +752,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                worker_owner_headroom.mark_unchanged();
+                worker_admission_headroom.mark_unchanged();
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
@@ -1197,13 +1218,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                let memory_pass = matches!(
-                    trigger,
-                    CodeIndexCadenceTriggerV1::MemoryHeadroom
-                        | CodeIndexCadenceTriggerV1::MemoryRetry
-                );
+                let memory_pass = trigger == CodeIndexCadenceTriggerV1::MemoryHeadroom;
                 if memory_pass {
-                    worker_memory_retry.retrying();
+                    worker_memory_retry.reset();
                 }
                 // Memory given back is the retry for a graph refused at the
                 // watermark: its generation activates again on this pass.
@@ -2232,8 +2249,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                                     true,
                                                 );
                                             }
-                                            worker_memory_retry
-                                                .schedule(&worker_pending_wake, &worker_wake);
+                                            worker_memory_retry.wait();
                                         }
                                         tracing::warn!(
                                             event = "code_index_graph_prepare_decode_refused",
@@ -2382,7 +2398,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
                                     true,
                                 );
-                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                                worker_memory_retry.wait();
                             }
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
@@ -2638,7 +2654,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 *latest = None;
                                 *replay_binding = None;
                             }
-                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                            worker_memory_retry.wait();
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
                             if let Ok((_, latest, replay_binding)) = &mut result {
@@ -3057,13 +3073,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                     &worker_wake,
                                     &worker_convergence_park,
                                 );
+                            } else if refused_for_memory {
+                                // The refusal registered with the resident-memory
+                                // authority; the headroom wake is its retry.
+                                capacity_retry.record_progress();
                             } else if transient_capacity {
-                                // Resident memory was held when this pass
-                                // asked for it, and RSS can fall with no owner
-                                // releasing anything, so this worker schedules
-                                // its own bounded retry. Permanent refusals
-                                // deliberately never reach here: retrying those
-                                // forever is the failure this loop already had.
+                                // A graph operation budget another holder
+                                // releases without waking this worktree gets a
+                                // bounded retry. Permanent refusals never reach
+                                // here: retrying those forever is the failure
+                                // this loop already had.
                                 if !Self::arm_capacity_retry(&mut capacity_retry, &worker_wake) {
                                     tracing::warn!(
                                         event = "code_index_reconcile_capacity_retry_exhausted",
@@ -3263,7 +3282,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                         PublishedTextProjectionOutcomeV1::WaitingForMemory => {
-                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                            worker_memory_retry.wait();
                         }
                     }
                     // The continuation is already in the slot. Dropping here
@@ -3297,53 +3316,49 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
-        // A text-artifact build, a native graph or a refresh refused for
-        // memory has no retry that outlasts its bounded backoff; memory given
-        // back anywhere in the process is its retry. Only a missing or
-        // unfinished text owner, a graph parked on resident memory or a
-        // refresh refused for it wakes: a pass on a finished worktree would
-        // re-seat the decode a release just gave back. The watcher holds no
-        // strong reference, so it ends with the worktree.
-        let mut headroom = self.resident_owners.subscribe_headroom();
+        // Memory given back anywhere in the process is the retry for work
+        // refused for it: an owner released, or the resident-memory authority
+        // finding a refused request would now fit. It wakes the worker even
+        // over an arrival a refused pass restored without a permit. The
+        // watcher holds no strong reference, so it ends with the worktree.
+        let mut owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
         let headroom_park = Arc::downgrade(&convergence_park);
         let headroom_residency = Arc::downgrade(&residency);
         tokio::spawn(async move {
-            while headroom.changed().await.is_ok() {
-                let (Some(pending_wake), Some(wake), Some(text), Some(park), Some(residency)) = (
+            loop {
+                let changed = tokio::select! {
+                    changed = owner_headroom.changed() => changed,
+                    changed = admission_headroom.changed() => changed,
+                };
+                let (
+                    Ok(()),
+                    Some(pending_wake),
+                    Some(wake),
+                    Some(text),
+                    Some(park),
+                    Some(residency),
+                ) = (
+                    changed,
                     headroom_pending_wake.upgrade(),
                     headroom_wake.upgrade(),
                     headroom_text.upgrade(),
                     headroom_park.upgrade(),
                     headroom_residency.upgrade(),
-                ) else {
+                )
+                else {
                     return;
                 };
-                let text_unfinished = text
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
-                let graph_refused_for_memory = park
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .is_some_and(|parked| {
-                        parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
-                    });
-                if !text_unfinished
-                    && !graph_refused_for_memory
-                    && !residency.refresh_waits_for_memory()
-                {
-                    continue;
+                if worktree_waits_for_memory(&text, &park, &residency) {
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                    );
                 }
-                Self::note_wake_if_idle(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::MemoryHeadroom,
-                );
             }
         });
         entry.insert(MountedCodeIndexWorktreeV1 {
@@ -3391,6 +3406,30 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
+}
+
+/// Whether memory given back can advance this worktree: its text owner is
+/// missing or unfinished, its graph is parked on resident memory, or its
+/// last refresh was refused for memory. A pass on a finished worktree would
+/// only re-seat the decode a release just gave back.
+fn worktree_waits_for_memory(
+    text: &RwLock<Option<LatestCodeTextGenerationV1>>,
+    park: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+    residency: &super::super::residency::WorktreeResidencyV1,
+) -> bool {
+    let text_unfinished = text
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
+    let graph_refused_for_memory = park
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|parked| {
+            parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+        });
+    text_unfinished || graph_refused_for_memory || residency.refresh_waits_for_memory()
 }
 
 /// Sole exact/lexical-ready bit for the published graph seat gate and the

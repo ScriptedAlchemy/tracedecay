@@ -30,6 +30,7 @@ use super::super::{
 };
 use super::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::{RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentOwnersV1};
 
 /// Wake rounds driven from outside the worker. Each stands for the ordinary
 /// wake traffic a live daemon produces (cadence ticks, queries, sibling
@@ -58,6 +59,7 @@ struct Fixture {
     _root: TempDir,
     project: std::path::PathBuf,
     registry: CodeIndexSchedulerRegistryV1,
+    owners: Arc<ResidentOwnersV1>,
 }
 
 impl Fixture {
@@ -77,7 +79,9 @@ impl Fixture {
         run_git_in(&project, &["commit", "-qm", "fixture"]);
         prepare(&project);
 
-        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+        let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&owners));
         registry
             .mount_worktree(
                 tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
@@ -91,6 +95,7 @@ impl Fixture {
             _root: root,
             project,
             registry,
+            owners,
         };
         // Mount itself can drive a pass. Let the worker go quiet before a fault
         // is installed, so every pass a test counts is one the test caused.
@@ -104,7 +109,8 @@ impl Fixture {
     /// way a restarted (or upgraded) daemon does. The caller has already shut
     /// the previous registry down.
     async fn remount(previous: Self, project_id: &str) -> Self {
-        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&previous.owners));
         registry
             .mount_worktree(
                 tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
@@ -117,6 +123,7 @@ impl Fixture {
             _root: previous._root,
             project: previous.project,
             registry,
+            owners: previous.owners,
         }
     }
 
@@ -595,6 +602,34 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
     assert!(
         settled >= 2,
         "the bound must still allow at least one retry; saw {settled}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+/// A reconcile refused for resident memory repeats no pass while that memory
+/// stays held, and runs again the moment memory is given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_memory_refusal_waits_for_headroom_instead_of_self_retrying() {
+    let fixture = Fixture::mount("project.reconcile-memory-refusal").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::ResidentMemory, 1)
+        .await;
+
+    fixture.wake_without_new_input().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "no pass repeats a memory refusal before memory is given back"
+    );
+
+    fixture.owners.note_headroom();
+    let attempts = wait_for_attempts(&fault, 2).await;
+    assert!(
+        attempts >= 2,
+        "memory given back is the refused reconcile's retry; saw {attempts} pass(es)"
     );
 
     fixture.registry.shutdown().await;

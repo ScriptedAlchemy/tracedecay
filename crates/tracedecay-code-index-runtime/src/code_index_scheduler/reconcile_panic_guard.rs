@@ -364,10 +364,13 @@ pub enum ReconcileFaultKindV1 {
     /// Unwinds inside the blocking reconcile task, exactly as a malformed
     /// source file did through `generate_node_id`.
     Panic,
+    /// Refused because a sibling worktree held a graph operation budget. It
+    /// clears once that holder finishes, which wakes nothing here.
+    TransientCapacity,
     /// Refused before any indexing work because a sibling worktree or artifact
     /// build was holding the shared resident-memory budget. The request fits
-    /// the limit, so releasing that budget makes it admissible.
-    TransientCapacity,
+    /// the limit, so memory given back makes it admissible.
+    ResidentMemory,
     /// Refused because the request is larger than the whole process limit. It
     /// is shaped like a capacity refusal and is not one: no release by any
     /// other holder can ever admit it.
@@ -442,9 +445,15 @@ impl ReconcileFaultInjectionV1 {
             ReconcileFaultKindV1::Panic => {
                 panic!("injected reconcile panic (pass {})", seen + 1)
             }
+            ReconcileFaultKindV1::TransientCapacity => Err(super::CodeIndexSchedulerErrorV1::GraphProjection(
+                crate::code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
+                    budget: tracedecay_graph_db::GraphBudgetKind::Capacity.as_str().to_owned(),
+                    limit: 1_000,
+                },
+            )),
             // Exactly the shape `ProcessResidentMemoryV1::reserve` returns when
             // the process budget is already spoken for by another holder.
-            ReconcileFaultKindV1::TransientCapacity => {
+            ReconcileFaultKindV1::ResidentMemory => {
                 Err(super::CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(
                     tracedecay_runtime_core::resident_memory::ResidentMemoryAdmissionFailureV1::ReservationCeiling {
                         used_bytes: 900,
