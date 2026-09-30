@@ -137,7 +137,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     "SELECT knowledge_at
                          FROM session_occurrences
                          WHERE session_id = ?1
-                           AND generation = ?2
+                           AND +generation <= ?2
                            AND occurrence_id = ?3
                          LIMIT 2",
                     params![request.session_id().as_str(), generation, after.as_str()],
@@ -187,7 +187,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                         role, knowledge_at, valid_time_json, evidence_json
                  FROM session_occurrences AS occurrence
                  WHERE occurrence.session_id = ?1
-                   AND occurrence.generation = ?2
+                   AND +occurrence.generation <= ?2
                    AND (
                        occurrence.knowledge_at > ?3
                        OR (
@@ -214,7 +214,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                                SELECT 1
                                FROM session_derived_evidence_members AS member
                                WHERE member.session_id = occurrence.session_id
-                                 AND member.generation = occurrence.generation
+                                 AND +member.generation <= ?2
                                  AND member.occurrence_id = occurrence.occurrence_id
                                  AND member.evidence_kind = CASE ?7
                                      WHEN 'evidence_span' THEN 'span'
@@ -423,7 +423,7 @@ async fn assertions_for_anchors(
                     knowledge_at, valid_time_json, evidence_json
              FROM session_assertions AS assertion
              WHERE assertion.session_id = ?1
-               AND assertion.generation = ?2
+               AND +assertion.generation <= ?2
                AND (
                    assertion.subject_anchor_id IN (SELECT value FROM json_each(?3))
                    OR assertion.object_anchor_id IN (SELECT value FROM json_each(?3))
@@ -446,7 +446,7 @@ async fn assertions_for_anchors(
                        SELECT 1
                        FROM session_assertion_supersession AS supersession
                        WHERE supersession.session_id = assertion.session_id
-                         AND supersession.generation = assertion.generation
+                         AND +supersession.generation <= ?2
                          AND supersession.superseded_assertion_id =
                              assertion.assertion_id
                    )

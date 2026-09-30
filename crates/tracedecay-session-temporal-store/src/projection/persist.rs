@@ -23,7 +23,6 @@ use super::super::query::{
     read_generation, read_observation, storage, storage_message,
 };
 use super::super::rebuild::checkpoint_relation_rebuild_control;
-use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
 
@@ -38,44 +37,6 @@ fn observation_envelope(
 ) -> SessionStoreResult<CanonicalObservationEnvelopeV1> {
     observation_envelope_from_payload(observation.payload())
         .map_err(|error| storage(PERSIST_OPERATION, error))
-}
-
-#[hotpath::measure(future = true, label = "session_temporal.projection.record_count")]
-pub async fn session_temporal_projection_record_count(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    session_id: &SessionId,
-    generation: tracedecay_domain::SessionProjectionGenerationV1,
-    copy_count: u64,
-) -> SessionStoreResult<u64> {
-    let mut rows = conn
-        .query(
-            "SELECT
-                (SELECT COUNT(*) FROM session_occurrences
-                 WHERE session_id = ?1 AND generation = ?2)
-              + (SELECT COUNT(*) FROM session_assertions
-                 WHERE session_id = ?1 AND generation = ?2)
-              + ?3",
-            params![
-                session_id.as_str(),
-                generation_i64(generation, MATERIALIZE_REFRESH)?,
-                i64::try_from(copy_count).map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-    let count = rows
-        .next()
-        .await
-        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
-        .ok_or_else(|| {
-            storage_message(
-                MATERIALIZE_REFRESH,
-                "projection record count returned no row",
-            )
-        })?
-        .get::<i64>(0)
-        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-    u64::try_from(count).map_err(|error| storage(MATERIALIZE_REFRESH, error))
 }
 
 #[hotpath::measure(future = true, label = "session_temporal.persist.projection_batch")]
@@ -131,16 +92,17 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     let terminal = batch.source_through() == batch.watermarks().source_frontier()
         && batch.projection_through() == batch.watermarks().projection_frontier();
     if terminal {
-        rebuild_assertion_derivatives(conn, batch, control).await?;
-        super::derived::rebuild_derived_evidence(conn, batch, control).await?;
+        extend_assertion_derivatives(conn, batch, control).await?;
+        super::derived::extend_derived_evidence(conn, batch, control).await?;
     }
 
     let committed_at = now_micros(PERSIST_OPERATION)?;
     // Intermediate receipts are exact batch journals through `batch_digest`.
-    // Only the terminal receipt claims whole-generation coverage; activation
-    // requires that terminal frontier and re-hashes it before the CAS.
+    // Only the terminal receipt claims whole-generation coverage: the base
+    // generation's coverage plus the rows this candidate added and minus the
+    // versions it superseded. Activation recomputes that delta before the CAS.
     let coverage = if terminal {
-        projection_coverage(conn, batch, Some(control)).await?
+        candidate_projection_coverage(conn, batch.session_id(), batch.generation(), control).await?
     } else {
         empty_projection_coverage()
     };
@@ -170,6 +132,7 @@ pub(crate) enum ProjectionProgressBaseline {
 }
 
 struct CanonicalOccurrenceProjection {
+    source_sequence: u64,
     observation: DurableObservationV1,
     envelope: CanonicalObservationEnvelopeV1,
     outputs: Vec<SessionMessageProjection>,
@@ -237,6 +200,7 @@ async fn canonical_occurrence_projection(
         ));
     }
     Ok(CanonicalOccurrenceProjection {
+        source_sequence,
         observation,
         envelope,
         outputs,
@@ -297,15 +261,7 @@ pub(super) async fn persist_occurrences(
             work.output_lookups = work.output_lookups.checked_add(1).ok_or_else(|| {
                 storage_message(PERSIST_OPERATION, "projection output lookup count overflow")
             })?;
-            persist_occurrence(
-                conn,
-                batch,
-                occurrence,
-                &canonical.observation,
-                &canonical.envelope,
-                output,
-            )
-            .await?;
+            persist_occurrence(conn, batch, occurrence, &canonical, output).await?;
         }
     }
     Ok(work)
@@ -315,10 +271,10 @@ async fn persist_occurrence(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     occurrence: &MessageOccurrenceRecordV1,
-    observation: &DurableObservationV1,
-    envelope: &CanonicalObservationEnvelopeV1,
+    canonical: &CanonicalOccurrenceProjection,
     output: &SessionMessageProjection,
 ) -> SessionStoreResult<bool> {
+    let envelope = &canonical.envelope;
     if output.session().session_id != occurrence.session_id.as_str() {
         return Err(storage_message(
             PERSIST_OPERATION,
@@ -330,7 +286,8 @@ async fn persist_occurrence(
             ),
         ));
     }
-    let expected = canonical_occurrence(conn, observation, envelope, output).await?;
+    let (expected, copied_from_anchor_ids) =
+        canonical_occurrence(conn, &canonical.observation, envelope, output).await?;
     if occurrence != &expected {
         return Err(storage_message(
             PERSIST_OPERATION,
@@ -401,28 +358,36 @@ async fn persist_occurrence(
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let evidence = serde_json::to_string(&occurrence.evidence)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let copied_from_anchor_ids = serde_json::to_string(&copied_from_anchor_ids)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let sanitized_content = output.message().text.as_str();
     let sanitized_content_digest = projected_content_hash(sanitized_content);
     let sanitized_content_bytes = i64::try_from(sanitized_content.len())
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let relations = envelope.relations();
+    // Occurrences are append-only and keyed per session, so a row the base or
+    // an earlier batch already holds is ignored here and must match exactly.
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO session_occurrences (
-                session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                thread_id, thread_grouping_json, turn_id, turn_grouping_json,
-                message_id, agent_id, role, knowledge_at, valid_time_json,
-                evidence_json, sanitized_content_digest, sanitized_content_bytes,
-                index_text
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
-             )",
+            session_id, generation, occurrence_id, source_observation_id, source_sequence,
+            source_provider, projection_output_ordinal, retrieval_anchor_id,
+            thread_id, thread_grouping_json, turn_id, turn_grouping_json,
+            message_id, agent_id, parent_message_id, parent_agent_id, parent_session_id,
+            copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
+            evidence_json, sanitized_content_digest, sanitized_content_bytes,
+            index_text
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+         )",
             params![
                 batch.session_id().as_str(),
                 generation,
                 occurrence.occurrence_id.as_str(),
                 occurrence.source_observation_id.as_str(),
+                i64::try_from(canonical.source_sequence)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
                 output.message().provider.as_str(),
                 i64::from(occurrence.projection_output_ordinal.value()),
                 occurrence.retrieval_anchor_id.as_str(),
@@ -444,6 +409,14 @@ async fn persist_occurrence(
                     .agent_id
                     .as_ref()
                     .map(tracedecay_domain::AgentInstanceId::as_str),
+                relations
+                    .parent_message_id()
+                    .map(tracedecay_domain::ObservationId::as_str),
+                relations
+                    .parent_agent_id()
+                    .map(tracedecay_domain::ObservationId::as_str),
+                relations.parent_session_id().map(SessionId::as_str),
+                copied_from_anchor_ids,
                 role,
                 occurrence.knowledge_at.0,
                 valid_time,
@@ -465,6 +438,7 @@ async fn persist_occurrence(
             output.message().text.as_str(),
         )
         .await?;
+        return Ok(false);
     }
     if let Some(turn_id) = &occurrence.turn_id {
         conn.execute(
@@ -482,16 +456,20 @@ async fn persist_occurrence(
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     }
-    Ok(inserted)
+    Ok(true)
 }
 
-/// Derives the canonical occurrence for one already-resolved projection output.
+/// Also returns the anchors the occurrence's anchor record copied from, the
+/// lineage its relations derive from.
 pub(super) async fn canonical_occurrence(
     conn: &impl crate::handle::SessionTemporalQuery,
     observation: &tracedecay_domain::DurableObservationV1,
     envelope: &CanonicalObservationEnvelopeV1,
     output: &SessionMessageProjection,
-) -> SessionStoreResult<MessageOccurrenceRecordV1> {
+) -> SessionStoreResult<(
+    MessageOccurrenceRecordV1,
+    Vec<tracedecay_domain::RetrievalAnchorId>,
+)> {
     let output_ordinal = output.output_ordinal();
     let expected_anchor =
         derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
@@ -578,7 +556,13 @@ pub(super) async fn canonical_occurrence(
         },
     }))
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    Ok(record)
+    let copied_from = anchor
+        .source_anchors()
+        .iter()
+        .filter(|source| source.relation() == AnchorProvenanceRelation::CopiedFrom)
+        .map(|source| source.anchor_id().clone())
+        .collect();
+    Ok((record, copied_from))
 }
 
 #[inline(always)]
@@ -597,6 +581,9 @@ fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
     let _ = work;
 }
 
+/// Versions a thread whose earliest grouping or creation time moved. The
+/// candidate reads its own version first, then its base's; an unchanged
+/// thread writes nothing.
 pub(super) async fn ensure_thread(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &str,
@@ -608,8 +595,19 @@ pub(super) async fn ensure_thread(
     conn.execute(
         "INSERT INTO session_threads (
                 session_id, generation, thread_id, grouping_provenance, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(session_id, generation, thread_id) DO UPDATE SET
+             )
+             SELECT ?1, ?2, ?3,
+                    MIN(?4, COALESCE(prior.grouping_provenance, ?4)),
+                    MIN(?5, COALESCE(prior.created_at, ?5))
+             FROM (SELECT 1) LEFT JOIN (
+                 SELECT grouping_provenance, created_at FROM session_threads
+                 WHERE session_id = ?1 AND thread_id = ?3 AND +generation <= ?2
+                 ORDER BY generation DESC LIMIT 1
+             ) AS prior
+             WHERE prior.created_at IS NULL
+                OR ?4 < prior.grouping_provenance
+                OR ?5 < prior.created_at
+             ON CONFLICT(session_id, thread_id, generation) DO UPDATE SET
                 grouping_provenance = MIN(
                     session_threads.grouping_provenance,
                     excluded.grouping_provenance
@@ -634,8 +632,21 @@ pub(super) async fn ensure_turn(
     conn.execute(
         "INSERT INTO session_turns (
                 session_id, generation, turn_id, ordinal, grouping_provenance, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(session_id, generation, turn_id) DO UPDATE SET
+             )
+             SELECT ?1, ?2, ?3,
+                    MIN(?4, COALESCE(prior.ordinal, ?4)),
+                    MIN(?5, COALESCE(prior.grouping_provenance, ?5)),
+                    MIN(?6, COALESCE(prior.created_at, ?6))
+             FROM (SELECT 1) LEFT JOIN (
+                 SELECT ordinal, grouping_provenance, created_at FROM session_turns
+                 WHERE session_id = ?1 AND turn_id = ?3 AND +generation <= ?2
+                 ORDER BY generation DESC LIMIT 1
+             ) AS prior
+             WHERE prior.created_at IS NULL
+                OR ?4 < prior.ordinal
+                OR ?5 < prior.grouping_provenance
+                OR ?6 < prior.created_at
+             ON CONFLICT(session_id, turn_id, generation) DO UPDATE SET
                 ordinal = MIN(session_turns.ordinal, excluded.ordinal),
                 grouping_provenance = MIN(
                     session_turns.grouping_provenance,
@@ -663,8 +674,19 @@ pub(super) async fn ensure_agent(
     conn.execute(
         "INSERT INTO session_agents (
                 session_id, generation, agent_id, agent_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(session_id, generation, agent_id) DO UPDATE SET
+             )
+             SELECT ?1, ?2, ?3,
+                    MIN(?4, COALESCE(prior.agent_json, ?4)),
+                    MIN(?5, COALESCE(prior.created_at, ?5))
+             FROM (SELECT 1) LEFT JOIN (
+                 SELECT agent_json, created_at FROM session_agents
+                 WHERE session_id = ?1 AND agent_id = ?3 AND +generation <= ?2
+                 ORDER BY generation DESC LIMIT 1
+             ) AS prior
+             WHERE prior.created_at IS NULL
+                OR ?4 < prior.agent_json
+                OR ?5 < prior.created_at
+             ON CONFLICT(session_id, agent_id, generation) DO UPDATE SET
                 agent_json = MIN(session_agents.agent_json, excluded.agent_json),
                 created_at = MIN(session_agents.created_at, excluded.created_at)",
         params![
@@ -711,7 +733,7 @@ pub(super) async fn require_exact_occurrence(
                 'index_text', index_text
              )
              FROM session_occurrences
-             WHERE session_id = ?1 AND generation = ?2 AND occurrence_id = ?3",
+             WHERE session_id = ?1 AND occurrence_id = ?3 AND +generation <= ?2",
             params![
                 batch.session_id().as_str(),
                 generation,
@@ -727,7 +749,7 @@ pub(super) async fn require_exact_occurrence(
         .ok_or_else(|| {
             storage_message(
                 PERSIST_OPERATION,
-                "occurrence insert was ignored without an existing row",
+                "occurrence insert was ignored without a row this generation reads",
             )
         })?
         .get(0)
@@ -780,7 +802,7 @@ pub(super) async fn validate_copy(
         .query(
             "SELECT occurrence_id, knowledge_at, valid_time_json
              FROM session_occurrences
-             WHERE session_id = ?1 AND generation = ?2
+             WHERE session_id = ?1 AND +generation <= ?2
                AND occurrence_id IN (?3, ?4)",
             params![
                 batch.session_id().as_str(),
@@ -854,7 +876,7 @@ pub(super) async fn occurrence_observation_and_anchor(
         .query(
             "SELECT source_observation_id, retrieval_anchor_id
              FROM session_occurrences
-             WHERE session_id = ?1 AND generation = ?2 AND occurrence_id = ?3",
+             WHERE session_id = ?1 AND occurrence_id = ?3 AND +generation <= ?2",
             params![
                 batch.session_id().as_str(),
                 generation_i64(batch.generation(), PERSIST_OPERATION)?,
@@ -917,7 +939,7 @@ pub(super) async fn validate_copy_proof(
                     "SELECT occurrence_id
                      FROM session_occurrences
                      WHERE session_id = ?1
-                       AND generation = ?2
+                       AND +generation <= ?2
                        AND retrieval_anchor_id = ?3
                        AND occurrence_id != ?4
                      ORDER BY knowledge_at DESC, occurrence_id DESC
@@ -1037,7 +1059,7 @@ pub(super) async fn persist_assertion(
                     'evidence_json', json(evidence_json)
                  )
                  FROM session_assertions
-                 WHERE session_id = ?1 AND generation = ?2 AND assertion_id = ?3",
+                 WHERE session_id = ?1 AND assertion_id = ?3 AND +generation <= ?2",
                 params![
                     batch.session_id().as_str(),
                     generation,
@@ -1053,7 +1075,7 @@ pub(super) async fn persist_assertion(
             .ok_or_else(|| {
                 storage_message(
                     PERSIST_OPERATION,
-                    "assertion insert was ignored without an existing row",
+                    "assertion insert was ignored without a row this generation reads",
                 )
             })?
             .get(0)
@@ -1084,7 +1106,7 @@ pub(super) async fn validate_assertion(
              FROM session_occurrences AS occurrence
              JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+             WHERE occurrence.session_id = ?1 AND +occurrence.generation <= ?2
                AND occurrence.retrieval_anchor_id = ?3",
             params![
                 batch.session_id().as_str(),
@@ -1128,7 +1150,7 @@ pub(super) async fn validate_assertion(
              FROM session_occurrences AS occurrence
              JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+             WHERE occurrence.session_id = ?1 AND +occurrence.generation <= ?2
                AND occurrence.retrieval_anchor_id = ?3",
             params![
                 batch.session_id().as_str(),
@@ -1241,6 +1263,38 @@ pub(super) const fn assertion_kind_for_relation(
     }
 }
 
+/// Inserts a new current-entity version for every winner that differs from
+/// the version the candidate reads. `?1` session, `?2` generation, and the
+/// `ranked` CTE yields `(entity_id, occurrence_id | assertion_id, count)`.
+const CURRENT_ENTITY_VERSION_INSERT: &str = "
+     INSERT INTO session_current_entities (
+        session_id, generation, entity_kind, entity_id,
+        current_assertion_id, current_occurrence_id, coverage_json
+     )
+     SELECT ?1, ?2, winner.entity_kind, winner.entity_id,
+            winner.current_assertion_id, winner.current_occurrence_id, winner.coverage_json
+     FROM winners AS winner
+     WHERE NOT EXISTS (
+         SELECT 1 FROM session_current_entities AS visible
+         WHERE visible.session_id = ?1
+           AND visible.entity_kind = winner.entity_kind
+           AND visible.entity_id = winner.entity_id
+           AND visible.generation = (
+               SELECT MAX(version.generation) FROM session_current_entities AS version
+               WHERE version.session_id = ?1
+                 AND version.entity_kind = winner.entity_kind
+                 AND version.entity_id = winner.entity_id
+                 AND +version.generation <= ?2
+           )
+           AND visible.current_assertion_id IS winner.current_assertion_id
+           AND visible.current_occurrence_id IS winner.current_occurrence_id
+           AND visible.coverage_json = winner.coverage_json
+     )
+     ON CONFLICT(session_id, entity_kind, entity_id, generation) DO UPDATE SET
+        current_assertion_id = excluded.current_assertion_id,
+        current_occurrence_id = excluded.current_occurrence_id,
+        coverage_json = excluded.coverage_json";
+
 #[hotpath::measure(
     future = true,
     label = "session_temporal.projection.rebuild_occurrences"
@@ -1261,43 +1315,34 @@ pub(super) async fn rebuild_current_occurrences(
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     conn.execute(
-        "DELETE FROM session_current_entities
-         WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'occurrence_anchor'
-           AND entity_id IN (SELECT value FROM json_each(?3))",
-        params![
-            batch.session_id().as_str(),
-            generation,
-            affected_anchors_json.as_str()
-        ],
-    )
-    .await
-    .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    conn.execute(
-        "WITH ranked AS (
-            SELECT retrieval_anchor_id, occurrence_id,
-                   COUNT(*) OVER (PARTITION BY retrieval_anchor_id) AS occurrence_count,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY retrieval_anchor_id
-                       ORDER BY
-                           CASE json_extract(valid_time_json, '$.kind')
-                               WHEN 'known' THEN 1 ELSE 0
-                           END DESC,
-                           json_extract(valid_time_json, '$.valid_at') DESC,
-                           knowledge_at DESC,
-                           occurrence_id DESC
-                   ) AS precedence
-            FROM session_occurrences
-            WHERE session_id = ?1 AND generation = ?2
-              AND retrieval_anchor_id IN (SELECT value FROM json_each(?3))
-         )
-         INSERT INTO session_current_entities (
-            session_id, generation, entity_kind, entity_id,
-            current_assertion_id, current_occurrence_id, coverage_json
-         )
-         SELECT ?1, ?2, 'occurrence_anchor', retrieval_anchor_id,
-                NULL, occurrence_id,
-                json_object('occurrence_count', occurrence_count)
-         FROM ranked WHERE precedence = 1",
+        &format!(
+            "WITH ranked AS (
+                SELECT retrieval_anchor_id, occurrence_id,
+                       COUNT(*) OVER (PARTITION BY retrieval_anchor_id) AS occurrence_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY retrieval_anchor_id
+                           ORDER BY
+                               CASE json_extract(valid_time_json, '$.kind')
+                                   WHEN 'known' THEN 1 ELSE 0
+                               END DESC,
+                               json_extract(valid_time_json, '$.valid_at') DESC,
+                               knowledge_at DESC,
+                               occurrence_id DESC
+                       ) AS precedence
+                FROM session_occurrences
+                WHERE session_id = ?1 AND +generation <= ?2
+                  AND retrieval_anchor_id IN (SELECT value FROM json_each(?3))
+             ),
+             winners AS (
+                SELECT 'occurrence_anchor' AS entity_kind,
+                       retrieval_anchor_id AS entity_id,
+                       NULL AS current_assertion_id,
+                       occurrence_id AS current_occurrence_id,
+                       json_object('occurrence_count', occurrence_count) AS coverage_json
+                FROM ranked WHERE precedence = 1
+             )
+             {CURRENT_ENTITY_VERSION_INSERT}"
+        ),
         params![
             batch.session_id().as_str(),
             generation,
@@ -1309,32 +1354,39 @@ pub(super) async fn rebuild_current_occurrences(
     Ok(())
 }
 
+/// Supersession closures and assertion-anchor winners depend only on the
+/// session's assertions, which are append-only, so both only grow and only
+/// a candidate that added assertions can change them. Their direct edges
+/// compare two assertions' own fields, so the closure over the visible
+/// assertions contains every edge the base already holds.
 #[hotpath::measure(
     future = true,
     label = "session_temporal.projection.rebuild_assertions"
 )]
-pub(super) async fn rebuild_assertion_derivatives(
+pub(super) async fn extend_assertion_derivatives(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
     checkpoint_relation_rebuild_control(control)?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
-    conn.execute(
-        "DELETE FROM session_assertion_supersession
-         WHERE session_id = ?1 AND generation = ?2",
-        params![batch.session_id().as_str(), generation],
-    )
-    .await
-    .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    checkpoint_relation_rebuild_control(control)?;
-    conn.execute(
-        "DELETE FROM session_current_entities
-         WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'assertion_anchor'",
-        params![batch.session_id().as_str(), generation],
-    )
-    .await
-    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let mut added = conn
+        .query(
+            "SELECT 1 FROM session_assertions
+             WHERE session_id = ?1 AND generation = ?2 LIMIT 1",
+            params![batch.session_id().as_str(), generation],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    if added
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+        .is_none()
+    {
+        return Ok(());
+    }
+    drop(added);
 
     checkpoint_relation_rebuild_control(control)?;
     conn.execute(
@@ -1349,9 +1401,9 @@ pub(super) async fn rebuild_assertion_derivatives(
              FROM session_assertions AS current
              JOIN session_assertions AS prior
                ON prior.session_id = current.session_id
-              AND prior.generation = current.generation
+              AND +prior.generation <= ?2
               AND prior.subject_anchor_id = current.object_anchor_id
-             WHERE current.session_id = ?1 AND current.generation = ?2
+             WHERE current.session_id = ?1 AND +current.generation <= ?2
                AND current.assertion_kind IN (?3, ?4)
                AND prior.assertion_kind IN (?3, ?4)
                AND json_extract(current.valid_time_json, '$.kind') = 'known'
@@ -1385,9 +1437,15 @@ pub(super) async fn rebuild_assertion_derivatives(
                ON direct.superseded_assertion_id =
                   transitive.superseding_assertion_id
          )
-         SELECT ?1, ?2, superseded_assertion_id,
-                superseding_assertion_id, created_at
-         FROM transitive",
+         SELECT ?1, ?2, edge.superseded_assertion_id,
+                edge.superseding_assertion_id, edge.created_at
+         FROM transitive AS edge
+         WHERE NOT EXISTS (
+             SELECT 1 FROM session_assertion_supersession AS settled
+             WHERE settled.session_id = ?1 AND +settled.generation <= ?2
+               AND settled.superseded_assertion_id = edge.superseded_assertion_id
+               AND settled.superseding_assertion_id = edge.superseding_assertion_id
+         )",
         params![
             batch.session_id().as_str(),
             generation,
@@ -1399,60 +1457,64 @@ pub(super) async fn rebuild_assertion_derivatives(
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     checkpoint_relation_rebuild_control(control)?;
     conn.execute(
-        "WITH RECURSIVE chains (
-             root_anchor_id, assertion_id, subject_anchor_id,
-             valid_at, knowledge_at
-         ) AS (
-             SELECT object_anchor_id, assertion_id, subject_anchor_id,
-                    json_extract(valid_time_json, '$.valid_at'), knowledge_at
-             FROM session_assertions
-             WHERE session_id = ?1 AND generation = ?2
-               AND assertion_kind IN (?3, ?4)
-               AND json_extract(valid_time_json, '$.kind') = 'known'
-             UNION
-             SELECT chains.root_anchor_id, successor.assertion_id,
-                    successor.subject_anchor_id,
-                    json_extract(successor.valid_time_json, '$.valid_at'),
-                    successor.knowledge_at
-             FROM chains
-             JOIN session_assertions AS successor
-               ON successor.session_id = ?1
-              AND successor.generation = ?2
-              AND successor.object_anchor_id = chains.subject_anchor_id
-             WHERE successor.assertion_kind IN (?3, ?4)
-               AND json_extract(successor.valid_time_json, '$.kind') = 'known'
-               AND (
-                    chains.valid_at
-                        < json_extract(successor.valid_time_json, '$.valid_at')
-                    OR (
+        &format!(
+            "WITH RECURSIVE chains (
+                 root_anchor_id, assertion_id, subject_anchor_id,
+                 valid_at, knowledge_at
+             ) AS (
+                 SELECT object_anchor_id, assertion_id, subject_anchor_id,
+                        json_extract(valid_time_json, '$.valid_at'), knowledge_at
+                 FROM session_assertions
+                 WHERE session_id = ?1 AND +generation <= ?2
+                   AND assertion_kind IN (?3, ?4)
+                   AND json_extract(valid_time_json, '$.kind') = 'known'
+                 UNION
+                 SELECT chains.root_anchor_id, successor.assertion_id,
+                        successor.subject_anchor_id,
+                        json_extract(successor.valid_time_json, '$.valid_at'),
+                        successor.knowledge_at
+                 FROM chains
+                 JOIN session_assertions AS successor
+                   ON successor.session_id = ?1
+                  AND +successor.generation <= ?2
+                  AND successor.object_anchor_id = chains.subject_anchor_id
+                 WHERE successor.assertion_kind IN (?3, ?4)
+                   AND json_extract(successor.valid_time_json, '$.kind') = 'known'
+                   AND (
                         chains.valid_at
-                            = json_extract(successor.valid_time_json, '$.valid_at')
-                        AND (
-                            chains.knowledge_at < successor.knowledge_at
-                            OR (
-                                chains.knowledge_at = successor.knowledge_at
-                                AND chains.assertion_id < successor.assertion_id
+                            < json_extract(successor.valid_time_json, '$.valid_at')
+                        OR (
+                            chains.valid_at
+                                = json_extract(successor.valid_time_json, '$.valid_at')
+                            AND (
+                                chains.knowledge_at < successor.knowledge_at
+                                OR (
+                                    chains.knowledge_at = successor.knowledge_at
+                                    AND chains.assertion_id < successor.assertion_id
+                                )
                             )
                         )
-                    )
-               )
-         ),
-         ranked AS (
-            SELECT assertion_id, root_anchor_id,
-                   COUNT(*) OVER (PARTITION BY root_anchor_id) AS assertion_count,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY root_anchor_id
-                       ORDER BY valid_at DESC, knowledge_at DESC, assertion_id DESC
-                   ) AS precedence
-            FROM chains
-         )
-         INSERT INTO session_current_entities (
-            session_id, generation, entity_kind, entity_id,
-            current_assertion_id, current_occurrence_id, coverage_json
-         )
-         SELECT ?1, ?2, 'assertion_anchor', root_anchor_id,
-                assertion_id, NULL, json_object('assertion_count', assertion_count)
-         FROM ranked WHERE precedence = 1",
+                   )
+             ),
+             ranked AS (
+                SELECT assertion_id, root_anchor_id,
+                       COUNT(*) OVER (PARTITION BY root_anchor_id) AS assertion_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY root_anchor_id
+                           ORDER BY valid_at DESC, knowledge_at DESC, assertion_id DESC
+                       ) AS precedence
+                FROM chains
+             ),
+             winners AS (
+                SELECT 'assertion_anchor' AS entity_kind,
+                       root_anchor_id AS entity_id,
+                       assertion_id AS current_assertion_id,
+                       NULL AS current_occurrence_id,
+                       json_object('assertion_count', assertion_count) AS coverage_json
+                FROM ranked WHERE precedence = 1
+             )
+             {CURRENT_ENTITY_VERSION_INSERT}"
+        ),
         params![
             batch.session_id().as_str(),
             generation,

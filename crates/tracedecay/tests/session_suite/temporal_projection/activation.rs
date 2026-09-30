@@ -373,10 +373,14 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
     );
 }
 
-#[tokio::test]
-async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
+/// Persists observations `one` and `two` in a fresh profile and projects
+/// candidate generation 2 through the frozen frontier of 2: both occurrences
+/// and their parent copy when `complete`, otherwise only `one`.
+async fn frontier_digest_fixture(
+    tmp: &TempDir,
+    complete: bool,
+) -> (HostAdmissionTestRuntimeV1, std::path::PathBuf, SessionId) {
+    let runtime = profile_runtime(tmp).await;
     let path = runtime
         .database_path(HostAdmissionScope::Profile)
         .unwrap()
@@ -393,84 +397,87 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
     let first = occurrence(&session_id, &first);
     let second = occurrence(&session_id, &second);
     begin_candidate(&store, &session_id, 2, 2).await;
+    let (occurrences, copies) = if complete {
+        let copy = parent_message_copy(&second, &first);
+        (vec![first, second], vec![copy])
+    } else {
+        (vec![first], vec![])
+    };
     store
         .persist_session_temporal_projection_batch(batch(
             &session_id,
             2,
             2,
-            vec![first.clone()],
-            vec![],
+            occurrences,
+            copies,
             vec![],
         ))
         .await
         .unwrap();
-    assert!(
-        store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(2),
-                    snapshot(&session_id, 1, 2),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        rows(
-            &path,
-            "SELECT generation || ':' || state
-             FROM session_temporal_generations
-             WHERE state = 'active'"
-        )
-        .await,
-        vec!["1:active"]
-    );
+    drop(observation_store);
+    (runtime, path, session_id)
+}
 
-    begin_candidate(&store, &session_id, 3, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            3,
-            2,
-            vec![first.clone(), second.clone()],
-            vec![parent_message_copy(&second, &first)],
-            vec![],
-        ))
-        .await
-        .unwrap();
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute(
-        "UPDATE session_occurrences
-         SET index_text = 'tampered'
-         WHERE session_id = ?1 AND generation = 3",
-        rusqlite::params![session_id.as_str()],
-    )
-    .unwrap();
-    assert!(
-        store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(3),
-                    snapshot(&session_id, 1, 2),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
+async fn activate_frontier_digest_candidate(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> Result<(), SessionStoreError> {
+    runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap()
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(session_id, 1, 2),
+                ExecutionControl::default(),
             )
+            .unwrap(),
+        )
+        .await
+        .map(|_| ())
+}
+
+async fn active_generations(path: &std::path::Path) -> Vec<String> {
+    rows(
+        path,
+        "SELECT generation || ':' || state
+         FROM session_temporal_generations
+         WHERE state = 'active'",
+    )
+    .await
+}
+
+// A session holds one open candidate, so the incomplete and the tampered
+// candidate each run in their own profile.
+#[tokio::test]
+async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
+    let incomplete_profile = TempDir::new().unwrap();
+    let (runtime, path, session_id) = frontier_digest_fixture(&incomplete_profile, false).await;
+    assert!(
+        activate_frontier_digest_candidate(&runtime, &session_id)
             .await
             .is_err()
     );
-    assert_eq!(
-        rows(
-            &path,
-            "SELECT generation || ':' || state
-             FROM session_temporal_generations
-             WHERE state = 'active'"
+    assert_eq!(active_generations(&path).await, vec!["1:active"]);
+
+    let tampered_profile = TempDir::new().unwrap();
+    let (runtime, path, session_id) = frontier_digest_fixture(&tampered_profile, true).await;
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE session_occurrences
+             SET index_text = 'tampered'
+             WHERE session_id = ?1 AND generation = 2",
+            rusqlite::params![session_id.as_str()],
         )
-        .await,
-        vec!["1:active"]
+        .unwrap();
+    let error = activate_frontier_digest_candidate(&runtime, &session_id)
+        .await
+        .expect_err("activation must refuse rows that no longer match their receipt");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation activate session temporal generation failed: candidate projection rows do not match the immutable final receipt"
     );
+    assert_eq!(active_generations(&path).await, vec!["1:active"]);
 }

@@ -1,10 +1,6 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::SessionId;
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{IntoParams, params};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
@@ -13,8 +9,7 @@ use tracedecay_store::{
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::query::{PERSIST_OPERATION, storage, storage_message};
-use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
-use super::relations::SessionRelationError;
+use super::refresh::SessionRefreshRecoveryV1;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 use crate::support as hotpath_observe;
 
@@ -27,15 +22,16 @@ mod tests;
 
 use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 
-pub(super) use materialize::canonical_parent_message_resolver;
+pub(super) use materialize::{ParentMessageResolver, canonical_parent_message_resolver};
 pub(crate) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
     ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
-    session_temporal_projection_record_count,
 };
-pub(crate) use receipts::digest_bytes;
+#[cfg(test)]
+use receipts::full_projection_coverage;
 pub use receipts::record_canonical_observation_effect;
 pub(super) use receipts::validate_final_projection_receipt;
+pub(crate) use receipts::{base_source_frontier, digest_bytes};
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
@@ -496,40 +492,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .await
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         hotpath_observe::record_snapshot_admissions(1);
-        let baseline_copy_count =
-            if recovery.restart_state() == SessionRefreshRestartStateV1::BeginProjection {
-                let (scope, relation_store) = self
-                    .session_relation_store()
-                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                match relation_store.logical_copy_count(
-                    &scope,
-                    recovery.session_id(),
-                    recovery.frozen_watermarks().active_generation().value(),
-                    Arc::new(NeverCancelled),
-                ) {
-                    Ok(copies) => copies,
-                    Err(SessionRelationError::NotFound) => {
-                        // No native graph was applied for this generation. Reconstruct
-                        // the copy count from the sealed rows instead of retrying the
-                        // absence as a busy source.
-                        crate::relation_projection::count_canonical_logical_copies(
-                            &snapshot,
-                            recovery.session_id(),
-                            recovery.frozen_watermarks().active_generation(),
-                        )
-                        .await?
-                    }
-                    Err(error) => return Err(storage(MATERIALIZE_REFRESH, error)),
-                }
-            } else {
-                0
-            };
-        materialize_session_temporal_refresh_batch_in_transaction(
-            &snapshot,
-            recovery,
-            baseline_copy_count,
-        )
-        .await
+        materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
     }
 
     #[hotpath::measure(future = true, label = "session_temporal.txn.persist_projection")]

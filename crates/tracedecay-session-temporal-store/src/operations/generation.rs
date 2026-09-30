@@ -7,7 +7,6 @@ use tracedecay_lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
 use super::PUBLICATION_ROUTE;
 use crate::relations::{SessionRelationProjection, SummarySourceRef};
-use crate::sql::GENERATION_COPY_STATEMENTS;
 
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
@@ -374,6 +373,24 @@ pub(super) async fn publish_candidate_generation(
     relation_projection: &SessionRelationProjection,
 ) -> Result<i64, LcmError> {
     let active = active_generation(conn, session_id).await?;
+    // Generations read every projection row numbered at or below them, so a
+    // publication may not activate above a refresh or rebuild candidate that
+    // is still adding rows. The convergence driver retries the stale state.
+    let mut open_rows = conn
+        .query(
+            "SELECT generation FROM session_temporal_generations
+             WHERE session_id = ?1 AND state IN ('building', 'ready')
+             ORDER BY generation LIMIT 1",
+            params![session_id],
+        )
+        .await?;
+    if let Some(row) = open_rows.next().await? {
+        return Err(LcmError::StaleSummaryGeneration {
+            expected: active.unwrap_or_default(),
+            actual: row.get(0)?,
+        });
+    }
+    drop(open_rows);
     let mut max_rows = conn
         .query(
             "SELECT COALESCE(MAX(generation), 0)
@@ -429,7 +446,6 @@ pub(super) async fn publish_candidate_generation(
     )
     .await?;
     if let Some(active) = active {
-        copy_active_projection(conn, session_id, active, candidate).await?;
         conn.execute(
             "INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
@@ -588,19 +604,6 @@ fn cycle(summary_id: &str) -> LcmError {
     LcmError::SummaryCycle {
         summary_id: summary_id.to_string(),
     }
-}
-
-async fn copy_active_projection(
-    conn: &impl crate::handle::SessionTemporalExec,
-    session_id: &str,
-    active: i64,
-    candidate: i64,
-) -> Result<(), LcmError> {
-    for sql in GENERATION_COPY_STATEMENTS {
-        conn.execute(sql, params![session_id, candidate, active])
-            .await?;
-    }
-    Ok(())
 }
 
 pub(super) async fn active_generation(

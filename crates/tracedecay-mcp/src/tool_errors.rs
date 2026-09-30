@@ -386,9 +386,10 @@ fn is_project_store_authority(authority: &str) -> bool {
 /// Authorities refused while admitting a registered store. The daemon holds
 /// that store in its typed reset-required state, so the scoped reset deletes
 /// exactly the refused stores.
-const REGISTERED_STORE_AUTHORITIES: [&str; 6] = [
+const REGISTERED_STORE_AUTHORITIES: [&str; 7] = [
     "observations",
     "session temporal",
+    "session temporal profile schema",
     "workflow",
     "authority schema",
     "LCM profile schema",

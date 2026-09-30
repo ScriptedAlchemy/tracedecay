@@ -187,7 +187,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND retrieval_anchor_id = 'anchor-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -197,7 +197,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND message_id = 'message-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -206,13 +206,11 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
         (
             "SELECT occurrence.occurrence_id
              FROM session_occurrences AS occurrence
-             JOIN session_temporal_observation_effects AS effect
-               ON effect.observation_id = occurrence.source_observation_id
-              AND effect.session_id = occurrence.session_id
+                  INDEXED BY idx_session_occurrences_message
              WHERE occurrence.session_id = 'session-one'
-               AND occurrence.generation = 1
                AND occurrence.message_id = 'message-one'
-             ORDER BY effect.observation_sequence,
+               AND +occurrence.generation <= 1
+             ORDER BY occurrence.source_sequence,
                       occurrence.projection_output_ordinal,
                       occurrence.occurrence_id
              LIMIT 1",
@@ -222,7 +220,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND thread_id = 'thread-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -232,7 +230,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND turn_id = 'turn-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -242,7 +240,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT occurrence_id
              FROM session_occurrences
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND agent_id = 'agent-one'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, occurrence_id",
@@ -252,7 +250,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT entity_id
              FROM session_current_entities
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND current_occurrence_id = 'occurrence-one'",
             "idx_session_current_entities_occurrence",
         ),
@@ -260,7 +258,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND object_anchor_id = 'anchor-object'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
@@ -270,7 +268,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND assertion_kind = 'corrects'
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
@@ -280,7 +278,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "SELECT assertion_id
              FROM session_assertions
              WHERE session_id = 'session-one'
-               AND generation = 1
+               AND +generation <= 1
                AND knowledge_at >= 0
              ORDER BY knowledge_at, assertion_id",
             "idx_session_assertions_generation_order",
@@ -417,18 +415,21 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
              )
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                source_provider, projection_output_ordinal, retrieval_anchor_id,
-                role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes, index_text
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
              )
              SELECT
                 printf('root-session-%02d', value % 8),
                 1,
                 printf('root-occurrence-%06d', value),
                 'root-observation',
+                1,
                 'test',
                 value,
                 'root-anchor',
+                '[]',
                 'assistant',
                 value / 8,
                 json_object('kind', 'unknown'),

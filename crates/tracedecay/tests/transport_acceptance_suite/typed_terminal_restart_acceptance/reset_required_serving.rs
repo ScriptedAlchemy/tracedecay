@@ -190,3 +190,174 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
 
     let _ = daemon.kill_and_wait();
 }
+
+/// Stamps a registered store with the session-temporal schema version the
+/// previous release wrote: version 6 copied every projection row into each
+/// refresh generation.
+fn stamp_session_temporal_version(db_path: &Path, version: i64) {
+    let stamped = rusqlite::Connection::open(db_path)
+        .expect("open the registered store")
+        .execute(
+            "UPDATE session_temporal_schema_migrations SET version = ?1
+             WHERE name = 'session-temporal'",
+            [version],
+        )
+        .expect("stamp the released session temporal schema version");
+    assert_eq!(
+        stamped,
+        1,
+        "{} records exactly one session temporal schema row",
+        db_path.display()
+    );
+}
+
+fn session_temporal_version(db_path: &Path) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open the registered store")
+        .query_row(
+            "SELECT version FROM session_temporal_schema_migrations
+             WHERE name = 'session-temporal'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read the session temporal schema version")
+}
+
+/// Gives a store session-temporal state, as a store that projected a session
+/// under the released format holds.
+fn record_session_generation(db_path: &Path) {
+    let inserted = rusqlite::Connection::open(db_path)
+        .expect("open the registered store")
+        .execute(
+            "INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('released-session', 1, 'building', '{}', 1)",
+            [],
+        )
+        .expect("record a released session generation");
+    assert_eq!(inserted, 1);
+}
+
+/// Every registered store carries the session-temporal authority, so a
+/// released profile has it at version 6 in the profile authority and each
+/// session store. Only a store holding session state needs the scoped reset;
+/// an empty copy is replaced with the final contract on open.
+#[test]
+fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+    let profile_root = home_path.join(".tracedecay");
+    let project_store = profile_root
+        .join("projects")
+        .join(tracedecay_runtime_core::storage::default_profile_project_id(&project_path))
+        .join("sessions.db");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "session-temporal-reset");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+
+    record_session_generation(&profile_root.join("user-sessions.db"));
+    for store in [
+        profile_root.join("global.db"),
+        profile_root.join("user-sessions.db"),
+        project_store.clone(),
+    ] {
+        stamp_session_temporal_version(&store, 6);
+    }
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let refusal = |store: String| {
+        json!({
+            "store": store,
+            "authority": "session temporal",
+            "found_version": 6,
+            "required_version": 7,
+            "reason": "session temporal profile schema 6 is incompatible with required schema 7; \
+                       reset the profile",
+            "remedy": "tracedecay wipe --stale --yes",
+        })
+    };
+    assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([
+            refusal("profile sessions".to_owned()),
+            refusal(format!(
+                "project sessions {}",
+                tracedecay_runtime_core::storage::default_profile_project_id(&project_path)
+            )),
+        ])
+    );
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    for (scope, read) in [
+        ("user", profile_session_read(&home_path, &project_path)),
+        (
+            "project",
+            super::tool_call(
+                &home_path,
+                &project_path,
+                "tracedecay_lcm_status",
+                &json!({ "storage_scope": "project", "format": "json" }),
+            ),
+        ),
+    ] {
+        let context = format!("{scope} session read over a copying session temporal store");
+        let refused = super::cli_problem_envelope(&read, &context);
+        super::assert_reset_required(&refused, &context);
+        assert_eq!(
+            refused["problem"]["detail"],
+            json!({
+                "kind": "reset_required",
+                "authority": "session temporal",
+                "found_version": 6,
+                "required_version": 7,
+                "reason": "session temporal profile schema 6 is incompatible with required \
+                           schema 7; reset the profile",
+                "remedy": "tracedecay wipe --stale --yes",
+            }),
+            "{context}"
+        );
+    }
+    assert_eq!(session_temporal_version(&profile_root.join("global.db")), 7);
+    assert_eq!(session_temporal_version(&project_store), 6);
+    assert_eq!(
+        session_temporal_version(&profile_root.join("user-sessions.db")),
+        6
+    );
+
+    let (reset_status, reset_output) =
+        super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
+    assert!(
+        reset_status.success(),
+        "tracedecay wipe --stale --yes failed:\n{reset_output}"
+    );
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "session-temporal-reset");
+    for scope in ["user", "project"] {
+        let served = super::tool_call(
+            &home_path,
+            &project_path,
+            "tracedecay_lcm_status",
+            &json!({ "storage_scope": scope, "format": "json" }),
+        );
+        assert!(
+            find_key(&served, "problem").is_none_or(|problem| problem.is_null()),
+            "the {scope} session read must serve after the named reset: {served}"
+        );
+    }
+    assert_eq!(session_temporal_version(&project_store), 7);
+    assert_eq!(
+        session_temporal_version(&profile_root.join("user-sessions.db")),
+        7
+    );
+    assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([]),
+        "the reset store serves again"
+    );
+
+    let _ = daemon.kill_and_wait();
+}

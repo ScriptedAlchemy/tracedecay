@@ -313,12 +313,13 @@ async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
                  ('graph-source-anchor', '{{}}', '{{}}', 'fixture');
              INSERT INTO session_occurrences (
                  session_id, generation, occurrence_id, source_observation_id,
-                 source_provider, projection_output_ordinal, retrieval_anchor_id,
-                 role, knowledge_at, valid_time_json, evidence_json,
-                 sanitized_content_digest, sanitized_content_bytes, index_text
+                 source_sequence, source_provider, projection_output_ordinal,
+                 retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                 valid_time_json, evidence_json, sanitized_content_digest,
+                 sanitized_content_bytes, index_text
              ) VALUES
-                 ('session-b', 1, '{target_value}', 'observation-shared',
-                  'fixture-provider', 2, 'graph-target-anchor', 'user', 6,
+                 ('session-b', 1, '{target_value}', 'observation-shared', 1,
+                  'fixture-provider', 2, 'graph-target-anchor', '[]', 'user', 6,
                   '{{\"kind\":\"unknown\"}}',
                   '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
                     \"source_anchor_id\":\"graph-target-anchor\",
@@ -326,8 +327,8 @@ async fn copy_lineage_comes_from_grafeo_without_a_sql_relation_table() {
                       \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
                     }}}}',
                   '{content_digest}', 6, 'target'),
-                 ('session-b', 1, '{graph_source_value}', 'observation-shared',
-                  'fixture-provider', 3, 'graph-source-anchor', 'user', 5,
+                 ('session-b', 1, '{graph_source_value}', 'observation-shared', 1,
+                  'fixture-provider', 3, 'graph-source-anchor', '[]', 'user', 5,
                   '{{\"kind\":\"unknown\"}}',
                   '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
                     \"source_anchor_id\":\"graph-source-anchor\",

@@ -6,8 +6,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
-    REGISTRY_TABLE_NAMES, SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX,
-    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, TABLES, Table,
+    REGISTRY_TABLE_NAMES, TABLES, Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
@@ -490,32 +489,6 @@ pub async fn validate_session_temporal_schema_contract(
     table_names: &[&str],
 ) -> tracedecay_domain::errors::Result<()> {
     validate_named_tables_and_indexes(conn, table_names).await
-}
-
-/// Validates the exact v4 `session_relation_receipts` shape persisted before
-/// receipt recovery: the final columns minus the recovery columns, and the
-/// final index inventory minus the recovery-due index.
-pub async fn validate_session_relation_receipts_without_recovery_contract(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    let contract = &SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY;
-    let metadata = read_table_metadata(conn, &[contract.name]).await?;
-    let actual = metadata.get(contract.name).ok_or_else(|| {
-        global_db_operation_message(
-            OPERATION,
-            format!("table '{}' metadata is unavailable", contract.name),
-        )
-    })?;
-    validate_table(contract, actual)?;
-    let expected = contract_indexes_for_table(contract.name)
-        .into_iter()
-        .filter(|index| {
-            index.name.is_none_or(|name| {
-                !name.eq_ignore_ascii_case(SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX)
-            })
-        })
-        .collect::<Vec<_>>();
-    validate_indexes_for_table(contract, &expected, &actual.indexes)
 }
 
 pub async fn validate_session_graph_publication_schema_contract(

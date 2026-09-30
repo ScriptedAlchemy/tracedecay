@@ -920,10 +920,11 @@ mod tests {
                 .execute(
                     "INSERT INTO session_occurrences (
                          session_id, generation, occurrence_id, source_observation_id,
-                         source_provider, projection_output_ordinal, retrieval_anchor_id,
-                         message_id, turn_id, role, knowledge_at, valid_time_json,
+                         source_sequence, source_provider, projection_output_ordinal,
+                         retrieval_anchor_id, message_id, turn_id,
+                         copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
                          evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
-                     ) VALUES (?1, 1, ?2, ?3, 'codex', 0, ?4, ?5, ?6, 'user', ?7,
+                     ) VALUES (?1, 1, ?2, ?3, ?4, 'codex', 0, ?5, ?6, ?7, '[]', 'user', ?8,
                                '{\"kind\":\"unknown\"}',
                                '{\"authority\":\"provider_native\",
                                  \"evidence_class\":\"provider_declared\",
@@ -933,11 +934,12 @@ mod tests {
                                     \"sanitizer_version\":\"root-sanitizer\"
                                  }}',
                                '0000000000000000000000000000000000000000000000000000000000000000',
-                               14, ?8)",
+                               14, ?9)",
                     params![
                         session_id.as_str(),
                         occurrence_id.as_str(),
                         observation_id.as_str(),
+                        i64::try_from(index + 1).expect("source sequence"),
                         anchor_id.as_str(),
                         message_id.as_str(),
                         turn_id.as_str(),
@@ -1026,11 +1028,12 @@ mod tests {
                 .execute(
                     "INSERT INTO session_occurrences (
                          session_id, generation, occurrence_id, source_observation_id,
-                         source_provider, projection_output_ordinal, retrieval_anchor_id,
-                         message_id, turn_id, role, knowledge_at, valid_time_json,
+                         source_sequence, source_provider, projection_output_ordinal,
+                         retrieval_anchor_id, message_id, turn_id,
+                         copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
                          evidence_json, sanitized_content_digest, sanitized_content_bytes, index_text
-                     ) VALUES ('session.000', 1, ?1, 'observation.000', 'codex', ?2,
-                               ?4, ?3, 'turn.000', 'user', ?2,
+                     ) VALUES ('session.000', 1, ?1, 'observation.000', 1, 'codex', ?2,
+                               ?4, ?3, 'turn.000', '[]', 'user', ?2,
                                '{\"kind\":\"unknown\"}',
                                '{\"authority\":\"provider_native\",
                                  \"evidence_class\":\"provider_declared\",
@@ -1103,10 +1106,11 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO session_derived_evidence_members (
-                         session_id, generation, evidence_kind, evidence_id, ordinal,
+                         session_id, generation, evidence_kind, first_occurrence_id, ordinal,
                          occurrence_id, member_role
-                     ) VALUES ('session.000', 1, 'span', 'span.000', ?1, ?2, ?3)",
+                     ) VALUES ('session.000', 1, 'span', ?1, ?2, ?3, ?4)",
                     params![
+                        members.first().expect("first member").as_str(),
                         i64::try_from(ordinal).expect("ordinal"),
                         occurrence_id.as_str(),
                         role

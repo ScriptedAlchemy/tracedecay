@@ -1,87 +1,103 @@
 use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine};
 
-/// Copies every session-temporal projection table's rows for the session bound
-/// as `?1` from source generation `?3` into target generation `?2`.
-pub(super) const GENERATION_COPY_STATEMENTS: &[&str] = &[
-    "INSERT INTO session_turns (
-        session_id, generation, turn_id, ordinal, grouping_provenance, created_at
-     )
-     SELECT session_id, ?2, turn_id, ordinal, grouping_provenance, created_at
-     FROM session_turns WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_threads (
-        session_id, generation, thread_id, grouping_provenance, created_at
-     )
-     SELECT session_id, ?2, thread_id, grouping_provenance, created_at
-     FROM session_threads WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_agents (
-        session_id, generation, agent_id, agent_json, created_at
-     )
-     SELECT session_id, ?2, agent_id, agent_json, created_at
-     FROM session_agents WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_occurrences (
-        session_id, generation, occurrence_id, source_observation_id,
-        source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
-        thread_grouping_json, turn_id, turn_grouping_json, message_id,
-        agent_id, role, knowledge_at, valid_time_json, evidence_json,
-        sanitized_content_digest, sanitized_content_bytes, index_text
-     )
-     SELECT session_id, ?2, occurrence_id, source_observation_id,
-            source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
-            thread_grouping_json, turn_id, turn_grouping_json, message_id,
-            agent_id, role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes, index_text
-     FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_turn_members (
-        session_id, generation, turn_id, occurrence_id, ordinal
-     )
-     SELECT session_id, ?2, turn_id, occurrence_id, ordinal
-     FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_assertions (
-        session_id, generation, assertion_id, assertion_kind,
-        subject_anchor_id, object_anchor_id, knowledge_at,
-        valid_time_json, evidence_json
-     )
-     SELECT session_id, ?2, assertion_id, assertion_kind,
-            subject_anchor_id, object_anchor_id, knowledge_at,
-            valid_time_json, evidence_json
-     FROM session_assertions WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_assertion_supersession (
-        session_id, generation, superseded_assertion_id,
-        superseding_assertion_id, created_at
-     )
-     SELECT session_id, ?2, superseded_assertion_id,
-            superseding_assertion_id, created_at
-     FROM session_assertion_supersession
-     WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_current_entities (
-        session_id, generation, entity_kind, entity_id,
-        current_assertion_id, current_occurrence_id, coverage_json
-     )
-     SELECT session_id, ?2, entity_kind, entity_id,
-            current_assertion_id, current_occurrence_id, coverage_json
-     FROM session_current_entities WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_derived_evidence (
-        session_id, generation, evidence_kind, evidence_id,
-        retrieval_anchor_id, thread_id,
-        first_occurrence_id, last_occurrence_id,
-        algorithm_version, configuration_digest,
-        member_count, member_digest, evidence_json
-     )
-     SELECT session_id, ?2, evidence_kind, evidence_id,
-            retrieval_anchor_id, thread_id,
-            first_occurrence_id, last_occurrence_id,
-            algorithm_version, configuration_digest,
-            member_count, member_digest, evidence_json
-     FROM session_derived_evidence WHERE session_id = ?1 AND generation = ?3",
-    "INSERT INTO session_derived_evidence_members (
-        session_id, generation, evidence_kind, evidence_id,
-        ordinal, occurrence_id, member_role
-     )
-     SELECT session_id, ?2, evidence_kind, evidence_id,
-            ordinal, occurrence_id, member_role
-     FROM session_derived_evidence_members
-     WHERE session_id = ?1 AND generation = ?3",
+/// One generation-shared projection table.
+///
+/// Generation `G` reads every row with `generation <= G`. A candidate adds
+/// rows under its own generation; `key` names the columns a row is
+/// identified by. An append-only table holds one row per key, while a
+/// versioned table holds an older and a newer version of one key while the
+/// candidate builds.
+pub(crate) struct SharedGenerationTable {
+    pub(crate) name: &'static str,
+    pub(crate) key: &'static str,
+    pub(crate) versioned: bool,
+}
+
+pub(crate) const SHARED_GENERATION_TABLES: &[SharedGenerationTable] = &[
+    SharedGenerationTable {
+        name: "session_turns",
+        key: "turn_id",
+        versioned: true,
+    },
+    SharedGenerationTable {
+        name: "session_threads",
+        key: "thread_id",
+        versioned: true,
+    },
+    SharedGenerationTable {
+        name: "session_agents",
+        key: "agent_id",
+        versioned: true,
+    },
+    SharedGenerationTable {
+        name: "session_occurrences",
+        key: "occurrence_id",
+        versioned: false,
+    },
+    SharedGenerationTable {
+        name: "session_turn_members",
+        key: "turn_id, occurrence_id",
+        versioned: false,
+    },
+    SharedGenerationTable {
+        name: "session_assertions",
+        key: "assertion_id",
+        versioned: false,
+    },
+    SharedGenerationTable {
+        name: "session_assertion_supersession",
+        key: "superseded_assertion_id, superseding_assertion_id",
+        versioned: false,
+    },
+    SharedGenerationTable {
+        name: "session_current_entities",
+        key: "entity_kind, entity_id",
+        versioned: true,
+    },
+    SharedGenerationTable {
+        name: "session_derived_evidence",
+        key: "evidence_kind, first_occurrence_id",
+        versioned: true,
+    },
+    SharedGenerationTable {
+        name: "session_derived_evidence_members",
+        key: "evidence_kind, first_occurrence_id, ordinal",
+        versioned: true,
+    },
 ];
+
+/// Deletes every row a terminated candidate introduced, bound as
+/// `(?1 session, ?2 generation)`. Later candidates read `generation <= G`, so
+/// a failed candidate's rows must not outlive it.
+pub(crate) fn discard_candidate_rows_sql(table: &SharedGenerationTable) -> String {
+    format!(
+        "DELETE FROM {} WHERE session_id = ?1 AND generation = ?2",
+        table.name
+    )
+}
+
+/// Deletes the older version of every key the activating generation
+/// re-versioned, bound as `(?1 session, ?2 generation)`. Only the active
+/// generation is read, so a superseded version has no reader once its
+/// successor activates.
+pub(crate) fn retire_superseded_versions_sql(table: &SharedGenerationTable) -> String {
+    let matches = table
+        .key
+        .split(", ")
+        .map(|column| format!("older.{column} = successor.{column}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "DELETE FROM {name}
+         WHERE rowid IN (
+             SELECT older.rowid
+             FROM {name} AS successor CROSS JOIN {name} AS older
+             WHERE successor.session_id = ?1 AND successor.generation = ?2
+               AND older.session_id = ?1 AND {matches} AND older.generation < ?2
+         )",
+        name = table.name,
+    )
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum TemporalSqlRead<'a> {

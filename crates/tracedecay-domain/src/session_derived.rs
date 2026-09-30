@@ -4,12 +4,13 @@
 //! message occurrences. They are not source authority, summaries, or carriers of
 //! external GitHub/CI/diagnostic/Git/receipt/task payloads.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::canonical_text::{canonical_framed_sha256_bytes, encode_tagged_lowercase_hex};
 use crate::research::{
     DataVersionDigest, MessageId, RetrievalAnchorId, SessionId, ThreadId, UtcMicros,
 };
@@ -17,8 +18,9 @@ use crate::session::{
     MessageOccurrenceIdV1, SessionAuthorityClassV1, SessionContractError, SummarySourceHorizonV1,
 };
 
-const DERIVED_EVIDENCE_ID_DOMAIN: &[u8] = b"tracedecay.session.derived-evidence.v1\0";
-const DERIVED_MEMBER_DIGEST_DOMAIN: &[u8] = b"tracedecay.session.derived-member-digest.v1\0";
+const DERIVED_EVIDENCE_ID_DOMAIN: &[u8] = b"tracedecay.session.derived-evidence.v2";
+const DERIVED_MEMBER_DIGEST_DOMAIN: &[u8] = b"tracedecay.session.derived-member-chain.v2";
+const DERIVED_ANCHOR_DOMAIN: &[u8] = b"tracedecay.session.derived-anchor.v2";
 const DERIVED_CONFIGURATION_DOMAIN: &[u8] = b"tracedecay.session.derived-configuration.v1\0";
 
 /// Default versioned span window used by the generation projector.
@@ -149,7 +151,13 @@ impl DerivedEvidenceMemberRoleV1 {
     }
 }
 
-/// Immutable generation-bound derived evidence record.
+/// One immutable version of a derived span or burst.
+///
+/// Members are stored beside the record, keyed by its kind and first member,
+/// so extending a live run appends members instead of restating them.
+/// `member_digest` chains every member in ordinal order and `evidence_id`
+/// binds that chain to the member count, so a version is reproducible from
+/// its ordered members alone.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionDerivedEvidenceRecordV1 {
@@ -166,131 +174,47 @@ pub struct SessionDerivedEvidenceRecordV1 {
     member_digest: DataVersionDigest,
     source_horizon: SummarySourceHorizonV1,
     authority: SessionAuthorityClassV1,
-    members: Vec<DerivedEvidenceMemberV1>,
 }
 
 impl SessionDerivedEvidenceRecordV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        evidence_kind: DerivedEvidenceKindV1,
-        retrieval_anchor_id: RetrievalAnchorId,
-        session_id: SessionId,
-        thread_id: Option<ThreadId>,
-        algorithm_version: impl Into<String>,
-        configuration_digest: DataVersionDigest,
-        source_horizon: SummarySourceHorizonV1,
-        members: Vec<DerivedEvidenceMemberV1>,
-    ) -> Result<Self, SessionContractError> {
-        let algorithm_version = algorithm_version.into();
-        if algorithm_version.is_empty() || algorithm_version.trim() != algorithm_version {
-            return Err(SessionContractError::InvalidIdentity {
-                field: "derived evidence algorithm_version",
-            });
-        }
-        if members.is_empty() {
-            return Err(SessionContractError::DerivedEvidenceMembersRequired);
-        }
-        source_horizon.validate()?;
-        let mut seen = BTreeSet::new();
-        for (index, member) in members.iter().enumerate() {
-            member.validate()?;
-            if member.ordinal as usize != index {
-                return Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals);
-            }
-            if !seen.insert(member.occurrence_id.as_str()) {
-                return Err(SessionContractError::DuplicateDerivedEvidenceMember);
-            }
-        }
-        let first_member = members
-            .first()
-            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
-        let last_member = members
-            .last()
-            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
-        let first = first_member.occurrence_id.clone();
-        let last = last_member.occurrence_id.clone();
-        let member_digest = member_digest(
-            evidence_kind,
-            &algorithm_version,
-            &configuration_digest,
-            &members,
-        )?;
-        let evidence_id = derive_evidence_id(
-            evidence_kind,
-            &algorithm_version,
-            &configuration_digest,
-            &members,
-        )?;
-        let member_count =
-            u32::try_from(members.len()).map_err(|_| SessionContractError::InvalidIdentity {
-                field: "derived evidence member_count",
-            })?;
-        Ok(Self {
-            evidence_id,
-            evidence_kind,
-            retrieval_anchor_id,
-            session_id,
-            thread_id,
-            first_occurrence_id: first,
-            last_occurrence_id: last,
-            algorithm_version,
-            configuration_digest,
-            member_count,
-            member_digest,
-            source_horizon,
-            authority: SessionAuthorityClassV1::DerivedProjection,
-            members,
-        })
-    }
-
     pub fn validate(&self) -> Result<(), SessionContractError> {
         if self.authority != SessionAuthorityClassV1::DerivedProjection {
             return Err(SessionContractError::DerivedEvidenceAuthorityMismatch);
         }
-        if self.members.is_empty() {
+        if self.member_count == 0 {
             return Err(SessionContractError::DerivedEvidenceMembersRequired);
         }
-        if self.member_count as usize != self.members.len() {
-            return Err(SessionContractError::DerivedEvidenceMemberDigestMismatch);
+        if (self.member_count == 1) != (self.first_occurrence_id == self.last_occurrence_id) {
+            return Err(SessionContractError::DerivedEvidenceEndpointMismatch);
         }
         self.source_horizon.validate()?;
-        let expected_digest = member_digest(
-            self.evidence_kind,
-            &self.algorithm_version,
-            &self.configuration_digest,
-            &self.members,
-        )?;
-        if expected_digest != self.member_digest {
-            return Err(SessionContractError::DerivedEvidenceMemberDigestMismatch);
+        if self.algorithm_version != self.evidence_kind.algorithm_version() {
+            return Err(SessionContractError::InvalidIdentity {
+                field: "derived evidence algorithm_version",
+            });
         }
-        let expected_id = derive_evidence_id(
+        if derive_evidence_id(
             self.evidence_kind,
             &self.algorithm_version,
             &self.configuration_digest,
-            &self.members,
-        )?;
-        if expected_id != self.evidence_id {
+            &self.member_digest,
+            self.member_count,
+        )? != self.evidence_id
+        {
             return Err(SessionContractError::InvalidIdentity {
                 field: "DerivedEvidenceIdV1",
             });
         }
-        let first_member = self
-            .members
-            .first()
-            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
-        let last_member = self
-            .members
-            .last()
-            .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
-        if first_member.occurrence_id != self.first_occurrence_id
-            || last_member.occurrence_id != self.last_occurrence_id
+        if derive_derived_anchor_id(
+            self.evidence_kind,
+            &self.session_id,
+            &self.configuration_digest,
+            &self.member_digest,
+        )? != self.retrieval_anchor_id
         {
-            return Err(SessionContractError::DerivedEvidenceEndpointMismatch);
-        }
-        for (index, member) in self.members.iter().enumerate() {
-            if member.ordinal as usize != index {
-                return Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals);
-            }
+            return Err(SessionContractError::InvalidIdentity {
+                field: "derived evidence retrieval_anchor_id",
+            });
         }
         Ok(())
     }
@@ -347,10 +271,6 @@ impl SessionDerivedEvidenceRecordV1 {
         self.authority
     }
 
-    pub fn members(&self) -> &[DerivedEvidenceMemberV1] {
-        &self.members
-    }
-
     pub fn span_id(&self) -> Result<EvidenceSpanIdV1, SessionContractError> {
         if self.evidence_kind != DerivedEvidenceKindV1::Span {
             return Err(SessionContractError::InvalidIdentity {
@@ -382,7 +302,6 @@ impl<'de> Deserialize<'de> for SessionDerivedEvidenceRecordV1 {
             member_digest: DataVersionDigest,
             source_horizon: SummarySourceHorizonV1,
             authority: SessionAuthorityClassV1,
-            members: Vec<DerivedEvidenceMemberV1>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -400,7 +319,6 @@ impl<'de> Deserialize<'de> for SessionDerivedEvidenceRecordV1 {
             member_digest: wire.member_digest,
             source_horizon: wire.source_horizon,
             authority: wire.authority,
-            members: wire.members,
         };
         record.validate().map_err(serde::de::Error::custom)?;
         Ok(record)
@@ -442,200 +360,348 @@ impl SessionDerivedEvidencePolicyV1 {
     }
 }
 
-/// Derive generation-bound spans and bursts from canonical occurrence order.
-pub fn derive_session_evidence_from_occurrences(
+/// The latest burst and span of a session's last run, the only derived
+/// evidence a later occurrence can extend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedEvidenceTailV1 {
+    pub burst: SessionDerivedEvidenceRecordV1,
+    pub span: SessionDerivedEvidenceRecordV1,
+}
+
+/// Derived evidence written by one extension: the final version of every
+/// span or burst it touched, and every member it added or re-roled, keyed by
+/// the owning evidence kind and first member.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DerivedEvidenceDeltaV1 {
+    pub records: Vec<SessionDerivedEvidenceRecordV1>,
+    pub members: Vec<(
+        DerivedEvidenceKindV1,
+        MessageOccurrenceIdV1,
+        DerivedEvidenceMemberV1,
+    )>,
+}
+
+/// Extends a session's spans and bursts with occurrences appended after
+/// `tail` in canonical occurrence order.
+///
+/// Runs are maximal consecutive occurrences sharing a thread; a burst covers
+/// one run and spans partition it into windows of the policy's size. Only the
+/// tail run can grow, so an extension touches at most that run and the runs
+/// it starts. Folding every occurrence from an empty tail derives the same
+/// records and members.
+pub fn extend_session_evidence(
     session_id: &SessionId,
+    tail: Option<&DerivedEvidenceTailV1>,
     occurrences: &[DerivedEvidenceOccurrenceRefV1],
     policy: &SessionDerivedEvidencePolicyV1,
-) -> Result<Vec<SessionDerivedEvidenceRecordV1>, SessionContractError> {
-    if occurrences.is_empty() {
-        return Ok(Vec::new());
-    }
+) -> Result<DerivedEvidenceDeltaV1, SessionContractError> {
     for window in occurrences.windows(2) {
         let left = &window[0];
         let right = &window[1];
-        let ordered = (left.observation_sequence, left.projection_output_ordinal)
-            <= (right.observation_sequence, right.projection_output_ordinal);
-        if !ordered {
+        if (left.observation_sequence, left.projection_output_ordinal)
+            > (right.observation_sequence, right.projection_output_ordinal)
+        {
             return Err(SessionContractError::NoncontiguousDerivedEvidenceOrdinals);
         }
     }
     let configuration_digest = policy.configuration_digest()?;
-    let runs = contiguous_runs(occurrences);
-    let mut derived = Vec::new();
-    for run in runs {
-        if run.is_empty() {
-            continue;
+    let span_max_members = u32::try_from(policy.span_max_members.max(1)).map_err(|_| {
+        SessionContractError::InvalidIdentity {
+            field: "derived evidence span_max_members",
         }
-        let burst_members = members_for_run(run);
-        let horizon = horizon_for_run(run)?;
-        let burst_anchor = derive_derived_anchor_id(
-            DerivedEvidenceKindV1::Burst,
-            session_id,
-            &burst_members,
-            &configuration_digest,
-        )?;
-        derived.push(SessionDerivedEvidenceRecordV1::new(
-            DerivedEvidenceKindV1::Burst,
-            burst_anchor,
-            session_id.clone(),
-            run.first().and_then(|item| item.thread_id.clone()),
-            DerivedEvidenceKindV1::Burst.algorithm_version(),
-            configuration_digest.clone(),
-            horizon,
-            burst_members,
-        )?);
-
-        let mut span_start = 0usize;
-        while span_start < run.len() {
-            let end = (span_start + policy.span_max_members).min(run.len());
-            let span_run = &run[span_start..end];
-            let span_members = members_for_run(span_run);
-            let span_horizon = horizon_for_run(span_run)?;
-            let span_anchor = derive_derived_anchor_id(
-                DerivedEvidenceKindV1::Span,
-                session_id,
-                &span_members,
-                &configuration_digest,
-            )?;
-            derived.push(SessionDerivedEvidenceRecordV1::new(
-                DerivedEvidenceKindV1::Span,
-                span_anchor,
-                session_id.clone(),
-                span_run.first().and_then(|item| item.thread_id.clone()),
-                DerivedEvidenceKindV1::Span.algorithm_version(),
-                configuration_digest.clone(),
-                span_horizon,
-                span_members,
-            )?);
-            if end == run.len() {
-                break;
+    })?;
+    let mut burst = tail
+        .map(|tail| DerivedEvidenceBuilder::resume(&tail.burst))
+        .transpose()?;
+    let mut span = tail
+        .map(|tail| DerivedEvidenceBuilder::resume(&tail.span))
+        .transpose()?;
+    let mut touched = BTreeMap::new();
+    let mut members = BTreeMap::new();
+    for occurrence in occurrences {
+        let continues_run = burst
+            .as_ref()
+            .is_some_and(|burst| burst.thread_id == occurrence.thread_id);
+        let (next_burst, next_span) = match (burst.take(), span.take()) {
+            (Some(mut run), Some(mut window)) if continues_run => {
+                run.push(occurrence, &mut members)?;
+                if window.member_count < span_max_members {
+                    window.push(occurrence, &mut members)?;
+                } else {
+                    window = DerivedEvidenceBuilder::start(
+                        DerivedEvidenceKindV1::Span,
+                        session_id,
+                        &configuration_digest,
+                        occurrence,
+                        &mut members,
+                    )?;
+                }
+                (run, window)
             }
-            span_start = end;
-        }
+            _ => (
+                DerivedEvidenceBuilder::start(
+                    DerivedEvidenceKindV1::Burst,
+                    session_id,
+                    &configuration_digest,
+                    occurrence,
+                    &mut members,
+                )?,
+                DerivedEvidenceBuilder::start(
+                    DerivedEvidenceKindV1::Span,
+                    session_id,
+                    &configuration_digest,
+                    occurrence,
+                    &mut members,
+                )?,
+            ),
+        };
+        touched.insert(next_burst.key(), next_burst.record()?);
+        touched.insert(next_span.key(), next_span.record()?);
+        burst = Some(next_burst);
+        span = Some(next_span);
     }
-    Ok(derived)
-}
-
-fn contiguous_runs(
-    occurrences: &[DerivedEvidenceOccurrenceRefV1],
-) -> Vec<&[DerivedEvidenceOccurrenceRefV1]> {
-    // Versioned adjacency: maximal consecutive runs share a thread identity.
-    let mut runs = Vec::new();
-    let mut start = 0usize;
-    for index in 1..occurrences.len() {
-        if occurrences[index - 1].thread_id != occurrences[index].thread_id {
-            runs.push(&occurrences[start..index]);
-            start = index;
-        }
-    }
-    runs.push(&occurrences[start..]);
-    runs
-}
-
-fn members_for_run(run: &[DerivedEvidenceOccurrenceRefV1]) -> Vec<DerivedEvidenceMemberV1> {
-    run.iter()
-        .enumerate()
-        .map(|(ordinal, item)| {
-            let role = if run.len() == 1 || ordinal == 0 {
-                DerivedEvidenceMemberRoleV1::First
-            } else if ordinal + 1 == run.len() {
-                DerivedEvidenceMemberRoleV1::Last
-            } else {
-                DerivedEvidenceMemberRoleV1::Member
-            };
-            DerivedEvidenceMemberV1::new(ordinal as u32, item.occurrence_id.clone(), role)
-        })
-        .collect()
-}
-
-fn horizon_for_run(
-    run: &[DerivedEvidenceOccurrenceRefV1],
-) -> Result<SummarySourceHorizonV1, SessionContractError> {
-    let knowledge_through = run
-        .iter()
-        .map(|item| item.knowledge_at)
-        .max()
-        .ok_or(SessionContractError::DerivedEvidenceMembersRequired)?;
-    Ok(SummarySourceHorizonV1 {
-        knowledge_through,
-        valid_through: None,
+    Ok(DerivedEvidenceDeltaV1 {
+        records: touched.into_values().collect(),
+        members: members
+            .into_iter()
+            .map(|((kind, first, _), member)| (kind, first, member))
+            .collect(),
     })
 }
 
-/// Frozen derived-identity layout: these three digests concatenate hasher
-/// updates with **no length framing**. That is weaker than
-/// [`crate::canonical_text::canonical_framed_sha256`], but the persisted ids
-/// are already written. Do not change these bytes; any new derived identity
-/// must use the framed helper.
+/// Derives every span and burst of `occurrences` from scratch.
+pub fn derive_session_evidence_from_occurrences(
+    session_id: &SessionId,
+    occurrences: &[DerivedEvidenceOccurrenceRefV1],
+    policy: &SessionDerivedEvidencePolicyV1,
+) -> Result<DerivedEvidenceDeltaV1, SessionContractError> {
+    extend_session_evidence(session_id, None, occurrences, policy)
+}
+
+type DerivedEvidenceKey = (DerivedEvidenceKindV1, MessageOccurrenceIdV1);
+type DerivedMemberKey = (DerivedEvidenceKindV1, MessageOccurrenceIdV1, u32);
+
+struct DerivedEvidenceBuilder {
+    kind: DerivedEvidenceKindV1,
+    session_id: SessionId,
+    thread_id: Option<ThreadId>,
+    first_occurrence_id: MessageOccurrenceIdV1,
+    last_occurrence_id: MessageOccurrenceIdV1,
+    configuration_digest: DataVersionDigest,
+    member_count: u32,
+    member_digest: DataVersionDigest,
+    knowledge_through: UtcMicros,
+}
+
+impl DerivedEvidenceBuilder {
+    fn start(
+        kind: DerivedEvidenceKindV1,
+        session_id: &SessionId,
+        configuration_digest: &DataVersionDigest,
+        first: &DerivedEvidenceOccurrenceRefV1,
+        members: &mut BTreeMap<DerivedMemberKey, DerivedEvidenceMemberV1>,
+    ) -> Result<Self, SessionContractError> {
+        let mut builder = Self {
+            kind,
+            session_id: session_id.clone(),
+            thread_id: first.thread_id.clone(),
+            first_occurrence_id: first.occurrence_id.clone(),
+            last_occurrence_id: first.occurrence_id.clone(),
+            configuration_digest: configuration_digest.clone(),
+            member_count: 0,
+            member_digest: member_digest_seed(
+                kind,
+                kind.algorithm_version(),
+                configuration_digest,
+            )?,
+            knowledge_through: first.knowledge_at,
+        };
+        builder.push(first, members)?;
+        Ok(builder)
+    }
+
+    fn resume(record: &SessionDerivedEvidenceRecordV1) -> Result<Self, SessionContractError> {
+        record.validate()?;
+        Ok(Self {
+            kind: record.evidence_kind,
+            session_id: record.session_id.clone(),
+            thread_id: record.thread_id.clone(),
+            first_occurrence_id: record.first_occurrence_id.clone(),
+            last_occurrence_id: record.last_occurrence_id.clone(),
+            configuration_digest: record.configuration_digest.clone(),
+            member_count: record.member_count,
+            member_digest: record.member_digest.clone(),
+            knowledge_through: record.source_horizon.knowledge_through,
+        })
+    }
+
+    fn key(&self) -> DerivedEvidenceKey {
+        (self.kind, self.first_occurrence_id.clone())
+    }
+
+    fn push(
+        &mut self,
+        occurrence: &DerivedEvidenceOccurrenceRefV1,
+        members: &mut BTreeMap<DerivedMemberKey, DerivedEvidenceMemberV1>,
+    ) -> Result<(), SessionContractError> {
+        let ordinal = self.member_count;
+        if ordinal > 0 && occurrence.occurrence_id == self.last_occurrence_id {
+            return Err(SessionContractError::DuplicateDerivedEvidenceMember);
+        }
+        if ordinal >= 2 {
+            let previous = ordinal - 1;
+            members.insert(
+                (self.kind, self.first_occurrence_id.clone(), previous),
+                DerivedEvidenceMemberV1::new(
+                    previous,
+                    self.last_occurrence_id.clone(),
+                    DerivedEvidenceMemberRoleV1::Member,
+                ),
+            );
+        }
+        let role = if ordinal == 0 {
+            DerivedEvidenceMemberRoleV1::First
+        } else {
+            DerivedEvidenceMemberRoleV1::Last
+        };
+        members.insert(
+            (self.kind, self.first_occurrence_id.clone(), ordinal),
+            DerivedEvidenceMemberV1::new(ordinal, occurrence.occurrence_id.clone(), role),
+        );
+        self.member_digest =
+            extend_member_digest(&self.member_digest, ordinal, &occurrence.occurrence_id)?;
+        self.member_count =
+            ordinal
+                .checked_add(1)
+                .ok_or(SessionContractError::InvalidIdentity {
+                    field: "derived evidence member_count",
+                })?;
+        self.last_occurrence_id = occurrence.occurrence_id.clone();
+        self.knowledge_through = self.knowledge_through.max(occurrence.knowledge_at);
+        Ok(())
+    }
+
+    fn record(&self) -> Result<SessionDerivedEvidenceRecordV1, SessionContractError> {
+        let algorithm_version = self.kind.algorithm_version();
+        let record = SessionDerivedEvidenceRecordV1 {
+            evidence_id: derive_evidence_id(
+                self.kind,
+                algorithm_version,
+                &self.configuration_digest,
+                &self.member_digest,
+                self.member_count,
+            )?,
+            evidence_kind: self.kind,
+            retrieval_anchor_id: derive_derived_anchor_id(
+                self.kind,
+                &self.session_id,
+                &self.configuration_digest,
+                &self.member_digest,
+            )?,
+            session_id: self.session_id.clone(),
+            thread_id: self.thread_id.clone(),
+            first_occurrence_id: self.first_occurrence_id.clone(),
+            last_occurrence_id: self.last_occurrence_id.clone(),
+            algorithm_version: algorithm_version.to_owned(),
+            configuration_digest: self.configuration_digest.clone(),
+            member_count: self.member_count,
+            member_digest: self.member_digest.clone(),
+            source_horizon: SummarySourceHorizonV1 {
+                knowledge_through: self.knowledge_through,
+                valid_through: None,
+            },
+            authority: SessionAuthorityClassV1::DerivedProjection,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+fn member_digest_seed(
+    kind: DerivedEvidenceKindV1,
+    algorithm_version: &str,
+    configuration_digest: &DataVersionDigest,
+) -> Result<DataVersionDigest, SessionContractError> {
+    tagged_digest(canonical_framed_sha256_bytes(
+        DERIVED_MEMBER_DIGEST_DOMAIN,
+        &[
+            kind.as_str().as_bytes(),
+            algorithm_version.as_bytes(),
+            configuration_digest.as_str().as_bytes(),
+        ],
+    ))
+}
+
+fn extend_member_digest(
+    previous: &DataVersionDigest,
+    ordinal: u32,
+    occurrence_id: &MessageOccurrenceIdV1,
+) -> Result<DataVersionDigest, SessionContractError> {
+    tagged_digest(canonical_framed_sha256_bytes(
+        DERIVED_MEMBER_DIGEST_DOMAIN,
+        &[
+            previous.as_str().as_bytes(),
+            &ordinal.to_be_bytes(),
+            occurrence_id.as_str().as_bytes(),
+        ],
+    ))
+}
+
 fn derive_evidence_id(
     kind: DerivedEvidenceKindV1,
     algorithm_version: &str,
     configuration_digest: &DataVersionDigest,
-    members: &[DerivedEvidenceMemberV1],
+    member_digest: &DataVersionDigest,
+    member_count: u32,
 ) -> Result<DerivedEvidenceIdV1, SessionContractError> {
-    let mut hasher = Sha256::new();
-    hasher.update(DERIVED_EVIDENCE_ID_DOMAIN);
-    hasher.update(kind.as_str().as_bytes());
-    hasher.update(algorithm_version.as_bytes());
-    hasher.update(configuration_digest.as_str().as_bytes());
-    for member in members {
-        hasher.update(member.ordinal.to_be_bytes());
-        hasher.update(member.occurrence_id.as_str().as_bytes());
-        hasher.update(member.member_role.as_str().as_bytes());
-    }
-    DerivedEvidenceIdV1::new(encode_sha256(hasher))
-}
-
-fn member_digest(
-    kind: DerivedEvidenceKindV1,
-    algorithm_version: &str,
-    configuration_digest: &DataVersionDigest,
-    members: &[DerivedEvidenceMemberV1],
-) -> Result<DataVersionDigest, SessionContractError> {
-    let mut hasher = Sha256::new();
-    hasher.update(DERIVED_MEMBER_DIGEST_DOMAIN);
-    hasher.update(kind.as_str().as_bytes());
-    hasher.update(algorithm_version.as_bytes());
-    hasher.update(configuration_digest.as_str().as_bytes());
-    for member in members {
-        hasher.update(member.ordinal.to_be_bytes());
-        hasher.update(member.occurrence_id.as_str().as_bytes());
-    }
-    digest_from_hasher(hasher)
+    DerivedEvidenceIdV1::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &canonical_framed_sha256_bytes(
+            DERIVED_EVIDENCE_ID_DOMAIN,
+            &[
+                kind.as_str().as_bytes(),
+                algorithm_version.as_bytes(),
+                configuration_digest.as_str().as_bytes(),
+                member_digest.as_str().as_bytes(),
+                &member_count.to_be_bytes(),
+            ],
+        ),
+    ))
 }
 
 fn derive_derived_anchor_id(
     kind: DerivedEvidenceKindV1,
     session_id: &SessionId,
-    members: &[DerivedEvidenceMemberV1],
     configuration_digest: &DataVersionDigest,
+    member_digest: &DataVersionDigest,
 ) -> Result<RetrievalAnchorId, SessionContractError> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.session.derived-anchor.v1\0");
-    hasher.update(kind.as_str().as_bytes());
-    hasher.update(session_id.as_str().as_bytes());
-    hasher.update(configuration_digest.as_str().as_bytes());
-    for member in members {
-        hasher.update(member.occurrence_id.as_str().as_bytes());
-    }
-    RetrievalAnchorId::new(encode_sha256(hasher)).map_err(|_| {
-        SessionContractError::InvalidIdentity {
-            field: "derived evidence retrieval_anchor_id",
-        }
+    RetrievalAnchorId::new(encode_tagged_lowercase_hex(
+        "sha256:",
+        &canonical_framed_sha256_bytes(
+            DERIVED_ANCHOR_DOMAIN,
+            &[
+                kind.as_str().as_bytes(),
+                session_id.as_str().as_bytes(),
+                configuration_digest.as_str().as_bytes(),
+                member_digest.as_str().as_bytes(),
+            ],
+        ),
+    ))
+    .map_err(|_| SessionContractError::InvalidIdentity {
+        field: "derived evidence retrieval_anchor_id",
     })
 }
 
 fn digest_from_hasher(hasher: Sha256) -> Result<DataVersionDigest, SessionContractError> {
-    DataVersionDigest::new(encode_sha256(hasher)).map_err(|_| {
+    tagged_digest(hasher.finalize().into())
+}
+
+fn tagged_digest(bytes: [u8; 32]) -> Result<DataVersionDigest, SessionContractError> {
+    DataVersionDigest::new(encode_tagged_lowercase_hex("sha256:", &bytes)).map_err(|_| {
         SessionContractError::InvalidIdentity {
             field: "DataVersionDigest",
         }
     })
-}
-
-fn encode_sha256(hasher: Sha256) -> String {
-    crate::canonical_text::encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
 }
 
 fn is_sha256_identity(value: &str) -> bool {
@@ -647,47 +713,154 @@ mod tests {
     use super::*;
 
     fn sha_id(label: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(label.as_bytes());
-        encode_sha256(hasher)
+        encode_tagged_lowercase_hex("sha256:", &Sha256::digest(label.as_bytes()))
+    }
+
+    fn occurrence(index: u64, thread: &str) -> DerivedEvidenceOccurrenceRefV1 {
+        DerivedEvidenceOccurrenceRefV1 {
+            occurrence_id: MessageOccurrenceIdV1::new(sha_id(&format!("occurrence-{index}")))
+                .unwrap(),
+            retrieval_anchor_id: RetrievalAnchorId::new(sha_id(&format!("anchor-{index}")))
+                .unwrap(),
+            thread_id: Some(ThreadId::new(thread).unwrap()),
+            message_id: Some(MessageId::new(format!("message.{index}")).unwrap()),
+            knowledge_at: UtcMicros(i64::try_from(index).unwrap()),
+            observation_sequence: index + 1,
+            projection_output_ordinal: 0,
+        }
     }
 
     #[test]
     fn singleton_occurrence_derives_valid_burst_and_span_evidence() {
         let session_id = SessionId::new("session.derived.singleton").unwrap();
-        let occurrence_id = MessageOccurrenceIdV1::new(sha_id("singleton-occurrence")).unwrap();
-        let occurrences = [DerivedEvidenceOccurrenceRefV1 {
-            occurrence_id: occurrence_id.clone(),
-            retrieval_anchor_id: RetrievalAnchorId::new(sha_id("singleton-anchor")).unwrap(),
-            thread_id: Some(ThreadId::new("thread.derived.singleton").unwrap()),
-            message_id: Some(MessageId::new("message.derived.singleton").unwrap()),
-            knowledge_at: UtcMicros(1),
-            observation_sequence: 1,
-            projection_output_ordinal: 0,
-        }];
+        let only = occurrence(0, "thread.derived.singleton");
 
         let derived = derive_session_evidence_from_occurrences(
             &session_id,
-            &occurrences,
+            std::slice::from_ref(&only),
             &SessionDerivedEvidencePolicyV1::default(),
         )
         .unwrap();
 
-        assert_eq!(derived.len(), 2);
-        for record in derived {
+        assert_eq!(derived.records.len(), 2);
+        assert_eq!(derived.members.len(), 2);
+        for (_, first, member) in &derived.members {
+            assert_eq!(first, &only.occurrence_id);
+            assert_eq!(member.ordinal, 0);
+            assert_eq!(member.member_role, DerivedEvidenceMemberRoleV1::First);
+        }
+        for record in derived.records {
             assert_eq!(record.member_count(), 1);
-            assert_eq!(record.first_occurrence_id(), &occurrence_id);
-            assert_eq!(record.last_occurrence_id(), &occurrence_id);
-            assert_eq!(
-                record.members()[0].member_role,
-                DerivedEvidenceMemberRoleV1::First
-            );
-            record.validate().unwrap();
+            assert_eq!(record.first_occurrence_id(), &only.occurrence_id);
+            assert_eq!(record.last_occurrence_id(), &only.occurrence_id);
             let encoded = serde_json::to_value(&record).unwrap();
             assert_eq!(
                 serde_json::from_value::<SessionDerivedEvidenceRecordV1>(encoded).unwrap(),
                 record
             );
         }
+    }
+
+    /// Replays `extension` onto a record/member map the way the store does:
+    /// a later version of a key replaces the earlier one.
+    fn apply(
+        records: &mut BTreeMap<DerivedEvidenceKey, SessionDerivedEvidenceRecordV1>,
+        members: &mut BTreeMap<DerivedMemberKey, DerivedEvidenceMemberV1>,
+        extension: DerivedEvidenceDeltaV1,
+    ) {
+        for record in extension.records {
+            records.insert(
+                (record.evidence_kind(), record.first_occurrence_id().clone()),
+                record,
+            );
+        }
+        for (kind, first, member) in extension.members {
+            members.insert((kind, first, member.ordinal), member);
+        }
+    }
+
+    fn tail_of(
+        records: &BTreeMap<DerivedEvidenceKey, SessionDerivedEvidenceRecordV1>,
+        last: &MessageOccurrenceIdV1,
+    ) -> DerivedEvidenceTailV1 {
+        let find = |kind| {
+            records
+                .values()
+                .find(|record| {
+                    record.evidence_kind() == kind && record.last_occurrence_id() == last
+                })
+                .unwrap()
+                .clone()
+        };
+        DerivedEvidenceTailV1 {
+            burst: find(DerivedEvidenceKindV1::Burst),
+            span: find(DerivedEvidenceKindV1::Span),
+        }
+    }
+
+    #[test]
+    fn extending_a_tail_one_occurrence_at_a_time_matches_the_from_scratch_derivation() {
+        let session_id = SessionId::new("session.derived.extension").unwrap();
+        let policy = SessionDerivedEvidencePolicyV1 {
+            span_max_members: 3,
+        };
+        let threads = [
+            "a", "a", "a", "a", "a", "b", "b", "a", "c", "c", "c", "c", "c", "c", "c",
+        ];
+        let occurrences = threads
+            .iter()
+            .enumerate()
+            .map(|(index, thread)| occurrence(u64::try_from(index).unwrap(), thread))
+            .collect::<Vec<_>>();
+
+        let mut expected_records = BTreeMap::new();
+        let mut expected_members = BTreeMap::new();
+        apply(
+            &mut expected_records,
+            &mut expected_members,
+            derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap(),
+        );
+
+        let mut records = BTreeMap::new();
+        let mut members = BTreeMap::new();
+        for (index, next) in occurrences.iter().enumerate() {
+            let tail = index
+                .checked_sub(1)
+                .map(|previous| tail_of(&records, &occurrences[previous].occurrence_id));
+            let extension = extend_session_evidence(
+                &session_id,
+                tail.as_ref(),
+                std::slice::from_ref(next),
+                &policy,
+            )
+            .unwrap();
+            assert!(
+                extension.records.len() <= 2 && extension.members.len() <= 4,
+                "one appended occurrence rewrites only the tail burst and span"
+            );
+            apply(&mut records, &mut members, extension);
+        }
+
+        assert_eq!(records, expected_records);
+        assert_eq!(members, expected_members);
+        let mut bursts = expected_records
+            .values()
+            .filter(|record| record.evidence_kind() == DerivedEvidenceKindV1::Burst)
+            .map(SessionDerivedEvidenceRecordV1::member_count)
+            .collect::<Vec<_>>();
+        bursts.sort_unstable();
+        assert_eq!(bursts, [1, 2, 5, 7]);
+        let spans = expected_records
+            .values()
+            .filter(|record| record.evidence_kind() == DerivedEvidenceKindV1::Span)
+            .count();
+        assert_eq!(spans, 7);
+        assert_eq!(
+            members
+                .values()
+                .filter(|member| member.member_role == DerivedEvidenceMemberRoleV1::Last)
+                .count(),
+            8
+        );
     }
 }

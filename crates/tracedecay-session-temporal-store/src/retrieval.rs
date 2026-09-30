@@ -666,19 +666,19 @@ impl<'a> SessionTemporalReadPort<'a> {
                  FROM session_derived_evidence evidence
                  JOIN session_derived_evidence_members member
                    ON member.session_id = evidence.session_id
-                  AND member.generation = evidence.generation
+                  AND +member.generation <= ?4
                   AND member.evidence_kind = evidence.evidence_kind
-                  AND member.evidence_id = evidence.evidence_id
+                  AND member.first_occurrence_id = evidence.first_occurrence_id
                  JOIN session_occurrences occurrence
                    ON occurrence.session_id = member.session_id
-                  AND occurrence.generation = member.generation
+                  AND +occurrence.generation <= ?4
                   AND occurrence.occurrence_id = member.occurrence_id
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
                  WHERE evidence.session_id = ?1
                    AND evidence.evidence_id = ?2
                    AND evidence.retrieval_anchor_id = ?3
-                   AND evidence.generation = ?4
+                   AND +evidence.generation <= ?4
                  ORDER BY member.ordinal
                  LIMIT 257",
                 common_values(),
@@ -703,7 +703,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                  WHERE occurrence.session_id = ?1
                    AND occurrence.occurrence_id = ?2
                    AND occurrence.retrieval_anchor_id = ?3
-                   AND occurrence.generation = ?4
+                   AND +occurrence.generation <= ?4
                  LIMIT 2",
                 common_values(),
             ),
@@ -795,7 +795,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                  JOIN session_occurrences occurrence
                    ON occurrence.retrieval_anchor_id = CAST(retained.value AS TEXT)
                   AND occurrence.session_id = ?1
-                  AND occurrence.generation = ?3
+                  AND +occurrence.generation <= ?3
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
                  ORDER BY CAST(retained.key AS INTEGER)
@@ -867,7 +867,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                  FROM session_temporal_generations frozen
                  JOIN session_occurrences occurrence
                    ON occurrence.session_id = frozen.session_id
-                  AND occurrence.generation = frozen.generation
+                  AND +occurrence.generation <= frozen.generation
                  JOIN retrieval_anchors authority_anchor
                    ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
                  JOIN sessions authority_session

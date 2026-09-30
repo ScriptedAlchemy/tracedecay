@@ -87,8 +87,6 @@ pub enum SessionContractError {
     DerivedEvidenceSessionMismatch,
     #[error("derived evidence authority must be derived_projection")]
     DerivedEvidenceAuthorityMismatch,
-    #[error("derived evidence member digest does not match membership")]
-    DerivedEvidenceMemberDigestMismatch,
 }
 
 macro_rules! session_string_id {

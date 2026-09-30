@@ -154,11 +154,11 @@ impl RootAuthorityChannel {
                       AND evidence.evidence_id = input.source_id
                      JOIN session_temporal_generations AS generation
                        ON generation.session_id = evidence.session_id
-                      AND generation.generation = evidence.generation
+                      AND +evidence.generation <= generation.generation
                       AND generation.state = 'active'
                      JOIN session_occurrences AS first_occurrence
                        ON first_occurrence.session_id = evidence.session_id
-                      AND first_occurrence.generation = evidence.generation
+                      AND +first_occurrence.generation <= generation.generation
                       AND first_occurrence.occurrence_id = evidence.first_occurrence_id
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = evidence.session_id
@@ -182,7 +182,7 @@ impl RootAuthorityChannel {
                       AND occurrence.occurrence_id = input.source_id
                      JOIN session_temporal_generations AS generation
                        ON generation.session_id = occurrence.session_id
-                      AND generation.generation = occurrence.generation
+                      AND +occurrence.generation <= generation.generation
                       AND generation.state = 'active'
                      JOIN sessions AS authority_session
                        ON authority_session.session_id = occurrence.session_id

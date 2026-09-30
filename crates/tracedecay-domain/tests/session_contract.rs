@@ -1296,18 +1296,22 @@ fn derived_evidence_ids_and_manifests_are_stable_and_reject_malformed_inputs() {
     let second =
         derive_session_evidence_from_occurrences(&session_id, &occurrences, &policy).unwrap();
     assert_eq!(first, second);
-    assert!(
-        first
+    let kinds = first
+        .records
+        .iter()
+        .map(|record| (record.evidence_kind(), record.member_count()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds
             .iter()
-            .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Burst)
+            .filter(|(kind, _)| *kind == DerivedEvidenceKindV1::Burst)
+            .count(),
+        1
     );
-    assert!(
-        first
-            .iter()
-            .any(|record| record.evidence_kind() == DerivedEvidenceKindV1::Span)
-    );
-    let encoded = serde_json::to_value(&first).unwrap();
-    assert_eq!(encoded, serde_json::to_value(&second).unwrap());
+    assert!(kinds.iter().all(|(_, members)| *members == 3));
+    assert_eq!(first.members.len(), 6);
+    let encoded = serde_json::to_value(&first.records).unwrap();
+    assert_eq!(encoded, serde_json::to_value(&second.records).unwrap());
 
     let mut disordered = occurrences.clone();
     disordered.swap(0, 2);
