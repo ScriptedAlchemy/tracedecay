@@ -1481,6 +1481,7 @@ impl tracedecay_sessions::serving::SessionProjectionServingStatusPort for FixedR
             backlog: 0,
             blocker: None,
             retry_class: None,
+            convergence: tracedecay_sessions::serving::SessionConvergenceStatus::unavailable(),
         }
     }
 }

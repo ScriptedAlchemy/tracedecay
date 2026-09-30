@@ -114,7 +114,7 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::{SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort};
     use tracedecay_sessions::serving::{
-        SessionProjectionServingState, SessionProjectionServingStatus,
+        SessionConvergenceStatus, SessionProjectionServingState, SessionProjectionServingStatus,
         SessionProjectionServingStatusPort,
     };
 
@@ -166,6 +166,7 @@ mod tests {
                 backlog: 0,
                 blocker: None,
                 retry_class: None,
+                convergence: SessionConvergenceStatus::unavailable(),
             }
         }
     }

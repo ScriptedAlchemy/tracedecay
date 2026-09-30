@@ -196,6 +196,10 @@ pub struct LcmStatusResultV1 {
     pub deep: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lcm: Option<LcmStatusV1>,
+    /// The store's refresh-worker serving and convergence state. Absent when
+    /// no refresh worker serves the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<LcmDoctorProjectionV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +285,36 @@ pub struct LcmDoctorProjectionV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub worker: super::RetrievalWorkerStatusV1,
+    pub convergence: LcmConvergenceV1,
+}
+
+/// Whether historical discovery, projection publication, and summary
+/// convergence have all settled for everything the store's sources hold.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmConvergenceStateV1 {
+    /// A stage still owes committed work.
+    Converging,
+    /// The worker committed the last owed item and has nothing pending.
+    Converged,
+    /// Every runnable stage settled, but historical discovery is blocked.
+    Blocked,
+    /// No worker is serving the store.
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LcmConvergenceV1 {
+    pub state: LcmConvergenceStateV1,
+    /// The historical discovery blocker when `state` is `blocked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Convergence events this worker has published; a larger value is a
+    /// newer event.
+    pub epoch: u64,
+    /// When the latest convergence event was published.
+    pub converged_at_unix_micros: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
