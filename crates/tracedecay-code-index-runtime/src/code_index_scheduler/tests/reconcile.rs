@@ -59,7 +59,7 @@ use crate::{
         CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
         CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
-        SharedCodeIndexBytePoolV1,
+        RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
@@ -1190,7 +1190,10 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
     let remount_root = canonical_existing_identity(fixture.path()).expect("canonical remount root");
     let (recovery_entered, release_successor) = restarted
-        .pause_next_retained_graph_recovery_before_successor(remount_root.clone())
+        .pause_next_retained_graph_recovery(
+            remount_root.clone(),
+            RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+        )
         .await;
     restarted
         .mount_worktree(

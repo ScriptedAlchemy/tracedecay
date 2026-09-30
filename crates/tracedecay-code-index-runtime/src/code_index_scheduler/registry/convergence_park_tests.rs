@@ -40,8 +40,8 @@ use super::super::graph_activation::{
     install_injected_activation_gate, set_injected_activation_failures,
     set_injected_publication_deadline,
 };
-use super::super::tests::{OwnerSignals, application_context};
-use super::{CodeIndexRetainedSeatWaitV1, CodeIndexSchedulerRegistryV1};
+use super::super::tests::{OwnerSignals, application_context, query_authority};
+use super::{CodeIndexRetainedTextServingWaitV1, CodeIndexSchedulerRegistryV1};
 use crate::project_reads::project_code_graph_projection_read_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -654,11 +654,12 @@ async fn progress_names_graph_publication_until_the_graph_seats() {
     fixture.registry.shutdown().await;
 }
 
-/// A read waiting for a retained generation to seat answers warming while
-/// that generation's graph is being published, instead of spending its
-/// deadline on a corpus-sized build that the wait cannot shorten.
+/// A search waiting for a retained generation's text serving answers from the
+/// text owners while that generation's graph is still being published: the
+/// publication is corpus-sized work the wait neither covers nor needs. It
+/// answers warming only while the query authority it also needs is missing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_seat_wait_answers_warming_while_the_graph_publishes() {
+async fn a_text_serving_wait_answers_while_the_graph_publishes() {
     let (fixture, admission) =
         Fixture::mount_with_poisoned_artifacts_root_held("project.code-index-tests", |_| {}).await;
     let scope = fixture
@@ -679,17 +680,56 @@ async fn a_seat_wait_answers_warming_while_the_graph_publishes() {
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
     );
-    let answered = tokio::time::timeout(
+    let without_authority = tokio::time::timeout(
         CONVERGENCE_DEADLINE,
-        fixture.registry.wait_for_retained_graph_seat(
+        fixture.registry.wait_for_retained_text_serving(
+            &fixture.project,
+            context.scope(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("the wait answers at its own budget");
+    assert_eq!(
+        without_authority,
+        CodeIndexRetainedTextServingWaitV1::Warming
+    );
+
+    let text = fixture
+        .registry
+        .retained_text_owner_for_root(&fixture.project)
+        .await
+        .expect("published text owner");
+    fixture
+        .registry
+        .mount_query_authority(
+            &fixture.project,
+            context.scope(),
+            query_authority(text.metadata().manifest().privacy_domain.clone()),
+        )
+        .await
+        .expect("mount query authority");
+    let serving = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_text_serving(
             &fixture.project,
             context.scope(),
             Duration::from_mins(10),
         ),
     )
     .await
-    .expect("the seat wait answers while the graph publication is held");
-    assert_eq!(answered, CodeIndexRetainedSeatWaitV1::Warming);
+    .expect("the wait answers while the graph publication is held");
+    assert_eq!(serving, CodeIndexRetainedTextServingWaitV1::Serving);
+    assert_eq!(
+        fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("freshness")
+            .code_graph_serving,
+        Some(CodeGraphServingReadinessV1::Pending),
+        "the graph is still unseated when text serving answers"
+    );
 
     gate.release();
     fixture.registry.shutdown().await;

@@ -2448,7 +2448,9 @@ fn hydrate_graph_relation_records(
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
     match reason {
-        RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
+        RetrievalFailure::AuthorityUnavailable { .. } | RetrievalFailure::GraphWarming => {
+            OmissionReason::Unavailable
+        }
         RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
         RetrievalFailure::StaleSource => OmissionReason::Stale,
         RetrievalFailure::CandidateSourcesPruned { .. } => OmissionReason::Budget,
@@ -2593,6 +2595,7 @@ where
                     RetrievalPortOutcome::Failed(evidence)
                 }
                 RetrievalFailure::AuthorityUnavailable { .. }
+                | RetrievalFailure::GraphWarming
                 | RetrievalFailure::IncompatibleProjection { .. }
                 | RetrievalFailure::StaleSource => RetrievalPortOutcome::Unavailable(evidence),
             }

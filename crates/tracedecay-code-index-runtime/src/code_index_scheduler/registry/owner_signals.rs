@@ -15,7 +15,7 @@ use tracedecay_contracts::ResolvedScope;
 
 use super::{
     CodeIndexCadenceTriggerV1, CodeIndexOwnerActivityV1, CodeIndexReconcileAdmissionV1,
-    CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1, unique_mounted_for_scope,
+    CodeIndexSchedulerRegistryV1, unique_mounted_for_scope,
 };
 use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
 use crate::code_index_scheduler::{
@@ -32,17 +32,18 @@ enum CodeIndexFreshSweepRefusedV1 {
     SweepFailed,
 }
 
-/// How a read's wait for a restart's retained generation to seat ended.
+/// How a search's wait for a restart's retained text serving ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CodeIndexRetainedSeatWaitV1 {
-    /// A published generation's code graph serves.
-    Seated,
+pub enum CodeIndexRetainedTextServingWaitV1 {
+    /// The retained generation's exact and lexical owners serve under a
+    /// mounted query authority.
+    Serving,
     /// The mounted worktree has no durable publication: a first index, with
     /// nothing retained to wait for.
     Unpublished,
-    /// The budget elapsed while the retained generation was still seating.
+    /// The budget elapsed while the retained text owners were still opening.
     Warming,
-    /// Waiting cannot seat it: convergence parked, graph serving refused,
+    /// Waiting cannot make them serve: the publication authority is corrupt,
     /// the publication read failed, or the registry closed.
     Unreachable,
 }
@@ -368,111 +369,74 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// Wait, for at most `budget`, until the generation a restart retained
-    /// for `project_root` serves graph and search reads for `scope` again.
+    /// for `project_root` serves exact and lexical search for `scope` again.
     ///
-    /// A restarted worktree answers reads only after its worker re-seats the
-    /// durable publication, and a read that arrives first would otherwise see
-    /// no authority at all. The wait follows the mount, then reads the
-    /// durable publication pointer once: without one there is nothing
-    /// retained to seat, so a first index returns at once instead of waiting
-    /// out its build.
-    pub async fn wait_for_retained_graph_seat(
+    /// A restarted worktree answers search only after its worker reopens the
+    /// retained text owners and project open mounts the query authority, and
+    /// a search that arrives first would otherwise see no authority at all.
+    /// The wait follows the mount, then reads the durable publication pointer
+    /// once: without one there is nothing retained to reopen, so a first
+    /// index returns at once instead of waiting out its build. Neither input
+    /// depends on the code graph, so the wait never covers graph-head
+    /// recovery or a graph publication; search reports that lane warming.
+    pub async fn wait_for_retained_text_serving(
         &self,
         project_root: &Path,
         scope: &ResolvedScope,
         budget: Duration,
-    ) -> CodeIndexRetainedSeatWaitV1 {
+    ) -> CodeIndexRetainedTextServingWaitV1 {
         let deadline = tokio::time::Instant::now() + budget;
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         loop {
             match self.has_active_publication(project_root).await {
                 Some(Ok(true)) => break,
-                Some(Ok(false)) => return CodeIndexRetainedSeatWaitV1::Unpublished,
-                Some(Err(_)) => return CodeIndexRetainedSeatWaitV1::Unreachable,
+                Some(Ok(false)) => return CodeIndexRetainedTextServingWaitV1::Unpublished,
+                Some(Err(_)) => return CodeIndexRetainedTextServingWaitV1::Unreachable,
                 None => {}
             }
             match tokio::time::timeout_at(deadline, signals.changed()).await {
-                Err(_) => return CodeIndexRetainedSeatWaitV1::Warming,
+                Err(_) => return CodeIndexRetainedTextServingWaitV1::Warming,
                 Ok(Err(CodeIndexOwnerSignalsClosedV1)) => {
-                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                    return CodeIndexRetainedTextServingWaitV1::Unreachable;
                 }
                 Ok(Ok(())) => {}
             }
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        // A retained seat that recovers its verified head serves within
-        // moments. One whose graph is being built serves only after
-        // corpus-sized work, so the read answers warming instead of spending
-        // its deadline on that build.
-        tokio::select! {
-            biased;
-            read = self.wait_for_readiness(
-                project_root,
-                CodeIndexReadinessTargetV1::GraphReady,
-                remaining,
-            ) => match read {
-                Ok(CodeIndexReadinessWaitReadV1::Reached { .. }) => {}
-                Ok(CodeIndexReadinessWaitReadV1::TimedOut { .. }) => {
-                    return CodeIndexRetainedSeatWaitV1::Warming;
-                }
-                Ok(CodeIndexReadinessWaitReadV1::Unreachable { .. }) | Err(_) => {
-                    return CodeIndexRetainedSeatWaitV1::Unreachable;
-                }
-            },
-            () = self.graph_publication_in_progress(project_root) => {
-                return CodeIndexRetainedSeatWaitV1::Warming;
-            }
-        }
-        // The graph seats before the retained text owners reopen their query
-        // owners, and project open installs the query authority after that
-        // seat; search serves only once both are in place.
         let mut reconcile_requested = false;
         loop {
-            if self
-                .latest_text_serving_freshness_for_scope(scope)
-                .await
-                .is_some()
-                && (self.query_authority_for_scope(scope).await.is_some()
-                    || matches!(
-                        self.mount_query_authority_from_project_peer(project_root, scope)
-                            .await,
-                        Ok(true)
-                    ))
-            {
-                return CodeIndexRetainedSeatWaitV1::Seated;
+            if self.text_serves_search(project_root, scope).await {
+                return CodeIndexRetainedTextServingWaitV1::Serving;
             }
             if !reconcile_requested {
                 reconcile_requested = true;
                 if let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) =
                     self.request_query_background_reconcile(scope).await
                 {
-                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                    return CodeIndexRetainedTextServingWaitV1::Unreachable;
                 }
             }
             match tokio::time::timeout_at(deadline, signals.changed()).await {
-                Err(_) => return CodeIndexRetainedSeatWaitV1::Warming,
+                Err(_) => return CodeIndexRetainedTextServingWaitV1::Warming,
                 Ok(Err(CodeIndexOwnerSignalsClosedV1)) => {
-                    return CodeIndexRetainedSeatWaitV1::Unreachable;
+                    return CodeIndexRetainedTextServingWaitV1::Unreachable;
                 }
                 Ok(Ok(())) => {}
             }
         }
     }
 
-    /// Resolves once `project_root`'s worker is building a sealed
-    /// generation's code graph; never resolves while it is not.
-    async fn graph_publication_in_progress(&self, project_root: &Path) {
-        let Some(mut activity) = self.subscribe_owner_activity(project_root).await else {
-            return std::future::pending().await;
-        };
-        loop {
-            if activity.worker_phase() == CodeIndexWorkerPhaseV1::PublishingGraph {
-                return;
-            }
-            if activity.changed().await.is_err() {
-                return std::future::pending().await;
-            }
-        }
+    /// Whether `scope`'s text owners serve exact and lexical search under a
+    /// query authority, its own or one reused from a project peer.
+    async fn text_serves_search(&self, project_root: &Path, scope: &ResolvedScope) -> bool {
+        self.latest_text_serving_freshness_for_scope(scope)
+            .await
+            .is_some()
+            && (self.query_authority_for_scope(scope).await.is_some()
+                || matches!(
+                    self.mount_query_authority_from_project_peer(project_root, scope)
+                        .await,
+                    Ok(true)
+                ))
     }
 
     /// Whether the mounted worktree's durable publication names a sealed
