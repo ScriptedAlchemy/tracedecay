@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
+use crate::registered::RefusedAuthorityV1;
 use crate::schema_contract::{
     starts_with_ignore_ascii_case, validate_session_graph_publication_schema_contract,
     validate_session_temporal_schema_contract,
@@ -29,34 +30,48 @@ const TEMPORAL_FTS_SHADOW_TABLES: &[&str] = &[
 
 /// Read-only admission result for the final session-temporal schema.
 ///
-/// Non-final shapes, including every earlier version, are not variants:
-/// admission returns a typed reset before any conversion.
+/// Non-final shapes holding session rows are not variants: admission refuses
+/// them with a typed reset before any conversion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionTemporalSchemaAdmission {
     /// The persisted schema and its objects exactly match the final contract.
     Current,
     /// The registered store is proven empty and may receive the final contract.
     Fresh,
+    /// An earlier version whose authority holds no rows, as in a store that
+    /// installs every registered schema but never records sessions. Nothing
+    /// is converted: its objects are dropped and the final contract installed.
+    EmptyEarlier,
 }
 
 /// Classifies a store without changing its schema or retained session state.
+/// Another recorded version over session rows is the scoped refusal of the
+/// authority; every other non-final shape is a hard typed reset.
 #[hotpath::measure(future = true, label = "session_temporal.schema.admit")]
 pub(crate) async fn require_admissible_session_temporal_schema(
     conn: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
-) -> tracedecay_domain::errors::Result<SessionTemporalSchemaAdmission> {
+) -> tracedecay_domain::errors::Result<Result<SessionTemporalSchemaAdmission, RefusedAuthorityV1>> {
     let version = schema_version(conn)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
     match version {
         Some(SESSION_TEMPORAL_SCHEMA_VERSION) => {
             validate_current_session_temporal_schema(conn).await?;
-            Ok(SessionTemporalSchemaAdmission::Current)
+            Ok(Ok(SessionTemporalSchemaAdmission::Current))
         }
-        Some(version) => Err(session_temporal_reset_required(format!(
-            "persisted schema version {version} does not match final version {SESSION_TEMPORAL_SCHEMA_VERSION}"
-        ))),
-        None if fresh_store.is_some() => Ok(SessionTemporalSchemaAdmission::Fresh),
+        Some(version)
+            if version < SESSION_TEMPORAL_SCHEMA_VERSION
+                && authority_holds_no_rows(conn).await? =>
+        {
+            Ok(Ok(SessionTemporalSchemaAdmission::EmptyEarlier))
+        }
+        Some(version) => Ok(Err(RefusedAuthorityV1::Version {
+            component: SESSION_TEMPORAL_AUTHORITY,
+            found_version: Some(version),
+            required_version: SESSION_TEMPORAL_SCHEMA_VERSION,
+        })),
+        None if fresh_store.is_some() => Ok(Ok(SessionTemporalSchemaAdmission::Fresh)),
         None => Err(session_temporal_reset_required(
             "a nonempty store does not carry the final schema marker",
         )),
@@ -217,6 +232,50 @@ pub(super) async fn validate_temporal_fts_match(
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     }
     Ok(())
+}
+
+/// Whether every row table of the authority is absent or empty. FTS tables
+/// index their content tables, and the version marker is not session state.
+pub(super) async fn authority_holds_no_rows(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<bool> {
+    let mut existing = BTreeSet::new();
+    let mut tables = conn
+        .query("SELECT name FROM sqlite_master WHERE type = 'table'", ())
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    while let Some(row) = tables
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        existing.insert(
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        );
+    }
+    drop(tables);
+    for (table, _) in TEMPORAL_TABLE_COLUMNS {
+        if *table == "session_temporal_schema_migrations"
+            || table.ends_with("_fts")
+            || !existing.contains(*table)
+        {
+            continue;
+        }
+        let mut rows = conn
+            .query(&format!("SELECT 1 FROM {table} LIMIT 1"), ())
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn schema_version(

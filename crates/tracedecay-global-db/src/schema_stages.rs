@@ -455,10 +455,11 @@ async fn classify_registered_schema_authorities(
     )
     .await
     .map_err(surface(refused_lcm))?;
+    let refused = refused_lcm.or(temporal_admission.err());
     let workflow_admission = inspect_workflow_schema_for_admission(connection)
         .await
-        .map_err(surface(refused_lcm))?;
-    let refused = refused_lcm.or(workflow_admission.err());
+        .map_err(surface(refused))?;
+    let refused = refused.or(workflow_admission.err());
     let refused_git_correlation = git_correlation_schema_refusal(connection)
         .await
         .map_err(surface(refused))?;
@@ -481,15 +482,15 @@ async fn classify_registered_schema_authorities(
             ),
         ));
     }
-    Ok(match (refused, workflow_admission) {
-        (None, Ok(workflow_admission)) => {
+    Ok(match (refused, temporal_admission, workflow_admission) {
+        (None, Ok(temporal_admission), Ok(workflow_admission)) => {
             RegisteredSchemaAdmission::Admissible(RegisteredSchemaAdmissionClassification {
                 configuration_fresh,
                 temporal_admission,
                 workflow_admission,
             })
         }
-        (Some(refused), _) | (None, Err(refused)) => {
+        (Some(refused), _, _) | (None, Err(refused), _) | (None, _, Err(refused)) => {
             RegisteredSchemaAdmission::SessionAuthorityRefused(refused)
         }
     })
@@ -924,6 +925,10 @@ async fn install_registered_schema_stage_sequence(
     ensure_authority_audit_checkpoint_schema(transaction).await?;
     match temporal_admission {
         session_temporal_schema::SessionTemporalSchemaAdmission::Fresh => {
+            session_temporal_schema::install_session_temporal_schema(transaction).await?;
+        }
+        session_temporal_schema::SessionTemporalSchemaAdmission::EmptyEarlier => {
+            session_temporal_schema::drop_empty_session_temporal_schema(transaction).await?;
             session_temporal_schema::install_session_temporal_schema(transaction).await?;
         }
         session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}

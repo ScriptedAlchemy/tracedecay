@@ -30,6 +30,24 @@ async fn schema_object_exists(db_path: &Path, object_type: &str, name: &str) -> 
     rows.next().await.unwrap().is_some()
 }
 
+/// Another recorded version refuses session features only: the store's other
+/// authorities stay admissible and nothing is converged.
+async fn assert_session_temporal_version_refused(db_path: &Path, found_version: i64) {
+    let (lease, owner) =
+        open_registered_test_database_fixture(db_path, TestDatabaseRuntimeScope::ProfileSessions)
+            .await
+            .expect("the store's other authorities stay admissible");
+    for refusal in [lease.reset_required(), owner.reset_required()] {
+        assert_eq!(
+            refusal.map(|error| error.to_string()),
+            Some(format!(
+                "session temporal profile schema {found_version} is incompatible with required \
+                 schema 7; reset the profile"
+            ))
+        );
+    }
+}
+
 #[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();
@@ -227,6 +245,9 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
          CREATE TRIGGER session_refresh_progress_insert_guard_v1
          BEFORE INSERT ON session_refresh_progress BEGIN SELECT 1; END;
+         INSERT INTO session_temporal_generations (
+             session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES ('session-a', 1, 'building', '{}', 1);
          UPDATE session_temporal_schema_migrations
          SET version = 2
          WHERE name = 'session-temporal';",
@@ -238,20 +259,67 @@ async fn temporal_schema_lower_marker_requires_reset_without_repairing_guards() 
     let stale_guard =
         normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1").await;
 
-    let error = match open_global_db(&db_path).await {
-        Ok(_) => panic!("a lower temporal marker must not be upgraded"),
-        Err(error) => error,
-    };
-    let (authority, reason) = error
-        .reset_required_context()
-        .expect("a lower marker must return typed reset-required");
-    assert_eq!(authority, "session temporal");
-    assert!(reason.contains("version 2"), "unexpected reason: {reason}");
+    assert_session_temporal_version_refused(&db_path, 2).await;
     assert_eq!(temporal_schema_version(&db_path).await, 2);
     assert_eq!(
         normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1").await,
         stale_guard,
         "rejected lower-version schema must not have its trigger repaired"
+    );
+}
+
+#[tokio::test]
+async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_contract() {
+    let tmp = TempDir::new().unwrap();
+    let fresh_path = tmp.path().join("fresh").join("sessions.db");
+    drop(
+        open_global_db(&fresh_path)
+            .await
+            .expect("fresh store should receive the final temporal schema"),
+    );
+    let final_catalog = temporal_schema_object_catalog(&fresh_path).await;
+    let final_guard =
+        normalized_trigger_sql(&fresh_path, "session_refresh_progress_insert_guard_v1").await;
+
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    drop(
+        open_global_db(&db_path)
+            .await
+            .expect("temporal schema initialization should not error"),
+    );
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "DROP TRIGGER session_refresh_progress_insert_guard_v1;
+         CREATE TRIGGER session_refresh_progress_insert_guard_v1
+         BEFORE INSERT ON session_refresh_progress BEGIN SELECT 1; END;
+         DROP INDEX idx_session_occurrences_introduced;
+         UPDATE session_temporal_schema_migrations
+         SET version = 6
+         WHERE name = 'session-temporal';",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+    assert!(
+        !schema_object_exists(&db_path, "index", "idx_session_occurrences_introduced").await,
+        "the earlier shape lacks the introduced-row index"
+    );
+
+    drop(
+        open_global_db(&db_path)
+            .await
+            .expect("an earlier authority holding no rows is replaced, not refused"),
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 7);
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        final_catalog
+    );
+    assert_eq!(
+        normalized_trigger_sql(&db_path, "session_refresh_progress_insert_guard_v1").await,
+        final_guard
     );
 }
 
@@ -783,18 +851,7 @@ async fn temporal_schema_refuses_future_version_without_mutation() {
 
     let restart_path = tmp.path().join(".tracedecay").join("future.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let error = match open_global_db(&restart_path).await {
-        Ok(_) => panic!("a newer temporal schema must be refused instead of treated as current"),
-        Err(error) => error,
-    };
-    let (authority, reason) = error
-        .reset_required_context()
-        .expect("a newer temporal marker must return typed reset-required");
-    assert_eq!(authority, "session temporal");
-    assert!(
-        reason.contains(&format!("version {future_version}")),
-        "unexpected reason: {reason}"
-    );
+    assert_session_temporal_version_refused(&restart_path, future_version).await;
     assert_eq!(temporal_schema_version(&restart_path).await, future_version);
     assert_eq!(
         temporal_schema_object_catalog(&restart_path).await,

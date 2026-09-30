@@ -9,7 +9,9 @@ mod admission;
 pub(crate) use admission::{
     SessionTemporalSchemaAdmission, require_admissible_session_temporal_schema,
 };
-use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
+use admission::{
+    authority_holds_no_rows, validate_temporal_fts_contracts, validate_temporal_fts_match,
+};
 
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
@@ -644,6 +646,29 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 ";
 
 pub(crate) use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
+
+/// Drops an earlier-version authority admission proved to hold no rows, so
+/// [`install_session_temporal_schema`] can install the final contract. Its
+/// triggers and indexes go with their tables.
+pub(crate) async fn drop_empty_session_temporal_schema(
+    conn: &impl Executor,
+) -> tracedecay_domain::errors::Result<()> {
+    if !authority_holds_no_rows(conn).await? {
+        return Err(admission::session_temporal_reset_required(
+            "an earlier schema version gained rows before its empty authority was replaced",
+        ));
+    }
+    let (fts, tables): (Vec<_>, Vec<_>) = TEMPORAL_TABLE_COLUMNS
+        .iter()
+        .map(|(table, _)| *table)
+        .partition(|table| table.ends_with("_fts"));
+    for table in fts.into_iter().chain(tables.into_iter().rev()) {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
+    Ok(())
+}
 
 /// Installs the final schema into a store already proven fresh by admission.
 #[hotpath::measure(future = true, label = "session_temporal.schema.install")]
