@@ -42,6 +42,19 @@ This investigation measured what calling it would buy.
 > the defect only shows at generation scale. This document remains the
 > measurement record for the whole-database compaction that was measured and
 > rejected.
+>
+> **Refreshes seal as layers (graph format 7):** a small refresh no longer
+> re-encodes its whole generation. Its sealed store is a delta container
+> over the last cold build's container, which it references by hard link,
+> plus the base rows it hides (`src/sealed_layer.rs`). The recovered digest
+> is an order-independent sum of row digests, so a layer's digest is the
+> base's sum minus the rows it shadows plus its own, identical to a cold
+> build of the same rows. The code index records every file's resolution
+> inputs beside each cold build, so a refresh decodes only the changed
+> files' segments and reruns the exact cold resolution over the rest. A
+> refresh that changes more than an eighth of the files seals cold and
+> becomes the next base. Stores sealed under format 6 are superseded and
+> rebuild cold; no migration exists.
 
 ## Verdict
 

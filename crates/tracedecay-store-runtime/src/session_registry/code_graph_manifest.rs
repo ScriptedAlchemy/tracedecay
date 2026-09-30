@@ -6,7 +6,8 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionError, SealedCodeGraphRowsError, build_sealed_code_graph_rows,
+    CodeGraphLayeredReportV1, CodeGraphProjectionError, SealedCodeGraphRowsError,
+    build_layered_code_graph_rows, build_sealed_code_graph_rows,
 };
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
@@ -19,7 +20,8 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, sha256_hex_suffix};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphGenerationRows, GraphLayeredRowSpill, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphSealedBaseAbsenceV1,
     SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
 };
 use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
@@ -409,18 +411,18 @@ fn read_verified_seal_manifest(
     Ok(manifest)
 }
 
-/// Builds the code graph of the authenticated seal `manifest` into `spill`,
-/// streaming its file segments from `segment_roots` one window at a time.
-#[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
-fn spill_verified_seal_graph(
-    source: &SealedGenerationFileWindowsV1,
+/// Runs a graph build over `source`'s file segments, read from
+/// `segment_roots`, and classifies its failure. A cancellation or deadline
+/// the segment reader observed is the build's outcome, whatever error the
+/// build reported after it.
+fn with_verified_segments<T>(
     sealed_state_digest: &ManifestDigest,
     segment_roots: &[PathBuf],
-    projection: GraphProjectionIdentity,
-    projector_revision: &GraphProjectorRevision,
-    spill: GraphGenerationRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<SpilledGraphGeneration, GraphDbError> {
+    build: impl FnOnce(
+        &mut tracedecay_code_index::production::SealedGenerationSegmentReaderV1<'_>,
+    ) -> Result<T, SealedCodeGraphRowsError>,
+) -> Result<T, GraphDbError> {
     let mut interruption = None;
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
@@ -440,14 +442,7 @@ fn spill_verified_seal_graph(
             buffer,
         )
     };
-    let built = build_sealed_code_graph_rows(
-        projection,
-        source,
-        &mut read_segment,
-        projector_revision,
-        spill,
-        check,
-    );
+    let built = build(&mut read_segment);
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
@@ -458,6 +453,30 @@ fn spill_verified_seal_graph(
         SealedCodeGraphRowsError::Projection(error) => {
             classify_sealed_projection_build_error(error)
         }
+    })
+}
+
+/// Builds the code graph of the authenticated seal `manifest` into `spill`,
+/// streaming its file segments from `segment_roots` one window at a time.
+#[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
+fn spill_verified_seal_graph(
+    source: &SealedGenerationFileWindowsV1,
+    sealed_state_digest: &ManifestDigest,
+    segment_roots: &[PathBuf],
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    spill: GraphGenerationRowSpill,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SpilledGraphGeneration, GraphDbError> {
+    with_verified_segments(sealed_state_digest, segment_roots, check, |read_segment| {
+        build_sealed_code_graph_rows(
+            projection,
+            source,
+            read_segment,
+            projector_revision,
+            spill,
+            check,
+        )
     })
 }
 
@@ -482,6 +501,7 @@ fn open_verified_seal(
 /// Builds the code graph of the seal `sealed_state_digest` names, read from
 /// the canonical generations root or, once retention moved it, the replay
 /// pool, into `spill`. The seal must hold `generation`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spill_sealed_generation_graph_from_roots(
     generations_root: &std::path::Path,
@@ -524,6 +544,104 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
         spill,
         check,
     )
+}
+
+/// A layered row spill over a parent's sealed graph, or why it has none.
+pub(super) type LayeredRowSpillV1 =
+    Result<Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>, GraphDbError>;
+
+/// A seal's graph rows as its publication seals them: a delta over the
+/// sealed graph of the seal's parent code generation when `layered_spill`
+/// resolves one and the base's inputs admit it, the cold rows otherwise.
+///
+/// A layered attempt that fails for any reason but an interruption is
+/// reported and replaced by the cold build, which is the authority a
+/// layered generation must equal.
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.session_registry.seal.graph_rows")]
+pub(super) fn graph_rows_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    layered_spill: &dyn Fn(&tracedecay_domain::CodeGenerationId) -> LayeredRowSpillV1,
+    cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
+    let seal_file = format!("generation-{digest}.json");
+    let segments_root = code_generation_segments_root(
+        generations_root
+            .parent()
+            .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?,
+    );
+    let manifest = with_verified_seal_from_roots(
+        &generations_root.join(&seal_file),
+        &replay_root.join(&seal_file),
+        digest,
+        check,
+        read_verified_seal_manifest,
+    )?;
+    let (source, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
+    drop(manifest);
+    if source.generation_id() != generation {
+        return Err(GraphDbError::conflict("code_graph_manifest.graph_rows"));
+    }
+    let segment_roots = [segments_root];
+    if let Some(parent) = source.manifest().parent_generation.clone() {
+        let layered = layered_spill(&parent).and_then(|spill| match spill {
+            Ok(spill) => with_verified_segments(
+                &sealed_state_digest,
+                &segment_roots,
+                check,
+                |read_segment| {
+                    build_layered_code_graph_rows(
+                        projection.clone(),
+                        &source,
+                        read_segment,
+                        projector_revision,
+                        spill,
+                        check,
+                    )
+                },
+            )
+            .map(|built| built.map_err(|decline| format!("{decline:?}"))),
+            Err(absence) => Ok(Err(format!("{absence:?}"))),
+        });
+        match layered {
+            Ok(Ok(built)) => return Ok((built.generation.into(), Some(built.report))),
+            Ok(Err(reason)) => tracing::info!(
+                event = "code_graph_layered_refresh_declined",
+                generation = %generation,
+                parent = %parent,
+                reason = %reason,
+                "the refresh seals cold rather than as a delta over its parent's graph"
+            ),
+            Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                return Err(error);
+            }
+            Err(error) => tracing::warn!(
+                event = "code_graph_layered_refresh_unavailable",
+                generation = %generation,
+                parent = %parent,
+                error = %error,
+                "a layered graph refresh could not be built; sealing the generation cold"
+            ),
+        }
+    }
+    let spilled = spill_verified_seal_graph(
+        &source,
+        &sealed_state_digest,
+        &segment_roots,
+        projection,
+        projector_revision,
+        cold_spill()?,
+        check,
+    )?;
+    Ok((spilled.into(), None))
 }
 
 struct PinnedPartitionedSegmentV1 {

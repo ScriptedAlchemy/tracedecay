@@ -21,8 +21,8 @@ use crate::{GraphDbError, GraphNamespace};
 use super::{
     CheckedDigestWriter, CheckedVecWriter, GraphEntityRef, GraphGenerationManifestIdentity,
     GraphGenerationRelation, GraphProjectionIdentity, frame_length_headers,
-    physical_namespace_projection_map, recovered_entity_ref, write_canonical_frame,
-    write_digest_bytes, write_generation_identity_frames,
+    physical_namespace_projection_map, recovered_entity_ref, write_canonical_row_frame,
+    write_generation_identity_frames,
 };
 
 /// Rows per encode chunk. Sized so one chunk is a few milliseconds of decode
@@ -159,7 +159,7 @@ fn digest_rows_serial(
     for (sorted_identity, node) in entities {
         check()?;
         let entity = decode_sorted_entity(store, sorted_identity, *node)?;
-        write_canonical_frame(
+        write_canonical_row_frame(
             writer,
             canonical,
             "entity",
@@ -179,7 +179,7 @@ fn digest_rows_serial(
             &mut endpoints,
             &mut endpoint_refs,
         )?;
-        write_canonical_frame(
+        write_canonical_row_frame(
             writer,
             canonical,
             "relation",
@@ -292,7 +292,7 @@ fn digest_rows_parallel(
                 let mut start = 0usize;
                 for &end in &encoded.frame_ends {
                     check()?;
-                    write_digest_bytes(writer, &encoded.buffer[start..end])?;
+                    writer.add_row_frame(&[&encoded.buffer[start..end]])?;
                     start = end;
                 }
             }

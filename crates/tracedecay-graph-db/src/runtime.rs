@@ -99,6 +99,15 @@ pub(crate) struct Inner {
 /// activation, never on a request path.
 pub struct GraphServingEnginePin {
     inner: Arc<Inner>,
+    /// A layered store's base engine, pinned for as long as this one.
+    companion: Option<Box<GraphServingEnginePin>>,
+}
+
+impl GraphServingEnginePin {
+    pub(crate) fn with_companion(mut self, companion: GraphServingEnginePin) -> Self {
+        self.companion = Some(Box::new(companion));
+        self
+    }
 }
 
 impl Drop for GraphServingEnginePin {
@@ -1022,7 +1031,7 @@ impl GraphDb {
             .map(|mut sealed| std::mem::take(&mut *sealed))
             .unwrap_or_default();
         for store in sealed.into_values() {
-            let _ = store.database().close();
+            let _ = store.close();
         }
         if was_uncertain {
             Err(durability_uncertain())
@@ -1177,7 +1186,7 @@ impl GraphDb {
             .map(|sealed| sealed.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         for store in sealed {
-            let _ = store.database().hibernate_if_lazy();
+            let _ = store.hibernate_if_lazy();
         }
         Ok(true)
     }
@@ -1538,6 +1547,7 @@ impl GraphDb {
         self.inner.serving_pins.fetch_add(1, Ordering::AcqRel);
         let pin = GraphServingEnginePin {
             inner: Arc::clone(&self.inner),
+            companion: None,
         };
         self.ensure_available()?;
         self.ensure_opened()?;

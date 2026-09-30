@@ -393,9 +393,12 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         runtime: graph_runtime.code_graph_seat_port(),
         project_database,
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        seated: Arc::default(),
     };
 
     let activated = latest.clone();
+    let activated_generation = latest.generation().manifest().generation_id.clone();
+    assert_eq!(graph_activation.seated_graph_generation(), None);
     graph_activation
         .activate(
             &project_id,
@@ -407,6 +410,10 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         )
         .await
         .expect("small persistent generation must activate");
+    assert_eq!(
+        graph_activation.seated_graph_generation(),
+        Some(activated_generation)
+    );
     activated
         .interactive_graph_store()
         .expect("activated generation must publish an interactive graph store");
@@ -510,6 +517,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         runtime: graph_runtime.code_graph_seat_port(),
         project_database: Arc::clone(&project_database),
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        seated: Arc::default(),
     };
     activation
         .activate(
@@ -551,6 +559,13 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // A recovered head seats no decoded generation, so only the seated graph
+    // keeps generation A a retention root for its successor's refresh.
+    let mounted_scope = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .expect("mounted scope");
+    assert_eq!(mounted_scope.graph_generation, Some(generation_a.clone()));
     let sessions = graph_runtime
         .profile_sessions()
         .await

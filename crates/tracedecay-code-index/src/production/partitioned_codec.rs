@@ -1804,19 +1804,53 @@ impl SealedGenerationFileWindowsV1 {
         &self.generation.manifest
     }
 
-    /// Decodes every file segment in manifest order, handing each window's
-    /// files to `visit` with the snapshot record each file was sealed from.
+    /// Every segmented snapshot file with the digest of its segment, in
+    /// manifest order.
+    pub(super) fn segmented_files(
+        &self,
+    ) -> impl Iterator<Item = Result<(&SanitizedCodeFileV1, &ManifestDigest), CodeIndexProductionErrorV1>>
+    {
+        self.generation.file_segments.iter().map(|descriptor| {
+            self.generation
+                .snapshot
+                .files
+                .get(descriptor.file_key as usize)
+                .map(|file| (file, &descriptor.segment_digest))
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed generation file key is outside its snapshot".to_owned(),
+                    )
+                })
+        })
+    }
+
+    /// Decodes, in manifest order, every file segment `select` admits by its
+    /// file occurrence and segment digest, handing each window's files to
+    /// `visit` with the snapshot record and segment digest each was sealed
+    /// from.
     pub(super) fn for_each_file_window<E>(
         &self,
         read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
+        select: impl Fn(&FileOccurrenceId, &ManifestDigest) -> bool,
         mut visit: impl FnMut(
-            Vec<(&SanitizedCodeFileV1, PersistedFileGenerationArtifactsV1)>,
+            Vec<(
+                &SanitizedCodeFileV1,
+                ManifestDigest,
+                PersistedFileGenerationArtifactsV1,
+            )>,
         ) -> Result<(), E>,
     ) -> Result<(), E>
     where
         E: From<CodeIndexProductionErrorV1>,
     {
-        let descriptors = &self.generation.file_segments;
+        let selected = self
+            .generation
+            .file_segments
+            .iter()
+            .filter(|descriptor| select(&descriptor.file_occurrence_id, &descriptor.segment_digest))
+            .cloned()
+            .collect::<Vec<_>>();
+        let descriptors = selected.as_slice();
         let window_files = crate::parallelism::indexing_workers()
             .max(1)
             .saturating_mul(FILE_WINDOW_FILES_PER_WORKER_V1);
@@ -1854,7 +1888,7 @@ impl SealedGenerationFileWindowsV1 {
                         .snapshot
                         .files
                         .get(descriptor.file_key as usize)
-                        .map(|file| (file, page))
+                        .map(|file| (file, descriptor.segment_digest.clone(), page))
                         .ok_or_else(|| {
                             CodeIndexProductionErrorV1::Contract(
                                 "sealed generation file key is outside its snapshot".to_owned(),

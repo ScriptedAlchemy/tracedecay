@@ -29,6 +29,7 @@ use tracedecay_graph_db::{
 
 mod builder;
 mod interactive;
+mod layered;
 mod reader;
 mod schema;
 mod traversal;
@@ -49,6 +50,10 @@ pub use self::interactive::{
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
     CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+};
+pub use self::layered::{
+    CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1, CodeGraphLayeredReportV1,
+    build_layered_code_graph_rows,
 };
 use self::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,
