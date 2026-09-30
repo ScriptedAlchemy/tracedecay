@@ -375,18 +375,6 @@ pub trait AgentIntegration {
         None
     }
 
-    /// Verify installation health using the daemon-owned snapshot already
-    /// collected by Doctor. Integrations with daemon-backed diagnostics can
-    /// override this without issuing another daemon call.
-    fn healthcheck_with_daemon_status(
-        &self,
-        dc: &mut DoctorCounters,
-        ctx: &HealthcheckContext,
-        _daemon_status: Option<&serde_json::Value>,
-    ) {
-        self.healthcheck(dc, ctx);
-    }
-
     /// Read-only native registration state for one receipt-backed component.
     /// Doctor calls this only for components enumerated from lifecycle
     /// receipts; implementations must not infer uninstalled catalog pairs.
