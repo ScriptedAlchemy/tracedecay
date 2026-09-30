@@ -12,14 +12,13 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
-use super::host_bundle::HostBundleRegistrationStateV1;
-use super::mcp_registration::McpRegistrationOutcome;
+use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, TextFileMutation, load_json_file, report_mcp_registration,
-    update_text_file_transactionally,
+    McpDoctorLabels, install_mcp_server_entry, load_json_file, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
 pub struct DevinIntegration;
@@ -243,94 +242,32 @@ fn doctor_check_devin_registration(
 }
 
 fn install_mcp_if_selected(
-    components: &[super::host_bundle::HostComponentV1],
+    components: &[HostComponentV1],
     config_path: &Path,
     ctx: &InstallContext,
 ) -> Result<()> {
-    if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "cannot create Devin config directory {}: {error}",
-                    parent.display()
-                ),
-            })?;
-        }
-        let outcome = update_text_file_transactionally(config_path, |existing| {
-            let mut settings = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
-            if !settings.is_object() {
-                return Err(TraceDecayError::Config {
-                    message: format!("{} must contain a JSON object", config_path.display()),
-                });
-            }
-            if settings
-                .get("mcpServers")
-                .is_some_and(|value| !value.is_object())
-            {
-                return Err(TraceDecayError::Config {
-                    message: format!("{}.mcpServers must be a JSON object", config_path.display()),
-                });
-            }
-            let entry = json!({
-                "command": ctx.tracedecay_bin.clone(),
-                "args": ["serve"],
-                "env": {},
-                "transport": "stdio",
-            });
-            let outcome =
-                McpRegistrationOutcome::between(settings.pointer("/mcpServers/tracedecay"), &entry);
-            if outcome == McpRegistrationOutcome::Unchanged {
-                return Ok((outcome, TextFileMutation::Unchanged));
-            }
-            settings["mcpServers"]["tracedecay"] = entry;
-            Ok((
-                outcome,
-                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
-            ))
-        })?;
-        outcome.report(config_path);
+    if !components.contains(&HostComponentV1::ContextMcp) {
+        return Ok(());
     }
-    Ok(())
+    install_mcp_server_entry(
+        config_path,
+        "mcpServers",
+        json!({
+            "command": ctx.tracedecay_bin.clone(),
+            "args": ["serve"],
+            "env": {},
+            "transport": "stdio",
+        }),
+        "Devin",
+        JsonConfigDialect::Json,
+    )
 }
 
-fn uninstall_mcp_if_selected(
-    components: &[super::host_bundle::HostComponentV1],
-    config_path: &Path,
-) -> Result<()> {
-    if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-        if !config_path.exists() {
-            eprintln!("  {} not found, skipping", config_path.display());
-            return Ok(());
-        }
-        let removed = update_text_file_transactionally(config_path, |existing| {
-            let mut settings = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
-            let Some(servers) = settings
-                .get_mut("mcpServers")
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                return Ok((false, TextFileMutation::Unchanged));
-            };
-            if servers.remove("tracedecay").is_none() {
-                return Ok((false, TextFileMutation::Unchanged));
-            }
-            Ok((
-                true,
-                JsonConfigDialect::Json.mutation(config_path, existing, settings)?,
-            ))
-        })?;
-        if removed {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-                config_path.display()
-            );
-        } else {
-            eprintln!(
-                "  No tracedecay MCP server in {}, skipping",
-                config_path.display()
-            );
-        }
+fn uninstall_mcp_if_selected(components: &[HostComponentV1], config_path: &Path) -> Result<()> {
+    if !components.contains(&HostComponentV1::ContextMcp) {
+        return Ok(());
     }
-    Ok(())
+    uninstall_mcp_server_entry(config_path, "mcpServers", JsonConfigDialect::Json)
 }
 
 #[cfg(test)]

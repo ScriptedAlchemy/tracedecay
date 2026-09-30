@@ -412,7 +412,7 @@ fn read_mcp_config_observation(
 }
 
 /// Run one host `mcp …` registry command with the shared peer-preservation
-/// guard used by Copilot and Kiro.
+/// guard used by Copilot and Droid.
 ///
 /// The host owns the registry merge. A buggy or changed command must not
 /// silently discard an operator's other MCP servers. The exact post-command
@@ -820,7 +820,7 @@ exit 0
         )
         .unwrap();
 
-        let launcher = home.path().join("kiro-cli");
+        let launcher = home.path().join("host-cli");
         write_executable_script(&launcher, "#!/usr/bin/env node\n").unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
