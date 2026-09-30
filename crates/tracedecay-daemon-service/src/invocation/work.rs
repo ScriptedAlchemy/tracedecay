@@ -357,13 +357,11 @@ mod placement_observation_tests {
             .expect("placement releases or quarantines")
     }
 
-    /// A placement observed while another thread walks its checkout reports
-    /// the checkout's real state, not an unreadable target with no dirt.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn placement_observation_shares_the_discovery_walk_another_thread_owns() {
-        let sandbox = tempfile::tempdir().expect("sandbox");
-        let repository_root = sandbox.path().join("repository");
-        let placement_root = sandbox.path().join("placement");
+    /// A linked worktree `placement` of a one-commit `main` repository, and
+    /// its placement target.
+    fn linked_placement(sandbox: &std::path::Path) -> (std::path::PathBuf, WorkPlacementTargetV1) {
+        let repository_root = sandbox.join("repository");
+        let placement_root = sandbox.join("placement");
         std::fs::create_dir(&repository_root).expect("repository root");
         git(
             &repository_root,
@@ -392,8 +390,6 @@ mod placement_observation_tests {
                 "main",
             ],
         );
-        std::fs::write(placement_root.join("fixture"), "edited\n").expect("dirty fixture");
-        std::fs::write(placement_root.join("scratch"), "scratch\n").expect("untracked file");
         let placement_root = placement_root.canonicalize().expect("canonical placement");
         let target = WorkPlacementTargetV1::new(
             WorkPlacementKindV1::LinkedWorktree,
@@ -407,6 +403,17 @@ mod placement_observation_tests {
             true,
         )
         .expect("linked target");
+        (placement_root, target)
+    }
+
+    /// A placement observed while another thread walks its checkout reports
+    /// the checkout's real state, not an unreadable target with no dirt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn placement_observation_shares_the_discovery_walk_another_thread_owns() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let (placement_root, target) = linked_placement(sandbox.path());
+        std::fs::write(placement_root.join("fixture"), "edited\n").expect("dirty fixture");
+        std::fs::write(placement_root.join("scratch"), "scratch\n").expect("untracked file");
 
         let mut block =
             tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(
@@ -450,48 +457,7 @@ mod placement_observation_tests {
     #[test]
     fn release_keeps_only_commits_not_reachable_from_another_ref() {
         let sandbox = tempfile::tempdir().expect("sandbox");
-        let repository_root = sandbox.path().join("repository");
-        let placement_root = sandbox.path().join("placement");
-        std::fs::create_dir(&repository_root).expect("repository root");
-        git(
-            &repository_root,
-            &["init", "--initial-branch=main", "--quiet"],
-        );
-        git(
-            &repository_root,
-            &["config", "user.name", "TraceDecay Test"],
-        );
-        git(
-            &repository_root,
-            &["config", "user.email", "test@tracedecay.invalid"],
-        );
-        std::fs::write(repository_root.join("fixture"), "base\n").expect("base fixture");
-        git(&repository_root, &["add", "fixture"]);
-        git(&repository_root, &["commit", "--quiet", "-m", "base"]);
-        git(
-            &repository_root,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "placement",
-                placement_root.to_str().expect("UTF-8 placement root"),
-                "main",
-            ],
-        );
-        let target = WorkPlacementTargetV1::new(
-            WorkPlacementKindV1::LinkedWorktree,
-            Some(
-                placement_root
-                    .to_str()
-                    .expect("UTF-8 placement root")
-                    .to_owned(),
-            ),
-            false,
-            true,
-        )
-        .expect("linked target");
+        let (placement_root, target) = linked_placement(sandbox.path());
 
         let clean = observe_placement_target(None, &target, UtcMicros(100)).expect("observation");
         assert_eq!(clean.unique_commits, Some(0));

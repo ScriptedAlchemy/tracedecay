@@ -729,9 +729,7 @@ fn forced_unreadable_repository_discovery(path: &Path) -> bool {
 #[cfg(any(test, feature = "test-helpers"))]
 #[must_use]
 pub fn repository_discovery_count_for_test(root: &Path) -> u64 {
-    repository_discovery_observations()
-        .get(&observed_discovery_root(root))
-        .map_or(0, |observation| observation.discoveries)
+    observed_count(root, |observation| observation.discoveries)
 }
 
 /// Topology resolutions under `root`, the discoveries the retained authority
@@ -739,9 +737,7 @@ pub fn repository_discovery_count_for_test(root: &Path) -> u64 {
 #[cfg(any(test, feature = "test-helpers"))]
 #[must_use]
 pub fn repository_topology_resolution_count_for_test(root: &Path) -> u64 {
-    repository_discovery_observations()
-        .get(&observed_discovery_root(root))
-        .map_or(0, |observation| observation.topology_resolutions)
+    observed_count(root, |observation| observation.topology_resolutions)
 }
 
 /// Callers under `root` that joined another thread's in-flight walk, since
@@ -749,9 +745,14 @@ pub fn repository_topology_resolution_count_for_test(root: &Path) -> u64 {
 #[cfg(any(test, feature = "test-helpers"))]
 #[must_use]
 pub fn repository_topology_wait_count_for_test(root: &Path) -> u64 {
+    observed_count(root, |observation| observation.topology_waits)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn observed_count(root: &Path, count: impl Fn(&RepositoryDiscoveryObservation) -> u64) -> u64 {
     repository_discovery_observations()
         .get(&observed_discovery_root(root))
-        .map_or(0, |observation| observation.topology_waits)
+        .map_or(0, count)
 }
 
 /// Wait until `callers` callers under `root` have either joined the parked
