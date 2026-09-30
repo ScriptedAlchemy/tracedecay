@@ -24,24 +24,17 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::SessionMessageRecord;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
 };
-use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
-    TranscriptLocationMetadataKeys, TranscriptScopeMatcher, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    title_from_messages,
-};
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
-    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    path_byte_len, run_blocking_transcript_section, stream_new_jsonl,
+    FileDiscoveryLimit, FileDiscoveryReport, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptIngestResult, TranscriptSource, path_byte_len, run_blocking_transcript_section,
 };
 use tracedecay_privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -52,11 +45,6 @@ const PROVIDER: &str = "vibe";
 const MAX_SCAN_DEPTH: u8 = 4;
 /// Bound global history enumeration so one large Vibe profile cannot stall ingest.
 const MAX_SESSION_FILES: usize = 512;
-const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
-    "vibe_session_cwd",
-    "vibe_session_worktree",
-    "vibe_session_location_provenance",
-);
 
 pub struct VibeSource {
     session_root: PathBuf,
@@ -166,46 +154,6 @@ impl TranscriptSource for VibeSource {
         start_offset: usize,
     ) -> (FileDiscoveryReport, usize) {
         self.discover_eligible_page(bounds, start_offset)
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let meta = self.scoped_meta(path, project_root)?;
-
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let mut messages = Vec::new();
-        for line in &new.lines {
-            if let Some(message) = message_from_line(&line.value, &meta, path, line.offset) {
-                messages.push(message);
-            }
-        }
-
-        let project = self.user_registered_roots.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: meta.session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(&meta)).ok(),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-
-        Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: new.new_cursor,
-        })
     }
 }
 
@@ -589,92 +537,6 @@ fn read_meta(path: &Path) -> Option<VibeMeta> {
         working_directory,
         model,
     })
-}
-
-fn message_from_line(
-    record: &Value,
-    meta: &VibeMeta,
-    path: &Path,
-    offset: i64,
-) -> Option<SessionMessageRecord> {
-    let role = record
-        .get("role")
-        .or_else(|| record.pointer("/message/role"))
-        .and_then(Value::as_str)
-        .filter(|role| matches!(*role, "user" | "assistant" | "model"))?;
-    let normalized_role = if role == "model" { "assistant" } else { role };
-    let content = record
-        .get("content")
-        .or_else(|| record.pointer("/message/content"))
-        .unwrap_or(record);
-    let (text, tool_names) = content_storage_text_and_tools(
-        content,
-        record
-            .get("tool_calls")
-            .or_else(|| record.pointer("/message/tool_calls")),
-    );
-    if text.trim().is_empty() {
-        return None;
-    }
-    let timestamp = record
-        .get("timestamp")
-        .or_else(|| record.get("created_at"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
-        });
-
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: normalized_role.to_string(),
-        timestamp,
-        ordinal: offset,
-        text,
-        kind: Some("message".to_string()),
-        model: meta.model.clone(),
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(record, meta)).ok(),
-    })
-}
-
-fn session_metadata(meta: &VibeMeta) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("vibe_messages".to_string()),
-    );
-    append_location_metadata(
-        &mut metadata,
-        VIBE_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&meta.working_directory), "session_meta"),
-    );
-    Value::Object(metadata)
-}
-
-fn message_metadata(record: &Value, meta: &VibeMeta) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("vibe_messages".to_string()),
-    );
-    append_location_metadata(
-        &mut metadata,
-        VIBE_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&meta.working_directory), "session_meta"),
-    );
-    append_tool_calls_metadata(&mut metadata, record);
-    if let Some(message) = record.get("message") {
-        append_tool_calls_metadata(&mut metadata, message);
-        append_usage_metadata(&mut metadata, &[record, message]);
-    } else {
-        append_usage_metadata(&mut metadata, &[record]);
-    }
-    Value::Object(metadata)
 }
 
 #[cfg(test)]

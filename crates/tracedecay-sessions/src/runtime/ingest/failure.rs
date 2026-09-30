@@ -359,9 +359,6 @@ pub fn classify_transcript_ingest_disposition(
         source::TranscriptIngestError::Store(TranscriptStoreError::MessageIdentityMismatch {
             ..
         }) => ("transcript_message_identity_mismatch", false, Degraded),
-        source::TranscriptIngestError::CursorKeyMismatch { .. } => {
-            ("transcript_cursor_key_mismatch", false, Degraded)
-        }
         source::TranscriptIngestError::ScanIo { .. } => {
             ("transcript_source_io_failed", true, Unavailable)
         }

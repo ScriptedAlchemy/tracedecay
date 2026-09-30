@@ -44,16 +44,13 @@
 //! context and duplicate the `item_completed`/legacy message turns, so
 //! ingesting them would double-count the conversation. Goal context blocks are
 //! cataloged as compact `goal_context` rows because real rollouts often record
-//! them only in `response_item` form. This append-only JSONL is read with the
-//! shared byte-offset machinery and scoped per turn by the latest Codex cwd
-//! context.
+//! them only in `response_item` form. This append-only JSONL is admitted as
+//! canonical observations by [`observation`], scoped per turn by the latest
+//! Codex cwd context.
 
 mod context;
-mod events;
-mod goals;
 mod meta;
 mod observation;
-mod records;
 #[cfg(test)]
 mod tests;
 
@@ -79,27 +76,17 @@ use tracedecay_runtime_core::resident_memory::{
 };
 use tracedecay_store::ParseOffset;
 
-use context::CodexContextState;
-use goals::{codex_goal_event_from_line, goal_context_from_line, goal_event_message};
 use meta::session_meta;
-use records::{
-    compacted_summary_from_line, message_from_line, response_item_goal_context_from_line,
-    response_item_tool_event_from_line, timestamp_from_record,
-};
 
 use crate::runtime::jsonl_observation_admission::{
-    SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
-    namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
+    SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
     reserve_shared_jsonl_bytes,
 };
-use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
-    title_from_messages,
-};
+use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptCursorKey,
-    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    jsonl_change_token_settled, jsonl_file_change_token, stream_new_jsonl,
+    FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource, jsonl_change_token_settled,
+    jsonl_file_change_token,
 };
 
 #[cfg(test)]
@@ -1039,11 +1026,6 @@ impl CodexRetainedScan {
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
-    user_scope: Option<UserCodexScope>,
-    /// Source-lifetime cache of project-root matchers and cwd worktree
-    /// resolutions, so one scan pass runs git identity discovery once per
-    /// root/cwd instead of once per transcript record.
-    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1231,12 +1213,6 @@ impl CodexExactSessionPathAuthority {
         });
         Ok(source.requested.len().saturating_sub(1))
     }
-}
-
-#[derive(Clone)]
-struct UserCodexScope {
-    session_id: Option<String>,
-    registered_roots: Vec<PathBuf>,
 }
 
 impl CodexSource {
@@ -1571,23 +1547,7 @@ impl CodexSource {
         Self {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
-            user_scope: None,
-            project_matchers: ProjectRootMatcherCache::default(),
         }
-    }
-
-    /// Restricts ingestion to sessions that cannot be attributed to a registered project.
-    #[must_use]
-    pub fn for_user_scope(
-        mut self,
-        session_id: Option<String>,
-        registered_roots: Vec<PathBuf>,
-    ) -> Self {
-        self.user_scope = Some(UserCodexScope {
-            session_id,
-            registered_roots,
-        });
-        self
     }
 
     /// Bounded discovery for long-lived schedulers. The caller must
@@ -2769,10 +2729,6 @@ impl TranscriptSource for CodexSource {
             .paths
     }
 
-    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        codex_cursor_key(transcript_path)
-    }
-
     fn discover_transcript_paths(
         &self,
         _project_root: &Path,
@@ -2793,237 +2749,5 @@ impl TranscriptSource for CodexSource {
                 }
             }
         }
-    }
-
-    #[hotpath::measure(label = "sessions.hosts.codex.parse")]
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        // `session_meta` (line 1) is authoritative for session identity and the
-        // initial cwd. Later context records can move one rollout between scopes.
-        let meta = session_meta(path)?;
-        if self
-            .user_scope
-            .as_ref()
-            .and_then(|scope| scope.session_id.as_deref())
-            .is_some_and(|session_id| session_id != meta.session_id)
-        {
-            return None;
-        }
-
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let mut messages = Vec::new();
-        // Collapses identical consecutive goal states within this parse pass:
-        // `thread_goal_updated` fires on every token/time tick, so only an
-        // objective- or status-change opens a new `goal` row.
-        let mut last_goal_key: Option<(String, Option<String>)> = None;
-        let mut structured = events::CodexStructuredState::new();
-        // Namespacing follows the stored cursor generation, so every batch of a
-        // rewritten file is namespaced; prior-context recovery follows this
-        // batch's own resume point, which is zero only at the file head.
-        let namespace_replacement = new.replacement_generation;
-        let mut context_state = if new.start_offset > 0 {
-            CodexContextState::scan_prior(path, new.start_offset, &meta)
-        } else {
-            CodexContextState::from_meta(&meta)
-        };
-        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
-            project_root,
-            self.user_scope
-                .as_ref()
-                .map(|scope| scope.registered_roots.as_slice()),
-            &self.project_matchers,
-        );
-        let mut last_in_scope_cwd = None;
-        let mut last_in_scope_git = None;
-        let push_annotated = |messages: &mut Vec<_>,
-                              mut message,
-                              cwd: Option<&Path>,
-                              git: Option<&serde_json::Value>| {
-            context::annotate_message(&mut message, cwd, git, &self.project_matchers);
-            messages.push(message);
-        };
-        for line in &new.lines {
-            let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            // `Unknown` means a bounded git timeout left this record's scope
-            // undecided: abort before any cursor can be persisted so the same
-            // bytes are re-parsed (and re-resolved) on the next scan pass.
-            let in_scope = match scope_matcher.membership(context_state.cwd.as_deref()) {
-                ProjectMembership::Match => true,
-                ProjectMembership::NoMatch => false,
-                ProjectMembership::Unknown => return None,
-            };
-            if !in_scope {
-                if compacted_summary_from_line(
-                    &line.value,
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    context_state.compaction_depth + 1,
-                )
-                .is_some()
-                {
-                    context_state.compaction_depth += 1;
-                }
-                continue;
-            }
-            last_in_scope_cwd.clone_from(&context_state.cwd);
-            last_in_scope_git.clone_from(&context_state.git);
-            let cwd = context_state.cwd.as_deref();
-            let git = context_state.git.as_ref();
-            // Non-consuming: harvest session-level policy/effort/rate-limit
-            // summary before the line is routed to its owning handler below.
-            structured.observe_summary(&line.value);
-            if is_context_record {
-                continue;
-            }
-            if let Some(rows) = structured.event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                for message in rows {
-                    push_annotated(&mut messages, message, cwd, git);
-                }
-                continue;
-            }
-            if let Some(event) = codex_goal_event_from_line(&line.value) {
-                let key = event.dedup_key();
-                if last_goal_key.as_ref() == Some(&key) {
-                    continue;
-                }
-                last_goal_key = Some(key);
-                push_annotated(
-                    &mut messages,
-                    goal_event_message(
-                        &meta,
-                        context_state.model.as_deref(),
-                        path,
-                        line.offset,
-                        timestamp_from_record(&line.value),
-                        &event,
-                    ),
-                    cwd,
-                    git,
-                );
-                continue;
-            }
-            if let Some(message) = response_item_goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = response_item_tool_event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = compacted_summary_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-                context_state.compaction_depth + 1,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                context_state.compaction_depth += 1;
-                continue;
-            }
-            if let Some(message) = goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = message_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-            }
-        }
-        // Emit any `exec_command` calls whose paired output never arrived in
-        // this pass so the tool call is not silently dropped.
-        for message in structured.flush_pending(&meta, path) {
-            push_annotated(
-                &mut messages,
-                message,
-                last_in_scope_cwd.as_deref(),
-                last_in_scope_git.as_ref(),
-            );
-        }
-
-        // A truncate-and-rewrite can reuse every byte offset from the previous
-        // file generation. Legacy projection keys are offset-based, so keep
-        // replacement rows distinct instead of overwriting retained history.
-        if namespace_replacement {
-            namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-        }
-
-        let project = self.user_scope.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: meta.session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            // The summary is session-wide and may include evidence observed
-            // after Codex changed cwd into a registered project. User scope
-            // stores only the filtered message rows, never that mixed summary.
-            metadata_json: context::session_metadata_json(
-                &meta,
-                self.user_scope.is_none().then_some(&structured.summary),
-                &self.project_matchers,
-            ),
-            parent_session_id: meta.parent_session_id.clone(),
-            is_subagent: meta.is_subagent,
-            agent_id: meta.agent_id.clone(),
-            parent_tool_use_id: None,
-        };
-
-        Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: new.new_cursor,
-        })
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
     }
 }

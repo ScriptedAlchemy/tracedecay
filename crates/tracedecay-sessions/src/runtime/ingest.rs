@@ -40,6 +40,7 @@ pub mod test_support {
     };
     pub use super::scheduler::{
         PROJECT_INGEST_PROVIDER_FRONTIER_KEY, USER_INGEST_PROVIDER_FRONTIER_KEY,
+        default_ingest_pass_bounds,
     };
     pub use super::startup::ingest_user_global_sources_for_startup_with_db_without_registered_authority;
     pub use super::user::{

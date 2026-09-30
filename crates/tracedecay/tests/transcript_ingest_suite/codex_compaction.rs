@@ -14,9 +14,10 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::config::ProfileRoot;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
-use tracedecay_sessions::runtime::hosts::codex::CodexSource;
+use tracedecay_sessions::runtime::{SessionProvider, with_transcript_source_profile};
 
 #[cfg(unix)]
 use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
@@ -384,12 +385,12 @@ async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect()
     .unwrap();
 
     let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 6);
+    with_transcript_source_profile(
+        ProfileRoot::new(runtime.profile_root_for_test()).with_home(&home),
+        runtime.ingest_project_provider_for_test(&project, Some(SessionProvider::Codex)),
+    )
+    .await
+    .unwrap();
 
     let status = runtime
         .lcm_status_for_test("codex", Some("codex-repeat"))

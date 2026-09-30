@@ -13,9 +13,7 @@
 //!     --features test-helpers,hotpath -- --run claude
 //!
 //! Providers: `claude` and `codex` exercise the observation capture +
-//! projection pipeline; `kiro` exercises the content-hash full-file reader;
-//! `store` drives a synthetic in-memory source so the shared
-//! persist-transcript store stack is measured without parse cost.
+//! projection pipeline; `kiro` exercises the content-hash full-file reader.
 
 #![allow(clippy::too_many_lines)]
 use std::io::Write as _;
@@ -27,10 +25,6 @@ use tracedecay_domain::ProjectId;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::write_repository_identity_marker;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
-};
-use tracedecay_store::SessionMessageRecord;
 
 #[derive(Clone, Copy)]
 struct BenchConfig {
@@ -287,82 +281,6 @@ fn write_kiro_fixture(sandbox: &Sandbox, config: &BenchConfig) -> PathBuf {
     session_dir
 }
 
-/// Synthetic parse-free source: fabricates provider-neutral messages so the
-/// shared persist path (cursor load, session merge, privacy staging, LCM raw
-/// + projection writes, cursor advance) is measured without file parsing.
-struct SyntheticStoreSource {
-    config: BenchConfig,
-    root: PathBuf,
-}
-
-impl TranscriptSource for SyntheticStoreSource {
-    fn provider(&self) -> &'static str {
-        "vibe"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        (0..self.config.sessions)
-            .map(|session| self.root.join(format!("synthetic-{session:04}.log")))
-            .collect()
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        if prev.position != 0 {
-            return None;
-        }
-        let session = path
-            .file_stem()?
-            .to_str()?
-            .rsplit('-')
-            .next()?
-            .parse::<usize>()
-            .ok()?;
-        let session_id = format!("bench-store-{session:04}");
-        let messages = (0..self.config.messages_per_session)
-            .map(|index| SessionMessageRecord {
-                provider: "vibe".to_owned(),
-                message_id: format!("bench-store-{session:04}-{index:06}"),
-                session_id: session_id.clone(),
-                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
-                timestamp: Some(1_800_000_000_000 + index as i64 * 1_000),
-                ordinal: index as i64,
-                text: message_text(&self.config, session, index),
-                kind: None,
-                model: None,
-                tool_names: None,
-                source_path: Some(path.to_string_lossy().into_owned()),
-                source_offset: Some(index as i64),
-                metadata_json: None,
-            })
-            .collect();
-        Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id,
-                project_key: project_root.to_string_lossy().into_owned(),
-                project_path: project_root.to_string_lossy().into_owned(),
-                title: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages,
-            new_cursor: StoredCursor {
-                position: 1,
-                mtime: 1,
-                file_id: 0,
-            },
-        })
-    }
-}
-
 struct BenchOutcome {
     provider: &'static str,
     passes: usize,
@@ -469,29 +387,6 @@ async fn run_provider_bench(
     }
 }
 
-async fn run_store_bench(config: BenchConfig) -> BenchOutcome {
-    let sandbox = sandbox("store");
-    let runtime = open_runtime(&sandbox, "store").await;
-    let source = SyntheticStoreSource {
-        config,
-        root: sandbox.home.join("synthetic"),
-    };
-    let started = Instant::now();
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &sandbox.project, None)
-        .await
-        .expect("synthetic store ingest");
-    let elapsed = started.elapsed();
-    BenchOutcome {
-        provider: "store",
-        passes: 1,
-        elapsed,
-        messages: stats.messages_upserted,
-        sessions: stats.sessions_upserted,
-        fixture_bytes: 0,
-    }
-}
-
 fn parse_usize(arguments: &[String], flag: &str, default: usize) -> usize {
     arguments
         .iter()
@@ -509,7 +404,7 @@ fn main() {
     let run_index = arguments.iter().position(|argument| argument == "--run");
     let Some(run_index) = run_index else {
         // `cargo bench` without arguments must stay cheap and green.
-        println!("transcript_ingest bench: pass `-- --run <claude|codex|kiro|store|all>`");
+        println!("transcript_ingest bench: pass `-- --run <claude|codex|kiro|all>`");
         return;
     };
     let target = arguments
@@ -561,12 +456,9 @@ fn main() {
                 run_provider_bench(SessionProvider::Kiro, "kiro", config, write_kiro_fixture).await,
             );
         }
-        if matches!(target.as_str(), "store" | "all") {
-            outcomes.push(run_store_bench(config).await);
-        }
         assert!(
             !outcomes.is_empty(),
-            "unknown bench target {target}; expected claude|codex|kiro|store|all"
+            "unknown bench target {target}; expected claude|codex|kiro|all"
         );
         for outcome in &outcomes {
             outcome.report(&config);

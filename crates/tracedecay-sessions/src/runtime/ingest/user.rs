@@ -170,7 +170,6 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             committable_frontier: None,
         });
     };
-    let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
     let pass = match discovery_state {
         Some((hub, consumer)) => match hub
             .discover(

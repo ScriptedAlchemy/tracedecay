@@ -174,34 +174,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn ingest_profile_transcript_source_for_test(
-        &self,
-        source: &dyn tracedecay_sessions::runtime::source::TranscriptSource,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
-        tracedecay_sessions::runtime::shared::TranscriptIngestStats,
-    > {
-        let database = self
-            .session_database_for_test(HostAdmissionScope::Profile)
-            .map_err(|error| {
-                tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
-                    operation: "bind registered profile session test runtime",
-                    path: project_root.to_path_buf(),
-                    source: std::io::Error::other(error.to_string()),
-                }
-            })?;
-        let store = tracedecay_session_memory::transcript::GlobalDbTranscriptStore::new(database);
-        tracedecay_sessions::runtime::source::try_ingest_source(
-            &store,
-            source,
-            project_root,
-            max_new_bytes,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
     pub async fn search_session_messages_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -374,33 +346,6 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
-    /// Drives one transcript source through the retained ProjectSessions mount.
-    #[doc(hidden)]
-    pub async fn ingest_project_transcript_source_for_test(
-        &self,
-        source: &dyn tracedecay_sessions::runtime::source::TranscriptSource,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
-        tracedecay_sessions::runtime::shared::TranscriptIngestStats,
-    > {
-        let database = self.project_database_for_test().map_err(|error| {
-            tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
-                operation: "bind registered project session test runtime",
-                path: project_root.to_path_buf(),
-                source: std::io::Error::other(error.to_string()),
-            }
-        })?;
-        let store = tracedecay_session_memory::transcript::GlobalDbTranscriptStore::new(database);
-        tracedecay_sessions::runtime::source::try_ingest_source(
-            &store,
-            source,
-            project_root,
-            max_new_bytes,
-        )
-        .await
-    }
-
     /// Runs one selected provider through the exact registered project authority.
     #[doc(hidden)]
     pub async fn ingest_project_provider_for_test(
@@ -567,57 +512,6 @@ impl HostAdmissionTestRuntimeV1 {
             })?);
         }
         Ok(store_ids)
-    }
-
-    #[doc(hidden)]
-    pub async fn project_parse_offset_by_suffix_for_test(
-        &self,
-        suffix: &str,
-    ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
-        let snapshot = self.project_database_for_test()?.read_snapshot().await?;
-        // `parse_offsets.file_path` holds the canonical path-identity form, so
-        // the suffix is normalised the same way and one LIKE is enough.
-        let suffix = tracedecay_sessions::runtime::shared::path_identity_key(suffix);
-        let mut rows = snapshot
-            .query(
-                "SELECT byte_offset, mtime, file_id
-                 FROM parse_offsets
-                 WHERE file_path LIKE '%' || ?1
-                 ORDER BY file_path
-                 LIMIT 1",
-                tracedecay_runtime_core::db::engine::params![suffix.as_str()],
-            )
-            .await
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "query registered project parse offset by suffix".to_owned(),
-                    message: error.to_string(),
-                },
-            )?;
-        let Some(row) = rows.next().await.map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "read registered project parse offset by suffix".to_owned(),
-                message: error.to_string(),
-            }
-        })?
-        else {
-            return Ok(None);
-        };
-        let decode = |index| {
-            row.get::<i64>(index)
-                .map(|value| u64::try_from(value).unwrap_or_default())
-                .map_err(
-                    |error| tracedecay_domain::errors::TraceDecayError::Database {
-                        operation: "decode registered project parse offset by suffix".to_owned(),
-                        message: error.to_string(),
-                    },
-                )
-        };
-        Ok(Some(tracedecay_global_db::ParseOffset {
-            byte_offset: decode(0)?,
-            mtime: decode(1)?,
-            file_id: decode(2)?,
-        }))
     }
 
     /// Installs or removes the deterministic projection-failure trigger in-place.

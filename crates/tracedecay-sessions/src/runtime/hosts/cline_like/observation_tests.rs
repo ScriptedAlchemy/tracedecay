@@ -233,15 +233,10 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
         );
         let before = before.pop().unwrap();
 
-        let before_snapshot = source
-            .load_snapshot(&api, StoredCursor::default(), &project, None)
-            .unwrap()
-            .unwrap();
-        let before_records = normalize_cline_like_snapshot_observations(
-            provider,
-            &before_snapshot.transcript.messages,
-        )
-        .unwrap();
+        let before_snapshot = source.load_snapshot(&api, &project).unwrap().unwrap();
+        let before_records =
+            normalize_cline_like_snapshot_observations(provider, &before_snapshot.messages)
+                .unwrap();
         let before_ui = before_records
             .iter()
             .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
@@ -257,13 +252,9 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
         }));
         std::fs::write(&api, serde_json::to_vec_pretty(&entries).unwrap()).unwrap();
 
-        let after_api = source
-            .load_snapshot(&api, StoredCursor::default(), &project, None)
-            .unwrap()
-            .unwrap();
+        let after_api = source.load_snapshot(&api, &project).unwrap().unwrap();
         let after_api_records =
-            normalize_cline_like_snapshot_observations(provider, &after_api.transcript.messages)
-                .unwrap();
+            normalize_cline_like_snapshot_observations(provider, &after_api.messages).unwrap();
         let after_api_ui = after_api_records
             .iter()
             .filter(|record| record.stream == ClineTranscriptStream::UiMessages)
@@ -318,13 +309,9 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
         appended["ts"] = serde_json::json!(1_800_000_030_i64);
         entries.push(appended);
         std::fs::write(&ui, serde_json::to_vec(&entries).unwrap()).unwrap();
-        let after_ui = source
-            .load_snapshot(&api, StoredCursor::default(), &project, None)
-            .unwrap()
-            .unwrap();
+        let after_ui = source.load_snapshot(&api, &project).unwrap().unwrap();
         let after_ui_records =
-            normalize_cline_like_snapshot_observations(provider, &after_ui.transcript.messages)
-                .unwrap();
+            normalize_cline_like_snapshot_observations(provider, &after_ui.messages).unwrap();
         let after_ui_api = after_ui_records
             .iter()
             .filter(|record| record.stream == ClineTranscriptStream::ApiHistory)

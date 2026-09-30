@@ -24,14 +24,12 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     JsonlFrameDeferral, JsonlIoAccounting, JsonlResumeState, MAX_JSONL_RECORD_BYTES,
-    ParsedTranscript, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,
-    TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason, TranscriptIngestError,
+    TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
 };
 use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
@@ -2934,26 +2932,6 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
         RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
     }
-}
-
-pub(in crate::runtime) fn namespace_replacement_message_ids(
-    messages: &mut [SessionMessageRecord],
-    generation: u64,
-) {
-    for message in messages {
-        message.message_id = format!("{}:generation:{generation}", message.message_id);
-    }
-}
-
-pub(in crate::runtime) fn preflight_and_parse_new(
-    provider: &'static str,
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    parse_new: impl FnOnce() -> Option<ParsedTranscript>,
-) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-    preflight_strict_jsonl(provider, path, prev, max_new_bytes)?;
-    Ok(parse_new())
 }
 
 #[cfg(test)]

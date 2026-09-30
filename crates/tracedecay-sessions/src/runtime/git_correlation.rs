@@ -16,23 +16,10 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::SessionMessageRecord;
-
 mod error;
 pub use error::GitCorrelationError;
 
 const MIGRATION_NAME: &str = "git_correlation";
-const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
-    "codex_turn_worktree",
-    "claude_message_worktree",
-    "cursor_session_worktree",
-    "kiro_workspace_worktree",
-    "cline_like_task_worktree",
-    "vibe_session_worktree",
-    "codex_session_worktree",
-    "claude_session_worktree",
-    "hermes_session_worktree",
-];
 
 /// Schema version of the Git evidence rows, convergence receipts and
 /// watermarks. A store recorded at any other version is refused with a typed
@@ -650,116 +637,6 @@ pub fn span_debounce_key(
     )
 }
 
-/// Parses each message's `metadata_json` once for both commit evidence and
-/// ingest span observations. The repository is discovered only after a
-/// message actually carries commit candidates.
-#[hotpath::measure(label = "sessions.git_correlation.transcript_evidence")]
-pub fn transcript_git_evidence(
-    messages: &[SessionMessageRecord],
-    project_root: &std::path::Path,
-) -> (Vec<CommitSessionRecord>, Vec<SpanObservation>) {
-    let mut repo: Option<gix::Repository> = None;
-    let mut repo_unavailable = false;
-    let mut records = BTreeMap::<(String, String), CommitSessionRecord>::new();
-    let mut spans = Vec::new();
-    for message in messages {
-        let Some(parsed) = parsed_message_metadata(message) else {
-            continue;
-        };
-        let Some(metadata) = parsed.as_object() else {
-            continue;
-        };
-        if let Some(span) = span_observation_from_metadata(message, metadata) {
-            spans.push(span);
-        }
-        if repo_unavailable {
-            continue;
-        }
-        for (key, relation, default_evidence, confidence) in [
-            (
-                "produced_commit_candidates",
-                CommitRelation::Produced,
-                CommitEvidence::ToolResult,
-                100,
-            ),
-            (
-                "observed_commit_candidates",
-                CommitRelation::Observed,
-                CommitEvidence::HeadObservation,
-                60,
-            ),
-        ] {
-            let Some(candidates) = metadata.get(key).and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            let repo = match &mut repo {
-                Some(repo) => repo,
-                slot => match tracedecay_runtime_core::git_open::discover(project_root) {
-                    Ok(discovered) => slot.insert(discovered),
-                    Err(_) => {
-                        // Keep spans already collected; later messages can
-                        // still contribute observations without commit rows.
-                        repo_unavailable = true;
-                        break;
-                    }
-                },
-            };
-            for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
-                let Ok(spec) = repo.rev_parse_single(candidate) else {
-                    continue;
-                };
-                let Ok(object) = spec.object() else {
-                    continue;
-                };
-                let Ok(commit) = object.try_into_commit() else {
-                    continue;
-                };
-                let sha = commit.id.to_string();
-                let evidence = if relation == CommitRelation::Produced
-                    && metadata
-                        .get("produced_commit_evidence")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("host_event")
-                {
-                    CommitEvidence::HostEvent
-                } else {
-                    default_evidence
-                };
-                let record = CommitSessionRecord {
-                    commit_sha: sha.clone(),
-                    provider: message.provider.clone(),
-                    session_id: message.session_id.clone(),
-                    branch: metadata
-                        .get("git_branch")
-                        .or_else(|| metadata.get("codex_git_branch"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    worktree: metadata_worktree(metadata)
-                        .map(normalize_worktree)
-                        .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy()))),
-                    committed_at: commit
-                        .time()
-                        .map_or(message.timestamp.unwrap_or_default(), |time| time.seconds),
-                    span_overlap_kind: SpanOverlapKind::Direct,
-                    span_id: None,
-                    relation,
-                    evidence,
-                    confidence,
-                    evidence_message_id: Some(message.message_id.clone()),
-                };
-                let slot = (sha, message.session_id.clone());
-                if records
-                    .get(&slot)
-                    .is_none_or(|existing| record_strength(&record) > record_strength(existing))
-                {
-                    records.insert(slot, record);
-                }
-            }
-        }
-    }
-    (records.into_values().collect(), spans)
-}
-
 /// Derives Git evidence from one privacy-approved canonical observation.
 ///
 /// The envelope contributes only typed Git facts and native identity/time.
@@ -891,37 +768,6 @@ pub fn canonical_observation_git_evidence(
         });
     }
     Ok((commits, spans))
-}
-
-fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
-    message
-        .metadata_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str(json).ok())
-}
-
-fn span_observation_from_metadata(
-    message: &SessionMessageRecord,
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> Option<SpanObservation> {
-    let timestamp = message.timestamp?;
-    let worktree = metadata_worktree(metadata).filter(|path| !path.is_empty())?;
-    Some(SpanObservation {
-        provider: message.provider.clone(),
-        session_id: message.session_id.clone(),
-        thread_id: metadata
-            .get("turn_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        branch: metadata
-            .get("git_branch")
-            .or_else(|| metadata.get("codex_git_branch"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        worktree: normalize_worktree(worktree),
-        ts: timestamp,
-        source: SpanSource::Ingest,
-    })
 }
 
 /// Installs the Git evidence rows, convergence receipts and watermarks.
@@ -1107,12 +953,6 @@ fn digest_bytes(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
-fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
-    MESSAGE_WORKTREE_KEYS
-        .into_iter()
-        .find_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
-}
-
 fn parse_commit_sha(value: &str) -> Result<String, GitCorrelationError> {
     if !(6..=64).contains(&value.len()) || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(GitCorrelationError::InvalidArgument(
@@ -1206,13 +1046,6 @@ fn commit_hit(record: &CommitSessionRecord) -> SessionGitCorrelationHit {
         confidence: Some(record.confidence),
         evidence_message_id: record.evidence_message_id.clone(),
     }
-}
-
-fn record_strength(record: &CommitSessionRecord) -> (u8, i64) {
-    (
-        u8::from(record.relation == CommitRelation::Produced),
-        record.confidence,
-    )
 }
 
 fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {

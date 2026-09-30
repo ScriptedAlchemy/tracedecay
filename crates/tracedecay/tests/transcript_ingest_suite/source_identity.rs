@@ -9,57 +9,15 @@ use tracedecay_domain::{
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::hosts::cursor::ingest_cursor_transcript_event;
 
-use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
+use crate::cline_like::{vscode_storage_root, write_task};
 use crate::codex::write_codex_rollout_with_structured_events;
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
-    observation_source_cursor_for_key, open_project_session_db, try_ingest_source,
+    observation_source_cursor_for_key, open_project_session_db,
 };
 use crate::support::{assert_metadata_path_eq, init_git_repo, setup};
-
-#[tokio::test]
-async fn cline_parse_offset_lookup_uses_path_identity_not_display_text() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let api = write_task(
-        &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
-        &project,
-        "cline-identity",
-    );
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
-    );
-    let committed = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("Cline API parse offset must be admitted");
-
-    assert_eq!(
-        db.get_parse_offset(api.to_string_lossy().as_ref()).await,
-        Some(committed),
-        "Cline cursor lookup must use the admitted path identity"
-    );
-    #[cfg(windows)]
-    {
-        let slash_flipped = api.to_string_lossy().replace('\\', "/");
-        assert_eq!(db.get_parse_offset(&slash_flipped).await, Some(committed));
-    }
-    #[cfg(not(windows))]
-    assert!(
-        db.get_parse_offset(&format!(r"{}\literal-backslash", api.to_string_lossy()))
-            .await
-            .is_none(),
-        "a Unix literal backslash must not alias a path separator"
-    );
-}
 
 #[tokio::test]
 async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources() {

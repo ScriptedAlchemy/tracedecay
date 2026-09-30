@@ -3,9 +3,11 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::hosts::codex::CodexSource;
+use tracedecay_sessions::runtime::SessionProvider;
 
-use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
+use crate::restart_atomicity::{
+    ingest_global_sources_for_provider, ingest_user_provider, open_project_session_db,
+};
 
 pub(crate) fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
     std::fs::write(
@@ -32,14 +34,8 @@ async fn user_scope_ingests_only_codex_sessions_outside_registered_projects() {
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
-    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
+    ingest_user_provider(&runtime, &home, SessionProvider::Codex, vec![registered]).await;
 
-    let stats = runtime
-        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
-        .await
-        .unwrap();
-
-    assert_eq!(stats.sessions_upserted, 1);
     assert!(
         runtime
             .session_for_test(HostAdmissionScope::Profile, "codex", "user-session")
@@ -89,14 +85,8 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
-    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
+    ingest_user_provider(&runtime, &home, SessionProvider::Codex, vec![registered]).await;
 
-    let stats = runtime
-        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
-        .await
-        .unwrap();
-
-    assert_eq!(stats.messages_upserted, 2);
     let search = |query: &'static str| {
         runtime.search_session_messages_for_test(
             HostAdmissionScope::Profile,
@@ -106,7 +96,7 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
             10,
         )
     };
-    assert!(!search("billing pipeline").await.unwrap().is_empty());
+    assert_eq!(search("billing pipeline").await.unwrap().len(), 2);
     assert!(
         search("registered project secret")
             .await
@@ -147,16 +137,14 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
     .unwrap();
 
     let db_a = open_project_session_db(&project_a).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    try_ingest_source(&db_a, &source, &project_a, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db_a, &project_a, Some(SessionProvider::Codex))
+        .await;
 
-    assert!(
-        !db_a
-            .search_session_messages("codex", None, "billing pipeline", 10)
+    assert_eq!(
+        db_a.search_session_messages("codex", None, "billing pipeline", 10)
             .await
-            .is_empty()
+            .len(),
+        2
     );
     assert!(
         db_a.search_session_messages("codex", None, "project beta private marker", 10)
@@ -166,19 +154,18 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
     drop(db_a);
 
     let db_b = open_project_session_db(&project_b).await.unwrap();
-    try_ingest_source(&db_b, &source, &project_b, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db_b, &project_b, Some(SessionProvider::Codex))
+        .await;
     assert!(
         db_b.search_session_messages("codex", None, "billing pipeline", 10)
             .await
             .is_empty()
     );
-    assert!(
-        !db_b
-            .search_session_messages("codex", None, "project beta private marker", 10)
+    assert_eq!(
+        db_b.search_session_messages("codex", None, "project beta private marker", 10)
             .await
-            .is_empty()
+            .len(),
+        1
     );
 }
 
@@ -215,12 +202,7 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
         .await
         .unwrap();
-    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
-
-    runtime
-        .ingest_profile_transcript_source_for_test(&source, tmp.path(), None)
-        .await
-        .unwrap();
+    ingest_user_provider(&runtime, &home, SessionProvider::Codex, vec![registered]).await;
 
     assert!(
         runtime
@@ -235,8 +217,8 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !runtime
+    assert_eq!(
+        runtime
             .search_session_messages_for_test(
                 HostAdmissionScope::Profile,
                 "codex",
@@ -246,7 +228,8 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
             )
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        1
     );
 }
 
@@ -307,48 +290,6 @@ pub(crate) fn write_codex_rollout(
                     "model_context_window": 258400
                 }
             }
-        }),
-    );
-    std::fs::write(&path, contents).unwrap();
-    path
-}
-
-pub(crate) fn write_codex_rollout_with_goal_context(
-    home: &std::path::Path,
-    project: &std::path::Path,
-    session: &str,
-) -> std::path::PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("rollout-2026-01-01T00-00-15-{session}.jsonl"));
-    let contents = format!(
-        "{}\n{}\n{}\n{}\n",
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:15.000Z",
-            "type": "session_meta",
-            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:15.100Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "Current goal for this thread\nobjective: ensure all provider session messages are ingested\nremaining token budget: 12000"
-                }]
-            }
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:15.200Z",
-            "type": "response_item",
-            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "duplicate assistant response"}]}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:16.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Continue implementation"}
         }),
     );
     std::fs::write(&path, contents).unwrap();

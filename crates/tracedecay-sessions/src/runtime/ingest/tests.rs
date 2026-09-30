@@ -126,13 +126,13 @@ fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
 
 #[test]
 fn transcript_contract_failures_are_not_retryable() {
-    let error = source::TranscriptIngestError::CursorKeyMismatch {
-        expected: "private expected key".to_string(),
-        actual: "private actual key".to_string(),
+    let error = source::TranscriptIngestError::InvalidSourceIdentity {
+        provider: "cursor",
+        path: std::path::PathBuf::from("/private/transcript.jsonl"),
     };
     let failure = classify_transcript_ingest_failure("cursor", "hook", &error);
 
-    assert_eq!(failure.reason_code, "transcript_cursor_key_mismatch");
+    assert_eq!(failure.reason_code, "transcript_source_contract_invalid");
     assert!(!failure.retryable);
 }
 

@@ -251,17 +251,16 @@ fn authority_write_failed_includes_cause_in_hook_detail() {
 }
 
 #[test]
-fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
-    let error = tracedecay_sessions::runtime::source::TranscriptIngestError::CursorKeyMismatch {
-        expected: "private expected cursor".to_string(),
-        actual: "private actual cursor".to_string(),
-    };
+fn transcript_hook_errors_keep_bounded_retry_data_without_source_detail() {
+    let error =
+        tracedecay_sessions::runtime::source::TranscriptIngestError::InvalidSourceIdentity {
+            provider: "cursor",
+            path: std::path::PathBuf::from("/private/transcript.jsonl"),
+        };
     let mapped = map_transcript_ingest_error(&error);
     let data = structured_hook_error_data(&mapped).unwrap();
 
-    assert_eq!(data["reason_code"], "transcript_cursor_key_mismatch");
+    assert_eq!(data["reason_code"], "transcript_source_contract_invalid");
     assert_eq!(data["retryable"], false);
-    let rendered = data.to_string();
-    assert!(!rendered.contains("private expected cursor"));
-    assert!(!rendered.contains("private actual cursor"));
+    assert!(!data.to_string().contains("/private/transcript.jsonl"));
 }
