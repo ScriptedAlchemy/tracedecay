@@ -130,33 +130,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn set_parse_offset_insert_failure_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        enabled: bool,
-    ) -> tracedecay_domain::errors::Result<()> {
-        let statement = if enabled {
-            "CREATE TRIGGER fail_parse_offset_insert
-             BEFORE INSERT ON parse_offsets
-             BEGIN
-                SELECT RAISE(ABORT, 'late parse offset failure');
-             END;"
-        } else {
-            "DROP TRIGGER IF EXISTS fail_parse_offset_insert;"
-        };
-        self.session_database_for_test(scope)?
-            .writer_connection()?
-            .execute_batch(statement)
-            .await
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "configure registered parse-offset failure".to_owned(),
-                    message: error.to_string(),
-                },
-            )
-    }
-
-    #[doc(hidden)]
     pub async fn set_project_parse_offset_for_test(
         &self,
         path: &str,

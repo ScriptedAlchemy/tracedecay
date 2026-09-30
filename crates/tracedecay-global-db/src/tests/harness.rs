@@ -749,41 +749,6 @@ impl HostAdmissionTestRuntimeV1 {
             .await)
     }
 
-    pub async fn upsert_session_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> tracedecay_domain::errors::Result<bool> {
-        let database = self.session_database_for_test(scope)?;
-        let session = database
-            .get_session(&message.provider, &message.session_id)
-            .await
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "seed registered session message fixture".to_owned(),
-                    message: error.to_string(),
-                },
-            )?
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "seed registered session message fixture".to_owned(),
-                message: format!(
-                    "session {}/{} is unavailable",
-                    message.provider, message.session_id
-                ),
-            })?;
-        Ok(database
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(message),
-                &format!(
-                    "global-db-test-message:{}:{}",
-                    message.provider, message.message_id
-                ),
-                crate::ParseOffset::default(),
-            )
-            .await)
-    }
-
     pub async fn session_for_test(
         &self,
         scope: HostAdmissionScope,

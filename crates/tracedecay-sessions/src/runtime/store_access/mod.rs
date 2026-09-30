@@ -21,10 +21,8 @@ pub(crate) use sessions::EXISTING_SESSION_MESSAGE_IDS_SQL;
 pub(crate) use sessions::SESSION_MESSAGE_ID_LOOKUP_MAX;
 pub use sessions::SESSION_MESSAGES_AFTER_SQL;
 pub use sessions::{SqlColumnError, message_record_from_row, session_record_from_row};
-pub use transcript::{
-    TranscriptGitEvidence, get_parse_offset, require_expected_offset, set_parse_offset,
-};
+pub use transcript::{get_parse_offset, require_expected_offset, set_parse_offset};
 pub use types::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptBatch, TranscriptPersistenceError, UNIX_TIMESTAMP_MILLIS_THRESHOLD,
+    TranscriptPersistenceError, UNIX_TIMESTAMP_MILLIS_THRESHOLD,
 };

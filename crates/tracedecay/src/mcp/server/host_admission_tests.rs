@@ -1490,7 +1490,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
             .expect("seed protected session")
     );
     test_runtime
-        .upsert_transcript_batch_for_test(
+        .seed_session_messages_for_test(
             HostAdmissionScope::Project,
             &session,
             std::slice::from_ref(&SessionMessageRecord {
@@ -1508,8 +1508,6 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
                 source_offset: None,
                 metadata_json: None,
             }),
-            &format!("host-admission-test-message:hermes:{protected}"),
-            tracedecay_global_db::ParseOffset::default(),
         )
         .await
         .expect("seed protected transcript");

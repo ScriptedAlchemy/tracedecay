@@ -1253,7 +1253,6 @@ mod tests {
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-    use tracedecay_store::ParseOffset;
 
     #[test]
     fn deterministic_storage_refusals_are_not_retryable() {
@@ -1555,16 +1554,14 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        assert!(
+        assert!(database.upsert_session(&session).await);
+        let storage_root = database.db_path().parent().unwrap();
+        for message in &messages {
             database
-                .upsert_transcript_batch(
-                    &session,
-                    &messages,
-                    &format!("/tmp/{session_id}.jsonl"),
-                    ParseOffset::default(),
-                )
+                .lcm_ingest_raw_message(storage_root, message)
                 .await
-        );
+                .unwrap();
+        }
         let transaction = database
             .begin_write_transaction()
             .await

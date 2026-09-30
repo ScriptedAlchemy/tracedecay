@@ -4,7 +4,6 @@ use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry
 
 pub use tracedecay_sessions::runtime::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptBatch,
 };
 
 /// Total savings + call count for a project (or all projects when `project` is None).

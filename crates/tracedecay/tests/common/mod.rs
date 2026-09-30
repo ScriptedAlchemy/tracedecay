@@ -1438,7 +1438,7 @@ impl LcmTestRuntime {
         self.runtime
             .upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     pub async fn lcm_load_raw_message(

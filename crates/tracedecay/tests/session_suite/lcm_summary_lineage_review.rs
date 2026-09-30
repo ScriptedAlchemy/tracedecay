@@ -51,7 +51,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     ) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     async fn lcm_publish_immutable_summary(

@@ -256,5 +256,5 @@ pub use session::{
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,
-    TranscriptStoreResult, TranscriptWriteBatch, TranscriptWriteKind,
+    TranscriptStoreResult, TranscriptWriteBatch,
 };

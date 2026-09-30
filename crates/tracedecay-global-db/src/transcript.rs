@@ -1,8 +1,5 @@
 use super::{ParseOffset, RegisteredGlobalDb};
-use tracedecay_sessions::runtime::{
-    SessionMessageRecord, SessionRecord, SessionStoreAccess, TranscriptGitEvidence,
-    TranscriptPersistenceError,
-};
+use tracedecay_sessions::runtime::{SessionRecord, SessionStoreAccess, TranscriptPersistenceError};
 
 pub(super) use tracedecay_sessions::runtime::store_access::{
     require_expected_offset, set_parse_offset,
@@ -22,64 +19,6 @@ impl RegisteredGlobalDb {
     ) -> Result<Option<SessionRecord>, TranscriptPersistenceError> {
         SessionStoreAccess::new(self)
             .get_session(provider, session_id)
-            .await
-    }
-
-    #[hotpath::measure(future = true, label = "global_db.transcript.upsert_batch")]
-    pub async fn upsert_transcript_batch(
-        &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> bool {
-        SessionStoreAccess::new(self)
-            .upsert_transcript_batch(session, messages, parse_offset_path, parse_offset)
-            .await
-    }
-
-    #[hotpath::measure(future = true, label = "global_db.transcript.persist_batch")]
-    pub async fn persist_transcript_batch_result(
-        &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
-        parse_offset_path: &str,
-        expected_offset: ParseOffset,
-        parse_offset: ParseOffset,
-    ) -> Result<(), TranscriptPersistenceError> {
-        SessionStoreAccess::new(self)
-            .persist_transcript_batch_result(
-                session,
-                messages,
-                parse_offset_path,
-                expected_offset,
-                parse_offset,
-            )
-            .await
-    }
-
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.transcript.persist_batch_with_git_evidence"
-    )]
-    pub async fn persist_transcript_batch_with_git_evidence_result(
-        &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
-        parse_offset_path: &str,
-        expected_offset: ParseOffset,
-        parse_offset: ParseOffset,
-        git_evidence: TranscriptGitEvidence<'_>,
-    ) -> Result<(), TranscriptPersistenceError> {
-        SessionStoreAccess::new(self)
-            .persist_transcript_batch_with_git_evidence_result(
-                session,
-                messages,
-                parse_offset_path,
-                expected_offset,
-                parse_offset,
-                git_evidence,
-            )
             .await
     }
 

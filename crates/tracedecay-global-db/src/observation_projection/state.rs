@@ -1430,9 +1430,9 @@ fn reconcile_metadata(
                     }
                 }
             }
-            // Host ingest keeps the first annotation (`merge_session_metadata`).
-            // A later observation's source, cwd, or hook label is not a different
-            // session. Session identity stays on provider and session id.
+            // The first annotation wins: a later observation's source, cwd, or
+            // hook label is not a different session. Session identity stays on
+            // provider and session id.
             Some(_) => {}
         }
     }

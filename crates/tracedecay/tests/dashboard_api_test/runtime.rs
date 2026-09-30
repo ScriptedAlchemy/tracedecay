@@ -470,13 +470,14 @@ impl DashboardTestRuntimeV1 {
         Ok(self.database(scope)?.upsert_session(session).await)
     }
 
+    /// Seeds one raw LCM message into its already-registered session.
     pub(crate) async fn upsert_session_message_for_test(
         &self,
         scope: HostAdmissionScope,
         message: &SessionMessageRecord,
-    ) -> Result<bool> {
-        let database = self.database(scope)?;
-        let session = database
+    ) -> Result<()> {
+        let session = self
+            .database(scope)?
             .get_session(&message.provider, &message.session_id)
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -490,36 +491,42 @@ impl DashboardTestRuntimeV1 {
                     message.provider, message.session_id
                 ),
             })?;
-        Ok(database
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(message),
-                &format!(
-                    "dashboard-test-message:{}:{}",
-                    message.provider, message.message_id
-                ),
-                tracedecay_global_db::ParseOffset::default(),
-            )
-            .await)
+        self.seed_session_messages_for_test(scope, &session, std::slice::from_ref(message))
+            .await
+            .map(|_| ())
     }
 
-    pub(crate) async fn upsert_transcript_batch_for_test(
+    /// Seeds one session row and its raw LCM messages, returning each
+    /// message's raw store id in input order.
+    pub(crate) async fn seed_session_messages_for_test(
         &self,
         scope: HostAdmissionScope,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
-        source: &str,
-        offset: tracedecay_global_db::ParseOffset,
     ) -> Result<Vec<i64>> {
         let database = self.database(scope)?;
-        if !database
-            .upsert_transcript_batch(session, messages, source, offset)
-            .await
-        {
+        if !database.upsert_session(session).await {
             return Err(TraceDecayError::Database {
-                operation: "seed dashboard test transcript batch".to_owned(),
-                message: "registered transcript batch write failed".to_owned(),
+                operation: "seed dashboard test session".to_owned(),
+                message: "registered session write failed".to_owned(),
             });
+        }
+        let storage_root =
+            database
+                .db_path()
+                .parent()
+                .ok_or_else(|| TraceDecayError::Database {
+                    operation: "seed dashboard test session message".to_owned(),
+                    message: "registered session database has no storage root".to_owned(),
+                })?;
+        for message in messages {
+            database
+                .lcm_ingest_raw_message(storage_root, message)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "seed dashboard test session message".to_owned(),
+                    message: error.to_string(),
+                })?;
         }
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {

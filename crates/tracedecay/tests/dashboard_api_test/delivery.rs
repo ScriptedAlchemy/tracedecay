@@ -41,7 +41,6 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
-use tracedecay_global_db::ParseOffset;
 use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -783,13 +782,7 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
                 .collect();
             fixture
                 .host_runtime
-                .upsert_transcript_batch_for_test(
-                    HostAdmissionScope::Project,
-                    session,
-                    &messages,
-                    &format!("agent-usage-fixture:{}", session.session_id),
-                    ParseOffset::default(),
-                )
+                .seed_session_messages_for_test(HostAdmissionScope::Project, session, &messages)
                 .await
                 .expect("seed agent usage transcript");
         }

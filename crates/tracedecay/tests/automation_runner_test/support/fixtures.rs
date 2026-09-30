@@ -9,7 +9,6 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
 use tracedecay_domain::FactOwnerV1;
-use tracedecay_global_db::ParseOffset;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -119,17 +118,10 @@ pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp:
         source_offset: None,
         metadata_json: None,
     };
-    assert!(
-        sessions
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(&message),
-                &format!("combined-review-activity:{timestamp}"),
-                ParseOffset::default(),
-            )
-            .await,
-        "activity fixture must persist a timestamped message"
-    );
+    sessions
+        .lcm_ingest_raw_message(sessions.db_path().parent().unwrap(), &message)
+        .await
+        .expect("activity fixture must persist a timestamped message");
 }
 
 #[cfg(feature = "test-transport")]
@@ -197,11 +189,9 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
         source_offset: None,
         metadata_json: Some(json!({ "cmd": "rg automation src" }).to_string()),
     };
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+        .await
+        .unwrap();
 }
 
 /// Seeds one session message at `timestamp` so the scheduler observes LCM
@@ -279,11 +269,9 @@ pub(crate) async fn seed_session_message_in_db(
             .source
             .map(|source| json!({ "source": source }).to_string()),
     };
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+        .await
+        .unwrap();
 }
 
 #[derive(Debug, Clone)]

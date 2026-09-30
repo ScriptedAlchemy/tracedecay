@@ -120,8 +120,7 @@ impl ProjectSettlementFixture {
         let Some(tools) = tools else {
             return;
         };
-        let inserted = self
-            .runtime
+        self.runtime
             .upsert_session_message_for_test(
                 HostAdmissionScope::Project,
                 &SessionMessageRecord {
@@ -142,7 +141,6 @@ impl ProjectSettlementFixture {
             )
             .await
             .expect("upsert project session message");
-        assert!(inserted, "session message should upsert");
     }
 
     async fn settle(&self, now_secs: i64) -> HintOutcomeStats {

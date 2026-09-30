@@ -21,7 +21,7 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ParseOffset, SessionRefreshStore as _, build_observation_resolution_authorization_v1,
+    SessionRefreshStore as _, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor, derive_canonical_projection,
 };
 
@@ -775,15 +775,7 @@ async fn transcript_ingest_persists_native_compaction_raw_range() {
     post_compaction.message_id = "native-range-post-compaction".to_string();
     messages.push(post_compaction);
 
-    assert!(
-        db.upsert_transcript_batch(
-            &session("codex", session_id),
-            &messages,
-            "/tmp/codex-native-range-session.jsonl",
-            ParseOffset::default(),
-        )
-        .await
-    );
+    seed_session_messages(&db, &session("codex", session_id), &messages).await;
     let first = db
         .lcm_raw_message_store_id("codex", "native-range-message-1")
         .await
@@ -1081,15 +1073,7 @@ fn native_compaction_requires_exact_selected_raw_membership() {
         tail.provider = "codex".to_string();
         tail.message_id = "native-membership-tail".to_string();
         messages.push(tail);
-        assert!(
-            db.upsert_transcript_batch(
-                &session("codex", session_id),
-                &messages,
-                "/tmp/codex-native-membership-session.jsonl",
-                ParseOffset::default(),
-            )
-            .await
-        );
+        seed_session_messages(&db, &session("codex", session_id), &messages).await;
         let policy_anchor_store_id = db
             .lcm_raw_message_store_id("codex", "native-membership-message-2")
             .await
@@ -1803,15 +1787,7 @@ async fn mounted_schedulers_share_historical_work_admission() {
         tail.provider = "codex".to_string();
         tail.message_id = format!("{session_id}-tail");
         messages.push(tail);
-        assert!(
-            db.upsert_transcript_batch(
-                &session("codex", &session_id),
-                &messages,
-                &format!("/tmp/{session_id}.jsonl"),
-                ParseOffset::default(),
-            )
-            .await
-        );
+        seed_session_messages(&db, &session("codex", &session_id), &messages).await;
         stores.push((harness, db, session_id));
     }
 
@@ -3296,8 +3272,7 @@ fn canonical_record_for_scope(envelope: Value, scope: ObservationScopeV1) -> Can
     }
 }
 
-/// Ingests `messages` followed by each record's projected row through the
-/// transcript path, then persists and projects each record's observation so
+/// Seeds `messages` followed by each record's projected row, then persists and projects each record's observation so
 /// the row's envelope authority exists exactly as capture leaves it.
 async fn ingest_canonical(
     db: &RegisteredGlobalDb,
@@ -3308,15 +3283,7 @@ async fn ingest_canonical(
     let provider = records[0].message.provider.as_str();
     let mut batch = messages.to_vec();
     batch.extend(records.iter().map(|record| record.message.clone()));
-    assert!(
-        db.upsert_transcript_batch(
-            &session(provider, session_id),
-            &batch,
-            &format!("/tmp/{session_id}.jsonl"),
-            ParseOffset::default(),
-        )
-        .await
-    );
+    seed_session_messages(db, &session(provider, session_id), &batch).await;
     let store = db.observation_store();
     for record in records {
         let observation = &record.observation;
@@ -3427,6 +3394,21 @@ async fn insert_summary_evidence(
     transaction.commit().await.unwrap();
 }
 
+/// Seeds one session row and its raw LCM messages in order.
+async fn seed_session_messages(
+    db: &RegisteredGlobalDb,
+    session: &SessionRecord,
+    messages: &[SessionMessageRecord],
+) {
+    assert!(db.upsert_session(session).await);
+    let storage_root = db.db_path().parent().unwrap();
+    for message in messages {
+        db.lcm_ingest_raw_message(storage_root, message)
+            .await
+            .unwrap();
+    }
+}
+
 async fn ingest_codex_compaction_evidence(
     db: &RegisteredGlobalDb,
     session_id: &str,
@@ -3449,15 +3431,7 @@ async fn ingest_codex_compaction_evidence(
     let mut tail = message(session_id, ordinal.saturating_add(1));
     tail.provider = "codex".to_string();
     tail.message_id = format!("{message_id}-tail");
-    assert!(
-        db.upsert_transcript_batch(
-            &session("codex", session_id),
-            &[compaction, tail],
-            &format!("/tmp/{session_id}.jsonl"),
-            ParseOffset::default(),
-        )
-        .await
-    );
+    seed_session_messages(db, &session("codex", session_id), &[compaction, tail]).await;
 }
 
 #[cfg(unix)]

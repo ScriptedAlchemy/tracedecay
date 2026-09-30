@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord};
+use tracedecay_store::ParseOffset;
 
 use crate::runtime::host_coverage::HostCoverageReason;
 
@@ -58,17 +58,6 @@ pub struct SessionIngestHealth {
     pub max_transcript_pending_bytes: u64,
     /// Newest transcript mtime recorded at ingest time (Unix seconds).
     pub last_ingest_unix: Option<i64>,
-}
-
-/// One transcript session plus its parsed messages, for projection-only
-/// multi-session upserts from stores such as Hermes `state.db`.
-///
-/// This compatibility DTO remains local because projection-only persistence is
-/// intentionally outside the authoritative transcript store contract.
-#[derive(Debug, Clone)]
-pub struct TranscriptBatch {
-    pub session: SessionRecord,
-    pub messages: Vec<SessionMessageRecord>,
 }
 
 #[derive(Debug)]
