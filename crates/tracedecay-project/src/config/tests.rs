@@ -227,9 +227,9 @@ mod runtime_configuration_cutover {
         ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
         ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
         ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
-        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
-        SourceBindingId, SourceKindV1,
+        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
+        INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY,
+        SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
@@ -244,6 +244,8 @@ mod runtime_configuration_cutover {
     use tracedecay_configuration::ProjectConfigurationRuntime;
     use tracedecay_configuration::SyncConfig;
     use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+    use tracedecay_global_db::configuration::GlobalDbConfigurationControlStore;
+    use tracedecay_global_db::configuration::contracts::types::AuthorizedActor;
     use tracedecay_global_db::configuration::contracts::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
     };
@@ -502,6 +504,105 @@ mod runtime_configuration_cutover {
         assert!(!startup.config().diagnostics_prewarm);
         assert!(current.config().diagnostics_prewarm);
         assert_eq!(runtime.configuration_target(), current.target());
+    }
+
+    /// A release before write-time pattern checks stored `index.exclude.v1`
+    /// patterns it never compiled. Opening such a store keeps the
+    /// configuration, and so its repair, available; the stored pattern is left
+    /// unapplied and `get` names it with the actions that clear it.
+    #[tokio::test]
+    async fn a_stored_uncompilable_index_pattern_is_a_typed_setting_finding() {
+        let profile = TempDir::new().expect("temporary profile root");
+        let root = TempDir::new().expect("temporary project root");
+        let project_id = project_id("project.configuration-uncompilable-exclude");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout = tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let host_runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), root.path(), project_id.clone())
+                .await
+                .expect("open retained project runtime");
+        let database = host_runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .expect("bind registered project database");
+        crate::config::install_usecase_runtime_configuration_authority()
+            .expect("install the root runtime configuration read ports");
+
+        let target = crate::config::runtime_configuration_target_for_layout(root.path(), &layout)
+            .expect("configuration target");
+        let exclude = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();
+        let revision = revision_id("configuration.revision.unchecked-exclude");
+        let stored = resolve_configuration(
+            &ConfigurationRegistry::core().unwrap(),
+            &[ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: project_id.clone(),
+                },
+                revision_id: revision.clone(),
+                entries: BTreeMap::from([
+                    (
+                        SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap(),
+                        ConfigurationValueV1::SourceBindings(vec![
+                            crate::config::daemon_project_source_binding(&target).unwrap(),
+                        ]),
+                    ),
+                    (
+                        exclude.clone(),
+                        ConfigurationValueV1::StringList(vec![
+                            "src/[abc".to_owned(),
+                            "docs/**".to_owned(),
+                        ]),
+                    ),
+                ]),
+            }],
+        )
+        .expect("read-time validation admits the stored pattern");
+        GlobalDbConfigurationControlStore::new_registered(database.as_ref())
+            .initialize_canonical(&revision, &stored, UtcMicros(1))
+            .await
+            .expect("seed the store as the earlier release left it");
+
+        let (_, opened) = crate::config::open_runtime_configuration_for_registered_database(
+            root.path(),
+            &layout,
+            database,
+        )
+        .await
+        .expect("an unapplied pattern must not refuse the configuration")
+        .into_parts();
+        let (runtime, pinned) =
+            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
+        assert_eq!(pinned.config().index_paths.exclude_patterns(), ["docs/**"]);
+
+        let setting = runtime
+            .client()
+            .get(
+                AuthorizedActor {
+                    actor_id: ActorId::new("actor.configuration-uncompilable-exclude").unwrap(),
+                },
+                exclude,
+            )
+            .await
+            .expect("the stored setting stays readable");
+        let setting = serde_json::to_value(setting).unwrap();
+        assert_eq!(
+            setting["effective_value"],
+            serde_json::json!({"kind": "string_list", "value": ["src/[abc", "docs/**"]})
+        );
+        assert_eq!(
+            setting["findings"],
+            serde_json::json!([{
+                "kind": "invalid_index_path_pattern",
+                "pattern": "src/[abc",
+                "message": "unclosed character class; missing ']'",
+                "legal_actions": ["set", "unset"],
+            }])
+        );
     }
 
     /// One real journey over the production read surfaces: open (as the
