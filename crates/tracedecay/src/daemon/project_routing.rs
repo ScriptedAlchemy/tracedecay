@@ -297,21 +297,19 @@ pub(super) async fn resolved_project_server_key(
     };
     let probe_path = canonical_project_path.to_path_buf();
     let data_root = layout.data_root.clone();
-    let (graph_db_path, fallback_warning) =
-        bounded_repository_probe(canonical_project_path, move || {
-            let graph_scope =
-                tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
-                    tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
-                });
-            let (graph_db_path, _, fallback_warning) =
-                tracedecay_project::project::TraceDecay::resolve_db_for_branch(
-                    &probe_path,
-                    &data_root,
-                    graph_scope.as_deref(),
-                );
-            (graph_db_path, fallback_warning)
-        })
-        .await?;
+    let fallback_warning = bounded_repository_probe(canonical_project_path, move || {
+        let graph_scope =
+            tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
+                tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
+            });
+        let (_, fallback_warning) = tracedecay_project::project::TraceDecay::resolve_serving_branch(
+            &probe_path,
+            &data_root,
+            graph_scope.as_deref(),
+        );
+        fallback_warning
+    })
+    .await?;
     if fallback_warning.is_some() {
         return Ok(None);
     }
@@ -321,7 +319,7 @@ pub(super) async fn resolved_project_server_key(
             &handshake.client_identity.global_db_path,
             layout.identity.project_id,
             &layout.data_root,
-            &graph_db_path,
+            &layout.graph_db_path,
         )?,
         project_root: authority::canonical_identity_path(&layout.project_root)?,
         scope_prefix: handshake.scope_prefix.clone(),

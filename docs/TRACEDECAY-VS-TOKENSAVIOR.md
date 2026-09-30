@@ -69,12 +69,13 @@ structured index.
 
 ### 1.2 Branch-aware indexing
 
-tracedecay maintains a separate SQLite DB per tracked branch:
+tracedecay tracks each branch as a provenance scope inside the one project
+graph store:
 
 ```bash
-tracedecay branch add feature/foo   # snapshot from ancestor + incremental sync
-tracedecay branch list              # show tracked branches + their DB sizes
-tracedecay branch gc                # drop DBs for branches deleted from git
+tracedecay branch add feature/foo   # admit the branch; its exact index builds in the background
+tracedecay branch list              # show tracked branches + their readiness
+tracedecay branch gc                # retire entries for branches deleted from git
 ```
 
 Switching branches doesn't invalidate the index. `tracedecay_branch_diff` and

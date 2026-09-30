@@ -140,14 +140,6 @@ fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
         json!(data_root.join("lcm-payloads").display().to_string()),
         "{payload}"
     );
-    assert!(
-        payload["branch"].get("serving_db_path").is_none(),
-        "{payload}"
-    );
-    assert!(
-        payload["branch"].get("serving_db_exists").is_none(),
-        "{payload}"
-    );
     assert_eq!(
         payload["branch"]["current_branch"],
         json!(OPENED_BRANCH),

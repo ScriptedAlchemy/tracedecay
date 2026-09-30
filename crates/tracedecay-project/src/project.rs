@@ -6,7 +6,7 @@
 //! (read-side graph queries), `diagnostics` (branch state), [`facts`]
 //! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
@@ -56,12 +56,6 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
-    /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
-    /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
-    /// immutable for the lifetime of an instance, branch changes produce a
-    /// new `TraceDecay` rather than mutating an existing one, so the resolved
-    /// path is safe to cache for the instance's lifetime.
-    db_path_cache: OnceLock<PathBuf>,
     /// The registered test runtime a fixture open went through, kept alive
     /// for as long as the graph is; `None` for every production open.
     #[cfg(any(test, feature = "test-helpers"))]

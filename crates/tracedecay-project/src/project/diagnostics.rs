@@ -87,24 +87,8 @@ impl TraceDecay {
     /// On-disk path to the `SQLite` DB this instance is serving. Useful for
     /// diagnostics such as WAL/SHM size sampling. Returns the same path that
     /// `Database::open` was called with.
-    ///
-    /// The inputs (`project_root`, `store_layout.data_root`, and
-    /// `serving_branch`) are immutable for the lifetime of a `TraceDecay`
-    /// instance. Branch changes are served by a freshly constructed
-    /// instance rather than mutating an existing one, so the resolved path
-    /// is memoized in `db_path_cache` after the first call instead of
-    /// re-reading and re-parsing branch metadata from disk on every call.
     pub fn db_path(&self) -> PathBuf {
-        self.db_path_cache
-            .get_or_init(|| {
-                let (path, _, _) = Self::resolve_db_for_branch(
-                    &self.project_root,
-                    &self.store_layout.data_root,
-                    self.serving_branch.as_deref(),
-                );
-                path
-            })
-            .clone()
+        self.store_layout.graph_db_path.clone()
     }
 
     pub fn store_layout(&self) -> &StoreLayout {
@@ -163,7 +147,6 @@ impl TraceDecay {
             self.active_branch.clone(),
             self.serving_branch.clone(),
             self.fallback_warning.clone(),
-            self.db_path(),
             None,
         )
     }
@@ -181,11 +164,6 @@ impl TraceDecay {
     /// Returns a fallback warning if serving from an ancestor branch DB.
     pub fn fallback_warning(&self) -> Option<&str> {
         self.fallback_warning.as_deref()
-    }
-
-    /// Returns true if serving from a fallback (ancestor) DB.
-    pub fn is_fallback(&self) -> bool {
-        self.fallback_warning.is_some()
     }
 
     pub fn is_read_only(&self) -> bool {

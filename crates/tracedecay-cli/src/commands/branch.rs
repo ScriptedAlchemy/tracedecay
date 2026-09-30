@@ -116,20 +116,6 @@ fn handle_branch_action_inner(
                     .into_iter()
                     .flatten()
                 {
-                    let db_exists = branch
-                        .get("db_exists")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let size = if db_exists {
-                        tracedecay_runtime_core::text::format_bytes(
-                            branch
-                                .get("size_bytes")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0),
-                        )
-                    } else {
-                        "missing".to_string()
-                    };
                     let parent = branch
                         .get("parent")
                         .and_then(serde_json::Value::as_str)
@@ -164,9 +150,6 @@ fn handle_branch_action_inner(
                     if !is_ready {
                         flags.push("indexing");
                     }
-                    if !db_exists {
-                        flags.push("missing-db");
-                    }
                     let flags = if flags.is_empty() {
                         String::new()
                     } else {
@@ -182,13 +165,12 @@ fn handle_branch_action_inner(
                         "exact index pending".to_string()
                     };
                     eprintln!(
-                        "  {}{}, {}{}, {}",
+                        "  {}{}{}, {}",
                         branch
                             .get("name")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("<unknown>"),
                         flags,
-                        size,
                         parent,
                         readiness
                     );

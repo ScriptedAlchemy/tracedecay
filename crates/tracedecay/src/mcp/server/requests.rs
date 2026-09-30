@@ -1,6 +1,7 @@
 //! Request routing and handlers: per-method JSON-RPC dispatch,
 //! handshake handling, resources, and `tools/call` execution.
 
+use std::collections::BTreeMap;
 use std::path::Component;
 
 use super::*;
@@ -756,14 +757,12 @@ impl McpServer {
                 Some(meta) => meta
                     .branches
                     .iter()
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
                     .map(|(name, entry)| {
-                        let db_path = tracedecay_dir.join(&entry.db_file);
-                        let size_bytes = db_path.metadata().map_or(0, |m| m.len());
                         json!({
                             "name": name,
-                            "db_file": entry.db_file,
                             "parent": entry.parent,
-                            "size_bytes": size_bytes,
                             "last_synced_at": entry.last_synced_at,
                             "is_current": current == Some(name.as_str()),
                             "is_default": name == &meta.default_branch,
