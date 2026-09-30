@@ -13,6 +13,8 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 use tracedecay_runtime_core::test_executable::link_or_copy_executable;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
@@ -1810,11 +1812,7 @@ fn assert_no_plugin_backups(root: &std::path::Path) {
 /// fake never runs.
 #[cfg(unix)]
 fn install_kimi_cli(cli: &IsolatedCli) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = cli.bin_dir.join("kimi");
-    fs::write(&path, "#!/bin/sh\nexit 64\n").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable_script(&cli.bin_dir.join("kimi"), "#!/bin/sh\nexit 64\n").unwrap();
 }
 
 /// Without Kimi Code on `PATH` the install is skipped and stages nothing;

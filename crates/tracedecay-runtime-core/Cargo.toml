@@ -74,6 +74,10 @@ tokio = { version = "1", features = ["full", "test-util"] }
 name = "tracing_capture_keepalive"
 required-features = ["test-helpers"]
 
+[[test]]
+name = "git_discovery_authority"
+required-features = ["test-helpers"]
+
 [[bench]]
 name = "exact_sql_writer_workload"
 harness = false

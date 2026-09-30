@@ -1498,12 +1498,11 @@ fn explicitly_injected_launchd_programs_reject_non_executable_paths() {
     let dir = TempDir::new().expect("temp dir");
     let launchctl = dir.path().join("launchctl");
     let id = dir.path().join("id");
-    std::fs::write(&launchctl, "#!/bin/sh\nexit 0\n").expect("launchctl program");
-    std::fs::write(&id, "#!/bin/sh\nexit 0\n").expect("id program");
+    write_executable_script(&launchctl, "#!/bin/sh\nexit 0\n").expect("launchctl program");
+    write_executable_script(&id, "#!/bin/sh\nexit 0\n").expect("id program");
 
     std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o644))
         .expect("launchctl permissions");
-    std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o755)).expect("id permissions");
     let launchctl_error = ServiceRunner::launchd(&launchctl, &id)
         .expect_err("explicit launchctl path must remain strict");
     assert!(launchctl_error.to_string().contains("launchctl candidate"));
