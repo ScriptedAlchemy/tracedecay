@@ -59,11 +59,19 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --metadata-file "$RUNNER_TEMP/image-metadata.json"
           python3 - <<'PY'
-          import json, os, pathlib, re
+          import json, os, pathlib, re, subprocess
           root = pathlib.Path(os.environ["RUNNER_TEMP"])
           digest = json.loads((root / "image-metadata.json").read_text())["containerimage.digest"]
           assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest), digest
           arch = os.environ["ARCH"]
+          reference = f"{os.environ['IMAGE']}@{digest}"
+          subprocess.run(["docker", "pull", "--quiet", reference], check=True, stdout=subprocess.DEVNULL)
+          subprocess.run([
+              "docker", "run", "--rm", "--pull", "never", "--network", "none", "--user", "10001:10001",
+              "--env", "HOME=/tmp", "--env", "CARGO_HOME=/tmp/cargo", reference, "sh", "-ec",
+              'node --version; hauler --version; test "$(hauler --version)" = "cargo-hauler 0.12.0"; '
+              'rustc --version; pnpm --version; cargo-nextest --version',
+          ], check=True, timeout=60)
           (root / f"image-{arch}.json").write_text(json.dumps({
               "image": os.environ["IMAGE"], "revision": os.environ["GITHUB_SHA"],
               "architecture": arch, "digest": digest,
