@@ -30,6 +30,10 @@ const LOCK_FILE: &str = "writer.v1.lock";
 /// the owner's adoption of abandoned staging.
 const STAGING_LOCK_FILE: &str = "staging.v1.lock";
 const STAGED_MARKER: &str = ".staged.";
+/// A staged receipt renamed after its sync: complete, so any owner adopts it
+/// without waiting for live writers to leave the staging lease.
+const READY_MARKER: &str = ".ready.";
+const SPOOL_DIRECTORY: &str = "hook-delivery-spool";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,22 +162,33 @@ pub struct HookDeliveryReceiptWriterV1 {
 }
 
 impl HookDeliveryReceiptSpoolV1 {
-    /// Opens the spool without waiting for a held writer lock, then adopts
-    /// receipts that writers staged but could not publish in their budget.
+    /// Opens the spool, waiting at most `wait_budget` for a held writer lock,
+    /// then adopts receipts that writers staged but could not publish in
+    /// their budget. A writer publishes its receipt while holding the lock,
+    /// so a drain woken by that publication waits it out instead of missing
+    /// the receipt. A lock still held after the budget is `Busy`.
     #[hotpath::measure(label = "hooks.delivery.open")]
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
+    pub fn open(
+        root: impl Into<PathBuf>,
+        wait_budget: Duration,
+    ) -> Result<Self, HookDeliverySpoolError> {
         let root = root.into();
         ensure_root(&root)?;
         let lock = open_lock_file(&root, LOCK_FILE)?;
-        hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()).map_err(
-            |error| match error {
-                std::fs::TryLockError::WouldBlock => {
-                    hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
-                    HookDeliverySpoolError::Busy
+        match hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()) {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
+                if wait_budget.is_zero() {
+                    return Err(HookDeliverySpoolError::Busy);
                 }
-                std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
-            },
-        )?;
+                lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
+                    LockAdmissionError::TimedOut => HookDeliverySpoolError::Busy,
+                    LockAdmissionError::Io(_) => HookDeliverySpoolError::Io,
+                })?;
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Err(HookDeliverySpoolError::Io),
+        }
         let spool = Self {
             root,
             _lock: FileLease::held(lock, "hooks.delivery.writer"),
@@ -183,19 +198,20 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(spool)
     }
 
-    /// Publishes staged receipts left by writers that ran out of budget, and
-    /// removes staging a killed writer left torn. Runs only while no writer
-    /// holds the staging lease, so every staged file is abandoned or complete.
-    /// A writer syncs the directory before reporting a receipt staged, so a
-    /// crash after an unsynced rename leaves one durable name to adopt again.
+    /// Publishes receipts writers readied after running out of budget, and
+    /// staging a killed writer left behind. Readied receipts are complete, so
+    /// they are adopted whenever the owner opens. Other staging is abandoned
+    /// or complete only while no writer holds the staging lease, so it is
+    /// adopted or removed only then. A writer syncs the directory before
+    /// reporting a receipt staged, so a crash after an unsynced rename leaves
+    /// one durable name to adopt again.
     fn adopt_staged(&self) -> Result<(), HookDeliverySpoolError> {
         let staging = open_lock_file(&self.root, STAGING_LOCK_FILE)?;
-        match staging.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        let abandoned = match staging.try_lock() {
+            Ok(()) => Some(FileLease::held(staging, "hooks.delivery.staging")),
+            Err(std::fs::TryLockError::WouldBlock) => None,
             Err(std::fs::TryLockError::Error(_)) => return Err(HookDeliverySpoolError::Io),
-        }
-        let _staging = FileLease::held(staging, "hooks.delivery.staging");
+        };
         for entry in fs::read_dir(&self.root).map_err(|_| HookDeliverySpoolError::Io)? {
             let entry = entry.map_err(|_| HookDeliverySpoolError::Io)?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -209,8 +225,13 @@ impl HookDeliveryReceiptSpoolV1 {
             {
                 continue;
             }
+            let final_name = match (ready_receipt_name(&name), &abandoned) {
+                (Some(final_name), _) => Some(final_name),
+                (None, Some(_)) => staged_receipt_name(&name),
+                (None, None) => continue,
+            };
             let staged = entry.path();
-            let adopted = staged_receipt_name(&name)
+            let adopted = final_name
                 .zip(read_bounded(&staged, MAX_RECEIPT_BYTES).ok().flatten())
                 .and_then(|(final_name, bytes)| {
                     decode_receipt(&bytes)
@@ -225,6 +246,26 @@ impl HookDeliveryReceiptSpoolV1 {
             }
         }
         Ok(())
+    }
+
+    /// Whether `root` holds receipts, published or readied, for a drain.
+    pub fn has_receipts(root: &Path) -> Result<bool, HookDeliverySpoolError> {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(HookDeliverySpoolError::Io),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| HookDeliverySpoolError::Io)?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(hook_delivery_publication_name)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     #[hotpath::measure(label = "hooks.delivery.pending")]
@@ -379,6 +420,12 @@ impl HookDeliveryReceiptWriterV1 {
             Ok(()) => {}
             Err(LockAdmissionError::TimedOut) => {
                 hotpath::gauge!("hooks.delivery.staged_for_adoption").inc(1);
+                let ready = staged
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| root.join(name.replacen(STAGED_MARKER, READY_MARKER, 1)))
+                    .ok_or(HookDeliverySpoolError::Io)?;
+                fs::rename(&staged, &ready).map_err(|_| HookDeliverySpoolError::Io)?;
                 hotpath::measure_block!("hooks.delivery.fsync.staged", {
                     sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
                 })?;
@@ -478,8 +525,24 @@ fn stage(
 
 /// The receipt file a staging name was written for.
 fn staged_receipt_name(name: &str) -> Option<&str> {
-    let (receipt, _) = name.strip_prefix('.')?.split_once(STAGED_MARKER)?;
+    marked_receipt_name(name, STAGED_MARKER)
+}
+
+/// The receipt file a readied staging name holds.
+fn ready_receipt_name(name: &str) -> Option<&str> {
+    marked_receipt_name(name, READY_MARKER)
+}
+
+fn marked_receipt_name<'a>(name: &'a str, marker: &str) -> Option<&'a str> {
+    let (receipt, _) = name.strip_prefix('.')?.split_once(marker)?;
     valid_receipt_name(receipt).then_some(receipt)
+}
+
+/// Whether a delivery spool entry named `name` is a receipt for the drain to
+/// settle: one published into place, or one readied for adoption. Creating
+/// either wakes the drain.
+pub fn hook_delivery_publication_name(name: &str) -> bool {
+    valid_receipt_name(name) || ready_receipt_name(name).is_some()
 }
 
 fn receipt_file_name(receipt_id: [u8; 16]) -> String {
@@ -516,11 +579,16 @@ fn admission_error(error: LockAdmissionError) -> HookDeliverySpoolError {
     }
 }
 
+/// The directory holding every host's delivery receipt spool.
+pub fn hook_delivery_spool_directory(data_root: &Path) -> PathBuf {
+    data_root.join(SPOOL_DIRECTORY)
+}
+
 pub fn hook_delivery_receipt_spool_root(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
 ) -> PathBuf {
-    data_root.join("hook-delivery-spool").join(host.hook_key())
+    hook_delivery_spool_directory(data_root).join(host.hook_key())
 }
 
 fn receipt_id_for_settlement(
@@ -654,9 +722,9 @@ mod tests {
     #[test]
     fn a_writer_behind_a_held_owner_stages_its_receipt_for_adoption() {
         let root = TestDir::new();
-        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         assert_eq!(
-            HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
+            HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
             HookDeliverySpoolError::Busy
         );
         // An exhausted budget never admits, even when the lease is free.
@@ -675,7 +743,7 @@ mod tests {
         drop(owner);
 
         // The next owner open publishes the staged receipt exactly once.
-        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         assert_eq!(owner.pending(64).unwrap(), vec![receipt()]);
         drop(owner);
         let writer =
@@ -688,17 +756,59 @@ mod tests {
     }
 
     #[test]
+    fn a_readied_receipt_is_adopted_while_writers_hold_the_staging_lease() {
+        let root = TestDir::new();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
+        let staged_by =
+            HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::from_millis(20)).unwrap();
+        assert_eq!(
+            staged_by.retain(&receipt()),
+            Ok(HookDeliveryRetentionV1::Staged)
+        );
+        let later =
+            HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::from_millis(20)).unwrap();
+        drop(owner);
+        assert_eq!(HookDeliveryReceiptSpoolV1::has_receipts(&root.0), Ok(true));
+
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
+        assert_eq!(owner.pending(64).unwrap(), vec![receipt()]);
+        drop((owner, staged_by, later));
+    }
+
+    #[test]
+    fn an_owner_open_waits_out_a_publishing_writer_within_its_budget() {
+        let root = TestDir::new();
+        assert_eq!(HookDeliveryReceiptSpoolV1::has_receipts(&root.0), Ok(false));
+        drop(HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap());
+        let publishing = open_lock_file(&root.0, LOCK_FILE).unwrap();
+        publishing.lock().unwrap();
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
+            HookDeliverySpoolError::Busy
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                publishing.unlock().unwrap();
+            });
+            assert!(
+                HookDeliveryReceiptSpoolV1::open(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET).is_ok()
+            );
+        });
+    }
+
+    #[test]
     fn a_live_writers_staging_survives_an_owner_open_and_torn_staging_does_not() {
         let root = TestDir::new();
         let writer =
             HookDeliveryReceiptWriterV1::open_within(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET)
                 .unwrap();
         let staged = stage(&root.0, receipt().receipt_id, b"{\"torn").unwrap();
-        drop(HookDeliveryReceiptSpoolV1::open(&root.0).unwrap());
+        drop(HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap());
         assert!(staged.is_file(), "a live writer's staging is never adopted");
         drop(writer);
 
-        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         assert!(
             !staged.exists(),
             "a killed writer's torn staging is removed"
@@ -710,7 +820,7 @@ mod tests {
     fn concurrent_writers_on_a_slow_disk_publish_every_receipt_within_budget() {
         const WRITERS: usize = 8;
         let root = TestDir::new();
-        drop(HookDeliveryReceiptSpoolV1::open(&root.0).unwrap());
+        drop(HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap());
         let _slow_disk = tracedecay_private_fs::framed_log::sync_latency::inject(
             &root.0,
             Duration::from_millis(20),
@@ -741,7 +851,7 @@ mod tests {
                 .map(|_| Ok(HookDeliveryRetentionV1::Published))
                 .collect::<Vec<_>>()
         );
-        let mut pending = HookDeliveryReceiptSpoolV1::open(&root.0)
+        let mut pending = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO)
             .unwrap()
             .pending(64)
             .unwrap();
@@ -760,7 +870,7 @@ mod tests {
             retain(&root.0, &published),
             Ok(HookDeliveryRetentionV1::Published)
         );
-        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         let writer =
             HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::from_millis(20)).unwrap();
         assert_eq!(writer.retain(&staged), Ok(HookDeliveryRetentionV1::Staged));
@@ -771,7 +881,7 @@ mod tests {
             &root.0,
             2 * crate::HOOK_SYNCHRONOUS_BUDGET,
         );
-        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         let mut pending = owner.pending(64).unwrap();
         pending.sort_by_key(|receipt| receipt.receipt_id);
         let mut expected = vec![staged.clone(), published.clone()];
@@ -870,19 +980,19 @@ mod tests {
             Ok(HookDeliveryRetentionV1::AlreadyRetained(receipt.clone()))
         );
         {
-            let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
+            let spool = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("open");
             assert_eq!(spool.pending(64).expect("pending"), vec![receipt.clone()]);
             assert_eq!(
-                HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
+                HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap_err(),
                 HookDeliverySpoolError::Busy
             );
         }
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("reopen");
         assert_eq!(spool.pending(64).expect("replayed"), vec![receipt.clone()]);
         assert!(spool.acknowledge(receipt.receipt_id).expect("ack"));
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("reopen");
         assert!(!spool.acknowledge(receipt.receipt_id).expect("ack replay"));
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("reopen");
         assert!(spool.pending(64).expect("empty").is_empty());
     }
 
@@ -896,7 +1006,7 @@ mod tests {
             retain(&root.0, &first),
             Ok(HookDeliveryRetentionV1::Published)
         );
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("open");
         assert_eq!(spool.pending(64).expect("pending"), vec![first.clone()]);
         drop(spool);
         assert_eq!(
@@ -911,7 +1021,7 @@ mod tests {
         let root = TestDir::new();
         fs::write(&root.0, b"not a spool directory").expect("fixture file");
         assert_eq!(
-            HookDeliveryReceiptSpoolV1::open(&root.0).expect_err("open must fail"),
+            HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect_err("open must fail"),
             HookDeliverySpoolError::UnsafePath
         );
     }
@@ -919,7 +1029,7 @@ mod tests {
     #[test]
     fn retain_propagates_full_spool_without_overwriting_existing_receipts() {
         let root = TestDir::new();
-        drop(HookDeliveryReceiptSpoolV1::open(&root.0).expect("open"));
+        drop(HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).expect("open"));
         for index in 0..MAX_PENDING_RECEIPTS {
             let name = format!("{index:032x}{RECEIPT_SUFFIX}");
             fs::write(root.0.join(name), b"placeholder").expect("full fixture");

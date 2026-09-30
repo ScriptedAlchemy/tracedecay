@@ -31,8 +31,11 @@ mod spool_watch;
 #[cfg(unix)]
 pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
 
-/// The longest a retained record waits for its next delivery attempt; a
-/// spool append wakes the drain sooner.
+/// The longest a retained record or receipt waits for its next delivery
+/// attempt. Every append and receipt publication wakes the drain, and startup
+/// opens every project holding either, so this sweep only retries work a pass
+/// retained (for example a settlement the authority refused) or a wake the
+/// spool watch could not deliver.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
@@ -104,13 +107,15 @@ async fn drain_hook_delivery_receipts(
 }
 
 /// The drain shares each delivery spool with hook callbacks, which legitimately
-/// write it while the daemon is down. A held writer lease is skipped and
-/// retried by the next sweep; any other failure is reported, not swallowed.
+/// write it while the daemon is down. A drain woken by a publication waits
+/// out the publishing writer; a lock held past the hook budget is skipped and
+/// retried by the next wake or sweep; any other failure is reported, not
+/// swallowed.
 fn open_delivery_receipt_spool_for_drain(
     root: &Path,
     host: NativeHostIdentityV1,
 ) -> Option<HookDeliveryReceiptSpoolV1> {
-    match HookDeliveryReceiptSpoolV1::open(root) {
+    match HookDeliveryReceiptSpoolV1::open(root, tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET) {
         Ok(spool) => Some(spool),
         Err(HookDeliverySpoolError::Busy) => None,
         Err(error) => {
