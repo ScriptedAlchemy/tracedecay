@@ -517,7 +517,7 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
         !doctor_text.contains("Stalled"),
         "doctor must not report project open stalled on a session store:\n{doctor_text}"
     );
-    let (exit, report, stderr) = mounted_doctor_report(&home_path, &project_path);
+    let (exit, report, stderr) = run_doctor_json(&home_path, &project_path);
     assert_eq!(
         (exit, &report["daemon_findings"]["state"], &report["issues"]),
         (Some(75), &json!("observed"), &json!(0)),
@@ -715,36 +715,49 @@ fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
         .expect("seed the refusal");
 }
 
-/// `tracedecay doctor --json` exit code, document, and stderr once the
-/// canonical Doctor report of the project has mounted.
-fn mounted_doctor_report(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
-    let started = Instant::now();
-    loop {
-        let doctor = tracedecay_command_with_home(home)
-            .args(["doctor", "--json"])
-            .current_dir(project)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run doctor");
-        let stderr = String::from_utf8_lossy(&doctor.stderr).into_owned();
-        let report: Value = serde_json::from_slice(&doctor.stdout).unwrap_or_else(|error| {
-            panic!("doctor --json printed no document ({error}):\n{stderr}")
-        });
-        if report["daemon_findings"]["state"] != "mounting" {
-            return (doctor.status.code(), report, stderr);
-        }
-        assert!(
-            started.elapsed() < SERVE_TIMEOUT,
-            "the canonical Doctor report never mounted within {SERVE_TIMEOUT:?}:\n{stderr}"
-        );
-        std::thread::sleep(Duration::from_millis(500));
-    }
+/// One `tracedecay doctor --json` run: exit code, document, and stderr.
+fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+    let doctor = tracedecay_command_with_home(home)
+        .args(["doctor", "--json"])
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run doctor");
+    let stderr = String::from_utf8_lossy(&doctor.stderr).into_owned();
+    let report: Value = serde_json::from_slice(&doctor.stdout)
+        .unwrap_or_else(|error| panic!("doctor --json printed no document ({error}):\n{stderr}"));
+    (doctor.status.code(), report, stderr)
 }
 
-/// `tracedecay doctor --json` exit code and its ingest-coverage finding, once
-/// the project runtime that owns the canonical report has mounted.
+/// A restarted daemon has no project open until something asks for one. A
+/// lone `doctor` must open the registered project itself and report the
+/// canonical findings, not a mount that never starts.
+#[test]
+fn doctor_alone_on_a_fresh_daemon_opens_the_project_and_reports_findings() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "cold-doctor");
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that registered the project");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    let (_, report, stderr) = run_doctor_json(&home_path, &project_path);
+    assert_eq!(
+        report["daemon_findings"]["state"], "observed",
+        "the first doctor on a fresh daemon must reach the canonical report:\n{stderr}"
+    );
+
+    let _ = daemon.kill_and_wait();
+}
+
+/// `tracedecay doctor --json` exit code and its ingest-coverage finding.
 fn doctor_ingest_coverage(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
-    let (exit, report, stderr) = mounted_doctor_report(home, project);
+    let (exit, report, stderr) = run_doctor_json(home, project);
     let finding = report["daemon_findings"]["payload"]["entries"]
         .as_array()
         .into_iter()

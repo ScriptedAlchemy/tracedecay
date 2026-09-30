@@ -3126,7 +3126,7 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let initialize_request = serde_json::from_value(json!({
+    let initialize_request: tracedecay_mcp::JsonRpcRequest = serde_json::from_value(json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -3148,7 +3148,7 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     });
     writer_held.notified().await;
 
-    Box::pin(engine.schedule_project_server_warmup(handshake, initialize_request))
+    Box::pin(engine.schedule_project_server_warmup(handshake, Some(initialize_request)))
         .await
         .expect("schedule project warmup");
     engine.lifecycle.begin_draining();
@@ -3257,7 +3257,7 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
         super::super::DaemonInvocationState::default(),
         super::super::http_application::DaemonHttpApplicationRegistry::default(),
         handshake,
-        initialize_request,
+        Some(initialize_request),
         Some(Arc::clone(&attempts)),
     ))
     .await

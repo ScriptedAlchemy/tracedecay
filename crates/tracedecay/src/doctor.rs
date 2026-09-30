@@ -591,10 +591,19 @@ async fn daemon_project_status(
             Some(deadline),
         )
         .await?;
+        let warmed_up = tokio::time::Instant::now() >= warmup_deadline;
         match daemon_runtime_status(runtime)? {
-            Some(status) => return Ok(Some(status)),
-            None if tokio::time::Instant::now() >= warmup_deadline => return Ok(None),
-            None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
+            // The first Doctor call starts the project open, so a warming
+            // owner is polled like missing telemetry until the report lands.
+            Some(status)
+                if warmed_up
+                    || canonical_daemon_doctor_report(&status)?
+                        != CanonicalDoctorReport::Mounting =>
+            {
+                return Ok(Some(status));
+            }
+            None if warmed_up => return Ok(None),
+            Some(_) | None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
         }
     }
 }
@@ -1089,7 +1098,9 @@ async fn check_project_index_paths(
                     }
                 }
             }
-            Err(error) => dc.fail(&format!("{key} could not be read: {error}")),
+            // A reset-required or still-mounting store is already reported
+            // as its own state; a read that could not run is not an issue.
+            Err(error) => dc.warn(&format!("{key} could not be read: {error}")),
         }
     }
 }
