@@ -19,8 +19,7 @@ use std::pin::Pin;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, SanitizationReceiptV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
 };
 use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -339,15 +338,6 @@ impl HostAdmissionOutcome {
             Some("parse_offset_conflict"),
         )
     }
-
-    #[hotpath::skip]
-    pub const fn observation_point_read_unavailable() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("observation_point_read_unavailable"),
-        )
-    }
 }
 
 pub(crate) fn is_admission_cancellation(
@@ -407,19 +397,6 @@ pub trait HostAdmission: Send + Sync {
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>>;
-
-    /// Content-free point existence check for idempotent recovery. The
-    /// default is a typed unavailable state; production composition overrides
-    /// it with the canonical observation authority.
-    fn observation_receipt<'a>(
-        &'a self,
-        _provider: &'a str,
-        _scope: &'a ObservationScopeV1,
-        _observation_id: &'a CanonicalObservationIdV1,
-        _cancellation: &'a ObservationCancellation,
-    ) -> AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
-        Box::pin(async { Err(HostAdmissionOutcome::observation_point_read_unavailable()) })
-    }
 
     /// Drains up to `max` queued projections for one provider.
     fn drain_projection_queue<'a>(
@@ -607,8 +584,7 @@ pub(crate) mod test_support {
     type SessionBackfillPagePause = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
 
     use crate::observation::{
-        AdvanceNonDurableSourceCursorRequest, GetObservationRequest, ObservationApplication,
-        ObservationApplicationError,
+        AdvanceNonDurableSourceCursorRequest, ObservationApplication, ObservationApplicationError,
     };
 
     use super::*;
@@ -1133,28 +1109,6 @@ pub(crate) mod test_support {
                     .get_source_cursor(source, scope)
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
-            })
-        }
-
-        fn observation_receipt<'a>(
-            &'a self,
-            _provider: &'a str,
-            _scope: &'a ObservationScopeV1,
-            observation_id: &'a CanonicalObservationIdV1,
-            cancellation: &'a ObservationCancellation,
-        ) -> AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
-            Box::pin(async move {
-                self.application()?
-                    .get_observation(GetObservationRequest::new(
-                        observation_id.clone(),
-                        cancellation.clone(),
-                    ))
-                    .await
-                    .map(|read| {
-                        read.observation()
-                            .map(|stored| stored.observation().receipt().clone())
-                    })
-                    .map_err(Self::application_error)
             })
         }
 
