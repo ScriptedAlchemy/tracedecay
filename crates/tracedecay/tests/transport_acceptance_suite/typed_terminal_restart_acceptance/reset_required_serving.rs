@@ -305,7 +305,21 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         ),
     ] {
         let context = format!("{scope} session read over a copying session temporal store");
-        super::assert_reset_required(&super::cli_problem_envelope(&read, &context), &context);
+        let refused = super::cli_problem_envelope(&read, &context);
+        super::assert_reset_required(&refused, &context);
+        assert_eq!(
+            refused["problem"]["detail"],
+            json!({
+                "kind": "reset_required",
+                "authority": "session temporal",
+                "found_version": 6,
+                "required_version": 7,
+                "reason": "session temporal profile schema 6 is incompatible with required \
+                           schema 7; reset the profile",
+                "remedy": "tracedecay wipe --stale --yes",
+            }),
+            "{context}"
+        );
     }
     assert_eq!(session_temporal_version(&profile_root.join("global.db")), 7);
     assert_eq!(session_temporal_version(&project_store), 6);
