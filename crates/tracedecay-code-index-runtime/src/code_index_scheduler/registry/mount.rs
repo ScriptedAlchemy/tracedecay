@@ -1372,12 +1372,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // owned graph try_lock, which deadlocked tests that hold the
                 // scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
-                // A publication must first reopen its own lightweight text
-                // owner: publication moved the durable pointer, so the prior
-                // owner is no longer authoritative even while the new
-                // lightweight handle is opening. Withdraw it first - a failed
-                // or delayed reopen must report warming, never keep serving
-                // the superseded generation indefinitely.
+                // A publication reopens its own lightweight text owner and
+                // swaps it in for the prior one in a single write, so status
+                // always names a committed generation. A failed
+                // reopen withdraws the prior owner instead: the durable
+                // pointer has moved, and the next pass restores from it.
                 let published_pass = matches!(
                     &source_result,
                     Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
@@ -1394,9 +1393,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 let mut published_text_projection = None;
                 let mut published_text_opened = None;
                 if published_pass {
-                    *worker_text_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     let text_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let published_text = tokio::task::spawn_blocking(move || {
@@ -1422,21 +1418,26 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(published_text.clone());
-                            // The publication broadcast went out while this
-                            // slot was empty; the reopened owner must wake
-                            // waiters that probed it then.
+                            // The publication broadcast went out before the
+                            // successor's owner was installed; waiters that
+                            // probed in between must wake now.
                             worker_serving_generation_changed.send_replace(());
                             Some(published_text)
                         }
-                        Ok(Ok(Err(error))) => {
-                            tracing::error!(
-                                event = "code_index_published_text_reopen_failed",
-                                error = %error,
-                                "published text restore failed at decoded-cache release"
-                            );
+                        failed => {
+                            if let Ok(Ok(Err(error))) = &failed {
+                                tracing::error!(
+                                    event = "code_index_published_text_reopen_failed",
+                                    error = %error,
+                                    "published text restore failed at decoded-cache release"
+                                );
+                            }
+                            *worker_text_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                            worker_serving_generation_changed.send_replace(());
                             None
                         }
-                        Ok(Ok(Ok(None)) | Err(_)) | Err(_) => None,
                     };
                     // Drive the replacement text owner in this pass. Exact and
                     // lexical are the required fresh-index product; graph

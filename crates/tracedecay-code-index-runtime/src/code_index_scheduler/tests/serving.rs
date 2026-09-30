@@ -56,17 +56,18 @@ use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use super::{
     ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, OwnerSignals, ReadyRetrievalControlV1,
-    active_text_artifact_path, application_context, build_progress_snapshot, callee_fanout_sources,
-    caller_star_sources, callers_page_meta, core_search_request, decode_hex, git,
-    install_verified_graph_store, install_verified_graph_store_on_text, mount_core_query_authority,
-    mount_query_authority, mounted_core_query_worktree,
-    mounted_core_query_worktree_with_one_permit, moved_reference_scope,
-    progress_snapshot_for_generation, published, query_authority, query_meta,
-    quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
+    SERVING_SEAT_FAILURE_CEILING, active_text_artifact_path, application_context,
+    build_progress_snapshot, callee_fanout_sources, caller_star_sources, callers_page_meta,
+    core_search_request, decode_hex, git, install_verified_graph_store,
+    install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
+    moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
+    query_meta, quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, settled_owner_with_idle_admission, test_project_id,
-    wait_for_live_complete_generation, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_settled_owner,
+    wait_for_dashboard_ready, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_settled_owner, write,
 };
 use crate::{
     code_index::production::{
@@ -6776,4 +6777,68 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "artifact-backed lexical hydration returns the canonical source path"
     );
     registry.shutdown().await;
+}
+
+/// A graph-off worktree never seats a decoded generation, so its text owner is
+/// the only thing status reads the committed generation from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_keeps_the_committed_generation_through_a_refresh() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let committed = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted dashboard freshness")
+        .latest_generation_id
+        .expect("a ready worktree advertises its generation");
+
+    write(
+        fixture.path(),
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 2 }\n",
+    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let mut advertised = Vec::new();
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted dashboard freshness");
+        let latest = freshness.latest_generation_id.clone();
+        if advertised.last() != Some(&latest) {
+            advertised.push(latest.clone());
+        }
+        if latest.as_ref().is_some_and(|latest| *latest != committed)
+            && freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the refresh never settled: {advertised:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(advertised.len(), 2, "status advertised {advertised:?}");
+    assert_eq!(advertised[0].as_deref(), Some(committed.as_str()));
 }
