@@ -571,7 +571,7 @@ fn unbound_refusal(
     })?;
     tracedecay_mcp::application_output::tool_result::problem_tool_result(
         &serde_json::to_string(&envelope)?,
-        &envelope,
+        &envelope.problem,
     )
 }
 

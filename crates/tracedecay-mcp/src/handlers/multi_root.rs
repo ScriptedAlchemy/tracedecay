@@ -13,6 +13,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
+use crate::application_output::tool_result::problem_tool_result;
 use crate::handlers::support::{json_result, unknown_tool_error};
 use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -257,7 +258,7 @@ fn problem_result(
         "binding_id": binding_id(operation)?,
         "application": application,
     });
-    Ok(json_result(&payload).with_semantic_error(true))
+    problem_tool_result(&payload.to_string(), &application.problem)
 }
 
 fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {

@@ -5,12 +5,14 @@ use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tracedecay_contracts::ApplicationProblemRecord;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor, encode_bound_cursor,
 };
 
 use crate::ToolResult;
+use crate::application_output::tool_result::problem_tool_result;
 use crate::tool_errors::cursor_refusal;
 use crate::tools::render;
 
@@ -70,12 +72,28 @@ pub fn rendered_tool_result<F: FnOnce() -> String>(
     md: F,
 ) -> ToolResult {
     let text = render::finalize(response_handle_root, args, value, md);
-    text_tool_result(&text, touched_files)
+    text_tool_result(&text, touched_files).with_structured_result(value.clone())
+}
+
+/// An owner's `{kind, value}` HTTP envelope as the tool result: an answer
+/// as its JSON body, a problem as the one refusing tool result with the
+/// typed record at `structuredContent.problem`.
+pub fn owner_envelope_result(payload: &Value) -> Result<ToolResult> {
+    if payload.get("kind").and_then(Value::as_str) != Some("problem") {
+        return Ok(json_result(payload).with_semantic_error(false));
+    }
+    let problem: ApplicationProblemRecord =
+        serde_json::from_value(payload["value"]["problem"].clone()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("the owner's problem record does not decode: {error}"),
+            }
+        })?;
+    problem_tool_result(&payload.to_string(), &problem)
 }
 
 /// A compact JSON payload rendered as the tool's text content.
 pub fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&value.to_string(), Vec::new())
+    text_tool_result(&value.to_string(), Vec::new()).with_structured_result(value.clone())
 }
 
 pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
