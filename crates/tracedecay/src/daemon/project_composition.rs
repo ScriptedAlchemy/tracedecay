@@ -395,19 +395,14 @@ pub(super) async fn production_project_server(
                 Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
             let upgrade =
                 match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await {
-                    Ok(PublishedFullServer {
-                        server,
-                        session_db,
-                        doctor_report_reader,
-                    }) => {
+                    Ok(PublishedFullServer { server, pending }) => {
                         match Box::pin(inputs.finish_full_server(
                             &opened,
                             &core,
                             &activation,
                             &resolved,
                             &server,
-                            session_db,
-                            doctor_report_reader,
+                            pending,
                         ))
                         .await
                         {
@@ -659,10 +654,16 @@ struct AdmittedSessionDatabases {
     user_session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
-/// The full server after it replaced the core in the owner registry, with the
-/// project session database its dependent owners still have to mount.
+/// The full server after it replaced the core in the owner registry.
 struct PublishedFullServer {
     server: Arc<crate::mcp::McpServer>,
+    pending: PendingFullServerOwners,
+}
+
+/// What the published full server still has to mount before it serves: the
+/// project session database its dependent owners open, and the Doctor report
+/// reader published once they have.
+struct PendingFullServerOwners {
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
 }
@@ -1494,8 +1495,10 @@ impl ProjectOpenInputs<'_> {
         }
         Ok(PublishedFullServer {
             server: full_candidate,
-            session_db,
-            doctor_report_reader,
+            pending: PendingFullServerOwners {
+                session_db,
+                doctor_report_reader,
+            },
         })
     }
 
@@ -1603,9 +1606,12 @@ impl ProjectOpenInputs<'_> {
         activation: &CoreRouteActivation,
         resolved: &Arc<crate::mcp::McpServer>,
         full_server: &Arc<crate::mcp::McpServer>,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
+        pending: PendingFullServerOwners,
     ) -> Result<()> {
+        let PendingFullServerOwners {
+            session_db,
+            doctor_report_reader,
+        } = pending;
         self.log_phase("session_capabilities_published", None, self.started);
         Box::pin(self.mount_full_server_owners(
             opened,
