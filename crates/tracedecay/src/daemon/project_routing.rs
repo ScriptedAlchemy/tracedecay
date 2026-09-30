@@ -225,7 +225,10 @@ where
     Value: Send + 'static,
 {
     let probe = tokio::task::spawn_blocking(probe);
-    let budget = repository_probe_budget(project_path);
+    let budget = tracedecay_runtime_core::git_discovery::repository_discovery_budget(
+        project_path,
+        std::time::Instant::now() + REPOSITORY_DISCOVERY_DEADLINE,
+    );
     tokio::pin!(probe);
     tokio::pin!(budget);
     match tokio::select! {
@@ -243,19 +246,6 @@ where
             tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
         )),
     }
-}
-
-/// Wall-clock discovery budget, or the moment a test parks the walk.
-///
-/// The parked walk is already past any useful wait: returning here marks the
-/// project discovery-blocked without sleeping out the production deadline.
-async fn repository_probe_budget(project_path: &Path) {
-    if tracedecay_runtime_core::git_repository::wait_until_repository_discovery_blocks(project_path)
-        .await
-    {
-        return;
-    }
-    tokio::time::sleep(REPOSITORY_DISCOVERY_DEADLINE).await;
 }
 
 /// Finish or refuse repository discovery before any cross-project admission lock.

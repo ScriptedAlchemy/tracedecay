@@ -41,7 +41,7 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::settled_repository_topology(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()?
         .worktree_root
         .clone()
@@ -52,13 +52,13 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    crate::git_repository::settled_repository_topology(dir)
+    crate::git_repository::repository_topology(dir)
         .ok()
         .map(|topology| topology.common_dir.clone())
 }
 
-/// [`git_common_dir`] that keeps a blocked discovery distinct from "not a
-/// repository".
+/// [`git_common_dir`] for callers that must not wait on another thread's
+/// walk, keeping a blocked discovery distinct from "not a repository".
 ///
 /// `Ok(None)` is a path that is not a readable repository. `Err` is only
 /// [`crate::git_repository::GitRepositoryError::DiscoveryBlocked`]: another
@@ -67,7 +67,7 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 pub fn git_common_dir_outcome(
     dir: &Path,
 ) -> std::result::Result<Option<PathBuf>, crate::git_repository::GitRepositoryError> {
-    match crate::git_repository::repository_topology(dir) {
+    match crate::git_repository::try_repository_topology(dir) {
         Ok(topology) => Ok(Some(topology.common_dir.clone())),
         Err(error @ crate::git_repository::GitRepositoryError::DiscoveryBlocked { .. }) => {
             Err(error)
@@ -145,7 +145,7 @@ pub fn primary_checkout_root(
 /// inside a monorepo is its own project), is outside git, or has a repository
 /// shape whose primary checkout cannot be derived safely.
 pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
-    let topology = crate::git_repository::settled_repository_topology(dir).ok()?;
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
     let worktree_root = topology.worktree_root.as_deref()?;
     // Only a worktree ROOT inherits repository identity. Without this check a
     // subdirectory indexed as its own project would be absorbed into the
@@ -158,7 +158,7 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
 
 /// Returns whether `dir` resolves to a linked worktree root.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    let Ok(topology) = crate::git_repository::settled_repository_topology(dir) else {
+    let Ok(topology) = crate::git_repository::repository_topology(dir) else {
         return false;
     };
     topology.worktree_root.as_deref().is_some_and(|root| {
@@ -180,7 +180,7 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let topology = crate::git_repository::settled_repository_topology(dir).ok()?;
+    let topology = crate::git_repository::repository_topology(dir).ok()?;
     let git_dir = topology.git_dir.as_path();
     let common_dir = topology.common_dir.as_path();
     let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
@@ -560,7 +560,8 @@ mod tests {
 
     /// A caller that finds another thread mid-walk on the same checkout must
     /// still get the repository answer, not "not a repository": a linked
-    /// worktree otherwise mints a path-derived identity of its own.
+    /// worktree otherwise mints a path-derived identity of its own. Only the
+    /// non-waiting probe reports the walk as blocked.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_walk_in_flight_on_another_thread_does_not_hide_the_repository() {
         let temporary = tempdir().unwrap();
@@ -577,10 +578,34 @@ mod tests {
         });
         block.wait_entered().await;
 
-        assert_eq!(git_common_dir(&primary), Some(common_dir.clone()));
-        assert_eq!(git_worktree_root(&primary), Some(primary.clone()));
+        match git_common_dir_outcome(&primary) {
+            Err(crate::git_repository::GitRepositoryError::DiscoveryBlocked { path }) => {
+                assert_eq!(path, primary.display().to_string());
+            }
+            outcome => panic!("the probe must not wait on the parked walk: {outcome:?}"),
+        }
+        let joined = std::thread::spawn({
+            let primary = primary.clone();
+            move || git_worktree_root(&primary)
+        });
+        let joined_by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::git_repository::repository_topology_wait_count_for_test(&primary) == 0
+            && !joined.is_finished()
+        {
+            assert!(
+                std::time::Instant::now() < joined_by,
+                "the worktree read neither joined the parked walk nor returned"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         block.release();
+
         assert_eq!(parked.join().unwrap(), Some(common_dir));
+        assert_eq!(joined.join().unwrap(), Some(primary.clone()));
+        assert_eq!(
+            crate::git_repository::repository_discovery_count_for_test(&primary),
+            1
+        );
         crate::git_repository::reset_repository_discovery_for_test(&primary);
     }
 

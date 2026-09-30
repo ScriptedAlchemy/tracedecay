@@ -299,30 +299,30 @@ async fn authority_identity_off_executor(
         () = cancellation.cancelled() => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::Cancelled)
         }
-        // A test block parks the walk on a channel. That is the deadline for
-        // this caller: the project is discovery-blocked, and waiting out the
-        // wall-clock budget would hold admission open for the whole hang.
-        () = discovery_block_budget(directory) => {
-            AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
-        }
-        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
+        () = repository_discovery_budget(directory, deadline.instant()) => {
             AuthorityProbe::Interrupted(GitDiscoveryUnknown::DeadlineExceeded)
         }
     }
 }
 
-/// Completes when a test has parked discovery for `directory`.
+/// Completes at `deadline`, the wall-clock bound on one caller's wait for
+/// discovery of `directory`.
 ///
-/// Production builds and unblocked paths pend forever so the caller's own
-/// deadline remains the only timer.
-async fn discovery_block_budget(directory: &Path) {
+/// A test that parks the walk on a channel ends the budget as soon as the
+/// walk is parked: the project is discovery-blocked, and sleeping out the
+/// deadline would hold the caller open for the whole hang.
+pub async fn repository_discovery_budget(directory: &Path, deadline: Instant) {
+    let elapsed = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
     #[cfg(any(test, feature = "test-helpers"))]
-    if crate::git_repository::wait_until_repository_discovery_blocks(directory).await {
-        return;
-    }
+    let elapsed = async {
+        tokio::select! {
+            () = elapsed => {}
+            true = crate::git_repository::wait_until_repository_discovery_blocks(directory) => {}
+        }
+    };
     #[cfg(not(any(test, feature = "test-helpers")))]
     let _ = directory;
-    std::future::pending::<()>().await;
+    elapsed.await;
 }
 
 /// Await the answer a joined resolution publishes, or `None` when the
@@ -481,7 +481,7 @@ fn git_control_exists_or_unknown(candidate: &Path) -> bool {
 }
 
 fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryIdentityOutcome> {
-    match crate::git_repository::repository_topology(directory) {
+    match crate::git_repository::try_repository_topology(directory) {
         Ok(topology) => {
             let Some(worktree_root) = topology.worktree_root.clone() else {
                 return Some(GitRepositoryIdentityOutcome::NotRepository);
