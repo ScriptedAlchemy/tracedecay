@@ -20,7 +20,8 @@ use tracedecay_domain::UtcMicros;
 use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
     HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolAckDispositionV1, HookSpoolAckV1,
-    HookSpoolRecordV1, HookSpoolV1, hook_configuration_path, validate_replay_batch,
+    HookSpoolConfigV1, HookSpoolError, HookSpoolRecordV1, HookSpoolV1, hook_configuration_path,
+    validate_replay_batch,
 };
 use tracedecay_domain::NativeHostIdentityV1;
 
@@ -142,19 +143,25 @@ impl ReplaySettlement {
 /// Drain one admitted host spool once. `admit` reauthorizes and admits a
 /// single envelope; production passes the daemon admission path, tests pass a
 /// fake. The spool handle is dropped across admission so a live hook can append.
+///
+/// Each lease acquisition waits out a live writer for at most its lease: an
+/// append wakes the drain while the appender still holds the lease, so
+/// skipping a held lease would strand that record until the next sweep.
 #[hotpath::measure(label = "hooks.replay.host_drain", future = true)]
 pub async fn drain_host_spool_once<A, F>(
-    mut spool: HookSpoolV1,
+    root: &Path,
+    config: HookSpoolConfigV1,
     project_id: [u8; 16],
     binding: Option<&HookScopeBindingV1>,
     now: UtcMicros,
     admit: A,
-) -> HookReplayPassReportV1
+) -> Result<HookReplayPassReportV1, HookSpoolError>
 where
     A: Fn(HookEventEnvelopeV2, Option<crate::NativeContextScoutLifecycleV1>) -> F,
     F: Future<Output = HookReplayAdmissionOutcomeV1>,
 {
-    let host = spool.config().host;
+    let (mut spool, _) = HookSpoolV1::open_within(root, config, now, config.writer_lease())?;
+    let host = config.host;
     let mut pass = HookReplayPassReportV1::default();
 
     // Age-expired records are terminal regardless of binding state: the spool
@@ -185,17 +192,17 @@ where
         // reauthorized. Records stay durable and pending; a later pass retries.
         hotpath::gauge!("hooks.replay.binding_unavailable").inc(1.0);
         pass.binding_unavailable = true;
-        return pass;
+        return Ok(pass);
     };
 
     let Ok(batches) = spool.claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS) else {
-        return pass;
+        return Ok(pass);
     };
     let mut replay_batches = Vec::with_capacity(batches.len());
     for batch in batches {
         let Ok(record_count) = u16::try_from(batch.records.len()) else {
             let _ = spool.release_replay_claim(batch.claim_id);
-            return pass;
+            return Ok(pass);
         };
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
             let _ = spool.release_replay_claim(batch.claim_id);
@@ -211,8 +218,6 @@ where
     // live hook events. Admission may await arbitrary daemon work, so retain
     // only bounded record copies across that await and reacquire the writer
     // solely for the final acknowledgement phase.
-    let root = spool.root().to_path_buf();
-    let config = spool.config();
     drop(spool);
     let mut completions = Vec::new();
     for (records, record_count) in replay_batches {
@@ -269,10 +274,11 @@ where
             | ReplayCompletion::Tombstone(_, _) => 1,
         })
     });
-    let Ok((mut spool, _)) = HookSpoolV1::open(root, config, now) else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
+    else {
         hotpath::gauge!("hooks.replay.retained").inc(f64::from(retained_without_ack));
         pass.retained = pass.retained.saturating_add(retained_without_ack);
-        return pass;
+        return Ok(pass);
     };
     let mut settled = Vec::new();
     for completion in completions {
@@ -301,7 +307,7 @@ where
         })
         .collect::<Vec<_>>();
     let Ok(outcomes) = spool.acknowledge_many(&acknowledgements, now) else {
-        return pass;
+        return Ok(pass);
     };
     for ((record, settlement), outcome) in settled.into_iter().zip(outcomes) {
         if !matches!(outcome, Ok(true)) {
@@ -331,7 +337,7 @@ where
             }
         }
     }
-    pass
+    Ok(pass)
 }
 
 fn log_tombstone(
@@ -496,29 +502,21 @@ mod tests {
         report.pending_records
     }
 
-    fn open_admitted_spool(data_root: &Path, now: UtcMicros) -> HookSpoolV1 {
-        HookSpoolV1::open(
-            hook_v2_spool_root(data_root, HOST),
-            HookSpoolConfigV1::stock(HOST),
-            now,
-        )
-        .unwrap()
-        .0
-    }
-
     async fn drain<A, F>(data_root: &Path, now: UtcMicros, admit: A) -> HookReplayPassReportV1
     where
         A: Fn(HookEventEnvelopeV2, Option<crate::NativeContextScoutLifecycleV1>) -> F,
         F: Future<Output = HookReplayAdmissionOutcomeV1>,
     {
         drain_host_spool_once(
-            open_admitted_spool(data_root, now),
+            &hook_v2_spool_root(data_root, HOST),
+            HookSpoolConfigV1::stock(HOST),
             PROJECT_ID,
             published_hook_scope_binding(data_root, WORKTREE_ID, HOST, now).as_ref(),
             now,
             admit,
         )
         .await
+        .unwrap()
     }
 
     struct TestRoot(PathBuf);
@@ -598,13 +596,8 @@ mod tests {
         let captured = Arc::clone(&suggestions);
 
         let report = drain_host_spool_once(
-            HookSpoolV1::open(
-                &spool_root,
-                HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
-                now,
-            )
-            .unwrap()
-            .0,
+            &spool_root,
+            HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
             PROJECT_ID,
             Some(&binding),
             now,
@@ -637,7 +630,8 @@ mod tests {
                 }
             },
         )
-        .await;
+        .await
+        .unwrap();
 
         assert_eq!(report.committed, 1);
         assert_eq!(
@@ -652,6 +646,83 @@ mod tests {
         .unwrap();
         assert_eq!(report.pending_records, 0);
         drop(spool);
+    }
+
+    /// Holds the spool's writer lease on another thread, as a live hook does
+    /// between its append and its commit, until `held` has elapsed.
+    fn hold_writer_lease(
+        spool_root: PathBuf,
+        append: Option<(HookEventEnvelopeV2, HookScopeBindingV1)>,
+        now: UtcMicros,
+        held: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let (mut spool, _) =
+                HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(HOST), now).unwrap();
+            if let Some((envelope, binding)) = append {
+                spool.append(envelope, &binding, now).unwrap();
+            }
+            holding_tx.send(()).unwrap();
+            std::thread::sleep(held);
+            spool.commit().unwrap();
+        });
+        holding_rx.recv().unwrap();
+        writer
+    }
+
+    #[tokio::test]
+    async fn a_drain_woken_while_the_appender_holds_the_lease_replays_its_record() {
+        let data_root = TestRoot::new("wake-held");
+        let current = UtcMicros(10);
+        let binding = binding(7);
+        publish_binding(data_root.path(), &binding, current);
+        let writer = hold_writer_lease(
+            hook_v2_spool_root(data_root.path(), HOST),
+            Some((envelope(9, &binding), binding.clone())),
+            current,
+            std::time::Duration::from_millis(50),
+        );
+
+        let report = drain(data_root.path(), current, |_, _| async { admitted() }).await;
+
+        writer.join().unwrap();
+        assert_eq!(report.committed, 1);
+        assert_eq!(pending_records(data_root.path(), current), 0);
+    }
+
+    #[tokio::test]
+    async fn a_writer_holding_the_lease_at_acknowledgement_delays_it_without_retaining() {
+        let data_root = TestRoot::new("ack-held");
+        let current = UtcMicros(10);
+        let binding = binding(7);
+        publish_binding(data_root.path(), &binding, current);
+        spool_envelopes(
+            data_root.path(),
+            &binding,
+            &[envelope(9, &binding)],
+            current,
+        );
+        let spool_root = hook_v2_spool_root(data_root.path(), HOST);
+        let writer = Arc::new(StdMutex::new(None));
+
+        let report = drain(data_root.path(), current, {
+            let writer = Arc::clone(&writer);
+            move |_, _| {
+                *writer.lock().unwrap() = Some(hold_writer_lease(
+                    spool_root.clone(),
+                    None,
+                    current,
+                    std::time::Duration::from_millis(50),
+                ));
+                async { admitted() }
+            }
+        })
+        .await;
+
+        writer.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!((report.committed, report.retained), (1, 0));
+        assert_eq!(pending_records(data_root.path(), current), 0);
     }
 
     #[tokio::test]
@@ -817,13 +888,15 @@ mod tests {
         spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], now);
 
         let report = drain_host_spool_once(
-            open_admitted_spool(root.path(), now),
+            &hook_v2_spool_root(root.path(), HOST),
+            HookSpoolConfigV1::stock(HOST),
             [9; 16],
             published_hook_scope_binding(root.path(), binding.worktree_id, HOST, now).as_ref(),
             now,
             |_, _| async move { admitted() },
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(report.binding_unavailable);
         assert_eq!(report.committed, 0);

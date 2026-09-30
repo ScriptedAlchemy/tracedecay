@@ -69,6 +69,12 @@ impl HookSpoolConfigV1 {
         }
     }
 
+    /// The longest a live writer may hold the lease; a holder past it is
+    /// stale and can no longer mutate the spool.
+    pub const fn writer_lease(self) -> std::time::Duration {
+        std::time::Duration::from_micros(self.writer_lease_micros.unsigned_abs())
+    }
+
     pub(super) fn validate(self) -> Result<(), HookSpoolError> {
         self.limits.validate()?;
         if self.writer_lease_micros <= 0 {
