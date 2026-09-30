@@ -328,8 +328,8 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
 }
 
 #[tokio::test]
-async fn registered_mount_publishes_complete_migrated_schema() {
-    let harness = RegisteredGlobalDbHarness::open("complete-migrated-schema").await;
+async fn registered_mount_publishes_complete_schema() {
+    let harness = RegisteredGlobalDbHarness::open("complete-schema").await;
     let snapshot = harness.registered.read_snapshot().await.unwrap();
 
     super::schema_contract::validate_authority_schema_contract(&snapshot)
@@ -359,9 +359,26 @@ async fn registered_mount_publishes_complete_migrated_schema() {
             .unwrap();
         assert!(
             rows.next().await.unwrap().is_some(),
-            "registered migration omitted {table}.{column}"
+            "registered schema omitted {table}.{column}"
         );
     }
+    let mut rows = snapshot
+        .query(
+            "SELECT group_concat(name, ',') FROM pragma_index_info('idx_sessions_parent')",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "provider,parent_session_id",
+        "registered schema omitted the subagent parent lookup index"
+    );
 }
 
 #[tokio::test]

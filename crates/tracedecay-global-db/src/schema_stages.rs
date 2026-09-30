@@ -6,10 +6,9 @@ use super::schema_contract::{
     validate_registry_schema_contract, validate_remote_deletion_schema_contract,
 };
 use super::{
-    configuration, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
-    global_db_operation_message, managed_test_runs, observability_rollup, observation,
-    observation_projection, project_registry, session_temporal_schema, stack_delivery,
+    configuration, git_index_transactions, global_db_operation_error, global_db_operation_message,
+    managed_test_runs, observability_rollup, observation, observation_projection, project_registry,
+    session_temporal_schema, stack_delivery,
 };
 use crate::registered::RefusedAuthorityV1;
 use tracedecay_runtime_core::{
@@ -229,6 +228,7 @@ const TRANSCRIPT_SCHEMA: &str = "
         PRIMARY KEY(provider, session_id)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(provider, project_key);
+    CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(provider, parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_project_provider_session
         ON sessions(project_key, provider, session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
@@ -848,17 +848,6 @@ async fn install_registered_schema_stage_sequence(
                 global_db_operation_error("initialize remote deletion catalog", error)
             })?;
     }
-    // A registry created by a released pre-`primary_root` binary (the
-    // 8-column `code_projects` shape shipped through 0.0.66) migrates
-    // additively in place; every other drift below still fails closed
-    // with the typed reset state.
-    if !is_fresh {
-        ensure_code_project_primary_root_columns(transaction)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("migrate released code_projects registry columns", error)
-            })?;
-    }
     if let Err(error) = validate_registry_schema_contract(transaction).await {
         if is_fresh {
             return Err(error);
@@ -888,7 +877,12 @@ async fn install_registered_schema_stage_sequence(
             global_db_operation_error("initialize delivery settlement schema", error)
         })?;
     stack_delivery::ensure_github_stack_delivery_schema(transaction).await?;
-    observability_rollup::ensure_observability_rollup_schema(transaction).await?;
+    transaction
+        .execute_batch(observability_rollup::OBSERVABILITY_ROLLUP_SCHEMA_V1)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize observability rollup schema", error)
+        })?;
     if workflow_admission == WorkflowSchemaAdmission::Create {
         for table in WORKFLOW_TABLE_CONTRACTS_V1 {
             transaction
@@ -927,12 +921,6 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(HANDOFF_OPEN_SCHEMA_V1)
         .await
         .map_err(|error| global_db_operation_error("initialize handoff-open schema", error))?;
-    ensure_session_parent_columns(transaction)
-        .await
-        .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
-    ensure_parse_offset_columns(transaction)
-        .await
-        .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
 
     ensure_authority_audit_checkpoint_schema(transaction).await?;
     match temporal_admission {
@@ -1528,108 +1516,55 @@ mod tests {
         );
     }
 
-    /// The 8-column `code_projects` shape shipped in released binaries
-    /// (through 0.0.66), so admission must migrate it additively in place,
-    /// columns added, existing rows preserved, instead of demanding a reset.
+    /// A registry whose `code_projects` is not the final shape, whether the
+    /// 8-column table released binaries through 0.0.74 created or any other
+    /// drift, is refused with the project-registry reset state and left
+    /// exactly as admission found it instead of being altered in place.
     #[tokio::test]
-    async fn released_registry_without_primary_root_columns_migrates_in_place() {
-        let directory = TempDir::new().unwrap();
-        let database_path = directory.path().join("sessions.db");
-        install_registered_schema(&database_path).await;
-        {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
-            connection
-                .execute_batch(
-                    "ALTER TABLE code_projects DROP COLUMN primary_root_platform;
-                     ALTER TABLE code_projects DROP COLUMN primary_root_bytes;
-                     ALTER TABLE code_projects DROP COLUMN primary_root_last_seen_at;
-                     INSERT INTO code_projects
-                        (project_id, canonical_root, display_root, created_at, last_seen_at)
-                     VALUES ('released-project', '/released/root', '/released/root', 100, 100);",
-                )
-                .expect("shape the registry like the released 8-column registry");
-        }
-
-        install_registered_schema(&database_path).await;
-
-        let connection = TestConnection::open(&database_path);
-        for column in [
-            "primary_root_platform",
-            "primary_root_bytes",
-            "primary_root_last_seen_at",
+    async fn registry_with_non_final_code_project_shape_requires_typed_reset() {
+        for (drift, columns_after_refusal) in [
+            (
+                "ALTER TABLE code_projects DROP COLUMN primary_root_platform;
+                 ALTER TABLE code_projects DROP COLUMN primary_root_bytes;
+                 ALTER TABLE code_projects DROP COLUMN primary_root_last_seen_at;",
+                "project_id,canonical_root,display_root,git_common_dir,git_remote_url,\
+                 default_branch,created_at,last_seen_at",
+            ),
+            (
+                "ALTER TABLE code_projects ADD COLUMN unknown_shape TEXT",
+                "project_id,canonical_root,display_root,primary_root_platform,\
+                 primary_root_bytes,primary_root_last_seen_at,git_common_dir,git_remote_url,\
+                 default_branch,created_at,last_seen_at,unknown_shape",
+            ),
         ] {
-            let mut rows = connection
-                .query(
-                    "SELECT 1 FROM pragma_table_xinfo('code_projects') WHERE name = ?1",
-                    tracedecay_runtime_core::db::engine::params![column],
-                )
-                .await
+            let directory = TempDir::new().unwrap();
+            let database_path = directory.path().join("sessions.db");
+            install_registered_schema(&database_path).await;
+            rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .execute_batch(drift)
                 .unwrap();
-            assert!(
-                rows.next().await.unwrap().is_some(),
-                "released registry admission must add final column {column}"
+
+            let error = registered_admission_error(&database_path).await;
+            assert_eq!(
+                error.reset_required_context(),
+                Some((
+                    super::project_registry::PROJECT_REGISTRY_AUTHORITY,
+                    "database error: table 'code_projects' has an incompatible number of \
+                     columns (operation: validate global database authority schema)"
+                )),
+                "{drift}"
             );
+            let columns: String = rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .query_row(
+                    "SELECT group_concat(name, ',') FROM pragma_table_xinfo('code_projects')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(columns, columns_after_refusal, "{drift}");
         }
-        let mut rows = connection
-            .query(
-                "SELECT canonical_root, primary_root_platform FROM code_projects
-                 WHERE project_id = 'released-project'",
-                (),
-            )
-            .await
-            .unwrap();
-        let row = rows
-            .next()
-            .await
-            .unwrap()
-            .expect("released project row must survive the in-place migration");
-        assert_eq!(row.get::<String>(0).unwrap(), "/released/root");
-        assert!(
-            row.get::<Option<String>>(1).unwrap().is_none(),
-            "migrated columns must stay NULL until the next registration backfills them"
-        );
-    }
-
-    /// Only the known released shape migrates; a registry whose
-    /// `code_projects` drifted in any other way still fails closed with the
-    /// typed reset state.
-    #[tokio::test]
-    async fn registry_with_unknown_code_project_shape_requires_typed_reset() {
-        let directory = TempDir::new().unwrap();
-        let database_path = directory.path().join("sessions.db");
-        install_registered_schema(&database_path).await;
-        {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
-            connection
-                .execute_batch("ALTER TABLE code_projects ADD COLUMN unknown_shape TEXT")
-                .expect("make the code-project catalog drift beyond the released shape");
-        }
-
-        let error = registered_admission_error(&database_path).await;
-        let connection = TestConnection::open(&database_path);
-        let Some((authority, reason)) = error.reset_required_context() else {
-            panic!("unknown code-project shape returned the wrong typed problem: {error}");
-        };
-        assert_eq!(
-            authority,
-            super::project_registry::PROJECT_REGISTRY_AUTHORITY
-        );
-        assert!(
-            reason.contains("code_projects") && reason.contains("incompatible number of columns"),
-            "reset problem must identify the incompatible final table: {reason}"
-        );
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM pragma_table_xinfo('code_projects')
-                 WHERE name = 'unknown_shape'",
-                (),
-            )
-            .await
-            .unwrap();
-        assert!(
-            rows.next().await.unwrap().is_some(),
-            "rejected code-project schema must not be silently converged"
-        );
     }
 
     #[tokio::test]
