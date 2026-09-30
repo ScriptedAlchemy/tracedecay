@@ -171,8 +171,8 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 1)
         .await
         .unwrap();
-    let branch_hits = store
-        .sessions_for_with_relation(
+    let (branch_hits, _) = store
+        .sessions_for_with_relation_and_presence(
             &SessionsForQuery {
                 git_ref: GitRefFilter::Branch("capture-branch".to_owned()),
                 since: None,
@@ -191,8 +191,8 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         Some(normalize_worktree(&project.to_string_lossy()))
     );
 
-    let commit_hits = store
-        .sessions_for_with_relation(
+    let (commit_hits, _) = store
+        .sessions_for_with_relation_and_presence(
             &SessionsForQuery {
                 git_ref: GitRefFilter::Commit(commit_sha.clone()),
                 since: None,

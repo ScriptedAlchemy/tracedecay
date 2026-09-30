@@ -138,14 +138,7 @@ pub async fn payload_health_detail(
     let last_reaped_bytes = gc_meta_i64(conn, "last_reaped_bytes")
         .await?
         .map(|value| value.max(0) as u64);
-    let last_gc_status = schema::get_gc_meta(conn, "last_gc_status")
-        .await?
-        .or_else(|| match (last_gc_at, last_gc_error.as_deref()) {
-            (None, _) => None,
-            (Some(_), None | Some("")) => Some("ok".to_string()),
-            (Some(_), Some("partial")) => Some("partial".to_string()),
-            (Some(_), Some(_)) => Some("failed".to_string()),
-        });
+    let last_gc_status = schema::get_gc_meta(conn, "last_gc_status").await?;
 
     let mut missing_count = 0_i64;
     let mut missing_payload_refs = Vec::new();
