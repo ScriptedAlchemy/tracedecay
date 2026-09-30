@@ -18,7 +18,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
 
 use crate::ToolResult;
-use crate::handlers::support::{json_result, unknown_tool_error};
+use crate::handlers::support::{owner_envelope_result, unknown_tool_error};
 
 #[hotpath::measure(future = true, label = "mcp.work.total")]
 pub async fn handle_work<Invoke, InvokeFuture>(
@@ -68,16 +68,7 @@ where
         label = "mcp.work.invoke"
     )
     .await?;
-    hotpath::measure_block!("mcp.work.result_assemble", {
-        let result = json_result(&payload);
-        Ok(
-            if payload.get("kind").and_then(Value::as_str) == Some("problem") {
-                result.with_semantic_error(true)
-            } else {
-                result.with_semantic_error(false)
-            },
-        )
-    })
+    hotpath::measure_block!("mcp.work.result_assemble", owner_envelope_result(&payload))
 }
 
 pub fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> {

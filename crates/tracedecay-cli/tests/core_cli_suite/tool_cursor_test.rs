@@ -751,3 +751,93 @@ fn every_json_refusal_prints_one_typed_problem_placement() {
         "{unreachable}"
     );
 }
+
+/// A tool's `--json` answer as it printed it, and the JSON body inside it.
+fn json_answer(run: &ToolRun) -> (Value, Value) {
+    assert!(run.success, "{}\n{}", run.stdout, run.stderr);
+    let printed: Value = serde_json::from_str(&run.stdout)
+        .unwrap_or_else(|error| panic!("answer printed non-JSON ({error}):\n{}", run.stdout));
+    let body = printed["content"][0]["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(Value::Null);
+    (printed, body)
+}
+
+/// A graph read (`search`) and a typed application read (`callers`) print one
+/// `--json` answer shape: the tool result with the whole typed result under
+/// `structuredContent`, the same document a refusal prints.
+#[test]
+fn every_json_answer_prints_one_tool_result_shape() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &hub_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    hub_node_id(&home, &project);
+    let leaf = node_id(&home, &project, "leaf_01");
+
+    let (search, search_body) = json_answer(&run_tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &json!({"query": "leaf", "limit": 2, "format": "json"}),
+    ));
+    let (callers, callers_body) = json_answer(&run_tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &json!({"node_id": leaf, "format": "json"}),
+    ));
+    stop_managed_daemon(&home);
+
+    let members = |value: &Value| {
+        value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+    };
+    assert_eq!(
+        [
+            (members(&search), &search["isError"]),
+            (members(&callers), &callers["isError"]),
+        ],
+        [
+            (
+                Some(vec![
+                    "content".to_owned(),
+                    "isError".to_owned(),
+                    "structuredContent".to_owned()
+                ]),
+                &json!(false)
+            ),
+            (
+                Some(vec![
+                    "content".to_owned(),
+                    "isError".to_owned(),
+                    "structuredContent".to_owned()
+                ]),
+                &json!(false)
+            ),
+        ],
+        "search:\n{search:#}\ncallers:\n{callers:#}"
+    );
+    assert_eq!(
+        (&search["structuredContent"], &callers["structuredContent"]),
+        (&search_body, &callers_body),
+        "structuredContent is the whole typed result the body renders"
+    );
+    assert_eq!(
+        (
+            search_body["results"].as_array().map(Vec::len),
+            callers_body["outcome"]["value"]["payload"]["items"]
+                .as_array()
+                .map(|items| items
+                    .iter()
+                    .map(|item| item["symbol"]["name"].clone())
+                    .collect::<Vec<_>>()),
+        ),
+        (Some(2), Some(vec![json!("hub")])),
+        "search {search_body}\ncallers {callers_body}"
+    );
+}

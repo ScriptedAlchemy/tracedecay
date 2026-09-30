@@ -43,7 +43,9 @@ const SEARCH_WINDOW_SECS: i64 = 12 * 3_600;
 const RAW_MESSAGE_FLOOR: i64 = 200;
 const SEARCH_BUDGET: Duration = Duration::from_secs(5);
 const ADMISSION_BUDGET: Duration = Duration::from_secs(30);
-const CONVERGENCE_WAIT: Duration = Duration::from_mins(2);
+/// Cadence of the operator-style status poll; convergence itself is awaited
+/// on the daemon's published state, never on a wall-clock bound.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DIRECT_USER_QUERY: &str = "compact-summary pair extraction";
 
 const CLAUDE_BOUNDARY: &str = include_str!(
@@ -531,18 +533,39 @@ fn assert_window_side(label: &str, returned: &[String], in_window: bool, payload
     }
 }
 
-/// One window read, retried until the projection can serve that window.
-///
-/// Retrieval is never blocked on convergence, which is the admission this
-/// journey asserts: a window the projection has not caught up to is answered
-/// with typed staleness instead of waiting for it. So any single read here can
-/// land in a lag window that background ingest opened after an earlier read of
-/// the same window was served, and reading absence out of that would let the
-/// window assertions pass on lag instead of on a window decision. Every window
-/// read retries under the same convergence budget the discovery wait uses.
-///
-/// The returned elapsed time is the served call alone, so the product search
-/// budget still measures one answer and not the wait in front of it.
+/// The store's published convergence state from `tracedecay_lcm_status`.
+fn convergence_state(status: &Value) -> &str {
+    status["projection"]["convergence"]["state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lcm_status must report the projection convergence: {status}"))
+}
+
+/// Polls `tracedecay_lcm_status` until the daemon publishes convergence:
+/// historical discovery reached the source frontier and every projection
+/// and summary it owed committed. A worker that settles blocked or
+/// unavailable fails here with its typed state instead of waiting forever.
+async fn wait_for_published_convergence(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Value {
+    loop {
+        let status = answered(
+            harness,
+            project,
+            "tracedecay_lcm_status",
+            json!({"format": "json"}),
+        )
+        .await;
+        match convergence_state(&status) {
+            "converged" => return status,
+            "converging" => tokio::time::sleep(STATUS_POLL_INTERVAL).await,
+            other => panic!("LCM convergence settled as {other} instead of converging: {status}"),
+        }
+    }
+}
+
+/// A window read after convergence: the projection has caught up to every
+/// committed row, so typed staleness here is a product defect, not lag.
 async fn converged_window_read(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -550,107 +573,15 @@ async fn converged_window_read(
     tool: &str,
     arguments: Value,
 ) -> (Duration, Value) {
-    let deadline = Instant::now() + CONVERGENCE_WAIT;
-    loop {
-        let (elapsed, response) = timed_call(harness, project, tool, arguments.clone()).await;
-        let payload = retained_payload(&resolved(harness, project, tool, response).await);
-        // `lcm_grep` names typed staleness on `status`, `message_search` on
-        // `outcome`; a served page carries "stale" on neither.
-        if payload["status"] != json!("stale") && payload["outcome"] != json!("stale") {
-            return (elapsed, payload);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{label} never left typed staleness: {payload}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-async fn wait_for_preserved_discovery(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    worktree: &str,
-    since: i64,
-) -> (Value, Value, Duration) {
-    let started = Instant::now();
-    let mut last_status = json!(null);
-    let mut last_sessions = json!(null);
-    let mut last_grep = json!(null);
-    let mut last_search = json!(null);
-    tokio::time::timeout(CONVERGENCE_WAIT, async {
-        loop {
-            let status = answered(
-                harness,
-                project,
-                "tracedecay_lcm_status",
-                json!({"format": "json"}),
-            )
-            .await;
-            let sessions = answered(
-                harness,
-                project,
-                "tracedecay_sessions_for",
-                json!({
-                    "git_ref": "worktree",
-                    "value": worktree,
-                    "limit": 100,
-                    "format": "json",
-                }),
-            )
-            .await;
-            let grep = answered(
-                harness,
-                project,
-                "tracedecay_lcm_grep",
-                json!({
-                    "query": DIRECT_USER_QUERY,
-                    "message_type": "direct_user",
-                    "since": since,
-                    "limit": 5,
-                    "format": "json",
-                }),
-            )
-            .await;
-            let search = answered(
-                harness,
-                project,
-                "tracedecay_message_search",
-                json!({
-                    "query": DIRECT_USER_QUERY,
-                    "message_type": "direct_user",
-                    "since": since,
-                    "limit": 5,
-                    "format": "json",
-                }),
-            )
-            .await;
-            last_status = status.clone();
-            last_sessions = sessions.clone();
-            last_grep = grep.clone();
-            last_search = search.clone();
-            if summary_generation_nonzero(&status)
-                && git_generation_nonzero(&sessions)
-                && session_ids(&sessions)
-                    .iter()
-                    .any(|id| id.starts_with("lcm-preserved-codex-"))
-                && !grep_hits(&grep).is_empty()
-                && !message_hit_session_ids(&search).is_empty()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "ordinary background convergence never published summary, git-correlation, and 12-hour hits; \
-             status={last_status}; sessions_for={last_sessions}; lcm_grep={last_grep}; \
-             message_search={last_search}"
-        )
-    });
-    (last_status, last_sessions, started.elapsed())
+    let (elapsed, response) = timed_call(harness, project, tool, arguments).await;
+    let payload = retained_payload(&resolved(harness, project, tool, response).await);
+    // `lcm_grep` names typed staleness on `status`, `message_search` on
+    // `outcome`.
+    assert!(
+        payload["status"] != json!("stale") && payload["outcome"] != json!("stale"),
+        "{label} answered stale after published convergence: {payload}"
+    );
+    (elapsed, payload)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -669,7 +600,7 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         .expect("production composition");
 
     let since = origin + CORPUS_SPAN_SECS - SEARCH_WINDOW_SECS;
-    let discovery = wait_for_preserved_discovery(&harness, &project, &worktree, since);
+    let discovery = wait_for_published_convergence(&harness, &project);
     let admissions = async {
         let read_progress = || async {
             ConvergenceProgress::read(
@@ -685,12 +616,23 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         // Positive in-flight evidence: repeat the admission batch until the
         // status shows background convergence advanced across one batch.
         // Every round is asserted admitted, so the round that observes the
-        // advance proves retrieval was served while convergence was running,
-        // without asserting convergence had *not* finished, which races the
-        // background worker.
-        let deadline = Instant::now() + CONVERGENCE_WAIT;
+        // advance proves retrieval was served while convergence was running.
+        // Published convergence ends the rounds: after it nothing can advance.
         loop {
-            let progress_before = read_progress().await;
+            let status_before = answered(
+                &harness,
+                &project,
+                "tracedecay_lcm_status",
+                json!({"format": "json"}),
+            )
+            .await;
+            assert_eq!(
+                convergence_state(&status_before),
+                "converging",
+                "convergence was published before any admission round overlapped it: \
+                 {status_before}"
+            );
+            let progress_before = ConvergenceProgress::read(&status_before);
             let round = tokio::join!(
                 timed_raw(
                     &harness,
@@ -726,26 +668,40 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
             if progress_after.advanced_from(&progress_before) {
                 return (progress_before, progress_after);
             }
-            assert!(
-                Instant::now() < deadline,
-                "background convergence never advanced while retrieval stayed admitted: \
-                 {progress_after:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
-    let ((status, sessions_for, convergence_elapsed), (progress_before, progress_after)) =
-        tokio::join!(discovery, admissions);
+    let (status, (progress_before, progress_after)) = tokio::join!(discovery, admissions);
     assert!(
         progress_after.advanced_from(&progress_before),
         "background convergence must be in flight across an admission batch: \
          {progress_before:?} -> {progress_after:?}"
     );
-    assert_under_budget(
-        "background discovery wait",
-        convergence_elapsed,
-        CONVERGENCE_WAIT,
+    assert_eq!(
+        status["projection"]["worker"]["backlog"],
+        json!(0),
+        "published convergence must leave no projection backlog: {status}"
     );
+    let summary_convergence = &lcm_status_body(&status)["summary_convergence"];
+    assert_eq!(
+        (
+            &summary_convergence["pending_session_count"],
+            &summary_convergence["retryable_session_count"],
+        ),
+        (&json!(0), &json!(0)),
+        "published convergence must leave no summary work owed: {status}"
+    );
+    let sessions_for = answered(
+        &harness,
+        &project,
+        "tracedecay_sessions_for",
+        json!({
+            "git_ref": "worktree",
+            "value": worktree,
+            "limit": 100,
+            "format": "json",
+        }),
+    )
+    .await;
     assert!(
         summary_generation_nonzero(&status),
         "LCM status must report a nonzero current summary generation: {status}"

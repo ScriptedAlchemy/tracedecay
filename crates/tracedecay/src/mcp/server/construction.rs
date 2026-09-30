@@ -157,7 +157,6 @@ pub(crate) struct McpServerConstructionContext {
     /// authorities. Daemon-owned servers install it; direct servers leave it
     /// absent and remote operator surfaces report typed unavailable.
     pub(crate) remote_operational_status: Option<RemoteOperationalStatusReaderV1>,
-    pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     pub(crate) code_index_readiness_waiter:
@@ -295,7 +294,6 @@ impl McpServerConstructionContext {
             dashboard_automation_writer:
                 tracedecay_dashboard_api::standalone_dashboard_automation_writer(),
             remote_operational_status: None,
-            dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
@@ -399,7 +397,6 @@ impl McpServerConstructionContext {
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             remote_operational_status: None,
-            dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
@@ -467,7 +464,6 @@ impl McpServerConstructionContext {
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             remote_operational_status: None,
-            dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
@@ -653,14 +649,6 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_startup_catch_up_enabled(mut self, enabled: bool) -> Self {
         self.startup_catch_up_enabled = enabled;
-        self
-    }
-
-    pub(crate) fn with_dashboard_doctor_report_reader(
-        mut self,
-        reader: tracedecay_dashboard_api::DoctorReportReader,
-    ) -> Self {
-        self.dashboard_doctor_report_reader = Some(reader);
         self
     }
 

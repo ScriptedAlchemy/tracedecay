@@ -33,7 +33,7 @@ use tracedecay_mcp::tools::binding::{
 };
 
 use super::{
-    OWNER_MOUNT_RESEND_DELAY, cli_request_controls, rendered_tool_output,
+    CliToolOutput, OWNER_MOUNT_RESEND_DELAY, cli_request_controls, rendered_tool_output,
     tool_result_process_outcome,
 };
 use crate::work_cli::{WorkCliDelivery, work_delivery_is_eligible};
@@ -129,7 +129,7 @@ pub(super) async fn dispatch_cli_family_tool(
         tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
     };
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    let rendered = rendered_tool_output(&result.value, raw_json);
+    let rendered = rendered_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     let written = {
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "{rendered}").and_then(|()| stdout.flush())

@@ -118,8 +118,9 @@ fn configure_codex_summarizer(
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` envelope: {error}"))
+        let printed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` JSON: {error}"));
+        printed["structuredContent"].clone()
     };
     let current = run_tool(
         "tracedecay_configuration_get",

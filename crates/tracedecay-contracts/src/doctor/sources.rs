@@ -370,6 +370,12 @@ pub enum ProfileAuthorityReadV1 {
         profile_sessions_attached: bool,
         coverage: DoctorCoverageCompletenessV1,
     },
+    /// The profile session store is held in its typed reset-required state:
+    /// session features are off until the operator resets it, which the
+    /// daemon's reset census names as a pending operator action.
+    ProfileSessionsResetRequired {
+        registry_attached: bool,
+    },
     Denied,
     Unavailable,
 }
@@ -462,6 +468,15 @@ fn profile_authority_finding(
     read: &ProfileAuthorityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::StorageRuntime;
+    let incomplete = |coverage| {
+        source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "profile.authority.incomplete",
+            coverage,
+            "the exact registered profile authority is only partially attached",
+        )
+    };
     match read {
         ProfileAuthorityReadV1::Observed {
             registry_attached: true,
@@ -473,12 +488,19 @@ fn profile_authority_finding(
             *coverage,
             "the exact registered profile and profile-session authorities are attached",
         ),
-        ProfileAuthorityReadV1::Observed { coverage, .. } => source_finding(
+        ProfileAuthorityReadV1::Observed { coverage, .. } => incomplete(*coverage),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: false,
+        } => incomplete(DoctorCoverageCompletenessV1::Complete),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: true,
+        } => source_finding(
             family,
-            DoctorEvidenceStateV1::Degraded,
-            "profile.authority.incomplete",
-            *coverage,
-            "the exact registered profile authority is only partially attached",
+            DoctorEvidenceStateV1::Stale,
+            "profile.authority.sessions-reset-required",
+            DoctorCoverageCompletenessV1::Complete,
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`",
         ),
         ProfileAuthorityReadV1::Denied => unobservable_finding(
             family,
@@ -2431,6 +2453,37 @@ mod tests {
             finding.coverage().statement().contains("sha256:"),
             "Doctor must retain an opaque corruption classification"
         );
+    }
+
+    #[test]
+    fn a_reset_required_profile_session_store_is_a_pending_reset_not_a_degraded_authority() {
+        let findings = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: true,
+            },
+        })
+        .expect("findings");
+
+        assert_eq!(findings[1].state(), DoctorEvidenceStateV1::Stale);
+        assert_eq!(
+            findings[1].evidence()[0].reference().as_str(),
+            "profile.authority.sessions-reset-required"
+        );
+        assert_eq!(
+            findings[1].coverage().statement(),
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`"
+        );
+
+        let detached = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: false,
+            },
+        })
+        .expect("findings");
+        assert_eq!(detached[1].state(), DoctorEvidenceStateV1::Degraded);
     }
 
     #[test]

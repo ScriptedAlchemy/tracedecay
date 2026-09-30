@@ -608,9 +608,11 @@ impl<'a> DoctorReportComposerV1<'a> {
             let read = port.operational_audit(context).await;
             consultations.push(match (&read.remote, &read.profile_authority) {
                 (RemoteOperationalReadV1::Observed { .. }, _)
-                | (_, ProfileAuthorityReadV1::Observed { .. }) => {
-                    DoctorFamilyConsultationV1::Consulted
-                }
+                | (
+                    _,
+                    ProfileAuthorityReadV1::Observed { .. }
+                    | ProfileAuthorityReadV1::ProfileSessionsResetRequired { .. },
+                ) => DoctorFamilyConsultationV1::Consulted,
                 (RemoteOperationalReadV1::Denied, _) | (_, ProfileAuthorityReadV1::Denied) => {
                     unavailable(DoctorFamilyUnavailableReasonV1::Denied)
                 }
