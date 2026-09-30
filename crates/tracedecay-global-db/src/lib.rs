@@ -57,7 +57,7 @@ pub use observability_rollup::{
     ObservabilityRollupFragmentPageV1, ObservabilityRollupFragmentQueryV1,
     ObservabilityRollupFragmentRecordV1, ObservabilityRollupFrontierV1,
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
-    ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
+    ObservabilityRollupRetentionReceiptV1,
 };
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{
@@ -164,9 +164,8 @@ pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,
 };
 use support::{
-    analytics_scope_query, ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, ensure_table_columns, git_remote_search_alias,
-    global_db_operation_error, global_db_operation_message, like_pattern, normalize_git_remote_url,
+    analytics_scope_query, git_remote_search_alias, global_db_operation_error,
+    global_db_operation_message, like_pattern, normalize_git_remote_url,
     push_optional_analytics_filter, repo_identity_aliases, row_to_analytics_event,
 };
 #[cfg(all(test, not(windows)))]
