@@ -26,6 +26,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
 };
+use tracedecay_code_index::retained_parse::{RetainedParsePoolReleaseV1, SharedRetainedParsePool};
 use tracedecay_runtime_core::resident_memory::{
     ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
     ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -53,6 +54,7 @@ pub(super) struct WorktreeResidencyV1 {
     reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
     text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    retained_parses: SharedRetainedParsePool,
     last_used: Mutex<Instant>,
     refresh_waits_for_memory: AtomicBool,
 }
@@ -65,6 +67,7 @@ pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
     pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    pub(super) retained_parses: SharedRetainedParsePool,
 }
 
 impl WorktreeResidencyV1 {
@@ -77,6 +80,7 @@ impl WorktreeResidencyV1 {
             reconcile_in_progress: parts.reconcile_in_progress,
             publication: parts.publication,
             text_generation: parts.text_generation,
+            retained_parses: parts.retained_parses,
             last_used: Mutex::new(Instant::now()),
             refresh_waits_for_memory: AtomicBool::new(false),
         }
@@ -167,8 +171,11 @@ impl WorktreeResidencyV1 {
             Arc::new(SupersededDecodesOwnerV1(Arc::clone(&self)));
         let graph_catalog: Arc<dyn ResidentOwnerV1> =
             Arc::new(GraphCatalogOwnerV1(Arc::clone(&self)));
+        let retained_parses: Arc<dyn ResidentOwnerV1> =
+            Arc::new(RetainedParsesOwnerV1(Arc::clone(&self)));
         let graph_engine: Arc<dyn ResidentOwnerV1> = Arc::new(GraphEngineOwnerV1(self));
         let registrations = [
+            (ResidentOwnerKindV1::RetainedParses, &retained_parses),
             (ResidentOwnerKindV1::DecodedGeneration, &serving),
             (ResidentOwnerKindV1::SupersededGeneration, &superseded),
             (ResidentOwnerKindV1::GraphCatalog, &graph_catalog),
@@ -190,7 +197,13 @@ impl WorktreeResidencyV1 {
         })
         .collect();
         WorktreeResidencyRegistrationV1 {
-            _owners: [serving, superseded, graph_catalog, graph_engine],
+            _owners: [
+                retained_parses,
+                serving,
+                superseded,
+                graph_catalog,
+                graph_engine,
+            ],
             _registrations: registrations,
         }
     }
@@ -198,7 +211,7 @@ impl WorktreeResidencyV1 {
 
 /// Keeps a mount's owners registered until the mount drops.
 pub(super) struct WorktreeResidencyRegistrationV1 {
-    _owners: [Arc<dyn ResidentOwnerV1>; 4],
+    _owners: [Arc<dyn ResidentOwnerV1>; 5],
     _registrations: Vec<ResidentOwnerRegistrationV1>,
 }
 
@@ -334,6 +347,39 @@ impl ResidentOwnerV1 for SupersededDecodesOwnerV1 {
 
     fn release(&self) -> ResidentOwnerReleaseV1 {
         HeldDecodesV1::release(self.0.publication.release_superseded_decodes())
+    }
+}
+
+/// The documents the worktree's increments retained for incremental reparse,
+/// charged by the pages of the pool's own heap.
+struct RetainedParsesOwnerV1(Arc<WorktreeResidencyV1>);
+
+impl ResidentOwnerV1 for RetainedParsesOwnerV1 {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        let held = self.0.retained_parses.holding()?;
+        Some(ResidentOwnerSampleV1 {
+            holding: ResidentHoldingV1::Worktree,
+            bytes: held.bytes.map_or(
+                ResidentOwnerBytesV1::Unmeasured,
+                ResidentOwnerBytesV1::Measured,
+            ),
+            last_used: held.last_retained,
+            serving: false,
+            shared: None,
+        })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        match self.0.retained_parses.release() {
+            RetainedParsePoolReleaseV1::Released { bytes } => ResidentOwnerReleaseV1::Released {
+                bytes: bytes.map_or(
+                    ResidentOwnerBytesV1::Unmeasured,
+                    ResidentOwnerBytesV1::Measured,
+                ),
+            },
+            RetainedParsePoolReleaseV1::Busy => ResidentOwnerReleaseV1::Busy,
+            RetainedParsePoolReleaseV1::Empty => ResidentOwnerReleaseV1::Empty,
+        }
     }
 }
 

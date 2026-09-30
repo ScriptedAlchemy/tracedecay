@@ -95,8 +95,8 @@ impl OwnerHeapV1 {
         build()
     }
 
-    /// Bytes of the pages this heap occupies. Call on the thread that ran
-    /// [`Self::scope`], after it returned.
+    /// Bytes of the pages this heap occupies. Call once every [`Self::scope`]
+    /// that allocated into it returned; other threads may still free blocks.
     #[must_use]
     pub fn resident_bytes(&self) -> u64 {
         (self.calls.footprint)(self.heap)

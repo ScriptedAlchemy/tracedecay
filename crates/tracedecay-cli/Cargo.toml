@@ -45,6 +45,11 @@ path = "tests/c_library_allocator.rs"
 required-features = ["alloc-mimalloc"]
 
 [[test]]
+name = "retained_parse_heap"
+path = "tests/retained_parse_heap.rs"
+required-features = ["alloc-mimalloc"]
+
+[[test]]
 name = "work_loop_journey"
 path = "tests/work_loop_journey.rs"
 required-features = ["test-transport"]
@@ -246,6 +251,7 @@ tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction" }
 tree-sitter-rust = "0.24"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

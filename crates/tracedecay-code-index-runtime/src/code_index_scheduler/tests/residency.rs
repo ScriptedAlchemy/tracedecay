@@ -280,8 +280,15 @@ async fn generation_swaps_keep_retained_bytes_flat() {
         .manifest()
         .generation_id
         .clone();
+    let decode_rows = |report: &ResidentOwnersReportV1| {
+        report
+            .owners
+            .iter()
+            .filter(|row| row.kind == ResidentOwnerKindV1::DecodedGeneration)
+            .count()
+    };
     let mut retained = vec![owners.report(Instant::now()).measured_bytes];
-    let mut row_counts = vec![owners.report(Instant::now()).owners.len()];
+    let mut row_counts = vec![decode_rows(&owners.report(Instant::now()))];
     for swap in 1..=6 {
         let content = if swap % 2 == 0 { FIRST } else { SECOND };
         fixture.edit("src/main.rs", content);
@@ -297,7 +304,7 @@ async fn generation_swaps_keep_retained_bytes_flat() {
         assert_eq!(seated.generation().manifest().generation_id, generation);
         let report = owners.report(Instant::now());
         retained.push(report.measured_bytes);
-        row_counts.push(report.owners.len());
+        row_counts.push(decode_rows(&report));
     }
 
     assert_eq!(
@@ -311,6 +318,77 @@ async fn generation_swaps_keep_retained_bytes_flat() {
         "each return to the first tree retains exactly what the previous return did"
     );
     assert_eq!([retained[5]], [retained[3]]);
+
+    registry.shutdown().await;
+}
+
+/// An increment keeps the documents it re-extracted for the next edit's
+/// incremental reparse. The inventory reports them as the worktree's own
+/// holding and its idle window gives them back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_increment_reports_its_retained_parses_and_the_idle_window_releases_them() {
+    let fixture = GitFixture::new(&[
+        ("src/main.rs", "fn main() { first(); }\nfn first() {}\n"),
+        ("src/lib.rs", "pub fn untouched() {}\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, _) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    let cold = wait_for_live_complete_generation(&registry, fixture.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    let retained_parses = |report: &ResidentOwnersReportV1| {
+        report
+            .owners
+            .iter()
+            .filter(|row| row.kind == ResidentOwnerKindV1::RetainedParses)
+            .map(|row| {
+                (
+                    row.holders.len(),
+                    row.holders[0].holding.clone(),
+                    row.protected,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        retained_parses(&owners.report(Instant::now())),
+        [],
+        "a full build retains no parse"
+    );
+
+    fixture.edit("src/main.rs", "fn main() { second(); }\nfn second() {}\n");
+    git(fixture.path(), &["commit", "-qam", "edit"]);
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    wait_for_generation_change(&registry, fixture.path(), &cold).await;
+    assert_eq!(
+        retained_parses(&owners.report(Instant::now())),
+        [(1, ResidentHoldingV1::Worktree, false)],
+        "the re-extracted file is retained by the worktree and pressure may shed it"
+    );
+
+    let released = owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert!(
+        released.iter().any(
+            |release| release.kind == ResidentOwnerKindV1::RetainedParses
+                && release.cause == ResidentOwnerReleaseCauseV1::Idle
+        ),
+        "{released:?}"
+    );
+    assert_eq!(retained_parses(&owners.report(Instant::now())), []);
 
     registry.shutdown().await;
 }

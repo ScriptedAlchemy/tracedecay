@@ -542,6 +542,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let epoch = Arc::clone(&opened.epoch);
         let shutting_down = Arc::clone(&opened.shutting_down);
         let residency_publication = opened.publication.clone();
+        let residency_retained_parses = opened.owner.retained_parse_pool();
         let scheduler = Arc::new(Mutex::new(opened));
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
@@ -634,6 +635,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 complete_generation_requested: Arc::clone(&complete_generation_requested),
                 reconcile_in_progress: Arc::clone(&reconcile_in_progress),
                 publication: residency_publication,
+                retained_parses: residency_retained_parses,
                 text_generation: Arc::clone(&text_generation),
             },
         ));

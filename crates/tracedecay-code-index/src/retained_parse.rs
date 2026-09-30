@@ -4,10 +4,19 @@
 //! document partitioning, deterministic eviction, and aggregate operational
 //! measurements. It is process-local and is never serialized with a code
 //! generation.
+//!
+//! Retained documents are parsed, reparsed and copied inside the pool's own
+//! allocator heap, so the pages that heap occupies are what the pool holds
+//! and releasing it returns them whole. The extraction a build receives is
+//! made outside it and is charged by that build's generation.
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, PoisonError, RwLock, TryLockError, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
 };
 
 use thiserror::Error;
@@ -19,6 +28,7 @@ use tracedecay_code_extraction::parsed_extraction::{
     ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
 };
 use tracedecay_code_extraction::{ExtractionArtifactV1, LanguageExtractor};
+use tracedecay_domain::process_heap::OwnerHeapV1;
 use tracedecay_domain::{ExtractorRevision, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 
 const DEFAULT_MAX_RETAINED_DOCUMENTS: usize = 256;
@@ -126,6 +136,57 @@ struct RetainedParsePoolState {
     lru: VecDeque<ParseDocumentKey>,
     stats: RetainedParsePoolStats,
     clear_epoch: u64,
+    last_retained: Option<Instant>,
+}
+
+/// What the pool retains, for the resident-memory inventory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetainedParseHoldingV1 {
+    pub documents: usize,
+    /// Pages of the pool's heap; `None` when the allocator has no owner heaps.
+    pub bytes: Option<u64>,
+    pub last_retained: Instant,
+}
+
+/// Outcome of releasing the retained documents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedParsePoolReleaseV1 {
+    /// Every document was dropped and the pool's heap returned; `bytes` is
+    /// what that heap occupied, `None` when the allocator has no owner heaps.
+    Released { bytes: Option<u64> },
+    /// A parse is running in the pool.
+    Busy,
+    /// Nothing was retained.
+    Empty,
+}
+
+/// The pool's allocator heap. Parses allocate into it under the read lock;
+/// measuring and replacing it takes the write lock, so neither runs while a
+/// thread is allocating into it.
+struct RetainedParseHeapV1 {
+    heap: RwLock<Option<OwnerHeapV1>>,
+    /// The heap's pages at the last measurement that no parse overlapped.
+    bytes: AtomicU64,
+    /// The allocator provides owner heaps, so the pool's bytes are measured.
+    owner_heaps: bool,
+}
+
+impl RetainedParseHeapV1 {
+    fn new() -> Self {
+        let heap = OwnerHeapV1::new();
+        Self {
+            owner_heaps: heap.is_some(),
+            heap: RwLock::new(heap),
+            bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// Measure under the write lock, when no thread allocates into the heap.
+    fn measure(&self, heap: &Option<OwnerHeapV1>) -> u64 {
+        let bytes = heap.as_ref().map_or(0, OwnerHeapV1::resident_bytes);
+        self.bytes.store(bytes, Ordering::Release);
+        bytes
+    }
 }
 
 /// Cloneable production pool. Documents parse concurrently under per-document
@@ -135,15 +196,12 @@ pub struct SharedRetainedParsePool {
     limits: RetainedParsePoolLimits,
     state: Arc<Mutex<RetainedParsePoolState>>,
     first_admissions: Arc<Mutex<BTreeMap<ParseDocumentKey, Weak<Mutex<()>>>>>,
+    heap: Arc<RetainedParseHeapV1>,
 }
 
 impl Default for SharedRetainedParsePool {
     fn default() -> Self {
-        Self {
-            limits: RetainedParsePoolLimits::default(),
-            state: Arc::new(Mutex::new(RetainedParsePoolState::default())),
-            first_admissions: Arc::new(Mutex::new(BTreeMap::new())),
-        }
+        Self::with_limits(RetainedParsePoolLimits::default())
     }
 }
 
@@ -155,10 +213,55 @@ impl SharedRetainedParsePool {
         {
             return Err(RetainedParsePoolOpenError::EmptyCapacity);
         }
-        Ok(Self {
+        Ok(Self::with_limits(limits))
+    }
+
+    fn with_limits(limits: RetainedParsePoolLimits) -> Self {
+        Self {
             limits,
             state: Arc::new(Mutex::new(RetainedParsePoolState::default())),
             first_admissions: Arc::new(Mutex::new(BTreeMap::new())),
+            heap: Arc::new(RetainedParseHeapV1::new()),
+        }
+    }
+
+    /// Run work whose allocations the retained documents keep in the pool's
+    /// heap.
+    fn in_heap<R>(&self, work: impl FnOnce() -> R) -> R {
+        let heap = self
+            .heap
+            .heap
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        match heap.as_ref() {
+            Some(heap) => heap.scope(work),
+            None => work(),
+        }
+    }
+
+    /// What the pool retains now, or `None` when it holds no document. The
+    /// heap is re-measured unless a parse is allocating into it, in which
+    /// case the measurement that parse's build started from stands.
+    pub fn holding(&self) -> Option<RetainedParseHoldingV1> {
+        let (documents, last_retained) = {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            (state.documents.len(), state.last_retained?)
+        };
+        if documents == 0 {
+            return None;
+        }
+        let bytes = self
+            .heap
+            .owner_heaps
+            .then(|| match self.heap.heap.try_write() {
+                Ok(heap) => self.heap.measure(&heap),
+                Err(TryLockError::Poisoned(heap)) => self.heap.measure(&heap.into_inner()),
+                Err(TryLockError::WouldBlock) => self.heap.bytes.load(Ordering::Acquire),
+            });
+        Some(RetainedParseHoldingV1 {
+            documents,
+            bytes,
+            last_retained,
         })
     }
 
@@ -314,22 +417,35 @@ impl SharedRetainedParsePool {
                         );
                     }
                     drop(state);
-                    let (document, report, parsed) = match self.open_and_extract(
-                        identity,
-                        language_id,
-                        source,
-                        prepared_source,
-                        grammar_key,
-                        extraction.map(|(extractor, _)| extractor),
-                        control,
-                    ) {
+                    let opened = self
+                        .in_heap(|| {
+                            self.open_document(
+                                identity,
+                                language_id,
+                                source,
+                                prepared_source,
+                                grammar_key,
+                                control,
+                            )
+                        })
+                        .and_then(|(document, report)| {
+                            let parsed = extraction
+                                .map(|(extractor, _)| {
+                                    document.extract_canonical_artifact(extractor, &report, None)
+                                })
+                                .transpose()?;
+                            Ok((document, report, parsed))
+                        });
+                    let (document, report, parsed) = match opened {
                         Ok(opened) => opened,
                         Err(error) => {
                             self.record_failure_at(admission_epoch);
                             return Err(error);
                         }
                     };
-                    let retained_artifact = parsed.as_ref().map(|parsed| parsed.artifact.clone());
+                    let retained_artifact = parsed
+                        .as_ref()
+                        .map(|parsed| self.in_heap(|| parsed.artifact.clone()));
                     let current_size = document.retained_source_bytes();
                     let entry = Arc::new(Mutex::new(RetainedEntry {
                         document,
@@ -345,6 +461,7 @@ impl SharedRetainedParsePool {
                     }
                     state.documents.insert(key.clone(), Arc::clone(&entry));
                     state.source_bytes.insert(key.clone(), current_size);
+                    state.last_retained = Some(Instant::now());
                     touch(&mut state.lru, &key);
                     evict_to_limits(&mut state, &key, self.limits);
                     record_success(&mut state.stats, &report, parsed.as_ref());
@@ -427,7 +544,30 @@ impl SharedRetainedParsePool {
         ),
         ParseError,
     > {
-        let (document, report) = match grammar_key {
+        let (document, report) = self.open_document(
+            identity,
+            language_id,
+            source,
+            prepared_source,
+            grammar_key,
+            control,
+        )?;
+        let parsed = extractor
+            .map(|extractor| document.extract_canonical_artifact(extractor, &report, None))
+            .transpose()?;
+        Ok((document, report, parsed))
+    }
+
+    fn open_document(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        prepared_source: &str,
+        grammar_key: Option<&str>,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(RetainedParseDocument, ParseReport), ParseError> {
+        match grammar_key {
             Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
                 identity,
                 language_id,
@@ -440,11 +580,7 @@ impl SharedRetainedParsePool {
             None => {
                 RetainedParseDocument::open(identity, language_id, source, self.limits.document)
             }
-        }?;
-        let parsed = extractor
-            .map(|extractor| document.extract_canonical_artifact(extractor, &report, None))
-            .transpose()?;
-        Ok((document, report, parsed))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -464,39 +600,34 @@ impl SharedRetainedParsePool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let language_changed = retained.document.language_id() != language_id;
-        let report = if !language_changed {
-            match grammar_key {
-                Some(_) => retained.document.reparse_prepared_with_control(
-                    identity,
-                    source,
-                    prepared_source,
-                    control,
-                ),
-                None => retained.document.reparse(identity, source),
+        let report = self.in_heap(|| {
+            if !language_changed {
+                return match grammar_key {
+                    Some(_) => retained.document.reparse_prepared_with_control(
+                        identity,
+                        source,
+                        prepared_source,
+                        control,
+                    ),
+                    None => retained.document.reparse(identity, source),
+                };
             }
-        } else {
-            let opened = match grammar_key {
-                Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
-                    identity,
-                    language_id,
-                    grammar_key,
-                    source,
-                    prepared_source,
-                    self.limits.document,
-                    control,
-                ),
-                None => {
-                    RetainedParseDocument::open(identity, language_id, source, self.limits.document)
-                }
-            };
-            opened.map(|(document, mut report)| {
+            self.open_document(
+                identity,
+                language_id,
+                source,
+                prepared_source,
+                grammar_key,
+                control,
+            )
+            .map(|(document, mut report)| {
                 retained.document = document;
                 report.reuse = ParseReuse::Reset {
                     reason: ParseResetReason::LanguageChanged,
                 };
                 report
             })
-        };
+        });
         let report = match report {
             Ok(report) => report,
             Err(error) => {
@@ -519,7 +650,7 @@ impl SharedRetainedParsePool {
                     .extract_canonical_artifact(extractor, &report, previous)
                 {
                     Ok(extraction) => {
-                        retained.artifact = Some(extraction.artifact.clone());
+                        retained.artifact = Some(self.in_heap(|| extraction.artifact.clone()));
                         retained.artifact_revision = artifact_revision.cloned();
                         Some(extraction)
                     }
@@ -549,6 +680,7 @@ impl SharedRetainedParsePool {
             .is_some_and(|current| Arc::ptr_eq(current, &entry));
         if is_still_retained {
             state.source_bytes.insert(key.clone(), current_size);
+            state.last_retained = Some(Instant::now());
             touch(&mut state.lru, &key);
             evict_to_limits(&mut state, &key, self.limits);
         }
@@ -566,17 +698,32 @@ impl SharedRetainedParsePool {
             .clone()
     }
 
-    pub fn clear(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.clear_epoch = state.clear_epoch.wrapping_add(1);
-        state.documents.clear();
-        state.source_bytes.clear();
-        state.lru.clear();
-        state.stats.retained_documents = 0;
-        state.stats.retained_source_bytes = 0;
+    /// Drop every retained document and return the pool's heap whole. The
+    /// next increment reparses what it re-extracts from scratch. Never waits:
+    /// a parse in the pool answers busy.
+    pub fn release(&self) -> RetainedParsePoolReleaseV1 {
+        let mut heap = match self.heap.heap.try_write() {
+            Ok(heap) => heap,
+            Err(TryLockError::Poisoned(heap)) => heap.into_inner(),
+            Err(TryLockError::WouldBlock) => return RetainedParsePoolReleaseV1::Busy,
+        };
+        let documents = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.documents.is_empty() {
+                return RetainedParsePoolReleaseV1::Empty;
+            }
+            state.clear_epoch = state.clear_epoch.wrapping_add(1);
+            state.source_bytes.clear();
+            state.lru.clear();
+            state.stats.retained_documents = 0;
+            state.stats.retained_source_bytes = 0;
+            std::mem::take(&mut state.documents)
+        };
+        let bytes = self.heap.owner_heaps.then(|| self.heap.measure(&heap));
+        drop(documents);
+        *heap = OwnerHeapV1::new();
+        self.heap.bytes.store(0, Ordering::Release);
+        RetainedParsePoolReleaseV1::Released { bytes }
     }
 
     fn record_failure(&self) {
