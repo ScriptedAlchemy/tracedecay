@@ -905,6 +905,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         });
                         let projection_pending_wake = Arc::clone(&worker_pending_wake);
                         let projection_wake = Arc::clone(&worker_wake);
+                        let projection_serving_changed = worker_serving_generation_changed.clone();
                         retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             #[cfg(any(test, feature = "test-helpers"))]
@@ -919,11 +920,21 @@ impl CodeIndexSchedulerRegistryV1 {
                                 gated_root,
                             )
                             .await;
-                            if matches!(outcome, PublishedTextProjectionOutcomeV1::Unfinished) {
-                                Self::note_worker_continuation(
-                                    &projection_pending_wake,
-                                    &projection_wake,
-                                );
+                            match outcome {
+                                // Exact and lexical serve from here on, while
+                                // this pass may still be recovering the graph:
+                                // search waiters must wake now, not at the seat.
+                                PublishedTextProjectionOutcomeV1::Finished => {
+                                    projection_serving_changed.send_replace(());
+                                }
+                                PublishedTextProjectionOutcomeV1::Unfinished => {
+                                    Self::note_worker_continuation(
+                                        &projection_pending_wake,
+                                        &projection_wake,
+                                    );
+                                }
+                                PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::Shutdown => {}
                             }
                             outcome
                         }));
@@ -1661,6 +1672,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         &worker_wake,
                     );
                     retained_graph_head_recovery_attempted = true;
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    Self::wait_for_retained_graph_head_recovery_gate(&worker_project_root).await;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);

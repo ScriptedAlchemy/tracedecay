@@ -13,10 +13,15 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
+use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexDemandAdmissionV1,
     CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+};
+use tracedecay_code_index_runtime::mcp_admission::{
+    CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
+    CodeIndexScopeResolverV1, CodeIndexScopeUnavailableV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantId,
@@ -25,10 +30,19 @@ use tracedecay_contracts::{
     RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
     now_micros,
 };
-use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId, UtcMicros};
+use tracedecay_daemon_protocol::DEFAULT_TOOL_REQUEST_DEADLINE;
+use tracedecay_domain::{
+    ActorId, AuthorizationRevision, CodeGenerationId, ManifestDigest, PrincipalId, ProjectId,
+    UtcMicros,
+};
 use tracedecay_graph_query::{
     CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
 };
+use tracedecay_query::code_search::{
+    CodeIndexLaneStatusV1, CodeIndexSearchAuthorityV1, CodeIndexSearchCoverageV1,
+    CodeIndexSearchOutcomeV1, CodeIndexSearchRequestV1,
+};
+use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessResidentSampleV1, RESIDENT_OWNER_IDLE_WINDOW_V1,
     ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersReportV1, ResidentOwnersV1,
@@ -1513,6 +1527,340 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+}
+
+/// The interactive search budget a restarted daemon must meet.
+const SEARCH_BUDGET: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct FixtureSearchGrant(CodeIndexSearchAuthorityV1);
+
+impl CodeIndexMcpReadGrantV1 for FixtureSearchGrant {
+    fn authorize(
+        &self,
+        _scope: &ResolvedScope,
+        _authority: Option<&CodeIndexSearchAuthorityV1>,
+    ) -> Result<CodeIndexSearchAuthorityV1, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(self.0.clone())
+    }
+
+    fn search_authority(&self) -> CodeIndexSearchAuthorityV1 {
+        self.0.clone()
+    }
+}
+
+#[derive(Clone)]
+struct FixtureSearchAdmission(CodeIndexSearchAuthorityV1);
+
+impl CodeIndexMcpReadAdmissionV1 for FixtureSearchAdmission {
+    type Grant = FixtureSearchGrant;
+
+    fn route_is_registered(&self) -> bool {
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureSearchGrant(self.0.clone()))
+    }
+}
+
+#[derive(Clone)]
+struct FixtureScopeResolver(ResolvedScope);
+
+impl CodeIndexScopeResolverV1 for FixtureScopeResolver {
+    fn resolved_scope_for_project(
+        &self,
+        _project_root: &Path,
+        _project_id: &ProjectId,
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        Ok(self.0.clone())
+    }
+}
+
+fn restart_search_request(project_root: &Path) -> CodeIndexSearchRequestV1 {
+    let deadline_micros = i64::try_from(DEFAULT_TOOL_REQUEST_DEADLINE.as_micros())
+        .expect("tool deadline fits in microseconds");
+    CodeIndexSearchRequestV1 {
+        project_root: project_root.to_path_buf(),
+        query: "alpha".to_owned(),
+        source_revision: None,
+        source_tree: None,
+        source_reference: None,
+        limit: 8,
+        cursor: None,
+        lexical_routing: LexicalRoutingV1::default(),
+        authority: None,
+        deadline: Some(
+            Deadline::new(UtcMicros(now_micros().0 + deadline_micros)).expect("tool deadline"),
+        ),
+        cancellation: None,
+    }
+}
+
+fn served_symbols(outcome: &CodeIndexSearchOutcomeV1) -> Vec<(String, String)> {
+    let CodeIndexSearchOutcomeV1::Complete(served) = outcome else {
+        panic!("search must serve: {outcome:?}");
+    };
+    served
+        .display_by_anchor
+        .values()
+        .map(|display| (display.name.clone(), display.path.clone()))
+        .collect()
+}
+
+fn served_coverage(outcome: &CodeIndexSearchOutcomeV1) -> CodeIndexSearchCoverageV1 {
+    let CodeIndexSearchOutcomeV1::Complete(served) = outcome else {
+        panic!("search must serve: {outcome:?}");
+    };
+    served.coverage.clone()
+}
+
+/// The first search after a restart of a daemon whose sealed graph is still
+/// recovering its verified head answers exact and lexical within the search
+/// budget and marks the graph lane warming, then serves the graph once it
+/// seats. It used to wait out the whole graph-head recovery (26.9 s on the
+/// beta.63 battery corpus), because its wait for the retained generation
+/// required graph readiness that exact and lexical never need.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_search_after_restart_serves_text_while_the_graph_head_recovers() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let canonical_fixture = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let store = TempDir::new().expect("store root");
+    let scoped_store = scoped_code_index_store_root(store.path(), &canonical_fixture);
+    let (scope, latest, replay_binding, repository_id, worktree_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        latest
+            .production_query_owners()
+            .expect("seal the durable text artifact before restart");
+        let replay_binding = scheduler
+            .code_graph_replay_binding(&latest.generation().manifest().generation_id)
+            .expect("seed graph replay binding");
+        let snapshot = latest.generation().snapshot();
+        let repository_id = snapshot.repository.clone();
+        let worktree_id = snapshot.worktree.clone().expect("worktree identity");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                repository_id.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            latest,
+            replay_binding,
+            repository_id,
+            worktree_id,
+        )
+    };
+
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        95,
+        "first search after restart",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind graph projection before restart",
+    )
+    .await
+    .expect("bound project graph runtime");
+    let retained = graph_runtime
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            repository_id,
+            worktree_id,
+            latest.generation().snapshot().reference.clone(),
+            latest.generation().manifest().generation_id.clone(),
+            Arc::clone(&project_database),
+            replay_binding,
+        )
+        .await
+        .expect("retain seeded graph runtime");
+    drop(
+        retained
+            .publish_verified_snapshot(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .expect("publish graph head before restart"),
+    );
+    drop(retained);
+    drop(latest);
+    graph_runtime
+        .shutdown_terminal_tasks()
+        .await
+        .expect("join graph terminal tasks before restart");
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("stop graph runtime before restart");
+    drop(project_database);
+    drop(graph_runtime);
+
+    let restarted_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("restart profile identity");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(restarted_identity)
+            .await
+            .expect("restarted graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("restarted writable project database");
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind restarted graph projection",
+    )
+    .await
+    .expect("bound restarted project graph runtime");
+
+    // Hold both halves of the restart open: the text owners opening, as on a
+    // freshly restarted daemon, and the graph-head recovery, which a large
+    // store holds open by itself for tens of seconds.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let (projecting, release_projection) = registry
+        .pause_next_retained_text_projection(canonical_fixture.clone())
+        .await;
+    let (recovering, release_recovery) = registry
+        .pause_next_retained_graph_head_recovery(canonical_fixture.clone())
+        .await;
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id.clone(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            graph_runtime.code_graph_seat_port(),
+            project_database,
+            CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
+        )
+        .await
+        .expect("mount restarted retained generation");
+    tokio::time::timeout(Duration::from_secs(20), projecting)
+        .await
+        .expect("the restart never started opening its retained text owners")
+        .expect("retained text projection gate dropped before observation");
+    tokio::time::timeout(Duration::from_secs(20), recovering)
+        .await
+        .expect("the restart never started recovering its retained graph head")
+        .expect("retained graph head recovery gate dropped before observation");
+
+    // Project open's deferred mount installs the query authority from the
+    // retained text owner alone.
+    let sessions = graph_runtime
+        .profile_sessions()
+        .await
+        .expect("profile session database");
+    let cursor_keys = SessionTemporalAccess::new(&*sessions)
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("cursor keys");
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+        &registry,
+        fixture.path(),
+        &scope,
+        &cursor_keys,
+    )
+    .await
+    .expect("mount query authority from the retained text owner");
+
+    let authority = CodeIndexSearchAuthorityV1 {
+        principal: PrincipalId::new("principal.restart-first-search").expect("principal"),
+        authorization_revision: AuthorizationRevision::new("authorization.restart-first-search")
+            .expect("authorization revision"),
+    };
+    let executor = code_index_search_executor(
+        registry.clone(),
+        project_id,
+        FixtureSearchAdmission(authority),
+        FixtureScopeResolver(scope.clone()),
+    );
+    let first = tokio::spawn(executor(restart_search_request(fixture.path())));
+    release_projection
+        .send(())
+        .expect("release the retained text projection");
+    let first = tokio::time::timeout(SEARCH_BUDGET, first)
+        .await
+        .expect("the first search after restart must answer within the search budget")
+        .expect("first search task");
+    assert_eq!(
+        (served_symbols(&first), served_coverage(&first)),
+        (
+            vec![("alpha".to_owned(), "src/lib.rs".to_owned())],
+            CodeIndexSearchCoverageV1 {
+                exact: CodeIndexLaneStatusV1::Complete,
+                lexical: CodeIndexLaneStatusV1::Complete,
+                graph: CodeIndexLaneStatusV1::Unavailable {
+                    reason: "graph_warming",
+                },
+            },
+        ),
+        "exact and lexical serve while the graph head is still recovering"
+    );
+
+    release_recovery
+        .send(())
+        .expect("release the retained graph head recovery");
+    let seat_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !registry
+        .retained_text_owner_for_root(&canonical_fixture)
+        .await
+        .is_some_and(|text| text.interactive_graph_store().is_ok())
+    {
+        assert!(
+            std::time::Instant::now() <= seat_deadline,
+            "the released graph head never seated"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let seated = tokio::time::timeout(
+        SEARCH_BUDGET,
+        executor(restart_search_request(fixture.path())),
+    )
+    .await
+    .expect("search after the graph seats answers within the search budget");
+    assert_eq!(
+        (served_symbols(&seated), served_coverage(&seated).graph),
+        (
+            vec![("alpha".to_owned(), "src/lib.rs".to_owned())],
+            CodeIndexLaneStatusV1::Complete,
+        ),
+        "the graph lane serves once the recovered head seats"
+    );
 
     registry.shutdown().await;
     graph_runtime

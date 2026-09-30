@@ -1372,6 +1372,18 @@ impl CodeIndexSchedulerRegistryV1 {
         self.text_owner_freshness_for_scope(scope, true).await
     }
 
+    /// Whether the worktree uniquely mounted for `scope` activates native
+    /// code graphs; `false` when none is.
+    pub(crate) async fn graph_activation_enabled_for_scope(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> bool {
+        let mounted = self.mounted.lock().await;
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .is_some_and(|(_, worktree)| worktree.graph_activation.policy().is_enabled())
+    }
+
     /// The same freshness ladder without the lexical-readiness requirement.
     /// See [`Self::retained_text_owner_for_root`].
     pub async fn retained_text_owner_freshness_for_scope(

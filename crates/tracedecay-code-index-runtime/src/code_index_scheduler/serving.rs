@@ -38,9 +38,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
-    ExactAdmissionRuleRevision, ManifestDigest, ProjectId, RetrievalBudget, RetrieverBatch,
-    RetrieverOutcome, ScoreDomainId, WorktreeId, canonical_text::encode_lowercase_hex,
-    sha256_hex_suffix,
+    ExactAdmissionRuleRevision, ManifestDigest, ProjectId, RetrievalBudget, RetrievalFailure,
+    RetrieverBatch, RetrieverOutcome, ScoreDomainId, WorktreeId,
+    canonical_text::encode_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_private_fs::{open_private_file, validate_private_directory};
 use tracedecay_runtime_core::resident_memory::{
@@ -2157,6 +2157,38 @@ impl LatestCodeTextGenerationV1 {
             CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
                 "code graph projection has not completed activation".to_owned(),
             )),
+        }
+    }
+
+    /// The graph a search lane expands through, or the typed reason it
+    /// cannot. A pending activation on a graph-enabled worktree is warming;
+    /// one on a graph-disabled worktree never activates.
+    pub(super) fn search_graph_serving(
+        &self,
+        graph_activation_enabled: bool,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalFailure> {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
+            CodeGraphActivationStateV1::Pending if graph_activation_enabled => {
+                Err(RetrievalFailure::GraphWarming)
+            }
+            CodeGraphActivationStateV1::Pending => Err(RetrievalFailure::AuthorityUnavailable {
+                detail: "graph_activation_disabled".to_owned(),
+            }),
+            CodeGraphActivationStateV1::Refused(reason) => {
+                Err(RetrievalFailure::AuthorityUnavailable {
+                    detail: (*reason).to_owned(),
+                })
+            }
+            CodeGraphActivationStateV1::Unavailable(reason) => {
+                Err(RetrievalFailure::AuthorityUnavailable {
+                    detail: reason.clone(),
+                })
+            }
         }
     }
 }

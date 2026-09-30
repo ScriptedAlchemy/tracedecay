@@ -725,7 +725,7 @@ fn install_verified_graph_store_on_text(
     .expect("install interactive graph serving");
 }
 
-fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
+pub(super) fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")

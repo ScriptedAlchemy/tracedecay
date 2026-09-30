@@ -15,8 +15,8 @@ use tracedecay_domain::{
     AuthorizationRevision, CalibrationProfileId, CodeGenerationId, ComponentRevision,
     DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, PrincipalId,
     QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    RetrievalCursor, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
@@ -784,6 +784,7 @@ where
             )
         })?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
+    let graph_activation_enabled = schedulers.graph_activation_enabled_for_scope(scope).await;
     let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
         // Graph retrieval requires at least one seed. An empty seed list is
         // "the lane had nothing to expand", not "the retriever is missing",
@@ -800,28 +801,19 @@ where
         // reads from exactly that owner and deliberately leaves the sealed
         // seat empty; resolving the lane only through the seat reported the
         // recovered graph as `retriever_unavailable` until the next publish.
-        let graph_serving = graph_latest
-            .as_ref()
-            .map_or_else(
-                || text.production_graph_serving(),
-                |latest| latest.production_graph_serving(),
-            )
-            .ok();
-        if graph_seeds.is_empty() {
-            if graph_serving.is_some() {
-                RetrieverOutcome::Complete(RetrieverBatch {
-                    candidates: Vec::new(),
-                    evidence_by_occurrence: BTreeMap::default(),
-                    coverage: RetrieverCoverage::default(),
-                    continuation: None,
-                })
-            } else {
-                RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                    detail: "exact and lexical lanes produced no graph seed".to_owned(),
-                })
-            }
-        } else if let Some(graph_serving) = graph_serving {
-            graph_serving.graph.retrieve_graph(
+        let graph_serving = graph_latest.as_ref().map_or_else(
+            || text.search_graph_serving(graph_activation_enabled),
+            |latest| latest.search_graph_serving(graph_activation_enabled),
+        );
+        match graph_serving {
+            Err(failure) => RetrieverOutcome::Unavailable(failure),
+            Ok(_) if graph_seeds.is_empty() => RetrieverOutcome::Complete(RetrieverBatch {
+                candidates: Vec::new(),
+                evidence_by_occurrence: BTreeMap::default(),
+                coverage: RetrieverCoverage::default(),
+                continuation: None,
+            }),
+            Ok(graph_serving) => graph_serving.graph.retrieve_graph(
                 &GraphLaneRequest {
                     base: request.clone(),
                     generation: generation.clone(),
@@ -831,11 +823,7 @@ where
                     budget: request.budget,
                 },
                 graph_control,
-            )?
-        } else {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "persistent code graph is unavailable for this generation".to_owned(),
-            })
+            )?,
         }
     });
     let lanes = vec![

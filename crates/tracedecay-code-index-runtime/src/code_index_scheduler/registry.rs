@@ -389,7 +389,7 @@ fn cold_mount_final_commit_gate() -> &'static Mutex<BTreeMap<PathBuf, ColdMountF
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-struct RetainedGraphRecoverySuccessorGateV1 {
+struct RetainedGraphRecoveryGateV1 {
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
@@ -400,10 +400,19 @@ struct RetainedGraphRecoverySuccessorGateV1 {
 /// accident; the key is the isolation the fixtures already have.
 #[cfg(any(test, feature = "test-helpers"))]
 fn retained_graph_recovery_successor_gate()
--> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>> {
-    static GATE: std::sync::OnceLock<
-        Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>>,
-    > = std::sync::OnceLock::new();
+-> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Armed gates, keyed by the exact worktree they fence, on the same
+/// per-worktree isolation as the successor gate above.
+#[cfg(any(test, feature = "test-helpers"))]
+fn retained_graph_head_recovery_gate()
+-> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RetainedGraphRecoveryGateV1>>> =
+        std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -458,7 +467,7 @@ mod resident_memory;
 mod test_gates;
 pub mod watch_ingress;
 pub use owner_signals::{
-    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedSeatWaitV1,
+    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedTextServingWaitV1,
 };
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile
@@ -1994,13 +2003,56 @@ impl CodeIndexSchedulerRegistryV1 {
             gates
                 .insert(
                     project_root.clone(),
-                    RetainedGraphRecoverySuccessorGateV1 { entered, release },
+                    RetainedGraphRecoveryGateV1 { entered, release },
                 )
                 .is_none(),
             "one retained graph recovery successor gate per worktree: {}",
             project_root.display()
         );
         (entered_observed, released)
+    }
+
+    /// Hold a restart's retained graph-head recovery before it opens the
+    /// graph container, so a fixture can observe what reads answer while the
+    /// graph is not seated yet. A real store holds this open by itself: the
+    /// container load takes seconds to tens of seconds on a large corpus.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn pause_next_retained_graph_head_recovery(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let mut gates = retained_graph_head_recovery_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gates
+                .insert(
+                    project_root.clone(),
+                    RetainedGraphRecoveryGateV1 { entered, release },
+                )
+                .is_none(),
+            "one retained graph head recovery gate per worktree: {}",
+            project_root.display()
+        );
+        (entered_observed, released)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn wait_for_retained_graph_head_recovery_gate(project_root: &Path) {
+        let gate = retained_graph_head_recovery_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
     }
 
     /// Hold a restart's retained text projection at its first advance, so a
