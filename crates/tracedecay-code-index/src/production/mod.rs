@@ -310,6 +310,11 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     CorruptionResetRequired(String),
     #[error("the publication authority is unavailable: {0}")]
     Unavailable(String),
+    /// Another owner holds the code-generation store lock this operation
+    /// needs, exclusive or shared. The holder releases it on its own and emits
+    /// no wake, so the refused pass is retried rather than parked.
+    #[error("the code-generation store lock is held by another owner")]
+    StoreLockContended,
     /// Materializing the whole generation does not fit the process
     /// resident-memory budget now; it succeeds once memory is given back.
     #[error("decoding the generation does not fit the resident-memory budget: {0}")]

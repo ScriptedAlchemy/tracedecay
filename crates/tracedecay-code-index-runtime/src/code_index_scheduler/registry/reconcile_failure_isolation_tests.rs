@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 
@@ -119,10 +120,15 @@ impl Fixture {
         }
     }
 
-    /// The durable active pointer of this checkout's scope store.
-    fn active_pointer_path(&self) -> std::path::PathBuf {
+    /// This checkout's scope store root.
+    fn scope_store_root(&self) -> std::path::PathBuf {
         let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         super::super::scoped_code_index_store_root(&self._root.path().join("store"), &canonical)
+    }
+
+    /// The durable active pointer of this checkout's scope store.
+    fn active_pointer_path(&self) -> std::path::PathBuf {
+        self.scope_store_root()
             .join("active-code-generation-v1.json")
     }
 
@@ -469,6 +475,79 @@ async fn a_transient_capacity_refusal_is_retried_without_an_external_wake() {
         attempts >= 2,
         "a transient capacity refusal must schedule its own retry; only {attempts} pass(es) \
          ran after a single wake, so the worktree stays stale until unrelated traffic arrives"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+/// A pass refused because another owner holds this scope's code-generation
+/// store lock is retried by the worker on its own, and the worktree converges
+/// once the holder lets go. Retention and sibling publications release the
+/// lock without waking this worktree, so a refusal classified as reproducing
+/// parked the edit unindexed until unrelated input arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_generation_store_lock_is_retried_until_the_worktree_converges() {
+    let fixture = Fixture::mount("project.reconcile-store-lock-retry").await;
+    let sealed_before = wait_for_latest_generation(&fixture).await;
+    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    let passes = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+    let holder = acquire_code_generation_store_lock(&fixture.scope_store_root())
+        .expect("hold the scope store lock");
+
+    fs::write(
+        fixture.project.join("src/main.rs"),
+        "fn main() { edited(); }\nfn edited() {}\n",
+    )
+    .expect("edit source");
+    run_git_in(&fixture.project, &["commit", "-qam", "edit"]);
+    // The only external wake: nothing notifies the worker when the lock drops.
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the hint must reach the mounted scheduler"
+    );
+    let refused_passes = wait_for_attempts(&passes, 2).await;
+    drop(holder);
+    assert!(
+        refused_passes >= 2,
+        "a pass refused by a held store lock must schedule its own retry; only \
+         {refused_passes} pass(es) ran after a single hint"
+    );
+
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    let freshness = loop {
+        let freshness = fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("mounted freshness");
+        let converged = freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
+        if converged || tokio::time::Instant::now() >= deadline {
+            break freshness;
+        }
+        signals.changed_before(deadline.into_std()).await;
+    };
+    assert_eq!(freshness.parked, None, "{freshness:?}");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "{freshness:?}"
+    );
+    assert!(
+        freshness
+            .latest_generation_id
+            .as_ref()
+            .is_some_and(|generation| *generation != sealed_before),
+        "the edit must seal a new generation once the lock is released: {freshness:?}"
     );
 
     fixture.registry.shutdown().await;

@@ -848,6 +848,7 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         ) => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
+        CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor => RetrievalPortError::StaleEvidence,
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
             format!("lexical artifact reservation is unavailable: {detail}"),

@@ -145,6 +145,10 @@ pub enum CodeLexicalArtifactErrorV1 {
     Interrupted(CodeIndexInterruptionV1),
     #[error("lexical artifact contract violation: {0}")]
     Contract(String),
+    /// A clone-family paging cursor names another artifact generation or
+    /// request: the caller's evidence is stale, not the artifact.
+    #[error("clone family cursor does not match its artifact or request")]
+    StaleCloneFamilyCursor,
 }
 
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeLexicalArtifactErrorV1> {
