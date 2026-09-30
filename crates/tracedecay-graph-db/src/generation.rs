@@ -1782,7 +1782,7 @@ fn write_row_frame(
     writer: &mut CheckedDigestWriter<'_>,
     tag: &str,
     bytes: &[u8],
-) -> Result<(), GraphDbError> {
+) -> Result<RowLanes, GraphDbError> {
     let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
     writer.add_row_frame(&[&tag_len, tag.as_bytes(), &byte_len, bytes])
 }
@@ -1795,7 +1795,7 @@ fn write_canonical_row_frame<T: Serialize + ?Sized>(
     subject: &str,
 ) -> Result<(), GraphDbError> {
     let bytes = canonical.encode(value, subject)?;
-    write_row_frame(writer, tag, bytes)
+    write_row_frame(writer, tag, bytes).map(drop)
 }
 
 fn write_digest_bytes(
@@ -1824,9 +1824,13 @@ fn write_digest_bytes(
 /// if the digest ever becomes a security boundary.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphRowDigestSum {
-    lanes: [u64; 4],
+    lanes: RowLanes,
     rows: u64,
 }
+
+/// One row frame's SHA-256 as the four big-endian lanes a
+/// [`GraphRowDigestSum`] adds.
+pub(crate) type RowLanes = [u64; 4];
 
 impl GraphRowDigestSum {
     fn frame_lanes(parts: &[&[u8]]) -> [u64; 4] {
@@ -1864,8 +1868,15 @@ impl GraphRowDigestSum {
         }
     }
 
-    fn add_frame(&mut self, parts: &[&[u8]]) {
-        self.add_lanes(Self::frame_lanes(parts));
+    fn add_frame(&mut self, parts: &[&[u8]]) -> RowLanes {
+        let lanes = Self::frame_lanes(parts);
+        self.add_row_lanes(lanes);
+        lanes
+    }
+
+    /// Adds one row whose frame hashed to `lanes`.
+    pub(crate) fn add_row_lanes(&mut self, lanes: RowLanes) {
+        self.add_lanes(lanes);
         self.rows = self.rows.wrapping_add(1);
     }
 
@@ -1889,6 +1900,7 @@ impl GraphRowDigestSum {
     }
 
     /// Adds the row frame `tag` over `canonical` bytes.
+    #[cfg(test)]
     pub(crate) fn add_row(&mut self, tag: &str, canonical: &[u8]) -> Result<(), GraphDbError> {
         let (tag_len, byte_len) = frame_length_headers(tag, canonical)?;
         self.add_frame(&[&tag_len, tag.as_bytes(), &byte_len, canonical]);
@@ -2022,7 +2034,7 @@ impl<'a> CheckedDigestWriter<'a> {
 
     /// One whole row frame, `tag_len | tag | byte_len | bytes` split across
     /// `parts`, into the row sum.
-    fn add_row_frame(&mut self, parts: &[&[u8]]) -> Result<(), GraphDbError> {
+    fn add_row_frame(&mut self, parts: &[&[u8]]) -> Result<RowLanes, GraphDbError> {
         if let Some(error) = self.failure.take() {
             return Err(error);
         }
@@ -2033,8 +2045,7 @@ impl<'a> CheckedDigestWriter<'a> {
             self.bytes_since_check = 0;
             (self.check)()?;
         }
-        self.rows.add_frame(parts);
-        Ok(())
+        Ok(self.rows.add_frame(parts))
     }
 
     /// The row sum so far. Read before `finish` consumes the writer.

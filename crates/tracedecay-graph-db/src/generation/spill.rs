@@ -34,6 +34,7 @@ use tracedecay_store::runtime::{
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
+use crate::row_index::{ROW_INDEX_FILE, RowIndexBuilder};
 use crate::{GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey};
 
 use super::{
@@ -434,12 +435,21 @@ impl GraphGenerationRowSpill {
         drop(canonical);
         let directory = self.directory.path().to_path_buf();
         let entity_identities = self.entity_identities;
+        // A generation a later refresh may layer over records every row's
+        // digest beside its container; see `row_index`.
+        let mut row_index = directory
+            .join(ATTACHMENT_FILE)
+            .is_file()
+            .then(RowIndexBuilder::new);
         let entity_count = merge_runs(
             &self.entities.runs,
             &directory.join(ENTITIES_FILE),
             check,
             |row| {
-                write_row_frame(&mut writer, "entity", &row.canonical)?;
+                let lanes = write_row_frame(&mut writer, "entity", &row.canonical)?;
+                if let Some(index) = row_index.as_mut() {
+                    index.entity(&row.identity, lanes)?;
+                }
                 Ok(())
             },
         )?;
@@ -454,17 +464,21 @@ impl GraphGenerationRowSpill {
             &directory.join(RELATIONS_FILE),
             check,
             |row| {
-                for endpoint in &row.endpoints {
-                    if entity_identities
+                let mut positions = [0_usize; 2];
+                for (position, endpoint) in positions.iter_mut().zip(&row.endpoints) {
+                    *position = entity_identities
                         .binary_search_by(|entity| entity.as_str().cmp(endpoint))
-                        .is_err()
-                    {
-                        return Err(GraphDbError::invalid(format!(
-                            "local relation endpoint `{endpoint}` is absent from the candidate generation"
-                        )));
-                    }
+                        .map_err(|_| {
+                            GraphDbError::invalid(format!(
+                                "local relation endpoint `{endpoint}` is absent from the candidate generation"
+                            ))
+                        })?;
                 }
-                write_row_frame(&mut writer, "relation", &row.canonical)
+                let lanes = write_row_frame(&mut writer, "relation", &row.canonical)?;
+                if let Some(index) = row_index.as_mut() {
+                    index.relation(&row.identity, lanes, positions[0], positions[1])?;
+                }
+                Ok(())
             },
         )?;
         if relation_count > MAX_VERIFIED_GENERATION_RELATIONS {
@@ -475,6 +489,9 @@ impl GraphGenerationRowSpill {
         }
         let row_sum = writer.row_sum();
         writer.finish()?;
+        if let Some(index) = row_index {
+            index.write(&directory.join(ROW_INDEX_FILE))?;
+        }
         let expected_recovered_digest = GraphRecoveredGenerationDigestV1::new(format!(
             "sha256:{}",
             encode_lowercase_hex(&digest.finalize())
@@ -641,6 +658,12 @@ impl SpilledGraphGeneration {
     /// The producer's attachment, when it wrote one before the spill finished.
     pub(crate) fn attachment(&self) -> Option<PathBuf> {
         let path = self.directory.path().join(ATTACHMENT_FILE);
+        path.is_file().then_some(path)
+    }
+
+    /// The row index sealed beside an attachment; see `row_index`.
+    pub(crate) fn row_index(&self) -> Option<PathBuf> {
+        let path = self.directory.path().join(ROW_INDEX_FILE);
         path.is_file().then_some(path)
     }
 
