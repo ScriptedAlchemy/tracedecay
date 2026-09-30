@@ -1419,62 +1419,26 @@ struct PendingWakeStateV1 {
     attributable: bool,
 }
 
-/// Delayed retry for a text build the resident-memory authority refused.
+/// Work of one worktree the resident-memory authority refused.
 ///
-/// Memory given back through the resident owners wakes the worktree at once.
-/// RSS can also fall with no owner released (a build elsewhere finished), so
-/// a refusal also retries after a delay that doubles up to a ceiling instead
-/// of waiting for an unrelated wake.
+/// The refusal registered with the authority, so memory given back anywhere
+/// in the process (an owner released, a reservation dropped, a sample that
+/// fits it) is its retry through the headroom wake.
 #[derive(Default)]
 struct MemoryRefusalRetryV1 {
-    delay_secs: AtomicU64,
     /// Work is parked on resident memory. A reader's wake cannot help until
-    /// memory is given back or the delay elapses, so readers do not wake the
-    /// worker meanwhile.
+    /// memory is given back, so readers do not wake the worker meanwhile.
     waiting: AtomicBool,
 }
 
 impl MemoryRefusalRetryV1 {
-    const FIRST_DELAY_SECS: u64 = 5;
-    const MAX_DELAY_SECS: u64 = 300;
-
-    fn schedule(&self, pending_wake: &Arc<PendingWakeV1>, wake: &Arc<tokio::sync::Notify>) {
-        let previous = self
-            .delay_secs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |delay| {
-                Some(match delay {
-                    0 => Self::FIRST_DELAY_SECS.saturating_mul(2),
-                    delay => delay.saturating_mul(2).min(Self::MAX_DELAY_SECS),
-                })
-            })
-            .unwrap_or_else(|delay| delay);
-        let delay = Duration::from_secs(match previous {
-            0 => Self::FIRST_DELAY_SECS,
-            delay => delay,
-        });
+    fn wait(&self) {
         self.waiting.store(true, Ordering::Release);
-        let pending_wake = Arc::downgrade(pending_wake);
-        let wake = Arc::downgrade(wake);
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let (Some(pending_wake), Some(wake)) = (pending_wake.upgrade(), wake.upgrade()) {
-                CodeIndexSchedulerRegistryV1::note_wake_if_idle(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::MemoryRetry,
-                );
-            }
-        });
     }
 
+    /// The work landed, or a memory pass is re-checking; readers may wake the
+    /// worker again.
     fn reset(&self) {
-        self.delay_secs.store(0, Ordering::Release);
-        self.waiting.store(false, Ordering::Release);
-    }
-
-    /// A memory pass is re-checking; readers may wake the worker again once
-    /// it lands.
-    fn retrying(&self) {
         self.waiting.store(false, Ordering::Release);
     }
 
@@ -2378,7 +2342,6 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
             CodeIndexCadenceTriggerV1::GitWatcher => 6,
             CodeIndexCadenceTriggerV1::MemoryHeadroom => 7,
-            CodeIndexCadenceTriggerV1::MemoryRetry => 8,
         }
     }
 
@@ -2390,7 +2353,6 @@ impl CodeIndexSchedulerRegistryV1 {
             5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
             6 => CodeIndexCadenceTriggerV1::GitWatcher,
             7 => CodeIndexCadenceTriggerV1::MemoryHeadroom,
-            8 => CodeIndexCadenceTriggerV1::MemoryRetry,
             _ => CodeIndexCadenceTriggerV1::Mount,
         }
     }

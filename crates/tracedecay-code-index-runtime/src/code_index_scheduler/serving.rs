@@ -1215,7 +1215,11 @@ impl DaemonCodeTextArtifactStoreV1 {
             snapshot.used_bytes,
             observed_bytes,
             watermark_headroom,
-        )?;
+        )
+        .inspect_err(|_| {
+            self.resident_memory
+                .wait_for_headroom(minimum.get(), admission_watermark);
+        })?;
         Ok((
             observed_bytes,
             unmodeled_live_bytes,

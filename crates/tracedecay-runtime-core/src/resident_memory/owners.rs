@@ -13,9 +13,9 @@
 //! [`RESIDENT_OWNER_SHED_ORDER_V1`], and never the generation a worktree is
 //! actively serving.
 //!
-//! Every release, and every return of process RSS to nominal, bumps one
-//! headroom epoch. Work refused for memory subscribes to it and retries then,
-//! instead of waiting for an unrelated wake.
+//! Every release bumps a headroom epoch. Work refused for memory subscribes to
+//! it, beside the pressure cell's epoch for ledger and measured headroom, and
+//! retries then instead of waiting for an unrelated wake.
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
+
+use super::advance_headroom_epoch;
 
 /// How long a worktree keeps its retained state after its last use.
 ///
@@ -285,8 +287,7 @@ impl ResidentOwnersV1 {
         }
     }
 
-    /// Changes each time memory is given back: an owner released, or the
-    /// process returned below its reclaim line.
+    /// Changes each time an owner's memory is given back.
     #[must_use]
     pub fn subscribe_headroom(&self) -> watch::Receiver<u64> {
         self.headroom.subscribe()
@@ -294,8 +295,7 @@ impl ResidentOwnersV1 {
 
     /// Record that memory was given back outside this inventory.
     pub fn note_headroom(&self) {
-        self.headroom
-            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        advance_headroom_epoch(&self.headroom);
     }
 
     fn note_released(

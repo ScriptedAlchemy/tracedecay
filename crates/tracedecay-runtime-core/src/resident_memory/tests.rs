@@ -816,6 +816,70 @@ fn nominal_rss_refuses_growth_that_would_cross_the_limit() {
 }
 
 #[test]
+fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
+    let (authority, pressure) = pressure_authority();
+    let mut headroom = pressure.subscribe_headroom();
+    let requested = bytes(PRESSURE_TEST_LIMIT_BYTES / 4);
+    let quarter = ResidentMemoryComponentIdV1::new("test.quarter").unwrap();
+    let held = [(); 4].map(|()| {
+        authority
+            .reserve_process_shared(quarter, requested)
+            .expect("four quarters fill the ledger")
+    });
+    let [first, second, third, fourth] = held;
+    drop(first);
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "a release with nothing refused announces nothing"
+    );
+    let refill = authority
+        .reserve_process_shared(quarter, requested)
+        .expect("the freed quarter is admitted");
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("a full ledger refuses");
+    assert!(!headroom.has_changed().unwrap());
+
+    let mut shrinking = second;
+    shrinking.shrink_to(requested.get() - 1).unwrap();
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "one byte back does not fit the refused quarter"
+    );
+    drop(third);
+    assert!(
+        headroom.has_changed().unwrap(),
+        "the quarter the refused request needs is back"
+    );
+    assert_eq!(*headroom.borrow_and_update(), 1);
+    drop(fourth);
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "the waiter was satisfied; later releases wait for a new refusal"
+    );
+
+    let observed = pressure.limit_bytes() - requested.get() + 1;
+    pressure.publish_observed_resident_bytes(observed);
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("measured RSS leaves no room for the quarter");
+    pressure.publish_observed_resident_bytes(observed);
+    assert!(!headroom.has_changed().unwrap());
+    pressure.publish_observed_resident_bytes(observed - 1);
+    assert!(
+        headroom.has_changed().unwrap(),
+        "a sample that fits the refused quarter announces it"
+    );
+    drop((refill, shrinking));
+}
+
+#[test]
 fn measured_rss_above_the_high_watermark_refuses_growth_with_a_typed_state() {
     let (authority, pressure) = pressure_authority();
     let observed = pressure.high_watermark_bytes() + 1;

@@ -33,8 +33,6 @@ pub enum CodeIndexCadenceTriggerV1 {
     BusyFollowUp,
     /// The process gave memory back, so work refused for memory retries.
     MemoryHeadroom,
-    /// A build refused for memory retries after its delay elapsed.
-    MemoryRetry,
 }
 
 impl CodeIndexCadenceTriggerV1 {
@@ -48,7 +46,6 @@ impl CodeIndexCadenceTriggerV1 {
             Self::QueryAdmission => "query_admission",
             Self::BusyFollowUp => "busy_follow_up",
             Self::MemoryHeadroom => "memory_headroom",
-            Self::MemoryRetry => "memory_retry",
         }
     }
 }
@@ -428,9 +425,6 @@ fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
         }
         CodeIndexCadenceTriggerV1::MemoryHeadroom => {
             hotpath::gauge!("daemon.code_index.cadence.wake.memory_headroom_total").inc(1_u64);
-        }
-        CodeIndexCadenceTriggerV1::MemoryRetry => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.memory_retry_total").inc(1_u64);
         }
     }
     if receipt.is_noop() {

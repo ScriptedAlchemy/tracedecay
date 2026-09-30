@@ -2405,12 +2405,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 None => return Ok(None),
             },
         };
+        let pressure = admission.resident_memory.pressure();
+        let watermark = pressure
+            .high_watermark_bytes()
+            .min(admission.resident_memory.snapshot().limit_bytes);
         let admissible = || -> Result<(), String> {
-            let snapshot = admission.resident_memory.snapshot();
-            let pressure = admission.resident_memory.pressure();
+            let used = admission.resident_memory.snapshot().used_bytes;
             let observed = pressure.measure_admission_bytes();
-            let watermark = pressure.high_watermark_bytes().min(snapshot.limit_bytes);
-            let available = watermark.saturating_sub(snapshot.used_bytes.max(observed));
+            let available = watermark.saturating_sub(used.max(observed));
             if requested.get() <= available {
                 Ok(())
             } else {
@@ -2439,7 +2441,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 refused = %detail,
                 "generation decode shed retained state before re-measuring headroom"
             );
-            admissible().map_err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused)?;
+            admissible().map_err(|detail| {
+                admission
+                    .resident_memory
+                    .wait_for_headroom(requested.get(), watermark);
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(detail)
+            })?;
         }
         let component = ResidentMemoryComponentIdV1::new(component).map_err(Self::unavailable)?;
         admission

@@ -407,7 +407,7 @@ async fn a_text_build_refused_for_memory_retries_when_memory_is_given_back() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_text_build_retries_after_its_delay_when_rss_falls_without_a_release() {
+async fn a_refused_text_build_retries_when_a_reservation_it_waited_on_drops() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
@@ -418,23 +418,181 @@ async fn a_refused_text_build_retries_after_its_delay_when_rss_falls_without_a_r
 
     assert_eq!(
         next_receipt_trigger(&mut receipts).await,
-        CodeIndexCadenceTriggerV1::MemoryRetry
+        CodeIndexCadenceTriggerV1::MemoryHeadroom
     );
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
     assert!(
         text.query_owners_are_ready(),
-        "the delayed retry finds the headroom no owner release announced"
+        "the dropped reservation, not an owner release, woke the refused build"
     );
 
     registry.shutdown().await;
 }
 
+/// A worktree serving its first generation whose refresh after a commit the
+/// ledger refuses, still refused well after the reconcile's bounded capacity
+/// retries (well under a second in tests) would have been spent. Returns the
+/// first generation.
+async fn refresh_refused_for_memory(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+) -> CodeGenerationId {
+    let first = wait_for_live_complete_generation(registry, fixture.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    fixture.edit("src/main.rs", "fn main() { second(); }\nfn second() {}\n");
+    git(fixture.path(), &["commit", "-qam", "refresh"]);
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(first.clone()),
+        "the refresh stays refused while the ledger is held"
+    );
+    first
+}
+
+/// The ledger with all but 1 MiB of its room taken by `held`.
+fn ledger_leaving_one_mib(
+    resident_memory: &Arc<ProcessResidentMemoryV1>,
+    held: &'static str,
+) -> ProcessSharedMemoryReservationV1 {
+    let limit = resident_memory.snapshot().limit_bytes;
+    let occupied = resident_memory
+        .snapshot()
+        .used_bytes
+        .max(resident_memory.pressure().measure_admission_bytes());
+    resident_memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new(held).unwrap(),
+            NonZeroU64::new(limit - occupied - 1024 * 1024).unwrap(),
+        )
+        .expect("the held memory fits the ledger")
+}
+
+fn sixteen_gib_authority() -> Arc<ProcessResidentMemoryV1> {
+    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::new(limit)),
+    ))
+}
+
+/// Issue #2707: the refresh stopped retrying and the idle release that later
+/// gave its memory back never woke it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_refused_for_memory_publishes_when_an_idle_owner_releases_it() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let resident_memory = sixteen_gib_authority();
+    let (registry, _) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    // The mount's last pass releases its own reservations as it finishes.
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    // Another worktree's serving decode: pressure cannot shed it, only its
+    // idle window ending gives it back.
+    let held = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-decode");
+    let held = Arc::new(HeldMemoryOwner {
+        bytes: held.reserved_bytes(),
+        held: std::sync::Mutex::new(Some(held)),
+        last_used: Instant::now(),
+        serving: true,
+    });
+    let held_owner: Arc<dyn ResidentOwnerV1> = Arc::clone(&held) as Arc<dyn ResidentOwnerV1>;
+    let other = WorktreeId::new("worktree.other").unwrap();
+    let _registration = owners
+        .register(
+            ResidentOwnerScopeV1 {
+                project_id: ProjectId::new("project.other").unwrap(),
+                worktree_id: other.clone(),
+            },
+            ResidentOwnerKindV1::DecodedGeneration,
+            Arc::downgrade(&held_owner),
+        )
+        .unwrap();
+    let first = refresh_refused_for_memory(&registry, &fixture).await;
+
+    let released = owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert_eq!(
+        released
+            .iter()
+            .filter(|release| release.scope.worktree_id == other)
+            .map(|release| (release.kind, release.cause))
+            .collect::<Vec<_>>(),
+        [(
+            ResidentOwnerKindV1::DecodedGeneration,
+            ResidentOwnerReleaseCauseV1::Idle
+        )],
+        "the other worktree's decode outlived the refusal and went idle"
+    );
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_generation_change(&registry, fixture.path(), &first),
+    )
+    .await
+    .expect("the idle release is the refused refresh's retry");
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    assert_eq!(seated.generation().manifest().generation_id, second);
+
+    registry.shutdown().await;
+}
+
+/// A reservation dropping with no owner released, as when another
+/// worktree's build finishes, is the retry of a refresh the ledger refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_refused_by_the_ledger_publishes_when_the_blocking_reservation_drops() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let resident_memory = sixteen_gib_authority();
+    let (registry, _) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let blocker = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-build");
+    let first = refresh_refused_for_memory(&registry, &fixture).await;
+
+    drop(blocker);
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_generation_change(&registry, fixture.path(), &first),
+    )
+    .await
+    .expect("the dropped reservation is the refused refresh's retry");
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    assert_eq!(seated.generation().manifest().generation_id, second);
+
+    registry.shutdown().await;
+}
+
 /// Retained state another worktree holds, modelled as a ledger reservation so
-/// releasing it gives the build real headroom.
+/// releasing it gives the build real headroom. A `serving` holding is
+/// protected from pressure inside its idle window.
 struct HeldMemoryOwner {
     held: std::sync::Mutex<Option<ProcessSharedMemoryReservationV1>>,
     bytes: u64,
     last_used: Instant,
+    serving: bool,
 }
 
 impl ResidentOwnerV1 for HeldMemoryOwner {
@@ -449,7 +607,7 @@ impl ResidentOwnerV1 for HeldMemoryOwner {
                 ),
                 bytes: ResidentOwnerBytesV1::Measured(self.bytes),
                 last_used: self.last_used,
-                serving: false,
+                serving: self.serving,
                 shared: None,
             })
     }
@@ -482,6 +640,7 @@ async fn a_text_build_sheds_retained_state_before_it_refuses() {
         )),
         bytes: held_bytes,
         last_used: Instant::now(),
+        serving: false,
     });
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
     let held_owner: Arc<dyn ResidentOwnerV1> = Arc::clone(&held) as Arc<dyn ResidentOwnerV1>;
@@ -528,8 +687,6 @@ async fn a_text_build_sheds_retained_state_before_it_refuses() {
     registry.shutdown().await;
 }
 
-// Paused time makes the refused build's delayed memory retry virtual, so it
-// cannot overtake the headroom wake however long the host takes.
 #[tokio::test(start_paused = true)]
 async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
