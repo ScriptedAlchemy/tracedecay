@@ -512,6 +512,33 @@ fn lexical_lane_applies_include_field_filters() {
 }
 
 #[test]
+fn lexical_field_filters_decode_only_the_persisted_field_spelling() {
+    let filter: LexicalFieldFilterV1 =
+        serde_json::from_value(serde_json::json!({"field": "BodyText", "include": false}))
+            .expect("persisted spelling decodes");
+    assert_eq!(
+        filter,
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::BodyText,
+            include: false,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&filter).expect("encode"),
+        serde_json::json!({"field": "BodyText", "include": false})
+    );
+    let error = serde_json::from_value::<LexicalFieldFilterV1>(
+        serde_json::json!({"field": "body_text", "include": false}),
+    )
+    .expect_err("second spelling is refused");
+    assert_eq!(
+        error.to_string(),
+        "unknown variant `body_text`, expected one of `SymbolName`, `QualifiedName`, `Path`, \
+         `Signature`, `Documentation`, `BodyText`, `PreambleText`, `ExactTerm`, `Subtoken`"
+    );
+}
+
+#[test]
 fn lexical_lane_applies_exclude_field_filters() {
     let mut request = lexical_request(8);
     request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {

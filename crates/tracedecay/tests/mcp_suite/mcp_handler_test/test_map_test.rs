@@ -278,19 +278,6 @@ async fn test_map_reports_literal_coverage_and_typed_refusals() {
         })
     );
 
-    let by_alias = success_payload(&call_test_map(&fixture, json!({"id": greet_id})).await);
-    assert_eq!(by_alias["coverage"][0]["source_id"], greet_id);
-    assert_eq!(
-        comparable_map(&by_alias),
-        json!({
-            "covered_symbols": 1,
-            "uncovered_symbols": 0,
-            "test_files": ["tests/behavior.rs"],
-            "coverage": [surface_mapping()["coverage"][0].clone()],
-            "uncovered": []
-        })
-    );
-
     let by_unused = success_payload(&call_test_map(&fixture, json!({"node_id": unused_id})).await);
     assert_eq!(by_unused["uncovered"][0]["id"], unused_id);
     assert_eq!(

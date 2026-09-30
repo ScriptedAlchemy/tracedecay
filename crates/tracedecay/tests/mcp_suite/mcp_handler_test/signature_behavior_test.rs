@@ -69,8 +69,6 @@ async fn tracedecay_signature_returns_the_declared_signature() {
 
     let by_node = signature_json(&server, json!({"node_id": fetch_id})).await;
     assert_one_surface(&by_node, &fetch_surface());
-    let by_alias = signature_json(&server, json!({"id": node_id(&by_node)})).await;
-    assert_one_surface(&by_alias, &fetch_surface());
     let node_wins = signature_json(
         &server,
         json!({
