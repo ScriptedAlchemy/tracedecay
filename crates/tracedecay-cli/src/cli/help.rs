@@ -576,16 +576,16 @@ view), tracedecay wipe (path-scoped removal), tracedecay tool project_search
 (MCP twin).";
 
 pub(crate) const BRANCH_LONG_ABOUT: &str = "\
-Manages per-branch code-graph databases so queries reflect the branch you \
-are on. Adding a branch copies the nearest ancestor's DB and syncs \
-incrementally; gc removes DBs for branches deleted from git. Cross-branch \
+Tracks branches as scopes of the project's one code graph so queries reflect \
+the branch you are on. An untracked branch is served from its nearest \
+tracked ancestor; gc stops tracking branches deleted from git. Cross-branch \
 queries are served by the branch_search/branch_diff MCP tools.";
 
 pub(crate) const BRANCH_AFTER_HELP: &str = "\
 Examples:
-  tracedecay branch list                         Tracked branches and DB sizes
+  tracedecay branch list                         Tracked branches and readiness
   tracedecay branch add feature/login            Track a branch explicitly
-  tracedecay branch gc                           Drop DBs for deleted branches
+  tracedecay branch gc                           Untrack branches deleted from git
   tracedecay branch remove feature/login
 
 Related: tracedecay tool branch_search / branch_diff / branch_list

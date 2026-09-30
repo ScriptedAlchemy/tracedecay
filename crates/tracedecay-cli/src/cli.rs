@@ -1245,13 +1245,13 @@ pub enum ProfileStorageAction {
 
 #[derive(Subcommand)]
 pub enum BranchAction {
-    /// List tracked branches and their DB sizes
+    /// List tracked branches and their readiness
     List {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Track a new branch (copies nearest ancestor DB + incremental sync)
+    /// Track a new branch as a scope of the project graph
     Add {
         /// Branch name to track (default: current branch)
         name: Option<String>,
@@ -1259,7 +1259,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove a tracked branch and delete its DB
+    /// Stop tracking a branch and drop its graph scope
     Remove {
         /// Branch name to remove
         name: String,
@@ -1273,7 +1273,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove DBs for branches that no longer exist in git
+    /// Stop tracking branches that no longer exist in git
     Gc {
         /// Project path (default: current directory)
         #[arg(short, long)]
