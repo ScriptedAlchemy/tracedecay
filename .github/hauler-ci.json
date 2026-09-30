@@ -10,7 +10,8 @@
   ],
   "image": {
     "dockerfile": ".github/hauler/Dockerfile",
-    "context": ".github/hauler"
+    "context": ".github/hauler",
+    "reference": "ghcr.io/scriptedalchemy/tracedecay-ci@sha256:ae4b33102847c1716552de83af04887aa90d9f9b69b4ac99cd9b091087d901f1"
   },
   "compatibilityPaths": [
     "Cargo.lock",
