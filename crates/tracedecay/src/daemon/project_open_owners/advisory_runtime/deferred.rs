@@ -10,8 +10,107 @@ use super::{
     register_production_feedback_and_advisory, register_production_feedback_cycle,
     selected_feedback_generation,
 };
-use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationUnavailableClassV1, LegalAction, RetryDirective, SafeDiagnostic,
+    now_micros,
+};
 use tracedecay_runtime_core::logging::log_daemon_event;
+
+/// What the project-open advisory mount is doing for its checkout. The
+/// pre-mount placeholder owner answers from this state alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon::project_open_owners) enum AdvisoryMountStateV1 {
+    /// No generation this mount could admit exists yet.
+    AwaitingGeneration,
+    /// A sealed generation, or a retained one awaiting its source proof, is
+    /// being mounted.
+    Mounting,
+    /// The full advisory owner replaced the placeholder.
+    Mounted,
+    Failed(AdvisoryMountFailureV1),
+}
+
+/// Why the advisory mount ended without publishing the full owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon::project_open_owners) enum AdvisoryMountFailureV1 {
+    CodeIndexDisabled,
+    FeedbackCycle,
+    LspScopeGrant,
+    LspOwner,
+    AdvisoryOwner,
+    /// The mount task stopped (daemon shutdown or a closed generation
+    /// channel) before it reached a verdict.
+    Abandoned,
+}
+
+impl AdvisoryMountFailureV1 {
+    pub(in crate::daemon::project_open_owners) fn problem(self) -> ApplicationProblem {
+        let message = match self {
+            Self::CodeIndexDisabled => {
+                "The code index was disabled when this checkout opened, so the advisory feedback cycle never mounted"
+            }
+            Self::FeedbackCycle => {
+                "The advisory feedback cycle could not mount its feedback cycle over the sealed code-index generation"
+            }
+            Self::LspScopeGrant => {
+                "The advisory feedback cycle could not obtain its language-server workspace grant"
+            }
+            Self::LspOwner => {
+                "The advisory feedback cycle could not mount its language-server owner"
+            }
+            Self::AdvisoryOwner => {
+                "The advisory feedback cycle owner could not be published for this checkout"
+            }
+            Self::Abandoned => {
+                "The advisory feedback cycle mount stopped before publishing its owner"
+            }
+        };
+        ApplicationProblem::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic: SafeDiagnostic {
+                code: "feedback.advisory-cycle.mount-failed".to_owned(),
+                message: message.to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+            detail: None,
+        }
+    }
+}
+
+/// The advisory mount's sole write handle on its published state. Dropping it
+/// before a verdict publishes `Failed(Abandoned)`, so no placeholder waits on
+/// a mount that no longer runs.
+pub(in crate::daemon::project_open_owners) struct AdvisoryMountPublisherV1(
+    watch::Sender<AdvisoryMountStateV1>,
+);
+
+impl AdvisoryMountPublisherV1 {
+    pub(in crate::daemon::project_open_owners) fn channel()
+    -> (Self, watch::Receiver<AdvisoryMountStateV1>) {
+        let (sender, receiver) = watch::channel(AdvisoryMountStateV1::Mounting);
+        (Self(sender), receiver)
+    }
+
+    pub(in crate::daemon::project_open_owners) fn publish(&self, state: AdvisoryMountStateV1) {
+        self.0.send_replace(state);
+    }
+}
+
+impl Drop for AdvisoryMountPublisherV1 {
+    fn drop(&mut self) {
+        self.0.send_if_modified(|state| {
+            let open = matches!(
+                state,
+                AdvisoryMountStateV1::AwaitingGeneration | AdvisoryMountStateV1::Mounting
+            );
+            if open {
+                *state = AdvisoryMountStateV1::Failed(AdvisoryMountFailureV1::Abandoned);
+            }
+            open
+        });
+    }
+}
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a
@@ -33,6 +132,7 @@ pub(super) fn spawn(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     mut state: ProjectOpenDependentOwnerState,
+    publisher: AdvisoryMountPublisherV1,
 ) -> bool {
     // Nothing user-facing may wait on a layer this route disables by contract.
     // With no code index there is no generation to defer to, so the wait below
@@ -42,6 +142,9 @@ pub(super) fn spawn(
         &state.scope,
     ) {
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
+        publisher.publish(AdvisoryMountStateV1::Failed(
+            AdvisoryMountFailureV1::CodeIndexDisabled,
+        ));
         return false;
     }
     // Project-open schedules this owner before code-index activation. Capture
@@ -59,7 +162,7 @@ pub(super) fn spawn(
                 .subscribe_generation_publications();
             let mut serving_changes = None;
             let mut partial_publication_retried = false;
-            loop {
+            let settled = loop {
                 // Sealing announces durable source before its text owner is
                 // installed. Subscribe before probing that owner so a later
                 // installation can finish this mount without another edit.
@@ -69,19 +172,25 @@ pub(super) fn spawn(
                         .subscribe_serving_generation_changes(&project_root)
                         .await;
                 }
+                publisher.publish(AdvisoryMountStateV1::Mounting);
                 match try_mount(&invocation, &project_root, &mut state).await {
-                    Attempt::Terminal => return,
+                    Attempt::Settled(settled) => break settled,
                     Attempt::RetryPartialPublication if !partial_publication_retried => {
                         partial_publication_retried = true;
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    Attempt::RetryPartialPublication => return,
+                    Attempt::RetryPartialPublication => {
+                        break AdvisoryMountStateV1::Failed(AdvisoryMountFailureV1::AdvisoryOwner);
+                    }
                     Attempt::AwaitNextPublication => {
+                        let awaiting = awaiting_state(&invocation, &state.scope).await;
+                        publisher.publish(awaiting);
                         tracing::info!(
                             event = "advisory_deferred_generation_unavailable",
                             project = %project_root.display(),
                             serving_watch_registered = serving_changes.is_some(),
+                            state = ?awaiting,
                             "waiting after exact complete-generation admission declined"
                         );
                     }
@@ -98,10 +207,27 @@ pub(super) fn spawn(
                     return;
                 }
                 partial_publication_retried = false;
-            }
+            };
+            publisher.publish(settled);
         },
         label = "daemon.project.owners.advisory_deferred"
     ))
+}
+
+/// A retained generation's pending source proof, or the successor it finds
+/// owed, publishes the generation this mount then admits, so that wait is
+/// still a mount in progress rather than a wait for a first generation.
+async fn awaiting_state(
+    invocation: &DaemonInvocationState,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> AdvisoryMountStateV1 {
+    invocation
+        .code_index_schedulers
+        .retained_text_owner_freshness_for_scope(scope)
+        .await
+        .map_or(AdvisoryMountStateV1::AwaitingGeneration, |_| {
+            AdvisoryMountStateV1::Mounting
+        })
 }
 
 /// Waits for the next signal that `project_root` may have a new generation:
@@ -136,7 +262,8 @@ pub(in crate::daemon::project_open_owners) async fn wait_for_generation_change(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Attempt {
-    Terminal,
+    /// `Mounted` or `Failed`: nothing retries this owner after it returns.
+    Settled(AdvisoryMountStateV1),
     AwaitNextPublication,
     RetryPartialPublication,
 }
@@ -169,7 +296,7 @@ async fn try_mount(
         )
         .await
         {
-            Ok(()) => Attempt::Terminal,
+            Ok(()) => Attempt::Settled(AdvisoryMountStateV1::Mounted),
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
@@ -242,7 +369,9 @@ async fn try_mount(
                 "deferred advisory LSP grant is unavailable"
             );
             log_deferred_attempt(project_root, "lsp_scope_grant_failed", &error.to_string());
-            return Attempt::Terminal;
+            return Attempt::Settled(AdvisoryMountStateV1::Failed(
+                AdvisoryMountFailureV1::LspScopeGrant,
+            ));
         }
     };
     let lsp_session_factory = match register_production_lsp_owner(
@@ -267,7 +396,9 @@ async fn try_mount(
                 "deferred advisory LSP owner could not mount"
             );
             log_deferred_attempt(project_root, "lsp_owner_failed", &error.to_string());
-            return Attempt::Terminal;
+            return Attempt::Settled(AdvisoryMountStateV1::Failed(
+                AdvisoryMountFailureV1::LspOwner,
+            ));
         }
     };
     state.lsp_session_factory = Some(Arc::clone(&lsp_session_factory));
@@ -301,7 +432,7 @@ async fn try_mount(
             return classify_failure(invocation, project_root, state).await;
         }
     }
-    Attempt::Terminal
+    Attempt::Settled(AdvisoryMountStateV1::Mounted)
 }
 
 async fn classify_failure(
@@ -332,13 +463,15 @@ async fn classify_failure(
         // the composition itself is missing rather than early. Nothing retries
         // this owner after it returns, so name that terminal state here rather
         // than leave a project serving without a cycle and no evidence why.
-        Attempt::Terminal
+        Attempt::Settled(AdvisoryMountStateV1::Failed(
+            AdvisoryMountFailureV1::FeedbackCycle,
+        ))
     };
     log_deferred_attempt(
         project_root,
         "classified_failure",
         match attempt {
-            Attempt::Terminal => "terminal",
+            Attempt::Settled(_) => "terminal",
             Attempt::AwaitNextPublication => "await_next_publication",
             Attempt::RetryPartialPublication => "retry_partial_publication",
         },
