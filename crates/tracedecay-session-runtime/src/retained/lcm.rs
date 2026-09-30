@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use tracedecay_contracts::retained_surfaces::{
-    LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmDagDepthStatusV1, LcmDagStatusV1,
-    LcmDescribeRequestV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1, LcmDoctorHealthStatusV1,
-    LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorRequestV1,
-    LcmDoctorResultV1, LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1,
-    LcmLifecycleStatusV1, LcmLoadSessionRequestV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
-    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmStatusRequestV1,
-    LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1,
-    LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1, LcmSummaryConvergenceStatusV1,
-    MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
-    RetrievalWorkerStatusV1,
+    LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmConvergenceStateV1, LcmConvergenceV1,
+    LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeRequestV1, LcmDoctorFindingKindV1,
+    LcmDoctorFindingV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorProjectionStateV1,
+    LcmDoctorProjectionV1, LcmDoctorRequestV1, LcmDoctorResultV1, LcmExpandQueryRequestV1,
+    LcmExpandRequestV1, LcmGrepRequestV1, LcmLifecycleStatusV1, LcmLoadSessionRequestV1,
+    LcmPayloadCoverageStateV1, LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1,
+    LcmRedactionStatusV1, LcmStatusRequestV1, LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1,
+    LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1,
+    LcmSummaryConvergenceStatusV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    RetainedTimeFilterV1, RetrievalWorkerStatusV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
@@ -33,7 +33,8 @@ use tracedecay_session_temporal_store::{
 };
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 use tracedecay_sessions::serving::{
-    SessionProjectionServingState, SessionProjectionServingStatus, SessionProjectionStaleReason,
+    SessionConvergenceState, SessionConvergenceStatus, SessionProjectionServingState,
+    SessionProjectionServingStatus, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
 };
@@ -461,6 +462,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 authority_outcome: Some(authority_outcome),
                 deep: Some(request.deep.unwrap_or(false)),
                 lcm: Some(lcm_status(status)),
+                projection: self.projection_serving_status().map(lcm_doctor_projection),
                 message: None,
                 provider: Some(provider.to_owned()),
                 reason: None,
@@ -548,15 +550,17 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
         )
     }
 
-    /// The refresh worker's serving state for the diagnosed store. Only
-    /// project mounts own a worker; the profile authority is served without
-    /// one, so it reports nothing rather than a fabricated state.
+    /// The refresh worker's serving state for this store. A profile mount
+    /// assembled without its worker reports nothing rather than a fabricated
+    /// state.
     fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
         match &self.authority {
             DirectRetainedLcmAuthority::Project { retrieval, .. } => {
                 retrieval.projection_serving_status()
             }
-            DirectRetainedLcmAuthority::Profile { .. } => None,
+            DirectRetainedLcmAuthority::Profile { refresh_status, .. } => refresh_status
+                .as_ref()
+                .map(|refresh_status| refresh_status.serving_status()),
         }
     }
 }
@@ -649,6 +653,24 @@ pub fn lcm_doctor_projection(status: SessionProjectionServingStatus) -> LcmDocto
                 .to_owned()
             }),
         },
+        convergence: lcm_convergence(status.convergence),
+    }
+}
+
+fn lcm_convergence(value: SessionConvergenceStatus) -> LcmConvergenceV1 {
+    let (state, reason) = match value.state {
+        SessionConvergenceState::Converging => (LcmConvergenceStateV1::Converging, None),
+        SessionConvergenceState::Converged => (LcmConvergenceStateV1::Converged, None),
+        SessionConvergenceState::Blocked { reason_code } => {
+            (LcmConvergenceStateV1::Blocked, Some(reason_code))
+        }
+        SessionConvergenceState::Unavailable => (LcmConvergenceStateV1::Unavailable, None),
+    };
+    LcmConvergenceV1 {
+        state,
+        reason,
+        epoch: value.epoch,
+        converged_at_unix_micros: value.converged_at_unix_micros,
     }
 }
 
