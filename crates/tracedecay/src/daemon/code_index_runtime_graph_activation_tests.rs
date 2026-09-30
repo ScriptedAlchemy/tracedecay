@@ -1791,15 +1791,31 @@ async fn first_search_after_restart_serves_text_while_the_graph_head_recovers() 
     release_recovery
         .send(())
         .expect("release the retained graph head recovery");
+    // Seating the graph and re-proving the retained generation against the
+    // checkout are separate steps of the released pass; every lane serves
+    // warm only once both have landed.
     let seat_deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while registry
-        .retained_text_owner_for_root(&canonical_fixture)
-        .await
-        .is_none_or(|text| text.interactive_graph_store().is_err())
-    {
+    loop {
+        let seated = registry
+            .retained_text_owner_for_root(&canonical_fixture)
+            .await
+            .is_some_and(|text| text.interactive_graph_store().is_ok());
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted freshness");
+        if seated
+            && freshness.latest_generation_id.as_deref() == Some(seeded_generation_id.as_str())
+            && freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
+        {
+            break;
+        }
         assert!(
             std::time::Instant::now() <= seat_deadline,
-            "the released graph head never seated"
+            "the released graph head never seated fresh: seated={seated} {freshness:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
