@@ -260,6 +260,48 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         json!(BRANCH)
     );
     assert_eq!(detailed["branch_diagnostics"]["warnings"], json!([]));
+    let mut branch_diagnostics = detailed["branch_diagnostics"].clone();
+    let tracked = &mut branch_diagnostics["branches"][0];
+    for timestamp in ["created_at", "last_synced_at"] {
+        let unix = tracked[timestamp].take();
+        assert!(
+            unix.as_str()
+                .is_some_and(|unix| unix.parse::<u64>().is_ok()),
+            "{timestamp} must be a unix timestamp: {detailed}"
+        );
+    }
+    assert_eq!(
+        branch_diagnostics,
+        json!({
+            "tracking_enabled": true,
+            "default_branch": BRANCH,
+            "current_branch": BRANCH,
+            "open_active_branch": BRANCH,
+            "serving_branch": BRANCH,
+            "branch_drifted": false,
+            "branch_resolution": "exact",
+            "is_fallback": false,
+            "fallback_target": null,
+            "fallback_warning": null,
+            "live_branch_tracked": true,
+            "live_branch_ready": true,
+            "nearest_tracked_ancestor": null,
+            "tracked_branch_count": 1,
+            "branches": [{
+                "name": BRANCH,
+                "parent": null,
+                "created_at": null,
+                "last_synced_at": null,
+                "is_default": true,
+                "is_current": true,
+                "is_open_active": true,
+                "is_serving": true,
+                "is_ready": true,
+            }],
+            "warnings": [],
+        }),
+        "branch diagnostics report branch provenance scopes of the one project store"
+    );
     assert_eq!(
         detailed["git_staleness"],
         json!({ "status": "current", "watermark": project.head })

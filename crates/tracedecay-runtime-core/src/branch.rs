@@ -322,28 +322,6 @@ pub fn sanitize_branch_name(name: &str) -> String {
     result.trim_matches('_').to_string()
 }
 
-/// Resolves the DB path for a given branch.
-///
-/// If the branch is tracked in metadata, returns its `db_file` path.
-/// Returns `None` if untracked or if the path would escape `tracedecay_dir`.
-#[must_use]
-pub fn resolve_branch_db_path(
-    tracedecay_dir: &Path,
-    branch: &str,
-    meta: &crate::branch_meta::BranchMeta,
-) -> Option<std::path::PathBuf> {
-    let entry = meta.branches.get(branch)?;
-    let resolved = tracedecay_dir.join(&entry.db_file);
-    // Prevent path traversal: resolved path must stay within tracedecay_dir
-    if let (Ok(canonical_dir), Ok(canonical_path)) =
-        (tracedecay_dir.canonicalize(), resolved.canonicalize())
-        && !canonical_path.starts_with(&canonical_dir)
-    {
-        return None;
-    }
-    Some(resolved)
-}
-
 #[cfg(test)]
 mod branch_memo_tests {
     use std::path::Path;

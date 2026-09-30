@@ -160,9 +160,9 @@ measurements, not inferred table sizes.
    (`feat(graph): fence branch graph publication and mutation epochs`,
    e19add066a; `feat(branch): serve tracked branches from the single project
    store`, 712f69ec04). Tracking a branch publishes a metadata entry
-   referencing the canonical main database instead of copying a private
-   SQLite snapshot; `resolve_db_for_branch` always serves the main store,
-   with the branch argument deciding provenance and fallback warnings only;
+   in the canonical main database instead of copying a private SQLite
+   snapshot; `resolve_serving_branch` resolves only the serving branch and
+   fallback warning, never a database path;
    branch admin Remove/RemoveAll/Gc retire single-store entries rather than
    deleting per-branch files. This structurally removes the "live branch
    stores scale as branches × full graph size" failure class described
@@ -175,9 +175,9 @@ measurements, not inferred table sizes.
    `branch_drifted_with()` was vacuously false, the mid-session drift reopen
    never fired, and the MCP freshness drift test failed. Ordinary opens
    (read-write, read-only, and init) now resolve branch provenance through
-   `TraceDecay::resolve_branch_provenance`, which reads `resolve_db_for_branch`
-   for the serving branch and fallback warning only, never for a path, since
-   the canonical project database serves every branch. `serving_branch` is
+   `TraceDecay::resolve_branch_provenance`, which reads `resolve_serving_branch`
+   for the serving branch and fallback warning, since the canonical project
+   database serves every branch. `serving_branch` is
    therefore `Some` exactly when the store publishes branch metadata, which is
    what the drift check reads as "there is a branch identity to drift from".
    The write gate follows the same epoch model: it now refuses only on drift

@@ -24,11 +24,6 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
     };
     let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
     let entry = meta.branches.get("feature/topic").unwrap();
-    assert_eq!(
-        entry.db_file,
-        crate::config::DB_FILENAME,
-        "single-store tracking must reference the canonical main database"
-    );
     assert_eq!(entry.parent.as_deref(), Some("main"));
 
     assert_eq!(
