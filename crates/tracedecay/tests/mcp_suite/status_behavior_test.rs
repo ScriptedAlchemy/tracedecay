@@ -177,8 +177,17 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(compact["schema_convergence"]["findings"], json!([]));
     assert!(compact.get("code_index_freshness_warning").is_none());
     assert!(compact.get("node_count").is_none());
+    let mut session_projection = compact["session_projection"].clone();
+    let converged_at = session_projection["convergence"]["converged_at_unix_micros"].take();
+    let converged_at_unix_micros = converged_at
+        .as_i64()
+        .expect("sealed refresh publishes a convergence timestamp");
+    assert!(
+        converged_at_unix_micros > 1_000_000_000_000_000,
+        "convergence time is unix microseconds: {converged_at_unix_micros}"
+    );
     assert_eq!(
-        compact["session_projection"],
+        session_projection,
         json!({
             "state": "current",
             "worker": {
@@ -186,6 +195,11 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
                 "backlog": 0,
                 "blocker": null,
                 "retry_class": null
+            },
+            "convergence": {
+                "state": "converged",
+                "epoch": 1,
+                "converged_at_unix_micros": null
             }
         })
     );

@@ -49,12 +49,22 @@ impl StoreSchemaVersions {
     };
 }
 
-/// Shared on-disk template identity. Keyed on the admitted final-shape
-/// fingerprint, not `SCHEMA_VERSION` or a hand-maintained revision: a required
-/// table can land in the final shape without a version bump, and a warm
-/// target must not reuse the previous template. The tables admitted by a
-/// recorded version alone are keyed on [`StoreSchemaVersions`].
+/// Shared on-disk template identity. The graph-database final shape and the
+/// other admitted schema constants (authority tables, temporal columns, format
+/// revisions) are fingerprinted from those constants, so a column or revision
+/// change selects a different directory without a hand-maintained revision.
+/// Tables admitted by a recorded version alone are keyed on [`StoreSchemaVersions`].
 fn template_dir_name(versions: StoreSchemaVersions) -> Option<String> {
+    schema_template_dir_name(
+        versions,
+        &tracedecay_global_db::schema_contract::expected_admitted_schema_fingerprint(),
+    )
+}
+
+fn schema_template_dir_name(
+    versions: StoreSchemaVersions,
+    admitted_schema: &str,
+) -> Option<String> {
     let StoreSchemaVersions {
         lcm,
         session_temporal,
@@ -62,7 +72,7 @@ fn template_dir_name(versions: StoreSchemaVersions) -> Option<String> {
     } = versions;
     match tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint() {
         Ok(fingerprint) => Some(format!(
-            "mcp-suite-store-template-{fingerprint}-lcm{lcm}-temporal{session_temporal}-git{git_correlation}"
+            "mcp-suite-store-template-{fingerprint}-{admitted_schema}-lcm{lcm}-temporal{session_temporal}-git{git_correlation}"
         )),
         Err(error) => {
             eprintln!("[mcp_suite::fixture] schema fingerprint unavailable: {error}");
@@ -506,6 +516,70 @@ fn sqlite_master_shape_fingerprint(database_path: &Path) -> io::Result<String> {
                 .map(|(name, sql)| (name.as_str(), sql.as_str())),
         ),
     )
+}
+
+/// A column constant that admission checks is part of the template key. A warm
+/// target recorded under the contract with that column removed is not selected,
+/// and the selected template's `graph_scopes` has the current columns.
+#[tokio::test]
+async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
+    assert!(
+        tracedecay_global_db::schema_contract::authority_schema_fingerprint_omitting_column(
+            "graph_scopes",
+            "db_relpath",
+        )
+        .is_none(),
+        "db_relpath is not an admitted graph_scopes column"
+    );
+    let omitted =
+        tracedecay_global_db::schema_contract::authority_schema_fingerprint_omitting_column(
+            "graph_scopes",
+            "writable",
+        )
+        .expect("writable is an admitted graph_scopes column");
+    assert_ne!(
+        omitted,
+        tracedecay_global_db::schema_contract::expected_admitted_schema_fingerprint(),
+        "dropping a column constant must change the admitted schema fingerprint"
+    );
+
+    let scratch = tempfile::TempDir::new().unwrap();
+    let tmp_root = scratch.path().canonicalize().unwrap();
+    let stale_name = schema_template_dir_name(StoreSchemaVersions::CURRENT, &omitted).unwrap();
+    let stale = tmp_root.join(&stale_name);
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("READY"), b"previous-schema").unwrap();
+
+    let selected = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
+        .await
+        .expect("current schema builds its own template");
+    assert_ne!(selected, stale);
+    assert_eq!(fs::read(selected.join("READY")).unwrap(), b"ok");
+
+    let global_db = selected
+        .join(EMPTY_FLAVOR)
+        .join("home/.tracedecay/global.db");
+    let connection = Connection::open(&global_db).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM pragma_table_info('graph_scopes') ORDER BY cid")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "graph_scope_id",
+            "project_id",
+            "store_id",
+            "branch_name",
+            "parent_scope_id",
+            "last_synced_at",
+            "writable",
+        ]
+    );
 }
 
 #[tokio::test]
