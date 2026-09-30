@@ -353,46 +353,23 @@ async fn remote_tls_connect(
     stream
 }
 
-async fn remote_tls_write_and_flush_with_wall_timeout(
-    stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-    bytes: &[u8],
-    context: &str,
-) {
-    let completed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let watchdog_completed = Arc::clone(&completed);
-    let mut watchdog = tokio::task::spawn_blocking(move || {
-        let (lock, condition) = &*watchdog_completed;
-        let completed = lock.lock().expect("lock real-wall write watchdog");
-        let (_completed, wait) = condition
-            .wait_timeout_while(completed, std::time::Duration::from_secs(1), |completed| {
-                !*completed
-            })
-            .expect("wait for paused TLS write completion");
-        wait.timed_out()
-    });
-    let operation = async {
-        stream.write_all(bytes).await?;
-        stream.flush().await
-    };
-    tokio::pin!(operation);
-    let outcome = tokio::select! {
-        outcome = &mut operation => outcome,
-        timed_out = &mut watchdog => {
-            assert!(
-                timed_out.expect("join real-wall write watchdog"),
-                "real-wall write watchdog stopped before {context} completed"
-            );
-            panic!("{context} exceeded the one-second real-wall bound");
+/// Waits until the real TLS reader has consumed exactly `expected` body
+/// bytes, refusing any reading past it.
+async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, expected: usize) {
+    loop {
+        let observed = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer")
+            .body_bytes_observed;
+        assert!(
+            observed <= expected,
+            "TLS ingress consumed body bytes out of order"
+        );
+        if observed == expected {
+            return;
         }
-    };
-    let (lock, condition) = &*completed;
-    *lock.lock().expect("lock completed TLS write watchdog") = true;
-    condition.notify_one();
-    assert!(
-        !watchdog.await.expect("join real-wall write watchdog"),
-        "{context} completed after the one-second real-wall bound"
-    );
-    outcome.unwrap_or_else(|error| panic!("{context}: {error}"));
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn remote_tls_h2_only_handshake_is_rejected(
@@ -988,23 +965,15 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
                 .expect("open bounded idle connection"),
         );
     }
-    for _ in 0..128 {
-        if service.remote_tls_available_admissions() == Some(0) {
-            break;
-        }
+    while service.remote_tls_available_admissions() != Some(0) {
         tokio::task::yield_now().await;
     }
-    assert_eq!(service.remote_tls_available_admissions(), Some(0));
 
     tokio::time::pause();
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    for _ in 0..128 {
-        if service.remote_tls_available_admissions() == Some(128) {
-            break;
-        }
+    while service.remote_tls_available_admissions() != Some(128) {
         tokio::task::yield_now().await;
     }
-    assert_eq!(service.remote_tls_available_admissions(), Some(128));
     drop(idle_connections);
     tokio::time::resume();
 
@@ -1056,6 +1025,24 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("the incomplete-body connection must be torn down");
     assert!(partial_body_response.is_empty());
 
+    // From here the paused clock cannot auto-advance while the test waits on
+    // the listener's ingress observer, so product deadlines age only through
+    // the explicit advances below, never through host scheduling delay.
+    tokio::time::pause();
+    let (inhibitor_ready_tx, inhibitor_ready_rx) = std::sync::mpsc::sync_channel(0);
+    let (inhibitor_release_tx, inhibitor_release_rx) = std::sync::mpsc::sync_channel(0);
+    let auto_advance_inhibitor = tokio::task::spawn_blocking(move || {
+        inhibitor_ready_tx
+            .send(())
+            .expect("announce the auto-advance inhibitor");
+        inhibitor_release_rx
+            .recv()
+            .expect("release the auto-advance inhibitor");
+    });
+    inhibitor_ready_rx
+        .recv()
+        .expect("the auto-advance inhibitor must start");
+
     let mut progressing_body = remote_tls_connect(endpoint, &certificate).await;
     let progressing_body_headers = format!(
         "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n",
@@ -1074,71 +1061,41 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .flush()
         .await
         .expect("flush progressing HTTP body headers");
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let observed = service
-                .remote_tls_ingress_snapshot()
-                .expect("TLS ingress observer")
-                .headers_complete;
-            assert!(
-                observed <= initial_ingress.headers_complete + 1,
-                "TLS ingress observed unexpected request headers"
-            );
-            if observed == initial_ingress.headers_complete + 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
+    loop {
+        let observed = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer")
+            .headers_complete;
+        assert!(
+            observed <= initial_ingress.headers_complete + 1,
+            "TLS ingress observed unexpected request headers"
+        );
+        if observed == initial_ingress.headers_complete + 1 {
+            break;
         }
-    })
-    .await
-    .expect("progressing headers must reach the real TLS reader");
+        tokio::task::yield_now().await;
+    }
     let initial_body_bytes = service
         .remote_tls_ingress_snapshot()
         .expect("TLS ingress observer")
         .body_bytes_observed;
-    tokio::time::pause();
     for (offset, byte) in b"         {}".iter().enumerate() {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        tokio::time::resume();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            progressing_body
-                .write_all(std::slice::from_ref(byte))
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("write progressing HTTP body byte {offset}: {error}")
-                });
-            progressing_body.flush().await.unwrap_or_else(|error| {
-                panic!("flush progressing HTTP body byte {offset}: {error}")
-            });
-            loop {
-                let observed = service
-                    .remote_tls_ingress_snapshot()
-                    .expect("TLS ingress observer")
-                    .body_bytes_observed;
-                let expected = initial_body_bytes + offset + 1;
-                assert!(
-                    observed <= expected,
-                    "TLS ingress consumed bytes out of order"
-                );
-                if observed == expected {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("progressing body byte {offset} must reach TLS ingress"));
-        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        progressing_body
+            .write_all(std::slice::from_ref(byte))
+            .await
+            .unwrap_or_else(|error| panic!("write progressing HTTP body byte {offset}: {error}"));
+        progressing_body
+            .flush()
+            .await
+            .unwrap_or_else(|error| panic!("flush progressing HTTP body byte {offset}: {error}"));
+        wait_for_ingress_body_bytes(&service, initial_body_bytes + offset + 1).await;
     }
-    tokio::time::resume();
     let mut progressing_response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        progressing_body.read_to_end(&mut progressing_response),
-    )
-    .await
-    .expect("progressing response must close within the bounded response window")
-    .expect("read progressing HTTP body response");
+    progressing_body
+        .read_to_end(&mut progressing_response)
+        .await
+        .expect("read progressing HTTP body response");
     assert!(
         progressing_response.starts_with(b"HTTP/1.1 400"),
         "progressing body must reach typed canonical protocol admission after more than 30 seconds"
@@ -1149,161 +1106,88 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
             .any(|window| window == b"\"kind\":\"problem\""),
         "progressing body failure must retain the canonical typed problem wrapper"
     );
-    let (mut absolute_slowloris, initial_absolute_body_bytes) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        async {
-            let initial_absolute_ingress = service
-                .remote_tls_ingress_snapshot()
-                .expect("TLS ingress observer");
-            let mut stream = remote_tls_connect(endpoint, &certificate).await;
-            let headers = format!(
+    let (mut absolute_slowloris, initial_absolute_body_bytes) = {
+        let initial_absolute_ingress = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer");
+        let mut stream = remote_tls_connect(endpoint, &certificate).await;
+        let headers = format!(
                 "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
                 String::from_utf8_lossy(&credential),
                 "0123456789abcdef0123456789abcdef",
             )
             .into_bytes();
-            stream
-                .write_all(&headers)
-                .await
-                .expect("write absolute slowloris HTTP body headers");
-            stream
-                .flush()
-                .await
-                .expect("flush absolute slowloris HTTP body headers");
-            loop {
-                let observed = service
-                    .remote_tls_ingress_snapshot()
-                    .expect("TLS ingress observer")
-                    .headers_complete;
-                assert!(
-                    observed <= initial_absolute_ingress.headers_complete + 1,
-                    "TLS ingress observed unexpected absolute slowloris request headers"
-                );
-                if observed == initial_absolute_ingress.headers_complete + 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            let body_bytes = service
-                .remote_tls_ingress_snapshot()
-                .expect("TLS ingress observer")
-                .body_bytes_observed;
-            (stream, body_bytes)
-        }
-    )
-    .await
-    .expect("absolute slowloris setup must reach the real TLS reader within one second");
-    let (inhibitor_ready_tx, inhibitor_ready_rx) = std::sync::mpsc::sync_channel(0);
-    let (inhibitor_release_tx, inhibitor_release_rx) = std::sync::mpsc::sync_channel(0);
-    let auto_advance_inhibitor = tokio::task::spawn_blocking(move || {
-        inhibitor_ready_tx
-            .send(())
-            .expect("announce absolute slowloris auto-advance inhibitor");
-        inhibitor_release_rx
-            .recv()
-            .expect("release absolute slowloris auto-advance inhibitor");
-    });
-    inhibitor_ready_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("absolute slowloris auto-advance inhibitor must start");
-    tokio::time::pause();
-    let mut slowloris_bytes = b"              {".iter();
-    for (offset, byte) in slowloris_bytes.by_ref().take(14).enumerate() {
-        tokio::time::advance(std::time::Duration::from_secs(4)).await;
-        remote_tls_write_and_flush_with_wall_timeout(
-            &mut absolute_slowloris,
-            std::slice::from_ref(byte),
-            &format!("write absolute slowloris body byte {offset} before deadline"),
-        )
-        .await;
-        let observation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        stream
+            .write_all(&headers)
+            .await
+            .expect("write absolute slowloris HTTP body headers");
+        stream
+            .flush()
+            .await
+            .expect("flush absolute slowloris HTTP body headers");
         loop {
             let observed = service
                 .remote_tls_ingress_snapshot()
                 .expect("TLS ingress observer")
-                .body_bytes_observed;
-            let expected = initial_absolute_body_bytes + offset + 1;
+                .headers_complete;
             assert!(
-                observed <= expected,
-                "TLS ingress consumed absolute slowloris body bytes out of order"
+                observed <= initial_absolute_ingress.headers_complete + 1,
+                "TLS ingress observed unexpected absolute slowloris request headers"
             );
-            if observed == expected {
+            if observed == initial_absolute_ingress.headers_complete + 1 {
                 break;
             }
-            assert!(
-                std::time::Instant::now() < observation_deadline,
-                "absolute slowloris body byte {offset} must reach TLS ingress"
-            );
             tokio::task::yield_now().await;
         }
-    }
-    tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    let final_offset = 14;
-    remote_tls_write_and_flush_with_wall_timeout(
-        &mut absolute_slowloris,
-        std::slice::from_ref(
-            slowloris_bytes
-                .next()
-                .expect("slowloris fixture extends past the absolute deadline probe"),
-        ),
-        "write absolute slowloris body byte at 58 seconds",
-    )
-    .await;
-    let observation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    loop {
-        let observed = service
+        let body_bytes = service
             .remote_tls_ingress_snapshot()
             .expect("TLS ingress observer")
             .body_bytes_observed;
-        let expected = initial_absolute_body_bytes + final_offset + 1;
-        assert!(
-            observed <= expected,
-            "TLS ingress consumed absolute slowloris body bytes out of order"
-        );
-        if observed == expected {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < observation_deadline,
-            "absolute slowloris body byte {final_offset} must reach TLS ingress at 58 seconds"
-        );
-        tokio::task::yield_now().await;
+        (stream, body_bytes)
+    };
+    let mut slowloris_bytes = b"              {".iter();
+    for (offset, byte) in slowloris_bytes.by_ref().take(14).enumerate() {
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        absolute_slowloris
+            .write_all(std::slice::from_ref(byte))
+            .await
+            .unwrap_or_else(|error| panic!("write absolute slowloris body byte {offset}: {error}"));
+        absolute_slowloris
+            .flush()
+            .await
+            .unwrap_or_else(|error| panic!("flush absolute slowloris body byte {offset}: {error}"));
+        wait_for_ingress_body_bytes(&service, initial_absolute_body_bytes + offset + 1).await;
     }
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    let final_offset = 14;
+    let final_byte = slowloris_bytes
+        .next()
+        .expect("slowloris fixture extends past the absolute deadline probe");
+    absolute_slowloris
+        .write_all(std::slice::from_ref(final_byte))
+        .await
+        .expect("write absolute slowloris body byte at 58 seconds");
+    absolute_slowloris
+        .flush()
+        .await
+        .expect("flush absolute slowloris body byte at 58 seconds");
+    wait_for_ingress_body_bytes(&service, initial_absolute_body_bytes + final_offset + 1).await;
+    // 61 s: past the 60 s absolute request deadline, but 3 s into the 5 s
+    // idle deadline the last byte reset, so only the absolute deadline can
+    // close this connection before the clock moves again.
     tokio::time::advance(std::time::Duration::from_secs(3)).await;
-    let absolute_slowloris_reader = tokio::task::spawn(async move {
-        let mut response = Vec::new();
-        let closed = absolute_slowloris.read_to_end(&mut response).await;
-        (closed, response)
-    });
-    let close_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while !absolute_slowloris_reader.is_finished() {
-        assert!(
-            std::time::Instant::now() < close_deadline,
-            "a progressing slowloris must hit the absolute admission deadline"
-        );
-        tokio::task::yield_now().await;
-    }
-    let (_closed, absolute_slowloris_response) = absolute_slowloris_reader
-        .await
-        .expect("join absolute slowloris response reader");
-    assert!(absolute_slowloris_response.is_empty());
-    let reset_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut absolute_slowloris_response = Vec::new();
+    let _closed = absolute_slowloris
+        .read_to_end(&mut absolute_slowloris_response)
+        .await;
+    assert!(
+        absolute_slowloris_response.is_empty(),
+        "a progressing slowloris must hit the absolute admission deadline"
+    );
     while service.remote_tls_available_admissions() != Some(128) {
-        assert!(
-            std::time::Instant::now() < reset_deadline,
-            "absolute slowloris admission must be released before the reset idle deadline"
-        );
         tokio::task::yield_now().await;
     }
-    assert_eq!(service.remote_tls_available_admissions(), Some(128));
 
-    inhibitor_release_tx
-        .send(())
-        .expect("release absolute slowloris auto-advance inhibitor");
-    auto_advance_inhibitor
-        .await
-        .expect("join absolute slowloris auto-advance inhibitor");
-    tokio::time::resume();
     let force_closed = remote_tls_request_without_connection_close(endpoint, &certificate).await;
     assert!(force_closed.starts_with("HTTP/1.1 404"), "{force_closed}");
     assert!(
@@ -1321,20 +1205,22 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .await
         .expect("write HTTP/2 prior-knowledge preface");
     let mut http2_response = Vec::new();
-    let _closed = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        http2.read_to_end(&mut http2_response),
-    )
-    .await
-    .expect("HTTP/2 connection must be torn down");
-    assert!(http2_response.is_empty());
-    for _ in 0..128 {
-        if service.remote_tls_available_admissions() == Some(128) {
-            break;
-        }
+    let _closed = http2.read_to_end(&mut http2_response).await;
+    assert!(
+        http2_response.is_empty(),
+        "HTTP/2 prior knowledge must be torn down without a response"
+    );
+    while service.remote_tls_available_admissions() != Some(128) {
         tokio::task::yield_now().await;
     }
-    assert_eq!(service.remote_tls_available_admissions(), Some(128));
+
+    inhibitor_release_tx
+        .send(())
+        .expect("release the auto-advance inhibitor");
+    auto_advance_inhibitor
+        .await
+        .expect("join the auto-advance inhibitor");
+    tokio::time::resume();
 
     service
         .shutdown()
