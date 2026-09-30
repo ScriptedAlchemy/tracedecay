@@ -225,6 +225,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(
         memory["shed_order"],
         json!([
+            "retained_parses",
             "superseded_generation",
             "graph_catalog",
             "decoded_generation",

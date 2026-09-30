@@ -6018,6 +6018,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-configuration",
  "tracedecay-contracts",

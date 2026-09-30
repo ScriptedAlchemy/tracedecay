@@ -1878,6 +1878,12 @@ where
         self.retained_parses.stats()
     }
 
+    /// The documents increments retain, as a handle the resident-memory
+    /// inventory samples and releases.
+    pub fn retained_parse_pool(&self) -> SharedRetainedParsePool {
+        self.retained_parses.clone()
+    }
+
     pub fn physical_artifact_pool_stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
         self.physical_artifacts.stats()
     }

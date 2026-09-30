@@ -1099,7 +1099,7 @@ mod tests {
                 "low_watermark_bytes": 7_500,
                 "psi_some_avg10": 1.5,
                 "idle_window_seconds": 600,
-                "shed_order": ["superseded_generation", "graph_catalog", "decoded_generation", "graph_engine", "session"],
+                "shed_order": ["retained_parses", "superseded_generation", "graph_catalog", "decoded_generation", "graph_engine", "session"],
                 "retained_bytes": 8_192,
                 "unmeasured_owners": 0,
                 "owners": [{

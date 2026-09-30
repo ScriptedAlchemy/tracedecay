@@ -217,9 +217,10 @@ mod mimalloc_v3 {
     fn heap_footprint(heap: NonZeroUsize) -> u64 {
         let heap = heap.get() as *mut c_void;
         let mut total = 0_u64;
-        // SAFETY: the owner calls this on the thread that allocated into
-        // `heap` once it stopped, which is the visit's single-allocator
-        // requirement; other threads only push frees onto pages atomically.
+        // SAFETY: the owner calls this once every thread that allocated into
+        // `heap` stopped, which is the visit's no-allocator requirement: the
+        // visit walks the heap's pages in every arena, and other threads only
+        // push frees onto those pages atomically.
         unsafe {
             mi_heap_collect(heap, true);
             mi_heap_visit_blocks(

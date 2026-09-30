@@ -38,6 +38,10 @@ pub const RESIDENT_OWNER_IDLE_WINDOW_V1: Duration = Duration::from_mins(10);
 /// What one owner retains. Declaration order is the shed order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResidentOwnerKindV1 {
+    /// Parse trees and extractions an increment kept for the files it
+    /// re-extracted, so the next edit of one reparses only what changed.
+    /// Released, that next edit parses the file from scratch.
+    RetainedParses,
     /// Decoded generations other than the one a worktree serves, kept so
     /// pinned and branch reads do not re-decode. Always re-decodable.
     SupersededGeneration,
@@ -61,7 +65,8 @@ pub enum ResidentOwnerKindV1 {
 }
 
 /// Pressure releases owners in this order.
-pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 5] = [
+pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 6] = [
+    ResidentOwnerKindV1::RetainedParses,
     ResidentOwnerKindV1::SupersededGeneration,
     ResidentOwnerKindV1::GraphCatalog,
     ResidentOwnerKindV1::DecodedGeneration,
@@ -73,6 +78,7 @@ impl ResidentOwnerKindV1 {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::RetainedParses => "retained_parses",
             Self::SupersededGeneration => "superseded_generation",
             Self::GraphCatalog => "graph_catalog",
             Self::DecodedGeneration => "decoded_generation",
@@ -89,6 +95,8 @@ pub enum ResidentHoldingV1 {
     Generation(CodeGenerationId),
     /// An open LSP session, by its session id.
     Session(String),
+    /// State the worktree keeps across its generations.
+    Worktree,
 }
 
 impl ResidentHoldingV1 {
@@ -97,6 +105,7 @@ impl ResidentHoldingV1 {
         match self {
             Self::Generation(generation) => generation.as_str(),
             Self::Session(session) => session,
+            Self::Worktree => "worktree",
         }
     }
 }
