@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, RetrievalAnchorId, SanitizationReceiptV1,
+    FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -32,8 +32,8 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, GetObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::git_correlation::{
@@ -309,29 +309,6 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ObservationSourceCursorV1>>
     {
         Box::pin(HostAdmissionFacade::get_source_cursor(self, source, scope))
-    }
-
-    fn observation_receipt<'a>(
-        &'a self,
-        provider: &'a str,
-        scope: &'a ObservationScopeV1,
-        observation_id: &'a CanonicalObservationIdV1,
-        cancellation: &'a ObservationCancellation,
-    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
-        Box::pin(async move {
-            let application = self.application(provider, scope)?;
-            application
-                .get_observation(GetObservationRequest::new(
-                    observation_id.clone(),
-                    cancellation.clone(),
-                ))
-                .await
-                .map(|read| {
-                    read.observation()
-                        .map(|stored| stored.observation().receipt().clone())
-                })
-                .map_err(|error| classify_error(&error))
-        })
     }
 
     fn drain_projection_queue<'a>(

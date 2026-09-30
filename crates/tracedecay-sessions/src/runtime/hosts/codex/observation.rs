@@ -11,14 +11,13 @@ pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
-    CodexObservationLocation, codex_current_user_message, codex_observation_record_supported,
+    CodexObservationLocation, codex_observation_record_supported,
     normalize_codex_observation_with_location,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, RetentionClass, SessionId,
+    ObservationScopeV1, ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass,
+    SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -33,16 +32,15 @@ use crate::runtime::jsonl_observation_admission::{
     SharedJsonlFileIdentity, admit_jsonl_observations, reserve_shared_jsonl_page,
     shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
-use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher};
-use crate::runtime::source::{
-    JsonlResumeState, MAX_JSONL_RECORD_BYTES, TranscriptIngestError, TranscriptIngestResult,
-    try_stream_new_jsonl_raw_strict_with_resume,
-};
+use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
 #[cfg(test)]
 mod meta_cache_tests;
+#[cfg(test)]
+mod retired_source_tests;
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 pub const CODEX_HOOK_MAX_NEW_BYTES: u64 = crate::runtime::source::MAX_JSONL_RECORD_BYTES as u64;
@@ -448,41 +446,6 @@ impl CodexObservationAdmission<'_> {
 struct CodexAdmissionState {
     context: CodexContextState,
     scope_verdict: Option<bool>,
-    replay_through: Option<u64>,
-}
-
-#[derive(Clone)]
-enum CodexAdmissionMode {
-    Ordinary,
-    CurrentUserMessageReplay {
-        expected_start_cursor: Option<tracedecay_domain::ObservationSourceCursorV1>,
-        generation: u64,
-        through: u64,
-    },
-}
-
-impl CodexAdmissionMode {
-    fn replay_through(&self, scan_generation: u64) -> Option<u64> {
-        match *self {
-            Self::CurrentUserMessageReplay {
-                generation,
-                through,
-                ..
-            } if generation == scan_generation => Some(through),
-            Self::Ordinary | Self::CurrentUserMessageReplay { .. } => None,
-        }
-    }
-
-    fn replay_window(&self) -> Option<(Option<tracedecay_domain::ObservationSourceCursorV1>, u64)> {
-        match self {
-            Self::CurrentUserMessageReplay {
-                expected_start_cursor,
-                through,
-                ..
-            } => Some((expected_start_cursor.clone(), *through)),
-            Self::Ordinary => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -516,96 +479,6 @@ pub fn codex_observation_source_v2(
             b"tracedecay.codex.observation-source.v2",
         ))?,
     )?)
-}
-
-async fn replay_advanced_current_user_messages(
-    context: CodexAdmissionContext<'_>,
-    ordinary_source: &ObservationSourceIdentityV1,
-    canonical_source: &ObservationSourceIdentityV1,
-    target: &tracedecay_domain::ObservationSourceCursorV1,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<Option<CodexJsonlAdmissionProgress>> {
-    let CodexAdmissionContext {
-        scope: admission_scope,
-        admission,
-        ..
-    } = context;
-    let scope = admission_scope.scope();
-    let replay_cursor = admission
-        .get_source_cursor(canonical_source, &scope)
-        .await
-        .map_err(|outcome| {
-            crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
-        })?;
-    let replay_position = match replay_cursor.as_ref() {
-        Some(cursor) if cursor.generation() == target.generation() => cursor.position(),
-        Some(_) => return Ok(None),
-        None => 0,
-    };
-    let remaining = target.position().saturating_sub(replay_position);
-    if remaining == 0 {
-        return Ok(None);
-    }
-    let replay_limit = max_new_bytes
-        .unwrap_or(CODEX_HOOK_MAX_NEW_BYTES)
-        .min(CODEX_HOOK_MAX_NEW_BYTES)
-        .min(remaining);
-    let mut progress = admit_codex_jsonl_page(
-        context,
-        canonical_source.clone(),
-        Some((ordinary_source, target.generation())),
-        Some(replay_limit),
-        None,
-        CodexAdmissionMode::CurrentUserMessageReplay {
-            expected_start_cursor: replay_cursor,
-            generation: target.generation().generation_id(),
-            through: target.position(),
-        },
-    )
-    .await?;
-    // This invocation was reserved for historical catch-up. Ordinary
-    // admission resumes on the next bounded scheduler pass.
-    progress.source_deferred = true;
-    Ok(Some(progress))
-}
-
-async fn legacy_cursor_matches_current_file(
-    path: &Path,
-    target: &tracedecay_domain::ObservationSourceCursorV1,
-) -> TranscriptIngestResult<bool> {
-    if target.position() == 0 {
-        return Ok(true);
-    }
-    let (Some(file_identity), Some(fingerprint)) =
-        (target.file_identity(), target.resume_fingerprint())
-    else {
-        return Ok(false);
-    };
-    let generation = target.generation().generation_id();
-    let position = target.position();
-    let path = path.to_path_buf();
-    let scan = tokio::task::spawn_blocking(move || {
-        try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            StoredCursor {
-                position,
-                mtime: 0,
-                file_id: generation,
-            },
-            Some(0),
-            MAX_JSONL_RECORD_BYTES,
-            Some(JsonlResumeState {
-                generation,
-                file_identity,
-                fingerprint,
-            }),
-        )
-    })
-    .await
-    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-    Ok(scan.start_offset == position
-        && scan.new_cursor.file_id == generation
-        && !scan.replacement_generation)
 }
 
 async fn shared_session_meta_with_provenance(
@@ -716,10 +589,6 @@ async fn try_admit_codex_jsonl_observations(
     if !admission_scope.accepts_session(&meta.session_id) {
         return Ok(CodexJsonlAdmissionProgress::default());
     }
-    let ordinary_source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new(PROVIDER)?,
-        SessionId::new(meta.session_id.clone())?,
-    )?;
     let canonical_source = codex_observation_source_v2(&meta.session_id)?;
     let context = CodexAdmissionContext {
         path,
@@ -735,54 +604,14 @@ async fn try_admit_codex_jsonl_observations(
     // this pass is about to commit.
     let gate = codex_admission_gate(&scope, path);
     let _admitting = gate.lock().await;
-    if let Some(target) = admission
-        .get_source_cursor(&ordinary_source, &scope)
-        .await
-        .map_err(|outcome| {
-            crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
-        })?
-    {
-        let canonical_cursor = admission
-            .get_source_cursor(&canonical_source, &scope)
-            .await
-            .map_err(|outcome| {
-                crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
-            })?;
-        let replay_is_pending = canonical_cursor.as_ref().is_none_or(|cursor| {
-            cursor.generation() == target.generation() && cursor.position() < target.position()
-        });
-        if replay_is_pending
-            && legacy_cursor_matches_current_file(path, &target).await?
-            && let Some(progress) = replay_advanced_current_user_messages(
-                context,
-                &ordinary_source,
-                &canonical_source,
-                &target,
-                max_new_bytes,
-            )
-            .await?
-        {
-            return Ok(progress);
-        }
-    }
-    admit_codex_jsonl_page(
-        context,
-        canonical_source,
-        None,
-        max_new_bytes,
-        max_frames,
-        CodexAdmissionMode::Ordinary,
-    )
-    .await
+    admit_codex_jsonl_page(context, canonical_source, max_new_bytes, max_frames).await
 }
 
 async fn admit_codex_jsonl_page(
     context: CodexAdmissionContext<'_>,
     source: ObservationSourceIdentityV1,
-    ordinary_identity: Option<(&ObservationSourceIdentityV1, ObservationSourceGenerationV1)>,
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
-    mode: CodexAdmissionMode,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     let CodexAdmissionContext {
         path,
@@ -814,11 +643,6 @@ async fn admit_codex_jsonl_page(
     if let Some(max_frames) = max_frames {
         request = request.with_max_frames(max_frames);
     }
-    if let Some((expected_start_cursor, through)) = mode.replay_window() {
-        request = request
-            .with_required_start_cursor(expected_start_cursor)
-            .with_max_end_offset(through);
-    }
     let progress = admit_jsonl_observations(
         request,
         |scan| {
@@ -834,12 +658,10 @@ async fn admit_codex_jsonl_page(
             CodexAdmissionState {
                 context,
                 scope_verdict: None,
-                replay_through: mode.replay_through(scan.generation),
             }
         },
         |state, _bytes, range, _, prepared, hints| {
             let mut stable_record_id = None;
-            let mut ordinary_observation_id = None;
             let mut non_durable_reason = None;
             // Scope is consulted before the record is decoded, not after. A
             // rollout that belongs to another project answers the same verdict
@@ -874,35 +696,8 @@ async fn admit_codex_jsonl_page(
                     non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
-                let replaying_frame = state
-                    .replay_through
-                    .is_some_and(|through| range.end() <= through);
-                if replaying_frame {
-                    let payload = native.get("payload").unwrap_or(native);
-                    if codex_current_user_message(payload).is_none() {
-                        non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
-                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
-                    }
-                }
                 let record_id = codex_native_record_id(&meta.session_id, native)
                     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                if replaying_frame {
-                    let (ordinary_source, ordinary_generation) = ordinary_identity
-                        .ok_or(ObservationRecordParseErrorV1::NormalizationFailed)?;
-                    let identity = ObservationIdentityMaterialV1::for_native_record(
-                        ordinary_source.clone(),
-                        scope.clone(),
-                        ordinary_generation,
-                        range,
-                        ObservationOrderingDomainV1::FileBytes,
-                        record_id.clone(),
-                    )
-                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                    ordinary_observation_id = Some(
-                        CanonicalObservationIdV1::derive(&identity)
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-                    );
-                }
                 let envelope = normalize_codex_observation_with_location(
                     native,
                     &meta.session_id,
@@ -918,15 +713,7 @@ async fn admit_codex_jsonl_page(
                 Ok(parsed) => {
                     let record_id = stable_record_id
                         .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-                    if let Some(observation_id) = ordinary_observation_id {
-                        Ok(JsonlFrameAdmission::durable_unless_observation_exists(
-                            parsed,
-                            record_id,
-                            observation_id,
-                        ))
-                    } else {
-                        Ok(JsonlFrameAdmission::durable(parsed, record_id))
-                    }
+                    Ok(JsonlFrameAdmission::durable(parsed, record_id))
                 }
                 Err(_) => Ok(JsonlFrameAdmission::non_durable(
                     non_durable_reason.unwrap_or(ObservationCoverageReason::MalformedFrame),
@@ -946,178 +733,4 @@ async fn admit_codex_jsonl_page(
         frames_persisted: progress.frames_persisted,
         resumed: progress.resumed,
     })
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod replay_boundary_tests {
-    use std::io::Write as _;
-
-    use serde_json::json;
-    use tempfile::TempDir;
-    use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
-
-    use super::*;
-    use crate::admission::test_support::MemoryHostAdmission;
-
-    #[tokio::test]
-    async fn stale_replay_stops_when_peer_and_legacy_writer_advance() {
-        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let path = tmp.path().join("rollout.jsonl");
-        let session_id = "peer-winner-session";
-        let lines = [
-            json!({
-                "timestamp": "2026-09-04T12:00:00.000Z",
-                "type": "session_meta",
-                "payload": {"id": session_id, "cwd": project}
-            }),
-            json!({
-                "timestamp": "2026-09-04T12:00:01.000Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "item_completed",
-                    "item": {
-                        "type": "UserMessage",
-                        "id": "peer-winner-item",
-                        "content": [{"type": "text", "text": "Admit before peer race."}]
-                    }
-                }
-            }),
-        ];
-        std::fs::write(
-            &path,
-            lines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        let admission = MemoryHostAdmission::default();
-        let project_id = ProjectId::new("project.peer-winner").unwrap();
-        let canonical_source = codex_observation_source_v2(session_id).unwrap();
-        let scope = ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        };
-        let stale_start_cursor = admission
-            .get_source_cursor(&canonical_source, &scope)
-            .await
-            .unwrap();
-        assert!(stale_start_cursor.is_none());
-        try_admit_codex_jsonl_observations_for_project_with_admission(
-            &path,
-            &project,
-            project_id.clone(),
-            &admission,
-            None,
-        )
-        .await
-        .unwrap();
-        let target = admission
-            .get_source_cursor(&canonical_source, &scope)
-            .await
-            .unwrap()
-            .expect("peer winner cursor");
-        let usage = json!({
-            "timestamp": "2026-09-04T12:00:02.000Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "token_count",
-                "info": {"last_token_usage": {
-                    "input_tokens": 17,
-                    "output_tokens": 3,
-                    "cached_input_tokens": 2,
-                    "reasoning_output_tokens": 1,
-                    "total_tokens": 20
-                }}
-            }
-        });
-        let usage_line = usage.to_string() + "\n";
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        file.write_all(usage_line.as_bytes()).unwrap();
-        drop(file);
-
-        let cancellation = ObservationCancellation::default();
-        let parsed_meta = shared_session_meta_with_provenance(&path, &cancellation)
-            .await
-            .unwrap();
-        let admission_scope = CodexObservationAdmission::Project {
-            root: &project,
-            project_id: project_id.clone(),
-        };
-        let ordinary_source = ObservationSourceIdentityV1::for_provider(
-            ProviderId::new(PROVIDER).unwrap(),
-            SessionId::new(session_id).unwrap(),
-        )
-        .unwrap();
-        let context = CodexAdmissionContext {
-            path: &path,
-            scope: &admission_scope,
-            admission: &admission,
-            meta: &parsed_meta.meta,
-            native_thread_id: parsed_meta.native_thread_id.as_deref(),
-            cancellation: &cancellation,
-        };
-        let old_writer = admit_codex_jsonl_page(
-            context,
-            ordinary_source.clone(),
-            None,
-            None,
-            None,
-            CodexAdmissionMode::Ordinary,
-        )
-        .await
-        .unwrap();
-        assert_eq!(old_writer.frames_persisted, 3);
-        let usage_count = || {
-            admission
-                .observations()
-                .iter()
-                .filter(|stored| {
-                    serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                        stored.observation().payload().clone(),
-                    )
-                    .is_ok_and(|envelope| {
-                        envelope.facts().iter().any(|fact| {
-                            matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. })
-                        })
-                    })
-                })
-                .count()
-        };
-        assert_eq!(usage_count(), 1);
-
-        let stale_replay = admit_codex_jsonl_page(
-            context,
-            canonical_source.clone(),
-            Some((&ordinary_source, target.generation())),
-            Some(usage_line.len() as u64),
-            None,
-            CodexAdmissionMode::CurrentUserMessageReplay {
-                expected_start_cursor: stale_start_cursor,
-                generation: target.generation().generation_id(),
-                through: target.position(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(stale_replay.source_deferred);
-        assert_eq!(stale_replay.bytes_consumed, 0);
-        assert_eq!(stale_replay.frames_persisted, 0);
-
-        let refreshed = try_admit_codex_jsonl_observations_for_project_with_admission(
-            &path, &project, project_id, &admission, None,
-        )
-        .await
-        .unwrap();
-        assert!(refreshed.source_deferred);
-        assert_eq!(usage_count(), 1);
-    }
 }
