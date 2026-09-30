@@ -384,11 +384,8 @@ impl HookDeliveryReceiptWriterV1 {
                 .writer_lock
                 .try_clone()
                 .map_err(|_| HookDeliverySpoolError::Io)?;
-            match lock_until(&publish, Instant::now() + self.wait_budget) {
-                Ok(()) => Ok(Some(FileLease::held(publish, "hooks.delivery.writer"))),
-                Err(LockAdmissionError::TimedOut) => Err(HookDeliverySpoolError::AdmissionTimedOut),
-                Err(LockAdmissionError::Io(_)) => Err(HookDeliverySpoolError::Io),
-            }
+            lock_until(&publish, Instant::now() + self.wait_budget).map_err(admission_error)?;
+            Ok(Some(FileLease::held(publish, "hooks.delivery.writer")))
         })
     }
 }
