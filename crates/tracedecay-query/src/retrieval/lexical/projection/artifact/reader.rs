@@ -3593,6 +3593,7 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
+        CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor => RetrievalPortError::StaleEvidence,
         CodeLexicalArtifactErrorV1::Unreserved(_)
         | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Corrupt(error)

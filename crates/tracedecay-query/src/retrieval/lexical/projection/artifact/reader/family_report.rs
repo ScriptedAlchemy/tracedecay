@@ -116,11 +116,7 @@ impl CodeLexicalArtifactReaderV1 {
             {
                 Some(&cursor.after)
             }
-            Some(_) => {
-                return Err(CodeLexicalArtifactErrorV1::Contract(
-                    "clone family cursor does not match its artifact or request".to_owned(),
-                ));
-            }
+            Some(_) => return Err(CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor),
             None => None,
         };
         let fetch = limit.checked_add(1).ok_or_else(|| {
