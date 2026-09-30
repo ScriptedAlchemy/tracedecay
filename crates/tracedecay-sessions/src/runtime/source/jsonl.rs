@@ -730,6 +730,53 @@ fn longest_retained_jsonl_prefix<R: Read + Seek>(
     Ok((retained, hashed))
 }
 
+enum RecordedPrefix {
+    /// The recorded cursor still resumes; the digest seeds the scanner when
+    /// this pass computed it.
+    Resumes(Option<ResumeDigest>),
+    /// The recorded prefix changed; carries the longest committed checkpoint
+    /// that still matches when checkpoints were supplied.
+    Diverged(Option<(JsonlPrefixCheckpoint, ResumeDigest)>),
+}
+
+fn match_recorded_prefix(
+    file: &mut MeasuredJsonlFile<'_>,
+    path: &Path,
+    recorded: Option<JsonlPrefixCheckpoint>,
+    prefix_recovery: &JsonlPrefixRecovery,
+    extent: u64,
+    io: &mut JsonlIoAccounting,
+) -> TranscriptIngestResult<RecordedPrefix> {
+    match (recorded, prefix_recovery) {
+        (None, JsonlPrefixRecovery::Report) => Ok(RecordedPrefix::Diverged(None)),
+        (Some(recorded), JsonlPrefixRecovery::Report) => {
+            match jsonl_prefix_digest(file, recorded.position) {
+                Ok((digest, hashed)) => {
+                    io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+                    if digest.fingerprint(recorded.position) == recorded.fingerprint {
+                        Ok(RecordedPrefix::Resumes(Some(digest)))
+                    } else {
+                        Ok(RecordedPrefix::Diverged(None))
+                    }
+                }
+                Err(_) => Ok(RecordedPrefix::Diverged(None)),
+            }
+        }
+        (_, JsonlPrefixRecovery::Checkpoints(checkpoints)) => {
+            let (retained, hashed) =
+                longest_retained_jsonl_prefix(file, checkpoints, recorded, extent)
+                    .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+            Ok(match retained {
+                Some((checkpoint, digest)) if Some(checkpoint) == recorded => {
+                    RecordedPrefix::Resumes(Some(digest))
+                }
+                other => RecordedPrefix::Diverged(other),
+            })
+        }
+    }
+}
+
 /// Memoized [`bounded_jsonl_snapshot_fingerprint`]: the hash walks the whole
 /// extent, so callers compute it at most once per scan and only on paths that
 /// actually consume it.
@@ -1005,6 +1052,24 @@ pub struct RawNewJsonl {
     pub io: JsonlIoAccounting,
 }
 
+impl RawNewJsonl {
+    /// Nothing read past validation: the cursor stays where it was.
+    fn prefix_diverged(previous: StoredCursor, file_identity: u64, io: JsonlIoAccounting) -> Self {
+        Self {
+            frames: Vec::new(),
+            skipped: Vec::new(),
+            start_offset: previous.position,
+            read_through: previous.position,
+            file_identity,
+            new_cursor: previous,
+            replacement_generation: false,
+            deferred: None,
+            prefix_diverged: true,
+            io,
+        }
+    }
+}
+
 /// Strict bounded framing used by Claude's single-parse privacy boundary.
 #[cfg(test)]
 pub fn stream_new_jsonl_raw_strict(
@@ -1211,42 +1276,22 @@ impl<'a> PreparedJsonlScan<'a> {
             // Under `Checkpoints` the recorded cursor is one more candidate of
             // a single forward walk that stops past the first changed record,
             // rather than a whole-prefix hash that can only say "changed".
-            let mut recovered = None;
-            let resume_matches = match (recorded, prefix_recovery) {
-                (Some(_), _) if cached_unchanged.is_some() => true,
-                (Some(_), JsonlPrefixRecovery::Report) => {
-                    match jsonl_prefix_digest(&mut file, previous.position) {
-                        Ok((digest, hashed)) => {
-                            io.prefix_validation_bytes =
-                                io.prefix_validation_bytes.saturating_add(hashed);
-                            let matched =
-                                digest.fingerprint(previous.position) == resume_state.fingerprint;
-                            if matched {
-                                validated_prefix = Some((previous.position, digest));
-                            }
-                            matched
-                        }
-                        Err(_) => false,
+            let (resume_matches, recovered) = if recorded.is_some() && cached_unchanged.is_some() {
+                (true, None)
+            } else {
+                match match_recorded_prefix(
+                    &mut file,
+                    path,
+                    recorded,
+                    prefix_recovery,
+                    file_size,
+                    io,
+                )? {
+                    RecordedPrefix::Resumes(digest) => {
+                        validated_prefix = digest.map(|digest| (previous.position, digest));
+                        (true, None)
                     }
-                }
-                (None, JsonlPrefixRecovery::Report) => false,
-                (_, JsonlPrefixRecovery::Checkpoints(checkpoints)) => {
-                    let (retained, hashed) =
-                        longest_retained_jsonl_prefix(&mut file, checkpoints, recorded, file_size)
-                            .map_err(|error| {
-                                TranscriptIngestError::scan_io("fingerprint", path, error)
-                            })?;
-                    io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
-                    match retained {
-                        Some((checkpoint, digest)) if Some(checkpoint) == recorded => {
-                            validated_prefix = Some((previous.position, digest));
-                            true
-                        }
-                        other => {
-                            recovered = other;
-                            false
-                        }
-                    }
+                    RecordedPrefix::Diverged(recovered) => (false, recovered),
                 }
             };
             if resume_matches {
@@ -1913,18 +1958,7 @@ fn try_stream_new_jsonl_raw_from_file(
         )? {
             JsonlCapture::Scan(prepared) => *prepared,
             JsonlCapture::PrefixDiverged { file_identity } => {
-                return Ok(RawNewJsonl {
-                    frames: Vec::new(),
-                    skipped: Vec::new(),
-                    start_offset: previous.position,
-                    read_through: previous.position,
-                    file_identity,
-                    new_cursor: previous,
-                    replacement_generation: false,
-                    deferred: None,
-                    prefix_diverged: true,
-                    io,
-                });
+                return Ok(RawNewJsonl::prefix_diverged(previous, file_identity, io));
             }
         };
         classified = true;

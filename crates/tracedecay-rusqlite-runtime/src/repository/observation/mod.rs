@@ -7,8 +7,9 @@
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationSourceCursorV1,
-    ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
+    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId,
+    SanitizationReceiptV1, classify_observation_collision,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
@@ -245,23 +246,9 @@ impl ObservationExecutor {
                 Ok(ObservationReadResultV1::SourceCursor(cursor))
             }
             ObservationReadOperationV1::CommittedSourceCursors { source, scope } => {
-                let mut statement = snapshot.prepare(
-                    "SELECT committed_cursor_json FROM observations
-                     WHERE json_valid(observation_json)
-                       AND json_extract(observation_json, '$.identity.source.session_id') = ?1
-                     ORDER BY sequence ASC",
-                )?;
-                let rows = statement.query_map([source.session_id().as_str()], |row| {
-                    row.get::<_, String>(0)
-                })?;
-                let mut cursors = Vec::new();
-                for row in rows {
-                    let cursor: ObservationSourceCursorV1 = decode(row?)?;
-                    if cursor.source() == source && cursor.scope() == scope {
-                        cursors.push(cursor);
-                    }
-                }
-                Ok(ObservationReadResultV1::CommittedSourceCursors(cursors))
+                Ok(ObservationReadResultV1::CommittedSourceCursors(
+                    committed_source_cursors(snapshot, source, scope)?,
+                ))
             }
             ObservationReadOperationV1::Observation { observation_id } => {
                 let row = snapshot
@@ -423,6 +410,32 @@ impl ObservationExecutor {
             }
         }
     }
+}
+
+/// Committed cursors of one source in commit order, read through the indexed
+/// session-id projection and narrowed to the exact source and scope.
+fn committed_source_cursors(
+    snapshot: &Transaction<'_>,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+) -> rusqlite::Result<Vec<ObservationSourceCursorV1>> {
+    let mut statement = snapshot.prepare(
+        "SELECT committed_cursor_json FROM observations
+         WHERE json_valid(observation_json)
+           AND json_extract(observation_json, '$.identity.source.session_id') = ?1
+         ORDER BY sequence ASC",
+    )?;
+    let rows = statement.query_map([source.session_id().as_str()], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut cursors = Vec::new();
+    for row in rows {
+        let cursor: ObservationSourceCursorV1 = decode(row?)?;
+        if cursor.source() == source && cursor.scope() == scope {
+            cursors.push(cursor);
+        }
+    }
+    Ok(cursors)
 }
 
 fn cursor_advance_ledger_disagreement(
