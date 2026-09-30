@@ -185,6 +185,14 @@ impl HostAdmission for PostFirstDrainAdmission {
         panic!("projection-only sweep attempted cursor read")
     }
 
+    fn committed_source_cursors<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        panic!("projection-only sweep attempted committed cursor read")
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         provider: &'a str,

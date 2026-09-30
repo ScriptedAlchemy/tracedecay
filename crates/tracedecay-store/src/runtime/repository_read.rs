@@ -114,6 +114,7 @@ fn observation_read_matches_shard(
 ) -> bool {
     match operation {
         ObservationReadOperationV1::SourceCursor { scope, .. }
+        | ObservationReadOperationV1::CommittedSourceCursors { scope, .. }
         | ObservationReadOperationV1::RetrievalAnchorByAlias { scope, .. } => {
             match (scope, &shard.scope) {
                 (ObservationScopeV1::Profile, StoreShardScopeV1::ProfileSessions) => true,
@@ -371,6 +372,11 @@ pub enum ObservationReadOperationV1 {
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
     },
+    /// Every cursor this source's observations committed, across generations.
+    CommittedSourceCursors {
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+    },
     Observation {
         observation_id: CanonicalObservationIdV1,
     },
@@ -426,6 +432,7 @@ pub struct ProjectionRebuildProgressV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ObservationReadResultV1 {
     SourceCursor(Option<ObservationSourceCursorV1>),
+    CommittedSourceCursors(Vec<ObservationSourceCursorV1>),
     Observation(Box<Option<StoredObservationRowV1>>),
     RetrievalAnchorByAlias(Option<RetrievalAnchorId>),
     Replay(Vec<StoredObservationRowV1>),

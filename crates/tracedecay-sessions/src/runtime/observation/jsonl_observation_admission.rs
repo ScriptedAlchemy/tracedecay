@@ -27,9 +27,10 @@ use crate::observation::{
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    JsonlFrameDeferral, JsonlIoAccounting, JsonlResumeState, MAX_JSONL_RECORD_BYTES,
-    RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason, TranscriptIngestError,
-    TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlFrameDeferral, JsonlIoAccounting, JsonlPrefixRecovery, JsonlResumeState,
+    MAX_JSONL_FRAMES_PER_BATCH, MAX_JSONL_RECORD_BYTES, RawJsonlRecord, RawJsonlSkippedRange,
+    RawJsonlSkippedReason, TranscriptIngestError, TranscriptIngestResult,
+    try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
 use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
@@ -470,6 +471,7 @@ struct SharedJsonlPageKey {
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume: Option<(u64, u64, u64)>,
+    prefix_recovery: JsonlPrefixRecovery,
     preparation: SharedJsonlFramePreparation,
 }
 
@@ -531,6 +533,7 @@ struct SharedJsonlPage {
     new_cursor: StoredCursor,
     replacement_generation: bool,
     deferred: Option<JsonlFrameDeferral>,
+    prefix_diverged: bool,
     io: JsonlIoAccounting,
     retained_bytes: u64,
     _prepared_bytes: Option<SharedJsonlPreparedBytesGuard>,
@@ -1084,6 +1087,7 @@ fn build_shared_jsonl_page(
         max_new_bytes,
         None,
         resume_state,
+        JsonlPrefixRecovery::rescan(),
         options,
     )
 }
@@ -1094,6 +1098,7 @@ fn build_shared_jsonl_page_with_frame_limit(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     options: SharedJsonlBuildOptions,
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
     let SharedJsonlBuildOptions {
@@ -1129,24 +1134,15 @@ fn build_shared_jsonl_page_with_frame_limit(
         };
         hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
         let _active = SharedJsonlPreparationActiveGuard;
-        if let Some(max_frames) = max_frames {
-            crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
-                &path,
-                previous,
-                max_new_bytes,
-                MAX_JSONL_RECORD_BYTES,
-                resume_state,
-                max_frames,
-            )?
-        } else {
-            try_stream_new_jsonl_raw_strict_with_resume(
-                &path,
-                previous,
-                max_new_bytes,
-                MAX_JSONL_RECORD_BYTES,
-                resume_state,
-            )?
-        }
+        try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+            &path,
+            previous,
+            max_new_bytes,
+            MAX_JSONL_RECORD_BYTES,
+            resume_state,
+            prefix_recovery,
+            max_frames.unwrap_or(MAX_JSONL_FRAMES_PER_BATCH),
+        )?
     };
     #[cfg(test)]
     let (preparation_file_identity, window_preparations) = (raw.file_identity, raw.frames.len());
@@ -1280,6 +1276,7 @@ fn build_shared_jsonl_page_with_frame_limit(
         new_cursor: raw.new_cursor,
         replacement_generation: raw.replacement_generation,
         deferred: raw.deferred,
+        prefix_diverged: raw.prefix_diverged,
         io: raw.io,
         retained_bytes,
         _prepared_bytes: prepared_bytes,
@@ -1503,6 +1500,7 @@ async fn shared_jsonl_page_with_cancellation(
         max_new_bytes,
         None,
         resume_state,
+        JsonlPrefixRecovery::Report,
         preparation,
         cancellation,
         speculative,
@@ -1524,6 +1522,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     preparation: impl Into<SharedJsonlFramePreparation>,
     cancellation: SharedJsonlCancellation,
     speculative: bool,
@@ -1563,6 +1562,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         max_frames,
         resume: resume_state
             .map(|resume| (resume.generation, resume.file_identity, resume.fingerprint)),
+        prefix_recovery: prefix_recovery.clone(),
         preparation,
     };
     let cache_lock = SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
@@ -1692,6 +1692,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             max_new_bytes,
             max_frames,
             resume_state,
+            prefix_recovery,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
                 background_cpu,
@@ -2330,40 +2331,64 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
-        path,
-        previous,
-        max_new_bytes,
-        max_frames,
-        resume_state,
-        shared_frame_preparation,
-        SharedJsonlCancellation {
-            blocking: None,
-            operation: Some(cancellation.clone()),
-        },
-        false,
-    )
-    .await
-    {
-        // A dangling symlink or a source removed between discovery and open
-        // cannot be read on the next pass either. Failing the provider keeps
-        // historical catch-up retrying one missing file forever.
-        Err(TranscriptIngestError::ScanIo { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
+    let mut prefix_recovery = JsonlPrefixRecovery::Report;
+    let mut divergence_io = JsonlIoAccounting::default();
+    let (raw, shared_page_hit) = loop {
+        let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
+            path,
+            previous,
+            max_new_bytes,
+            max_frames,
+            resume_state,
+            prefix_recovery.clone(),
+            shared_frame_preparation,
+            SharedJsonlCancellation {
+                blocking: None,
+                operation: Some(cancellation.clone()),
+            },
+            false,
+        )
+        .await
         {
-            return Ok(JsonlObservationAdmissionProgress::default());
+            // A dangling symlink or a source removed between discovery and open
+            // cannot be read on the next pass either. Failing the provider keeps
+            // historical catch-up retrying one missing file forever.
+            Err(TranscriptIngestError::ScanIo { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(JsonlObservationAdmissionProgress::default());
+            }
+            other => other?,
+        };
+        // Only `Report` stops at a diverged prefix, and the retry below
+        // supplies checkpoints, so this runs at most twice.
+        if !raw.prefix_diverged {
+            break (raw, shared_page_hit);
         }
-        other => other?,
+        if !shared_page_hit {
+            divergence_io = raw.io;
+        }
+        let committed = admission
+            .committed_source_cursors(&source, &scope)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    TranscriptIngestError::InvalidFrameState { provider }
+                }
+            })?;
+        prefix_recovery = JsonlPrefixRecovery::committed(&committed);
     };
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
         resumed: had_expected_cursor,
-        io: if shared_page_hit {
+        io: divergence_io.followed_by(if shared_page_hit {
             JsonlIoAccounting::default()
         } else {
             raw.io
-        },
+        }),
         ..JsonlObservationAdmissionProgress::default()
     };
     let total_frames = raw.frames.len();
@@ -2931,6 +2956,7 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     match reason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
         RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
+        RawJsonlSkippedReason::RetainedPrefix => ObservationCoverageReason::RetainedPrefix,
     }
 }
 

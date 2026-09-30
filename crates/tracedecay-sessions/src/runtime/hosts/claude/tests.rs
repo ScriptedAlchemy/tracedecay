@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::shared::StoredCursor;
+use crate::runtime::source::JsonlPrefixRecovery;
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
@@ -581,6 +582,7 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
             StoredCursor::default(),
             None,
             None,
+            JsonlPrefixRecovery::rescan(),
         )
         .unwrap()
         .unwrap()

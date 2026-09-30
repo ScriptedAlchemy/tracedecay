@@ -425,20 +425,22 @@ pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub(in crate::runtime) use jsonl::spin_until_jsonl_change_settled;
 #[cfg(test)]
-pub use jsonl::try_stream_new_jsonl_raw_strict;
-pub(in crate::runtime) use jsonl::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit;
+use jsonl::stream_new_jsonl_raw_strict;
 pub(in crate::runtime) use jsonl::{
     JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_change_token_settled,
     jsonl_file_change_token, jsonl_file_change_token_under, jsonl_native_file_identity,
     jsonl_prefix_digest,
 };
 pub use jsonl::{
-    JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
-    RawJsonlFrameReader, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,
-    STRICT_JSONL_BATCH_BYTES, try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlFrameDeferral, JsonlPrefixCheckpoint, JsonlPrefixRecovery, JsonlResumeState,
+    MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, RawJsonlRecord,
+    RawJsonlSkippedRange, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
+};
+pub(in crate::runtime) use jsonl::{
+    MAX_JSONL_FRAMES_PER_BATCH, try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
 #[cfg(test)]
-use jsonl::{MAX_JSONL_FRAMES_PER_BATCH, stream_new_jsonl_raw_strict};
+pub use jsonl::{try_stream_new_jsonl_raw_strict, try_stream_new_jsonl_raw_strict_with_resume};
 
 /// Reads one complete snapshot document, or `None` (logged) when it cannot be
 /// opened or read or exceeds `max_bytes`.

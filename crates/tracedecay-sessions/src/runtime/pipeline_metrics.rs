@@ -38,6 +38,29 @@ pub struct JsonlIoAccounting {
     pub change: JsonlChangeKind,
 }
 
+impl JsonlIoAccounting {
+    /// Totals of two scans of one source where `next` decided the change.
+    #[must_use]
+    pub fn followed_by(self, next: Self) -> Self {
+        Self {
+            identity_window_bytes: self
+                .identity_window_bytes
+                .saturating_add(next.identity_window_bytes),
+            prefix_validation_bytes: self
+                .prefix_validation_bytes
+                .saturating_add(next.prefix_validation_bytes),
+            snapshot_hash_bytes: self
+                .snapshot_hash_bytes
+                .saturating_add(next.snapshot_hash_bytes),
+            content_bytes: self.content_bytes.saturating_add(next.content_bytes),
+            scan_payload_read_bytes: self
+                .scan_payload_read_bytes
+                .saturating_add(next.scan_payload_read_bytes),
+            change: next.change,
+        }
+    }
+}
+
 #[inline]
 pub(crate) fn add(name: &'static str, delta: u64) {
     #[cfg(feature = "hotpath")]
