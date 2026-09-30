@@ -597,13 +597,15 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .await
         .expect("retain the child graph runtime");
     // Work proportional to the edit: of 121 files only the three edited
-    // segments decode, the other 118 reuse the base's recorded inputs.
+    // segments decode, the other 118 reuse the base's recorded inputs, and
+    // of 721 retained references only the 24 the edit can move re-resolve.
     assert_eq!(
         layered_report(&child_runtime),
         Some(CodeGraphLayeredReportV1 {
             reextracted_files: 3,
             reused_files: 118,
             removed_files: 3,
+            resolved_references: 24,
             delta_rows: (31, 35),
         })
     );
@@ -649,13 +651,15 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         .await
         .expect("retain the grandchild graph runtime");
     // Still against the cold base: the three edited files and the added one
-    // decode; the base's versions of those and the deleted file drop.
+    // decode; the base's versions of those and the deleted file drop. A
+    // changed file set moves module lookups, so every reference re-resolves.
     assert_eq!(
         layered_report(&grandchild_runtime),
         Some(CodeGraphLayeredReportV1 {
             reextracted_files: 4,
             reused_files: 117,
             removed_files: 4,
+            resolved_references: 718,
             delta_rows: (34, 38),
         })
     );
@@ -680,6 +684,49 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
     )
     .await;
     drop((base_runtime, child_runtime, grandchild_runtime));
+}
+
+/// The layered report of a three-file refresh over a cold base of `modules`
+/// modules, taken before it publishes.
+async fn three_file_refresh_report(modules: usize, epoch: u64) -> CodeGraphLayeredReportV1 {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, modules);
+    let (source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("profile", epoch).await;
+    let base_runtime = source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain the base graph runtime");
+    let _base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("publish the base graph cold");
+    edit_three_files(&fixture.project_root, modules);
+    fixture.commit("edit three files");
+    let (source, child_generation, _, child_binding) = fixture.seal();
+    let child_runtime = source
+        .retain(&registry, &database, &child_generation, child_binding)
+        .await
+        .expect("retain the child graph runtime");
+    let report = layered_report(&child_runtime).expect("the refresh layers over its base");
+    drop((base_runtime, child_runtime));
+    report
+}
+
+/// Fails on a refresh that re-resolves every retained reference of the
+/// corpus: the same three-file edit re-decides the same references whether
+/// the base holds 120 modules or 240.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_small_refresh_resolves_the_same_references_at_both_base_sizes() {
+    let small = three_file_refresh_report(MODULES, 48).await;
+    let large = three_file_refresh_report(MODULES * 2, 49).await;
+    assert_eq!(
+        (small.resolved_references, large.resolved_references),
+        (24, 24)
+    );
 }
 
 const PEAK_PROBE_MODULES: &str = "TRACEDECAY_LAYERED_PEAK_PROBE_MODULES";

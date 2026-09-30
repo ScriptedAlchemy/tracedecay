@@ -100,7 +100,9 @@ mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
+mod changed_resolution;
 mod graph_base_inputs;
+use changed_resolution::edge_evidence_over_parent;
 pub(crate) use graph_base_inputs::CodeGraphBaseInputsWriterV1;
 mod graph_inputs;
 pub(crate) use graph_inputs::{
@@ -886,7 +888,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// Call sites whose import binding names project code the seal could not
     /// bind; see [`helpers::unresolved_import_calls`].
     pub fn unresolved_import_calls(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
-        unresolved_import_calls(&self.files)
+        unresolved_import_calls(&self.files, None)
     }
 
     pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {
@@ -2189,7 +2191,12 @@ where
             );
             let (edges, edge_abstentions) = hotpath::measure_block!(
                 "code_index.build.assemble.edge_evidence",
-                collect_edge_evidence(&staged.files)
+                match (active.as_deref(), staged.parent_shared_occurrences.as_ref()) {
+                    (Some(parent), Some(shared)) => {
+                        edge_evidence_over_parent(&staged.files, parent, shared)
+                    }
+                    _ => collect_edge_evidence(&staged.files),
+                }
             )?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
@@ -2898,3 +2905,7 @@ mod worker_tests;
 #[cfg(test)]
 #[path = "arc_share_sequence_tests.rs"]
 mod arc_share_sequence_tests;
+
+#[cfg(test)]
+#[path = "changed_resolution_tests.rs"]
+mod changed_resolution_tests;

@@ -1997,6 +1997,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     reextracted_files = report.reextracted_files,
                     reused_files = report.reused_files,
                     removed_files = report.removed_files,
+                    resolved_references = report.resolved_references,
                     delta_entities = report.delta_rows.0,
                     delta_relations = report.delta_rows.1,
                     "sealed the refresh as a delta over its predecessor's graph"
