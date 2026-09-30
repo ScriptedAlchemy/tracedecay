@@ -6046,6 +6046,8 @@ dependencies = [
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
  "ureq",
  "url",
  "xattr",

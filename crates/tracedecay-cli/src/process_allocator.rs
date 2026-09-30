@@ -9,9 +9,10 @@
     not(feature = "hotpath-alloc")
 ))]
 mod mimalloc_v3 {
-    use std::ffi::c_void;
+    use std::ffi::{c_int, c_void};
     use std::num::NonZeroUsize;
 
+    use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
     use tracedecay_domain::process_heap::{
         OwnerHeapCallsV1, ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
@@ -38,6 +39,12 @@ mod mimalloc_v3 {
     ) -> bool;
 
     unsafe extern "C" {
+        fn mi_malloc(size: usize) -> *mut c_void;
+        fn mi_calloc(count: usize, size: usize) -> *mut c_void;
+        fn mi_realloc(block: *mut c_void, size: usize) -> *mut c_void;
+        fn mi_free(block: *mut c_void);
+        fn mi_usable_size(block: *const c_void) -> usize;
+        fn mi_good_size(size: usize) -> usize;
         fn mi_collect(force: bool);
         fn mi_heap_new() -> *mut c_void;
         fn mi_heap_delete(heap: *mut c_void);
@@ -54,6 +61,86 @@ mod mimalloc_v3 {
             arg: *mut c_void,
         ) -> bool;
     }
+
+    /// Point SQLite and tree-sitter at mimalloc, so the process has one heap:
+    /// their pages are collected, purged and measured with Rust's instead of
+    /// accumulating in glibc arenas no release reaches. Both libraries must
+    /// not have allocated yet, since neither frees a block through another
+    /// allocator.
+    pub(super) fn route_c_libraries() {
+        // SAFETY: called once at startup before any parser, tree, or query
+        // exists, so every tree-sitter block is allocated and freed by
+        // mimalloc; the functions are thread-safe and never unwind.
+        unsafe {
+            tree_sitter::set_allocator(
+                Some(mi_malloc),
+                Some(mi_calloc),
+                Some(mi_realloc),
+                Some(mi_free),
+            );
+        }
+        let methods = sqlite3_mem_methods {
+            xMalloc: Some(sqlite_malloc),
+            xFree: Some(sqlite_free),
+            xRealloc: Some(sqlite_realloc),
+            xSize: Some(sqlite_size),
+            xRoundup: Some(sqlite_roundup),
+            xInit: Some(sqlite_init),
+            xShutdown: Some(sqlite_shutdown),
+            pAppData: std::ptr::null_mut(),
+        };
+        // SAFETY: SQLite copies `methods` before returning. It accepts the
+        // configuration only before its first initialization and refuses it
+        // with `SQLITE_MISUSE` afterwards.
+        let status = unsafe { sqlite3_config(SQLITE_CONFIG_MALLOC, &raw const methods) };
+        if status != SQLITE_OK {
+            tracing::warn!(
+                event = "sqlite_allocator_route_refused",
+                status,
+                "SQLite was initialized before startup routed its allocator; it keeps glibc malloc"
+            );
+        }
+    }
+
+    unsafe extern "C" fn sqlite_malloc(bytes: c_int) -> *mut c_void {
+        usize::try_from(bytes).map_or(std::ptr::null_mut(), |bytes| {
+            // SAFETY: a plain allocation; null tells SQLite it failed.
+            unsafe { mi_malloc(bytes) }
+        })
+    }
+
+    unsafe extern "C" fn sqlite_free(block: *mut c_void) {
+        // SAFETY: SQLite frees only blocks `sqlite_malloc`/`sqlite_realloc`
+        // returned, or null.
+        unsafe { mi_free(block) }
+    }
+
+    unsafe extern "C" fn sqlite_realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
+        usize::try_from(bytes).map_or(std::ptr::null_mut(), |bytes| {
+            // SAFETY: `block` is a live mimalloc block from this table.
+            unsafe { mi_realloc(block, bytes) }
+        })
+    }
+
+    unsafe extern "C" fn sqlite_size(block: *mut c_void) -> c_int {
+        // SAFETY: `block` is a live mimalloc block from this table. SQLite
+        // needs a size at least its `c_int` request, which the clamp keeps.
+        c_int::try_from(unsafe { mi_usable_size(block) }).unwrap_or(c_int::MAX)
+    }
+
+    unsafe extern "C" fn sqlite_roundup(bytes: c_int) -> c_int {
+        usize::try_from(bytes)
+            .ok()
+            // SAFETY: a pure size-class lookup.
+            .and_then(|bytes| c_int::try_from(unsafe { mi_good_size(bytes) }).ok())
+            .unwrap_or(bytes)
+    }
+
+    unsafe extern "C" fn sqlite_init(_: *mut c_void) -> c_int {
+        SQLITE_OK
+    }
+
+    unsafe extern "C" fn sqlite_shutdown(_: *mut c_void) {}
 
     pub(super) fn install() {
         if let Err(message) = install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
@@ -193,13 +280,17 @@ mod mimalloc_v3 {
     }
 }
 
-/// Install the process allocator's release call as the runtime's allocator
-/// release. Runs once at startup, before any daemon work.
+/// Route the C libraries to the process allocator and install its release
+/// call as the runtime's allocator release. Runs once at startup, before any
+/// daemon work.
 pub(crate) fn configure_process_allocator() {
     #[cfg(all(
         feature = "alloc-mimalloc",
         not(feature = "alloc-jemalloc"),
         not(feature = "hotpath-alloc")
     ))]
-    mimalloc_v3::install();
+    {
+        mimalloc_v3::route_c_libraries();
+        mimalloc_v3::install();
+    }
 }
