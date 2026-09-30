@@ -1024,17 +1024,16 @@ async fn events_spooled_before_a_binding_republication_replay_after_it() {
     let binding =
         tracedecay_hooks::published_hook_scope_binding(&layout.data_root, worktree_id, host, now)
             .unwrap();
-    let (spool, _) = HookSpoolV1::open(
-        tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
+    let pass = tracedecay_hooks::drain_host_spool_once(
+        &tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
         HookSpoolConfigV1::stock(host),
+        project_id,
+        Some(&binding),
         now,
+        |_, _| std::future::ready(tracedecay_hooks::HookReplayAdmissionOutcomeV1::Admitted),
     )
+    .await
     .unwrap();
-    let pass =
-        tracedecay_hooks::drain_host_spool_once(spool, project_id, Some(&binding), now, |_, _| {
-            std::future::ready(tracedecay_hooks::HookReplayAdmissionOutcomeV1::Admitted)
-        })
-        .await;
 
     assert_eq!(
         (pass.committed, pass.tombstoned, pass.retained),

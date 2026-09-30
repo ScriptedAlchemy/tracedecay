@@ -411,12 +411,65 @@ pub mod sync_latency {
     }
 }
 
-fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+fn before_sync(path: &Path) {
     #[cfg(feature = "test-helpers")]
     sync_latency::before_sync(path);
     #[cfg(not(feature = "test-helpers"))]
     let _ = path;
+}
+
+fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
     hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
+}
+
+/// `File::sync_data` on a caller-held handle of `path`.
+pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
+    hotpath::measure_block!("private_fs.framed_log.fdatasync", file.sync_data())
+}
+
+/// A synced replacement for `destination`, staged so its durability barrier
+/// runs before, and outside, whatever lock guards publication.
+///
+/// [`Self::publish`] renames it into place without a barrier; the caller makes
+/// the directory entry durable. Dropping it unpublished removes the staging.
+#[derive(Debug)]
+pub struct StagedReplacement {
+    temporary: PathBuf,
+    destination: PathBuf,
+    published: bool,
+}
+
+impl StagedReplacement {
+    #[hotpath::measure(label = "private_fs.framed_log.stage_replacement")]
+    pub fn stage(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<Self> {
+        validate_regular_or_missing(destination)?;
+        let (temporary, mut output) = create_owned_temp(destination, kind)?;
+        let staged = Self {
+            temporary,
+            destination: destination.to_path_buf(),
+            published: false,
+        };
+        output.write_all(bytes)?;
+        sync_owned_file(&staged.temporary, &output)?;
+        Ok(staged)
+    }
+
+    pub fn publish(mut self) -> io::Result<()> {
+        validate_regular_or_missing(&self.destination)?;
+        replace_via_rename(&self.temporary, &self.destination)?;
+        self.published = true;
+        tighten_existing_file(&self.destination)
+    }
+}
+
+impl Drop for StagedReplacement {
+    fn drop(&mut self) {
+        if !self.published {
+            remove_owned_temp(&self.temporary);
+        }
+    }
 }
 
 fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
@@ -894,25 +947,16 @@ pub fn append_durable(
     Ok(offset)
 }
 
-/// Appends `frame` without syncing it. Only a newly created file and its
-/// directory entry are made durable here; the caller owns the frame's
-/// durability, typically one group commit that syncs every frame appended
-/// before it.
+/// Appends `frame` without any durability barrier. The caller owns the
+/// frame's durability and, when this creates the file, its directory entry's:
+/// typically one group commit that syncs every frame appended before it.
 #[hotpath::measure(label = "private_fs.framed_log.append_unsynced")]
-pub fn append_unsynced(
-    path: &Path,
-    frame: &[u8],
-    directory_policy: DirectorySyncPolicy,
-) -> io::Result<u64> {
+pub fn append_unsynced(path: &Path, frame: &[u8]) -> io::Result<u64> {
     hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
     tighten_existing_file(path)?;
-    let (mut output, created) = open_append_target(path)?;
+    let (mut output, _created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
-    if created {
-        sync_owned_file(path, &output)?;
-        sync_parent_directory(path, directory_policy)?;
-    }
     Ok(offset)
 }
 

@@ -15,9 +15,8 @@ use tracedecay_domain::NativeHostIdentityV1;
 
 use super::types::{HookSpoolRecordV1, PendingRecordV1, ScanResult};
 use super::{
-    DIRECTORY_POLICY, FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES,
-    HookSpoolConfigV1, HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path,
-    validate_regular_or_missing,
+    FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES, HookSpoolConfigV1,
+    HookSpoolError, SPOOL_FORMAT_VERSION, SPOOL_MAGIC, records_path, validate_regular_or_missing,
 };
 
 const SPOOL_PAYLOAD_VERSION: u16 = 1;
@@ -47,11 +46,11 @@ pub(super) fn encode_spool_payload(
     .map_err(|_| HookSpoolError::RecordTooLarge)
 }
 
-/// Writes one frame without syncing it; [`super::HookSpoolV1::commit`] makes
-/// it durable.
+/// Writes one frame without syncing it, even into a new records file;
+/// [`super::HookSpoolV1::commit`] makes it and the file's name durable.
 pub(super) fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
     hotpath::gauge!("hooks.spool.append.frame_bytes").set(frame.len());
-    append_unsynced(path, frame, DIRECTORY_POLICY)
+    append_unsynced(path, frame)
         .map(|_| ())
         .map_err(|_| HookSpoolError::Io)
 }

@@ -20,8 +20,8 @@ use tracedecay_domain::{
 };
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{
-    DirectorySyncPolicy, atomic_write as shared_atomic_write, read_bounded as shared_read_bounded,
-    sync_directory as shared_sync_directory,
+    DirectorySyncPolicy, StagedReplacement, atomic_write_accelerator,
+    read_bounded as shared_read_bounded, sync_directory as shared_sync_directory,
     validate_regular_or_missing as shared_validate_regular,
 };
 
@@ -53,15 +53,15 @@ pub use types::{
     HookSpoolResetReasonV1, HookSpoolWriterLeaseV1,
 };
 
-use commit::{COMMIT_FILE, CommitLockV1, commit_records};
+use commit::{COMMIT_FILE, CommitLockV1, commit_records, forget_synced_extent};
 use frame::{
     append_frame, decode_complete_frame, encode_frame, encode_spool_payload, scan_records,
     scan_records_from, truncate_records,
 };
 use lease::{acquire_lease, acquire_lease_bounded};
 use meta::{
-    acknowledged_map, advance_next_sequence, normalize_acknowledgements, read_meta, validate_meta,
-    validate_meta_against_records, write_meta,
+    acknowledged_map, advance_next_sequence, encode_meta, normalize_acknowledgements, read_meta,
+    validate_meta, validate_meta_against_records, write_meta,
 };
 use replay::{
     batch_for_session, is_expired, replayable_sessions, round_robin_after, usage_by_session,
@@ -98,12 +98,20 @@ const COMMIT_WAIT: Duration = HOOK_SYNCHRONOUS_BUDGET;
 
 /// A host-local transport spool. It owns a short writer lease, performs no
 /// query/model/database work, and has no authority to rebind an event.
+///
+/// No durability barrier runs under the writer lease in steady state: appends
+/// write unsynced frames, the group commit syncs them after the lease is
+/// released, and settlement or reclaim stages its synced replacement with the
+/// lease released and holds it only to publish by rename. Only recovery of a
+/// torn or corrupt spool, its first metadata write, and an explicit reset
+/// sync under the lease.
 #[derive(Debug)]
 pub struct HookSpoolV1 {
     root: PathBuf,
     config: HookSpoolConfigV1,
     lease: HookSpoolWriterLeaseV1,
-    _lease_file: FileLease,
+    /// `None` only while [`Self::without_lease`] runs a barrier.
+    lease_file: Option<FileLease>,
     meta: HookSpoolMetaV1,
     checkpoint: Option<CheckpointAnchorV1>,
     observed_records_revision: Option<RecordsFileRevisionV1>,
@@ -440,11 +448,11 @@ impl HookSpoolV1 {
         } else {
             current_revision
         };
-        let mut spool = Self {
+        let spool = Self {
             root,
             config,
             lease,
-            _lease_file: lease_file,
+            lease_file: Some(lease_file),
             meta,
             checkpoint,
             observed_records_revision,
@@ -458,13 +466,6 @@ impl HookSpoolV1 {
             #[cfg(feature = "hotpath")]
             _lease_hold: SpoolLeaseHoldObservationV1::enter(),
         };
-        // A crash may leave logically acknowledged frames in the active file.
-        // Metadata is already durable, so this recovery compaction is safe.
-        if matches!(spool.meta.integrity, SpoolIntegrityV1::Healthy)
-            && spool.physical_len > spool.pending_bytes()
-        {
-            spool.compact_pending()?;
-        }
         hotpath::gauge!("hooks.spool.pending.frame_count").set(report.pending_records);
         hotpath::gauge!("hooks.spool.pending.bytes").set(report.pending_bytes);
         Ok((spool, report))
@@ -522,6 +523,17 @@ impl HookSpoolV1 {
         binding: &HookScopeBindingV1,
         now: UtcMicros,
     ) -> Result<HookSpoolRecordV1, HookSpoolError> {
+        self.append_record(envelope, native_lifecycle, binding, now, true)
+    }
+
+    fn append_record(
+        &mut self,
+        envelope: HookEventEnvelopeV2,
+        native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+        binding: &HookScopeBindingV1,
+        now: UtcMicros,
+        may_reclaim: bool,
+    ) -> Result<HookSpoolRecordV1, HookSpoolError> {
         self.ensure_writable(now)?;
         envelope
             .validate(binding)
@@ -558,10 +570,12 @@ impl HookSpoolV1 {
         let frame_len = u64::try_from(frame.len()).map_err(|_| HookSpoolError::SpoolFull)?;
         self.ensure_append_capacity(&envelope, frame_len)?;
         if self.physical_len.saturating_add(frame_len) > self.config.limits.max_host_bytes {
-            self.compact_pending()?;
-        }
-        if self.physical_len.saturating_add(frame_len) > self.config.limits.max_host_bytes {
-            return Err(HookSpoolError::SpoolFull);
+            if !may_reclaim || self.physical_len <= self.pending_bytes() {
+                return Err(HookSpoolError::SpoolFull);
+            }
+            // Reclaiming reloads the spool, so the append restarts against it.
+            self.reclaim(now)?;
+            return self.append_record(envelope, native_lifecycle, binding, now, false);
         }
         if records_file_revision(&self.root)? != self.observed_records_revision {
             self.recovery_required = true;
@@ -769,11 +783,11 @@ impl HookSpoolV1 {
     }
 
     /// Persist a replay pass's acknowledgements with one metadata publication
-    /// and at most one compaction.
+    /// and at most one reclaim.
     ///
-    /// The drain holds the writer lease for this whole call, and every live
-    /// hook append waits on that lease within its synchronous budget, so the
-    /// cost of settling a pass must not grow with the records it settled.
+    /// Live hook appends wait on the writer lease within their synchronous
+    /// budget, so the lease is released across every durability barrier of
+    /// the settlement and held only to validate and publish by rename.
     /// Each acknowledgement is validated on its own: a conflicting one is
     /// reported in its slot and leaves the others to persist. Only a failed
     /// publication fails the call, and then nothing was acknowledged.
@@ -828,40 +842,155 @@ impl HookSpoolV1 {
             return Ok(outcomes);
         }
         normalize_acknowledgements(&mut next_meta)?;
-        write_meta_after_records(&self.root, &next_meta)?;
-        self.meta = next_meta;
-        acknowledged_indices.sort_unstable_by_key(|(index, _)| std::cmp::Reverse(*index));
-        for (index, _disposition) in acknowledged_indices {
-            let removed = self.pending.remove(index);
-            self.release_usage(&removed);
-            #[cfg(feature = "hotpath")]
-            {
+        #[cfg(feature = "hotpath")]
+        let settled = acknowledged_indices
+            .iter()
+            .map(|(index, disposition)| {
+                let record = &self.pending[*index];
+                (record.framed_len, record.queued_at, *disposition)
+            })
+            .collect::<Vec<_>>();
+        self.publish_meta(&next_meta, now)?;
+        #[cfg(feature = "hotpath")]
+        {
+            for (framed_len, queued_at, disposition) in settled {
                 // A tombstone is a delivery that expired or was refused, not a
                 // success; the disposition mix keeps those failures visible.
-                hotpath::gauge!(match _disposition {
+                hotpath::gauge!(match disposition {
                     HookSpoolAckDispositionV1::Committed => "hooks.spool.ack.committed",
                     HookSpoolAckDispositionV1::TerminalTombstone => "hooks.spool.ack.tombstoned",
                 })
                 .inc(1);
-                hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(removed.framed_len));
+                hotpath::gauge!("hooks.spool.ack.frame_bytes").set(u64::from(framed_len));
                 hotpath::gauge!("hooks.spool.queue_wait_micros")
-                    .set(now.0.saturating_sub(removed.queued_at.0));
+                    .set(now.0.saturating_sub(queued_at.0));
             }
-        }
-        #[cfg(feature = "hotpath")]
-        {
             hotpath::gauge!("hooks.spool.pending.frame_count").set(self.pending.len());
             hotpath::gauge!("hooks.spool.pending.bytes").set(self.pending_bytes());
         }
-        // Compaction rewrites every remaining frame, so draining N records
-        // must not rewrite the file once per acknowledgement (O(N^2) bytes).
+        // Reclaim rewrites every remaining frame, so draining N records must
+        // not rewrite the file once per acknowledgement (O(N^2) bytes).
         // Reclaim only when acknowledged frames occupy at least as much of
-        // the file as the live ones; a fully drained spool always compacts
+        // the file as the live ones; a fully drained spool always reclaims
         // to zero, and append reclaims on demand when the byte cap nears.
         if self.physical_len > self.pending_bytes().saturating_mul(2) {
-            self.compact_pending()?;
+            self.reclaim(now)?;
         }
         Ok(outcomes)
+    }
+
+    /// Replaces the metadata with `meta`, computed from the metadata this
+    /// handle holds. The replacement and the records it names are made
+    /// durable with the lease released; publication fails with
+    /// [`HookSpoolError::WriterLeaseLost`] if another writer replaced the
+    /// metadata meanwhile. Returns once the publication itself is durable.
+    fn publish_meta(
+        &mut self,
+        meta: &HookSpoolMetaV1,
+        now: UtcMicros,
+    ) -> Result<(), HookSpoolError> {
+        let bytes = encode_meta(meta)?;
+        let settled_against = read_bounded(&meta_path(&self.root), MAX_META_BYTES)?;
+        let records = self
+            .observed_records_revision
+            .as_ref()
+            .map(|revision| (revision.identity, revision.length));
+        let staged = self.without_lease(now, |root| {
+            // Metadata may name only sequences the durable records file holds.
+            if let Some((identity, end)) = records {
+                commit_records(root, identity, end, COMMIT_WAIT)?;
+            }
+            hotpath::measure_block!("hooks.spool.fsync.meta", {
+                StagedReplacement::stage(&meta_path(root), "meta", &bytes)
+                    .map_err(|_| HookSpoolError::Io)
+            })
+        })?;
+        if read_bounded(&meta_path(&self.root), MAX_META_BYTES)? != settled_against {
+            return Err(HookSpoolError::WriterLeaseLost);
+        }
+        staged.publish().map_err(|_| HookSpoolError::Io)?;
+        self.without_lease(now, |root| {
+            hotpath::measure_block!("hooks.spool.fsync.directory", {
+                shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
+            })
+        })
+    }
+
+    /// Rewrites the records file down to its pending frames. The replacement
+    /// is staged and synced with the lease released and published only if no
+    /// writer changed the spool meanwhile; otherwise a later reclaim retries.
+    /// A lost rename leaves the old file, which still holds every pending
+    /// frame, and the first commit to the replacement makes its name durable.
+    #[hotpath::measure(label = "hooks.spool.reclaim")]
+    fn reclaim(&mut self, now: UtcMicros) -> Result<(), HookSpoolError> {
+        let (bytes, rebuilt) = self.pending_frames()?;
+        let revision = self.observed_records_revision.clone();
+        let sequences = |records: &[PendingRecordV1]| {
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>()
+        };
+        let reclaimed = sequences(&rebuilt);
+        let staged = self.without_lease(now, |root| {
+            forget_synced_extent(root, COMMIT_WAIT)?;
+            hotpath::measure_block!("hooks.spool.fsync.compact", {
+                StagedReplacement::stage(&records_path(root), "records", &bytes)
+                    .map_err(|_| HookSpoolError::Io)
+            })
+        })?;
+        if self.observed_records_revision != revision || sequences(&self.pending) != reclaimed {
+            hotpath::gauge!("hooks.spool.compact.raced").inc(1);
+            return Ok(());
+        }
+        staged.publish().map_err(|_| HookSpoolError::Io)?;
+        let checkpoint = match write_checkpoint(&self.root, self.config, &rebuilt) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                self.recovery_required = true;
+                return Err(error);
+            }
+        };
+        self.pending = rebuilt;
+        self.observed_records_revision = checkpoint.records_revision.clone();
+        self.checkpoint = Some(checkpoint);
+        self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
+        hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
+        hotpath::gauge!("hooks.spool.compact.bytes").set(self.physical_len);
+        Ok(())
+    }
+
+    /// Runs `barrier` with the writer lease released, so no live writer waits
+    /// on it, then reacquires the lease and reloads the spool, which writers
+    /// may have appended to meanwhile. This handle's own appended frames are
+    /// committed first, since the reload forgets them. A handle that could not
+    /// get its lease back refuses further mutations.
+    fn without_lease<T>(
+        &mut self,
+        now: UtcMicros,
+        barrier: impl FnOnce(&Path) -> Result<T, HookSpoolError>,
+    ) -> Result<T, HookSpoolError> {
+        self.ensure_writable(now)?;
+        let uncommitted = self.uncommitted.take();
+        drop(self.lease_file.take());
+        self.recovery_required = true;
+        let outcome = uncommitted
+            .map_or(Ok(()), |extent| {
+                commit_records(&self.root, extent.identity, extent.end, COMMIT_WAIT)
+            })
+            .and_then(|()| barrier(&self.root));
+        let (lease, lease_file) = acquire_lease_bounded(
+            &self.root,
+            self.config.writer_lease_micros,
+            now,
+            Some(self.config.writer_lease()),
+        )?;
+        let replay_claims = std::mem::take(&mut self.replay_claims);
+        let (reloaded, _) =
+            Self::open_after_lease(self.root.clone(), self.config, lease, lease_file, now)?;
+        *self = reloaded;
+        self.replay_claims = replay_claims;
+        outcome
     }
 
     fn hydrate(&mut self, index: usize) -> Result<HookSpoolRecordV1, HookSpoolError> {
@@ -1036,19 +1165,6 @@ impl HookSpoolV1 {
         Ok(())
     }
 
-    fn release_usage(&mut self, record: &PendingRecordV1) {
-        if let Some(entry) = self
-            .pending_by_session
-            .get_mut(&record.protected_session_id)
-        {
-            entry.0 = entry.0.saturating_sub(1);
-            entry.1 = entry.1.saturating_sub(u64::from(record.framed_len));
-            if entry.0 == 0 {
-                self.pending_by_session.remove(&record.protected_session_id);
-            }
-        }
-    }
-
     fn pending_bytes(&self) -> u64 {
         self.pending_by_session
             .values()
@@ -1057,7 +1173,9 @@ impl HookSpoolV1 {
     }
 
     #[hotpath::measure(label = "hooks.spool.compact")]
-    fn compact_pending(&mut self) -> Result<(), HookSpoolError> {
+    /// The pending frames' bytes, in order, and their entries at the offsets
+    /// a file holding only those bytes gives them.
+    fn pending_frames(&mut self) -> Result<(Vec<u8>, Vec<PendingRecordV1>), HookSpoolError> {
         self.ensure_healthy()?;
         if records_file_revision(&self.root)? != self.observed_records_revision {
             self.recovery_required = true;
@@ -1095,32 +1213,7 @@ impl HookSpoolV1 {
             bytes.extend_from_slice(frame);
             rebuilt.push(rebuilt_entry);
         }
-        // Committers must not observe the replacement before it is durable.
-        let commit_lock = CommitLockV1::acquire(&self.root, COMMIT_WAIT)?;
-        hotpath::measure_block!("hooks.spool.fsync.compact", {
-            shared_atomic_write(
-                &records_path(&self.root),
-                "records",
-                &bytes,
-                DIRECTORY_POLICY,
-            )
-            .map_err(|_| HookSpoolError::Io)
-        })?;
-        commit_lock.invalidate()?;
-        let checkpoint = match write_checkpoint(&self.root, self.config, &rebuilt) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.recovery_required = true;
-                return Err(error);
-            }
-        };
-        self.pending = rebuilt;
-        self.observed_records_revision = checkpoint.records_revision.clone();
-        self.checkpoint = Some(checkpoint);
-        self.physical_len = offset;
-        hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
-        hotpath::gauge!("hooks.spool.compact.bytes").set(self.physical_len);
-        Ok(())
+        Ok((bytes, rebuilt))
     }
 
     fn ensure_healthy(&self) -> Result<(), HookSpoolError> {
@@ -1240,26 +1333,15 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, HookSpoo
     }
 }
 
+/// The fair-replay cursor only orders sessions, so it is an accelerator: a
+/// missing or torn one restarts the rotation.
 fn read_replay_cursor(root: &Path) -> Result<Option<[u8; 32]>, HookSpoolError> {
-    read_bounded(&replay_cursor_path(root), 32)?
-        .map(|bytes| {
-            bytes
-                .try_into()
-                .map_err(|_| HookSpoolError::MetadataCorrupted)
-        })
-        .transpose()
+    Ok(read_bounded(&replay_cursor_path(root), 32)?.and_then(|bytes| bytes.try_into().ok()))
 }
 
 fn write_replay_cursor(root: &Path, cursor: [u8; 32]) -> Result<(), HookSpoolError> {
-    hotpath::measure_block!("hooks.spool.fsync.cursor", {
-        shared_atomic_write(
-            &replay_cursor_path(root),
-            "replay-cursor",
-            &cursor,
-            DIRECTORY_POLICY,
-        )
+    atomic_write_accelerator(&replay_cursor_path(root), "replay-cursor", &cursor)
         .map_err(|_| HookSpoolError::Io)
-    })
 }
 
 fn next_token() -> [u8; 16] {
