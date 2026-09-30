@@ -233,7 +233,8 @@ pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 pub use feedback::{
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
-    DaemonAdvisoryCycleMountFuture, DaemonAdvisoryCycleMountV1, DaemonFeedbackInvocationOwner,
+    DaemonAdvisoryCycleMountChangedFuture, DaemonAdvisoryCycleMountFuture,
+    DaemonAdvisoryCycleMountV1, DaemonFeedbackInvocationOwner,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     advisory_cycle_invocation_result, daemon_operation_event_authority,
     feedback_proximity_invocation_result,
