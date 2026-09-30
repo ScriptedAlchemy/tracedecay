@@ -122,7 +122,10 @@ pub enum HookDeliverySpoolError {
 /// Sole reader and acknowledger of one host's delivery receipts.
 ///
 /// It holds the writer lock exclusively, so no writer publishes while it
-/// reads or releases receipts.
+/// reads or releases receipts. Hook callbacks wait on that lock within their
+/// synchronous budget, so it never holds the lock across a durability
+/// barrier: every name it renames or removes is already durable or may
+/// reappear harmlessly.
 #[derive(Debug)]
 pub struct HookDeliveryReceiptSpoolV1 {
     root: PathBuf,
@@ -180,37 +183,11 @@ impl HookDeliveryReceiptSpoolV1 {
         Ok(spool)
     }
 
-    #[hotpath::measure(label = "hooks.delivery.append")]
-    pub fn append(
-        &self,
-        receipt: &HookDeliverySourceReceiptV1,
-    ) -> Result<bool, HookDeliverySpoolError> {
-        Ok(matches!(
-            retain(&self.root, receipt, || Ok(None))?,
-            HookDeliveryRetentionV1::Published
-        ))
-    }
-
-    /// Appends a source receipt or returns the exact durable receipt already
-    /// retained for its stable identity. The daemon drains the retained
-    /// settlement with its original timestamps, so retries never reconstruct
-    /// a conflicting delivery attempt.
-    #[hotpath::measure(label = "hooks.delivery.append_or_replay")]
-    pub fn append_or_replay(
-        &self,
-        receipt: &HookDeliverySourceReceiptV1,
-    ) -> Result<HookDeliverySourceReceiptV1, HookDeliverySpoolError> {
-        match retain(&self.root, receipt, || Ok(None))? {
-            HookDeliveryRetentionV1::AlreadyRetained(existing) => Ok(existing),
-            HookDeliveryRetentionV1::Published | HookDeliveryRetentionV1::Staged => {
-                Ok(receipt.clone())
-            }
-        }
-    }
-
     /// Publishes staged receipts left by writers that ran out of budget, and
     /// removes staging a killed writer left torn. Runs only while no writer
     /// holds the staging lease, so every staged file is abandoned or complete.
+    /// A writer syncs the directory before reporting a receipt staged, so a
+    /// crash after an unsynced rename leaves one durable name to adopt again.
     fn adopt_staged(&self) -> Result<(), HookDeliverySpoolError> {
         let staging = open_lock_file(&self.root, STAGING_LOCK_FILE)?;
         match staging.try_lock() {
@@ -219,7 +196,6 @@ impl HookDeliveryReceiptSpoolV1 {
             Err(std::fs::TryLockError::Error(_)) => return Err(HookDeliverySpoolError::Io),
         }
         let _staging = FileLease::held(staging, "hooks.delivery.staging");
-        let mut changed = false;
         for entry in fs::read_dir(&self.root).map_err(|_| HookDeliverySpoolError::Io)? {
             let entry = entry.map_err(|_| HookDeliverySpoolError::Io)?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -247,12 +223,6 @@ impl HookDeliveryReceiptSpoolV1 {
                 }
                 None => fs::remove_file(&staged).map_err(|_| HookDeliverySpoolError::Io)?,
             }
-            changed = true;
-        }
-        if changed {
-            hotpath::measure_block!("hooks.delivery.fsync.adopt", {
-                sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
-            })?;
         }
         Ok(())
     }
@@ -282,17 +252,17 @@ impl HookDeliveryReceiptSpoolV1 {
     }
 
     #[hotpath::measure(label = "hooks.delivery.acknowledge")]
-    pub fn acknowledge(&self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
+    pub fn acknowledge(self, receipt_id: [u8; 16]) -> Result<bool, HookDeliverySpoolError> {
         Ok(self.acknowledge_many(&[receipt_id])? > 0)
     }
 
-    /// Releases settled receipts with one directory sync. The drain holds the
-    /// writer lock for this call and hook callbacks wait on that lock within
-    /// their synchronous budget, so releasing a pass must not cost one sync
-    /// per receipt. Returns how many receipts were still present.
+    /// Releases settled receipts, then gives up the writer lock before the one
+    /// directory sync that makes the removals durable. A receipt whose removal
+    /// a crash undoes is settled again idempotently. Returns how many receipts
+    /// were still present.
     #[hotpath::measure(label = "hooks.delivery.acknowledge_many")]
     pub fn acknowledge_many(
-        &self,
+        self,
         receipt_ids: &[[u8; 16]],
     ) -> Result<usize, HookDeliverySpoolError> {
         let mut removed = 0;
@@ -304,9 +274,11 @@ impl HookDeliveryReceiptSpoolV1 {
             fs::remove_file(path).map_err(|_| HookDeliverySpoolError::Io)?;
             removed += 1;
         }
+        let Self { root, _lock: lock } = self;
+        drop(lock);
         if removed > 0 {
             hotpath::measure_block!("hooks.delivery.fsync.ack", {
-                sync_directory(&self.root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+                sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
             })?;
         }
         Ok(removed)
@@ -372,65 +344,62 @@ impl HookDeliveryReceiptWriterV1 {
         })
     }
 
-    /// Durably retains `receipt`. A publish lock held past the budget leaves
-    /// the receipt staged for the next owner open instead of failing.
+    /// Durably retains `receipt`: stages and syncs it outside the writer
+    /// lock, then holds that lock only to publish by rename. A publish lock
+    /// held past the budget leaves the receipt staged for the next owner open
+    /// instead of failing.
     #[hotpath::measure(label = "hooks.delivery.retain")]
     pub fn retain(
         &self,
         receipt: &HookDeliverySourceReceiptV1,
     ) -> Result<HookDeliveryRetentionV1, HookDeliverySpoolError> {
-        retain(&self.root, receipt, || {
-            let publish = self
-                .writer_lock
-                .try_clone()
-                .map_err(|_| HookDeliverySpoolError::Io)?;
-            lock_until(&publish, Instant::now() + self.wait_budget).map_err(admission_error)?;
-            Ok(Some(FileLease::held(publish, "hooks.delivery.writer")))
-        })
-    }
-}
-
-/// Stage, sync, then publish `receipt` under the writer lock `admit` yields
-/// (`None` when the caller already holds it exclusively).
-fn retain(
-    root: &Path,
-    receipt: &HookDeliverySourceReceiptV1,
-    admit: impl FnOnce() -> Result<Option<FileLease>, HookDeliverySpoolError>,
-) -> Result<HookDeliveryRetentionV1, HookDeliverySpoolError> {
-    receipt.validate()?;
-    if let Some(existing) = retained(root, receipt)? {
-        hotpath::gauge!("hooks.delivery.append.deduplicated").inc(1);
-        return Ok(HookDeliveryRetentionV1::AlreadyRetained(existing));
-    }
-    let bytes =
-        canonical_json_bytes(receipt).map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
-    if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
-        return Err(HookDeliverySpoolError::InvalidReceipt);
-    }
-    hotpath::gauge!("hooks.delivery.append.bytes").set(bytes.len());
-    let staged = hotpath::measure_block!("hooks.delivery.fsync.stage", {
-        stage(root, receipt.receipt_id, &bytes)
-    })?;
-    let lease = match admit() {
-        Ok(lease) => lease,
-        Err(HookDeliverySpoolError::AdmissionTimedOut) => {
-            hotpath::gauge!("hooks.delivery.staged_for_adoption").inc(1);
-            return Ok(HookDeliveryRetentionV1::Staged);
+        let root = self.root.as_path();
+        receipt.validate()?;
+        if let Some(existing) = retained(root, receipt)? {
+            hotpath::gauge!("hooks.delivery.append.deduplicated").inc(1);
+            return Ok(HookDeliveryRetentionV1::AlreadyRetained(existing));
         }
-        Err(error) => {
-            let _ = fs::remove_file(&staged);
-            return Err(error);
+        let bytes =
+            canonical_json_bytes(receipt).map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
+        if bytes.is_empty() || bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(HookDeliverySpoolError::InvalidReceipt);
         }
-    };
-    let published = publish_staged(root, &staged, receipt);
-    drop(lease);
-    let retention = published?;
-    if retention == HookDeliveryRetentionV1::Published {
-        hotpath::measure_block!("hooks.delivery.fsync.append", {
-            sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+        hotpath::gauge!("hooks.delivery.append.bytes").set(bytes.len());
+        let staged = hotpath::measure_block!("hooks.delivery.fsync.stage", {
+            stage(root, receipt.receipt_id, &bytes)
         })?;
+        let publish = match self.writer_lock.try_clone() {
+            Ok(publish) => publish,
+            Err(_) => {
+                let _ = fs::remove_file(&staged);
+                return Err(HookDeliverySpoolError::Io);
+            }
+        };
+        match lock_until(&publish, Instant::now() + self.wait_budget) {
+            Ok(()) => {}
+            Err(LockAdmissionError::TimedOut) => {
+                hotpath::gauge!("hooks.delivery.staged_for_adoption").inc(1);
+                hotpath::measure_block!("hooks.delivery.fsync.staged", {
+                    sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+                })?;
+                return Ok(HookDeliveryRetentionV1::Staged);
+            }
+            Err(LockAdmissionError::Io(_)) => {
+                let _ = fs::remove_file(&staged);
+                return Err(HookDeliverySpoolError::Io);
+            }
+        }
+        let lease = FileLease::held(publish, "hooks.delivery.writer");
+        let published = publish_staged(root, &staged, receipt);
+        drop(lease);
+        let retention = published?;
+        if retention == HookDeliveryRetentionV1::Published {
+            hotpath::measure_block!("hooks.delivery.fsync.append", {
+                sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookDeliverySpoolError::Io)
+            })?;
+        }
+        Ok(retention)
     }
-    Ok(retention)
 }
 
 /// The receipt already retained under `receipt`'s identity, if any.
@@ -708,7 +677,6 @@ mod tests {
         // The next owner open publishes the staged receipt exactly once.
         let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
         assert_eq!(owner.pending(64).unwrap(), vec![receipt()]);
-        assert!(!owner.append(&receipt()).unwrap());
         drop(owner);
         let writer =
             HookDeliveryReceiptWriterV1::open_within(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET)
@@ -783,6 +751,60 @@ mod tests {
         assert_eq!(pending, expected);
     }
 
+    #[test]
+    fn the_owner_holds_the_writer_lock_across_no_durability_barrier() {
+        let root = TestDir::new();
+        let staged = indexed_receipt(1);
+        let published = indexed_receipt(2);
+        assert_eq!(
+            retain(&root.0, &published),
+            Ok(HookDeliveryRetentionV1::Published)
+        );
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let writer =
+            HookDeliveryReceiptWriterV1::open_within(&root.0, Duration::from_millis(20)).unwrap();
+        assert_eq!(writer.retain(&staged), Ok(HookDeliveryRetentionV1::Staged));
+        drop((writer, owner));
+
+        // Each barrier outlasts a callback's whole lock-wait budget.
+        let slow_disk = tracedecay_private_fs::framed_log::sync_latency::inject(
+            &root.0,
+            2 * crate::HOOK_SYNCHRONOUS_BUDGET,
+        );
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let mut pending = owner.pending(64).unwrap();
+        pending.sort_by_key(|receipt| receipt.receipt_id);
+        let mut expected = vec![staged.clone(), published.clone()];
+        expected.sort_by_key(|receipt| receipt.receipt_id);
+        assert_eq!(pending, expected);
+        assert_eq!(slow_disk.syncs(), 0, "adoption syncs under the lock");
+
+        let callback = std::thread::scope(|scope| {
+            let callback = scope.spawn(|| {
+                let lock = open_lock_file(&root.0, LOCK_FILE).unwrap();
+                lock_until(&lock, Instant::now() + crate::HOOK_SYNCHRONOUS_BUDGET)
+            });
+            assert_eq!(
+                owner.acknowledge_many(&[staged.receipt_id, published.receipt_id]),
+                Ok(2)
+            );
+            callback.join().unwrap()
+        });
+        assert!(
+            callback.is_ok(),
+            "a callback waited out an acknowledgement barrier"
+        );
+        assert_eq!(slow_disk.syncs(), 1);
+    }
+
+    fn retain(
+        root: &Path,
+        receipt: &HookDeliverySourceReceiptV1,
+    ) -> Result<HookDeliveryRetentionV1, HookDeliverySpoolError> {
+        HookDeliveryReceiptWriterV1::open_within(root, crate::HOOK_SYNCHRONOUS_BUDGET)?
+            .retain(receipt)
+    }
+
     fn indexed_receipt(index: usize) -> HookDeliverySourceReceiptV1 {
         let mut settlement = receipt().settlement;
         settlement.attempt.owner_event_id = format!("hook:native:fixture-{index}");
@@ -839,10 +861,16 @@ mod tests {
     fn post_flush_receipt_reopens_replays_and_acks_exactly_once() {
         let root = TestDir::new();
         let receipt = receipt();
+        assert_eq!(
+            retain(&root.0, &receipt),
+            Ok(HookDeliveryRetentionV1::Published)
+        );
+        assert_eq!(
+            retain(&root.0, &receipt),
+            Ok(HookDeliveryRetentionV1::AlreadyRetained(receipt.clone()))
+        );
         {
             let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
-            assert!(spool.append(&receipt).expect("append"));
-            assert!(!spool.append(&receipt).expect("exact replay"));
             assert_eq!(spool.pending(64).expect("pending"), vec![receipt.clone()]);
             assert_eq!(
                 HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
@@ -852,7 +880,9 @@ mod tests {
         let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
         assert_eq!(spool.pending(64).expect("replayed"), vec![receipt.clone()]);
         assert!(spool.acknowledge(receipt.receipt_id).expect("ack"));
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
         assert!(!spool.acknowledge(receipt.receipt_id).expect("ack replay"));
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("reopen");
         assert!(spool.pending(64).expect("empty").is_empty());
     }
 
@@ -862,16 +892,16 @@ mod tests {
         let first = receipt_with_times(100, 110, 110);
         let retry = receipt_with_times(200, 220, 220);
         assert_eq!(first.receipt_id, retry.receipt_id);
-        {
-            let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
-            assert!(spool.append(&first).expect("first append"));
-            assert!(!spool.append(&retry).expect("retry dedupe"));
-            assert_eq!(spool.pending(64).expect("pending"), vec![first.clone()]);
-        }
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("restart open");
         assert_eq!(
-            spool.append_or_replay(&retry).expect("replay"),
-            first,
+            retain(&root.0, &first),
+            Ok(HookDeliveryRetentionV1::Published)
+        );
+        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
+        assert_eq!(spool.pending(64).expect("pending"), vec![first.clone()]);
+        drop(spool);
+        assert_eq!(
+            retain(&root.0, &retry),
+            Ok(HookDeliveryRetentionV1::AlreadyRetained(first)),
             "the retained settlement, including its first timestamps, is authoritative"
         );
     }
@@ -887,19 +917,19 @@ mod tests {
     }
 
     #[test]
-    fn append_propagates_full_spool_without_overwriting_existing_receipts() {
+    fn retain_propagates_full_spool_without_overwriting_existing_receipts() {
         let root = TestDir::new();
-        let spool = HookDeliveryReceiptSpoolV1::open(&root.0).expect("open");
+        drop(HookDeliveryReceiptSpoolV1::open(&root.0).expect("open"));
         for index in 0..MAX_PENDING_RECEIPTS {
             let name = format!("{index:032x}{RECEIPT_SUFFIX}");
             fs::write(root.0.join(name), b"placeholder").expect("full fixture");
         }
-        let before = spool.receipt_paths().expect("receipt census").len();
-        assert_eq!(before, MAX_PENDING_RECEIPTS);
+        let before = receipt_names(&root.0).expect("receipt census");
+        assert_eq!(before.len(), MAX_PENDING_RECEIPTS);
         assert_eq!(
-            spool.append(&receipt()).expect_err("full spool must fail"),
-            HookDeliverySpoolError::Full
+            retain(&root.0, &receipt()),
+            Err(HookDeliverySpoolError::Full)
         );
-        assert_eq!(spool.receipt_paths().expect("receipt census").len(), before);
+        assert_eq!(receipt_names(&root.0).expect("receipt census"), before);
     }
 }

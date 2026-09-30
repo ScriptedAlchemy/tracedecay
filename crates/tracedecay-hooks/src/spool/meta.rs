@@ -38,13 +38,18 @@ fn decode_exact_meta(bytes: &[u8]) -> Result<HookSpoolMetaV1, HookSpoolError> {
     })
 }
 
-#[hotpath::measure(label = "hooks.spool.write_meta")]
-pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
+pub(super) fn encode_meta(meta: &HookSpoolMetaV1) -> Result<Vec<u8>, HookSpoolError> {
     let bytes = serde_json::to_vec(meta).map_err(|_| HookSpoolError::MetadataCorrupted)?;
     if bytes.len() > MAX_META_BYTES {
         return Err(HookSpoolError::MetadataCorrupted);
     }
     hotpath::gauge!("hooks.spool.meta.bytes").set(bytes.len());
+    Ok(bytes)
+}
+
+#[hotpath::measure(label = "hooks.spool.write_meta")]
+pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
+    let bytes = encode_meta(meta)?;
     hotpath::measure_block!("hooks.spool.fsync.meta", {
         shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
             .map_err(|_| HookSpoolError::Io)
