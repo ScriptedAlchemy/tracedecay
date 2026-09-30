@@ -976,6 +976,94 @@ fn raw_strict_resume_checkpoint_detects_same_inode_middle_rewrite() {
     assert_eq!(second.frames.len(), 4_096);
 }
 
+#[test]
+fn raw_strict_resume_survives_rename_replacement_with_unchanged_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("renamed.jsonl");
+    let staged = dir.path().join("renamed.jsonl.tmp");
+    let replace = |contents: &[u8]| {
+        std::fs::write(&staged, contents).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+    };
+    let checkpoint_of = |scan: &jsonl::RawNewJsonl| JsonlResumeState {
+        generation: scan.new_cursor.file_id,
+        file_identity: scan.file_identity,
+        fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+    };
+    let original = b"{\"v\":0}\n{\"v\":1}\n";
+    std::fs::write(&path, original).unwrap();
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    assert_eq!(first.frames.len(), 2);
+
+    replace(original);
+    let identical = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint_of(&first)),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            identical.start_offset,
+            identical.frames.len(),
+            identical.new_cursor.file_id,
+            identical.replacement_generation,
+        ),
+        (16, 0, first.new_cursor.file_id, false)
+    );
+
+    replace(b"{\"v\":0}\n{\"v\":1}\n{\"v\":2}\n");
+    let appended = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint_of(&first)),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            appended.start_offset,
+            appended.frames.len(),
+            appended.new_cursor.position,
+            appended.new_cursor.file_id,
+            appended.file_identity,
+            appended.replacement_generation,
+        ),
+        (
+            16,
+            1,
+            24,
+            first.new_cursor.file_id,
+            first.file_identity,
+            false
+        )
+    );
+
+    replace(b"{\"v\":9}\n{\"v\":1}\n{\"v\":2}\n");
+    let edited = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        appended.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint_of(&appended)),
+    )
+    .unwrap();
+    assert_eq!(edited.start_offset, 0);
+    assert_eq!(edited.frames.len(), 3);
+    assert!(edited.replacement_generation);
+    assert_ne!(edited.new_cursor.file_id, first.new_cursor.file_id);
+}
+
 /// One resumed scan must walk the validated prefix exactly once.
 ///
 /// Checkpoint validation and the scanner's resume digest both need the digest
