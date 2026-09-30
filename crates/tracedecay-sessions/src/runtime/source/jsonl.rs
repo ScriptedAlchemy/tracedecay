@@ -1170,6 +1170,10 @@ struct JsonlScanGeneration {
     witness: RewriteWitness,
     file_id: u64,
     file_identity: u64,
+    /// Identity of the file this scan opened. It differs from `file_identity`
+    /// only when a replaced file resumed its recorded generation, and it is
+    /// what revalidation compares the file against after the read.
+    physical_identity: u64,
     /// `None` only when the scan proved it would read nothing, so no batch,
     /// and therefore no revalidation, consumes it.
     snapshot_fingerprint: Option<u64>,
@@ -1212,13 +1216,14 @@ impl<'a> PreparedJsonlScan<'a> {
             .filter(|key| {
                 unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
             });
-        let (file_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
+        let (physical_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
             (key.stable_file_identity, 0)
         } else {
             let (identity, read) = stable_jsonl_file_id(file.inner_mut(), &metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
             (identity, read)
         };
+        let mut file_identity = physical_identity;
         io.identity_window_bytes = identity_window_bytes;
         // The snapshot fingerprint hashes the whole extent, so it is captured
         // lazily: only rewrite-marker minting and scans that will actually
@@ -1229,11 +1234,12 @@ impl<'a> PreparedJsonlScan<'a> {
         // from it instead of walking the same prefix a second time.
         let mut validated_prefix: Option<(u64, ResumeDigest)> = None;
         let (seek_to, file_id) = if let Some(resume_state) = resume_state {
-            let identity_matches = previous.position > 0
+            // The consumed prefix digest, not the physical file identity, proves
+            // a resume: a transcript replaced by rename keeps its generation and
+            // recorded identity when its first `position` bytes are unchanged.
+            let resume_matches = previous.position > 0
                 && previous.file_id == resume_state.generation
                 && file_size >= previous.position
-                && file_identity == resume_state.file_identity;
-            let resume_matches = identity_matches
                 && (cached_unchanged.is_some()
                     || match jsonl_prefix_digest(&mut file, previous.position) {
                         Ok((digest, hashed)) => {
@@ -1249,6 +1255,7 @@ impl<'a> PreparedJsonlScan<'a> {
                         Err(_) => false,
                     });
             if resume_matches {
+                file_identity = resume_state.file_identity;
                 (previous.position, resume_state.generation)
             } else {
                 (
@@ -1347,6 +1354,7 @@ impl<'a> PreparedJsonlScan<'a> {
                 witness,
                 file_id,
                 file_identity,
+                physical_identity,
                 snapshot_fingerprint,
                 seek_to,
                 replacement,
@@ -1389,7 +1397,7 @@ impl<'a> PreparedJsonlScan<'a> {
             io.identity_window_bytes = io
                 .identity_window_bytes
                 .saturating_add(identity_window_bytes);
-            if final_file_identity != self.generation.file_identity
+            if final_file_identity != self.generation.physical_identity
                 || metadata.len() != self.generation.file_size
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != self.generation.change
@@ -1839,7 +1847,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         } else {
             false
         };
-        if final_file_id != self.generation.file_identity
+        if final_file_id != self.generation.physical_identity
             || snapshot_changed
             || wrote_without_growing
             || changed_consumed_prefix
@@ -2282,7 +2290,7 @@ mod tests {
             fingerprint: first.frames.last().unwrap().resume_fingerprint,
         };
 
-        std::fs::write(&replacement, contents).unwrap();
+        std::fs::write(&replacement, b"{\"v\":1}\n").unwrap();
         std::fs::rename(&path, &old).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
 

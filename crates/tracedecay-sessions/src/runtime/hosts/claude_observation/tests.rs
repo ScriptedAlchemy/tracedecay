@@ -346,7 +346,7 @@ async fn native_observation_id_survives_identical_transcript_relocation() {
         .await
         .unwrap();
     assert_eq!(second.observations_committed, 0);
-    assert_eq!(second.observation_duplicates, 1);
+    assert_eq!(second.observation_duplicates, 0);
     let after = fixture.admission.observations();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].observation().observation_id(), &before_id);

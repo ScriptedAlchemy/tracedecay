@@ -1009,6 +1009,59 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
     );
 }
 
+/// Replace `path` the way editors and hosts do: write a sibling temp file and
+/// rename it over the original, so the transcript gets a new inode.
+fn atomically_replace(path: &std::path::Path, contents: &str) {
+    let staged = path.with_extension("jsonl.tmp");
+    std::fs::write(&staged, contents).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_transcript_replaced_by_rename_ingests_only_new_records() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcripts_dir = tmp.path().join("agent-transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    let transcript = transcripts_dir.join("parent-session.jsonl");
+    let original = concat!(
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Plan the lantern migration."}]}}"#,
+        "\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        "\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        "\n",
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Now draft the lantern rollout."}]}}"#,
+        "\n",
+    );
+    std::fs::write(&transcript, original).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_hook_event(&project, &transcript).to_string();
+    let first = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(first.messages_upserted, 4);
+    assert_eq!(db.session_message_count().await.unwrap(), 4);
+
+    atomically_replace(&transcript, original);
+    let identical = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(identical.messages_upserted, 0);
+    assert_eq!(db.session_message_count().await.unwrap(), 4);
+
+    let appended = format!(
+        "{original}{}\n{}\n",
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Rollout drafted for the lantern fleet."}]}}"#,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+    );
+    atomically_replace(&transcript, &appended);
+    let grown = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(grown.messages_upserted, 2);
+    assert_eq!(db.session_message_count().await.unwrap(), 6);
+
+    let replayed = ingest_cursor_transcript_event(&event, &db).await;
+    assert_eq!(replayed.messages_upserted, 0);
+    assert_eq!(db.session_message_count().await.unwrap(), 6);
+}
+
 #[tokio::test]
 async fn cursor_parent_and_subagent_offsets_do_not_collide() {
     let tmp = TempDir::new().unwrap();
