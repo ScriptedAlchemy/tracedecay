@@ -124,48 +124,6 @@ fn require_host_cli_from(
     })
 }
 
-/// Spawn a host command, absorbing the transient `ETXTBSY` window that follows
-/// a fresh write of the executable.
-///
-/// Linux refuses `execve` with `ETXTBSY` while *any* process holds the image
-/// open for writing, including a process that merely inherited the descriptor
-/// across a `fork` and has not reached its own `exec` yet. A lifecycle that
-/// drives a host CLI shortly after something installed or updated that binary
-/// can therefore be refused for a reason that has nothing to do with the host,
-/// and reporting it would blame the host for a race in its installer.
-///
-/// The retry is deliberately tiny and bounded: the condition clears as soon as
-/// the writer's descriptor closes. Every other spawn failure, including a
-/// missing or non-executable file, is returned on the first attempt, so no
-/// real refusal is delayed or masked.
-fn spawn_admitting_recent_writes(command: &mut Command) -> std::io::Result<std::process::Child> {
-    const ATTEMPTS: u32 = 5;
-    const BACKOFF: Duration = Duration::from_millis(20);
-
-    let mut attempt = 0;
-    loop {
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error) => {
-                let busy = error.raw_os_error() == Some(TEXT_FILE_BUSY);
-                attempt += 1;
-                if !busy || attempt >= ATTEMPTS {
-                    return Err(error);
-                }
-                std::thread::sleep(BACKOFF);
-            }
-        }
-    }
-}
-
-/// `ETXTBSY`. Named rather than matched through `ErrorKind`, which has no
-/// stable variant for it.
-#[cfg(unix)]
-const TEXT_FILE_BUSY: i32 = 26;
-
-#[cfg(not(unix))]
-const TEXT_FILE_BUSY: i32 = i32::MIN;
-
 /// Run one host CLI invocation under [`HOST_CLI_TIMEOUT`], capturing its typed
 /// outcome.
 ///
@@ -183,10 +141,9 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         .to_string();
     let rendered_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
-    let mut child =
-        spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
-            message: format!("could not run `{}`: {error}", resolved_program.display()),
-        })?;
+    let mut child = command.spawn().map_err(|error| TraceDecayError::Config {
+        message: format!("could not run `{}`: {error}", resolved_program.display()),
+    })?;
 
     // Drain both pipes concurrently: a command that writes more than one pipe
     // buffer would otherwise block on write while we block on wait.
@@ -286,10 +243,9 @@ pub(crate) fn spawn_host_server(
 ) -> Result<HostServerChild> {
     let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
     command.envs(env.iter().copied());
-    let mut child =
-        spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
-            message: format!("could not run `{}`: {error}", resolved_program.display()),
-        })?;
+    let mut child = command.spawn().map_err(|error| TraceDecayError::Config {
+        message: format!("could not run `{}`: {error}", resolved_program.display()),
+    })?;
     let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     if let Some(stdout) = child.stdout.take() {
         spawn_shared_reader(stdout, std::sync::Arc::clone(&output));
@@ -724,6 +680,33 @@ mod tests {
         assert!(
             matches!(error, TraceDecayError::Io(_)),
             "only an exhausted search may become HostCliUnavailable: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_executable_held_open_for_writing_is_refused_on_the_first_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        write_fake_cli(&bin, "exit 0");
+        let bin = std::fs::canonicalize(&bin).unwrap();
+        let _writer = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+
+        let started = Instant::now();
+        let error = run_host_cli(&bin, &["plugin", "list"], dir.path())
+            .expect_err("Linux refuses to exec a file that is open for writing");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "config error: could not run `{}`: Text file busy (os error 26)",
+                bin.display()
+            )
+        );
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "the refusal must not wait for the writer to go away: {elapsed:?}"
         );
     }
 
