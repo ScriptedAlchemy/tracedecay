@@ -32,10 +32,9 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
-    TranscriptLocationMetadataKeys, TranscriptScopeMatcher, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
+    TranscriptScopeMatcher, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools,
 };
 #[cfg(test)]
 use crate::runtime::snapshot_observation::canonical_snapshot_envelope;
@@ -45,8 +44,8 @@ use crate::runtime::snapshot_observation::{
     non_durable_snapshot_record, read_snapshot_text_bounded,
 };
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext_bounded, content_hash64, read_snapshot_file_bounded,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
@@ -145,38 +144,18 @@ impl TranscriptSource for KiroSource {
         out.truncate(MAX_TRANSCRIPTS_PER_PASS);
         out
     }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-            .ok()
-            .flatten()
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-    }
 }
 
 impl KiroSource {
+    /// Reads one complete snapshot in scope of `project_root`. The generation
+    /// is the snapshot's content hash, so an unchanged rewrite re-admits as an
+    /// exact duplicate.
     fn parse_snapshot(
         &self,
         path: &Path,
-        prev: StoredCursor,
         project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+    ) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<SessionMessageRecord>)>>
+    {
         let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
             return Ok(None);
         };
@@ -194,14 +173,11 @@ impl KiroSource {
             return Ok(None);
         }
 
-        let byte_cap = max_new_bytes
-            .unwrap_or(MAX_SNAPSHOT_FILE_BYTES)
-            .min(MAX_SNAPSHOT_FILE_BYTES);
-        ensure_bounded_snapshot(path, byte_cap)?;
-        let Some(changed) = read_changed_file(path, prev, byte_cap) else {
+        ensure_bounded_snapshot(path, MAX_SNAPSHOT_FILE_BYTES)?;
+        let Some(contents) = read_snapshot_file_bounded(path, MAX_SNAPSHOT_FILE_BYTES) else {
             return Ok(None);
         };
-        let value: Value = match serde_json::from_str(&changed.contents) {
+        let value: Value = match serde_json::from_str(&contents) {
             Ok(value) => value,
             Err(error) if error.is_eof() => return Ok(None),
             Err(_) => return Err(non_durable(path, "malformed snapshot JSON")),
@@ -217,32 +193,8 @@ impl KiroSource {
         if messages.is_empty() {
             return Err(non_durable(path, "snapshot contains no durable messages"));
         }
-
-        let project = self.user_registered_roots.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(
-                Some(&location_cwd),
-                Some(&value),
-            ))
-            .ok(),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-
-        Ok(Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: changed.new_cursor,
-        }))
+        let generation = ObservationSourceGenerationV1::new(content_hash64(&contents).max(1))?;
+        Ok(Some((generation, messages)))
     }
 }
 
@@ -325,13 +277,10 @@ pub async fn capture_kiro_snapshot_observations(
         },
         |path| source.snapshot_input_bytes(path),
         |path| {
-            let Some(parsed) =
-                source.parse_snapshot(path, StoredCursor::default(), project_root, None)?
-            else {
+            let Some((generation, messages)) = source.parse_snapshot(path, project_root)? else {
                 return Ok(None);
             };
-            let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-            let records = normalize_kiro_snapshot_observations(&parsed.messages)?;
+            let records = normalize_kiro_snapshot_observations(&messages)?;
             Ok(Some(vec![SnapshotAdmissionBatch::new(generation, records)]))
         },
     )
@@ -936,35 +885,6 @@ fn stable_message_id(
         occurrence,
         text,
     )
-}
-
-fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("kiro_transcript".to_string()),
-    );
-    append_location_metadata(
-        &mut metadata,
-        KIRO_LOCATION_KEYS,
-        TranscriptLocation::new(location_cwd, "workspace_mapping"),
-    );
-    if let Some(transcript) = transcript {
-        for key in ["workflowId", "profileId", "projectId"] {
-            if let Some(value) = transcript
-                .get(key)
-                .or_else(|| {
-                    transcript
-                        .get("metadata")
-                        .and_then(|metadata| metadata.get(key))
-                })
-                .filter(|value| value.is_string() || value.is_number() || value.is_boolean())
-            {
-                metadata.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    Value::Object(metadata)
 }
 
 fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {

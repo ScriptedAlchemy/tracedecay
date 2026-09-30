@@ -26,9 +26,9 @@ use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
-    TranscriptLocationMetadataKeys, append_location_metadata, append_tool_calls_metadata,
-    append_usage_metadata, content_storage_text_and_tools, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
@@ -39,8 +39,8 @@ use crate::runtime::snapshot_observation::{
 #[cfg(test)]
 use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, content_hash64, read_changed_with_companion,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    content_hash64, read_snapshot_file_bounded,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
@@ -57,7 +57,8 @@ mod observation;
 pub use observation::ClineLikeSnapshotObservationRecord;
 
 struct ParsedClineSnapshot {
-    transcript: ParsedTranscript,
+    task_id: String,
+    messages: Vec<SessionMessageRecord>,
     api_generation: ObservationSourceGenerationV1,
     ui_generation: Option<ObservationSourceGenerationV1>,
 }
@@ -219,28 +220,6 @@ impl TranscriptSource for ClineLikeSource {
         }
         out
     }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-            .ok()
-            .flatten()
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        self.parse_snapshot(path, prev, project_root, max_new_bytes)
-    }
 }
 
 impl ClineLikeSource {
@@ -287,38 +266,28 @@ impl ClineLikeSource {
         }
     }
 
-    fn parse_snapshot(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        self.load_snapshot(path, prev, project_root, max_new_bytes)
-            .map(|loaded| loaded.map(|snapshot| snapshot.transcript))
-    }
-
+    /// Reads one complete task snapshot (API history plus its UI sidecar) in
+    /// scope of `project_root`. Each stream's generation is its content hash.
     fn load_snapshot(
         &self,
         path: &Path,
-        prev: StoredCursor,
         project_root: &Path,
-        max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedClineSnapshot>> {
         let Some(task_dir) = path.parent() else {
             return Ok(None);
         };
         let ui_path = task_dir.join("ui_messages.json");
-        let byte_cap = max_new_bytes
-            .unwrap_or(MAX_SNAPSHOT_FILE_BYTES)
-            .min(MAX_SNAPSHOT_FILE_BYTES);
-        ensure_bounded_file(self.provider, path, byte_cap)?;
+        ensure_bounded_file(self.provider, path, MAX_SNAPSHOT_FILE_BYTES)?;
         if ui_path.is_file() {
-            ensure_bounded_file(self.provider, &ui_path, byte_cap)?;
+            ensure_bounded_file(self.provider, &ui_path, MAX_SNAPSHOT_FILE_BYTES)?;
         }
-        let Some(changed) = read_changed_with_companion(path, &ui_path, prev, byte_cap) else {
+        let Some(contents) = read_snapshot_file_bounded(path, MAX_SNAPSHOT_FILE_BYTES) else {
             return Ok(None);
         };
+        let companion_contents = ui_path
+            .is_file()
+            .then(|| read_snapshot_file_bounded(&ui_path, MAX_SNAPSHOT_FILE_BYTES))
+            .flatten();
         let Some(metadata) = self.task_metadata.get(self.provider, task_dir) else {
             return Ok(None);
         };
@@ -327,7 +296,7 @@ impl ClineLikeSource {
             return Ok(None);
         };
 
-        let document: Value = match serde_json::from_str(&changed.contents) {
+        let document: Value = match serde_json::from_str(&contents) {
             Ok(document) => document,
             Err(error) if error.is_eof() => return Ok(None),
             Err(_) => return Err(non_durable(self.provider, path, "malformed snapshot JSON")),
@@ -370,7 +339,7 @@ impl ClineLikeSource {
             self.provider,
             task_id,
             &ui_path,
-            changed.companion_contents.as_deref(),
+            companion_contents.as_deref(),
             &location_cwd,
         )?
         else {
@@ -378,40 +347,14 @@ impl ClineLikeSource {
         };
         messages.extend(usage);
 
-        let project = self.user_registered_roots.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: task_id.to_string(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages)
-                .or_else(|| metadata_task_title(&metadata).map(str::to_string)),
-            metadata_json: serde_json::to_string(&session_metadata(
-                self.provider,
-                Some(&location_cwd),
-            ))
-            .ok(),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-
-        let api_generation =
-            ObservationSourceGenerationV1::new(content_hash64(&changed.contents).max(1))?;
-        let ui_generation = changed
-            .companion_contents
+        let api_generation = ObservationSourceGenerationV1::new(content_hash64(&contents).max(1))?;
+        let ui_generation = companion_contents
             .as_deref()
             .map(|contents| ObservationSourceGenerationV1::new(content_hash64(contents).max(1)))
             .transpose()?;
         Ok(Some(ParsedClineSnapshot {
-            transcript: ParsedTranscript {
-                draft,
-                messages,
-                new_cursor: changed.new_cursor,
-            },
+            task_id: task_id.to_string(),
+            messages,
             api_generation,
             ui_generation,
         }))
@@ -446,22 +389,18 @@ pub async fn capture_cline_like_snapshot_observations(
         },
         |path| snapshot_input_bytes(source.provider, path),
         |path| {
-            let Some(parsed) =
-                source.load_snapshot(path, StoredCursor::default(), project_root, None)?
-            else {
+            let Some(parsed) = source.load_snapshot(path, project_root)? else {
                 return Ok(None);
             };
-            let records = normalize_cline_like_snapshot_observations(
-                source.provider,
-                &parsed.transcript.messages,
-            )?;
+            let records =
+                normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?;
             let (api_records, ui_records): (Vec<_>, Vec<_>) = records
                 .into_iter()
                 .partition(|record| record.stream == ClineTranscriptStream::ApiHistory);
             let identity = |stream: ClineTranscriptStream| -> TranscriptIngestResult<_> {
                 Ok(stream.source_identity(
                     ProviderId::new(source.provider)?,
-                    SessionId::new(&parsed.transcript.draft.session_id)?,
+                    SessionId::new(&parsed.task_id)?,
                 )?)
             };
             let mut batches = vec![SnapshotAdmissionBatch::for_source(
@@ -601,15 +540,6 @@ fn collect_metadata_project_paths(value: &Value, key: Option<&str>, out: &mut Ve
         }
         _ => {}
     }
-}
-
-fn metadata_task_title(metadata: &Value) -> Option<&str> {
-    metadata
-        .get("task")
-        .or_else(|| metadata.get("title"))
-        .or_else(|| metadata.get("summary"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
 }
 
 #[hotpath::measure(label = "sessions.hosts.cline_like.usage_records")]
@@ -958,20 +888,6 @@ fn stable_message_id(
             &occurrence_bytes,
         ],
     )
-}
-
-fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String(format!("{provider}_task_history")),
-    );
-    append_location_metadata(
-        &mut metadata,
-        CLINE_LIKE_LOCATION_KEYS,
-        TranscriptLocation::new(location_cwd, "task_metadata"),
-    );
-    Value::Object(metadata)
 }
 
 fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value {

@@ -4,7 +4,6 @@
 use tempfile::TempDir;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
@@ -184,76 +183,6 @@ async fn codex_workflow_fact_rows(
         .project_workflow_fact_rows_for_test()
         .await
         .unwrap()
-}
-
-#[tokio::test]
-async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
-
-    mark_test_project(&project);
-    let runtime = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .runtime()
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    // user_message + agent_message + three goal transitions. The drift-only
-    // active repeat is deduped; objective and status transitions remain.
-    assert_eq!(stats.messages_upserted, 5);
-
-    // Both distinct goal states are searchable by their shared objective text.
-    let hits = runtime
-        .search_session_messages(
-            "codex",
-            Some(project.to_string_lossy().as_ref()),
-            "phlogiston pipeline",
-            10,
-        )
-        .await;
-    let goal_hits: Vec<_> = hits
-        .iter()
-        .filter(|hit| hit.message.kind.as_deref() == Some("goal"))
-        .collect();
-    assert_eq!(
-        goal_hits.len(),
-        3,
-        "objective/status transitions kept, drift deduped"
-    );
-    let mut statuses: Vec<String> = goal_hits
-        .iter()
-        .filter_map(|hit| {
-            let meta: serde_json::Value =
-                serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).ok()?;
-            meta.get("status")
-                .and_then(|s| s.as_str())
-                .map(str::to_string)
-        })
-        .collect();
-    statuses.sort();
-    assert_eq!(
-        statuses,
-        vec![
-            "active".to_string(),
-            "active".to_string(),
-            "paused".to_string()
-        ]
-    );
-    for hit in &goal_hits {
-        assert_eq!(hit.message.role, "system");
-        assert!(matches!(
-            hit.message.text.as_str(),
-            "phlogiston pipeline overhaul and reconciliation"
-                | "phlogiston pipeline rollout and verification"
-        ));
-        let meta: serde_json::Value =
-            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(meta["source"], "codex_thread_goal");
-        assert_eq!(meta["source_event"], "thread_goal_updated");
-        assert_eq!(meta["thread_id"], "codex-goal-events");
-    }
 }
 
 #[tokio::test]

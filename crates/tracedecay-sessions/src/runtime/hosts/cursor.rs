@@ -19,39 +19,24 @@ use tracedecay_domain::{
     ProjectId, RetentionClass,
 };
 use tracedecay_store::ParseOffset;
-use tracedecay_store::cursor_dispatch::{
-    cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
-};
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
-    admit_jsonl_observations, namespace_replacement_message_ids, preflight_and_parse_new,
+    admit_jsonl_observations,
 };
 use crate::runtime::native_ingest_source_identity;
-use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
-    content_storage_text_and_tools, paths_equal, title_from_messages,
-};
+use crate::runtime::shared::paths_equal;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    HostProviderCoverage, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    collect_files_with_ext_bounded, persist_host_provider_coverage,
-    run_blocking_transcript_section, stream_new_jsonl,
+    HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult,
+    TranscriptSource, collect_files_with_ext_bounded, persist_host_provider_coverage,
+    run_blocking_transcript_section,
 };
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
-const CURSOR_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "cursor_session_cwd",
-        "cursor_session_worktree",
-        "cursor_session_location_provenance",
-    );
 const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
 mod parent_dispatch_index;
@@ -106,7 +91,6 @@ struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
     include_subagents: bool,
-    user_scope: bool,
 }
 
 impl TranscriptSource for CursorEventSource {
@@ -124,36 +108,6 @@ impl TranscriptSource for CursorEventSource {
             ));
         }
         paths
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        _project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let parent_session_id = event_session_id(&self.event, &self.transcript_path);
-        parse_cursor_jsonl(
-            &self.event,
-            &parent_session_id,
-            path,
-            prev,
-            max_new_bytes,
-            self.user_scope,
-        )
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
     }
 }
 
@@ -416,136 +370,13 @@ fn cursor_native_with_context(
     native
 }
 
-/// Parse the newly-appended portion of one Cursor transcript file into a
-/// provider-neutral [`ParsedTranscript`]. Shared by the hook path
-/// ([`CursorEventSource`]) and the startup catch-up sweep
-/// ([`CursorSweepSource`]); both derive identical session/message ids for the
-/// same file (the hook event's `session_id` always equals the transcript file
-/// stem), so whichever runs second is an idempotent no-op.
-#[hotpath::measure(label = "sessions.hosts.cursor.parse")]
-fn parse_cursor_jsonl(
-    event: &Value,
-    parent_session_id: &str,
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    user_scope: bool,
-) -> Option<ParsedTranscript> {
-    let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-    // A truncate-and-rewrite can reuse every byte offset from the previous
-    // file generation. Legacy projection keys are offset-based, so keep
-    // replacement rows distinct instead of overwriting retained history. The
-    // scan reports this from the stored cursor generation, so a rewrite spread
-    // over several batches namespaces all of them, not just the first.
-    let namespace_replacement = new.replacement_generation;
-    let subagent = cursor_subagent_identity(path, parent_session_id);
-    let session_id = subagent.as_ref().map_or_else(
-        || parent_session_id.to_string(),
-        |(session_id, _agent_id)| session_id.clone(),
-    );
-    // The dispatch-model lookup rescans the parent transcript, so a no-change
-    // poll (no new lines, and therefore no message needing the fallback)
-    // skips it entirely.
-    let subagent_model = if new.lines.is_empty() {
-        None
-    } else {
-        subagent.as_ref().and_then(|(_, agent_id)| {
-            let (model, receipt) =
-                parent_dispatch_model_for_subagent_with_receipt(path, parent_session_id, agent_id);
-            record_dispatch_scan_gauges(receipt);
-            model
-        })
-    };
-    let event_cwd = event_cwd(event);
-    let event_location_provenance = event_location_provenance(event);
-    let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
-    let mut messages = Vec::new();
-    for line in &new.lines {
-        let derived_timestamp = carry.observe(&line.value);
-        let context = CursorMessageContext {
-            transcript_path: path,
-            source_offset: line.offset,
-            derived_timestamp,
-            model_fallback: subagent_model.as_deref(),
-            event_cwd: event_cwd.as_deref(),
-            event_location_provenance,
-        };
-        // The byte offset doubles as the message ordinal and source_offset,
-        // matching the original Cursor ingestion.
-        if let Some(message) = event_message(&line.value, event, &session_id, line.offset, context)
-        {
-            messages.push(message);
-        }
-        messages.extend(event_dispatch_messages(
-            &line.value,
-            event,
-            &session_id,
-            context,
-        ));
-    }
-    if namespace_replacement {
-        namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-    }
-
-    // Defer the (filesystem-walking) project/title/metadata derivation until
-    // we actually have new messages; the driver ignores the draft otherwise.
-    let draft = if messages.is_empty() {
-        SessionDraft {
-            session_id,
-            project_key: String::new(),
-            project_path: String::new(),
-            title: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        }
-    } else {
-        let (project_key, project_path) = if user_scope {
-            ("user".to_string(), "user".to_string())
-        } else {
-            event_project(event)
-        };
-        let (draft_parent_session_id, agent_id) = subagent
-            .map_or((None, None), |(_session_id, agent_id)| {
-                (Some(parent_session_id.to_string()), Some(agent_id))
-            });
-        let is_subagent = draft_parent_session_id.is_some();
-        SessionDraft {
-            session_id,
-            project_key,
-            project_path,
-            title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&session_metadata(
-                event,
-                event_cwd.as_deref(),
-                event_location_provenance,
-            ))
-            .ok(),
-            parent_session_id: draft_parent_session_id,
-            is_subagent,
-            agent_id,
-            parent_tool_use_id: None,
-        }
-    };
-
-    Some(ParsedTranscript {
-        draft,
-        messages,
-        new_cursor: new.new_cursor,
-    })
-}
-
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
 /// hooks pass both the daemon-resolved project DB and canonical project id.
 ///
-/// Ingestion is **incremental**: it resumes from the byte offset recorded in the
-/// DB's `parse_offsets` table (via the shared [`crate::runtime::source`]
-/// driver), so each call only parses and upserts transcript lines appended since
-/// the last run rather than re-reading the whole file. Repeated calls on an
-/// unchanged file are a no-op.
+/// Admission is **incremental**: it resumes from each transcript's committed
+/// observation source cursor, so each call only admits lines appended since
+/// the last run. Repeated calls on an unchanged file are a no-op.
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     admission: &dyn HostAdmission,
@@ -619,9 +450,9 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         return Ok(CursorTranscriptIngestStats::default());
     };
 
-    // Cursor derives its project from the event, so the driver's project_root
-    // argument is unused by `CursorEventSource`; the transcript path's parent is
-    // a cheap, side-effect-free placeholder.
+    // Cursor derives its project from the event, so `transcript_paths` ignores
+    // its project_root argument; the transcript path's parent is a cheap,
+    // side-effect-free placeholder.
     let project_root = transcript_path
         .parent()
         .map_or_else(|| transcript_path.clone(), Path::to_path_buf);
@@ -629,7 +460,6 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         event,
         transcript_path,
         include_subagents: true,
-        user_scope: false,
     };
     let scope = ObservationScopeV1::Project { project_id };
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -779,7 +609,6 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         event,
         transcript_path,
         include_subagents: true,
-        user_scope: true,
     };
     let scope = ObservationScopeV1::Profile;
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
@@ -1208,42 +1037,6 @@ impl TranscriptSource for CursorSweepSource {
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         self.sweep_page(project_root, 0).into_paths()
     }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        let parent_session_id = sweep_parent_session_id(path)?;
-        // Synthesize the minimal hook-shaped event the shared parser expects:
-        // the same session id a live hook would carry (Cursor names parent
-        // transcripts `<session-id>.jsonl`) and the project root as `cwd` so
-        // `event_project` scopes the session exactly like the hook path.
-        let user_scope = self.user_registered_slugs.is_some();
-        let event = cursor_sweep_event(&parent_session_id, project_root, user_scope);
-        parse_cursor_jsonl(
-            &event,
-            &parent_session_id,
-            path,
-            prev,
-            max_new_bytes,
-            user_scope,
-        )
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
-    }
 }
 
 fn select_cursor_session_authorities(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1473,186 +1266,6 @@ impl TimestampCarry {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CursorMessageContext<'a> {
-    transcript_path: &'a Path,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
-    model_fallback: Option<&'a str>,
-    event_cwd: Option<&'a Path>,
-    event_location_provenance: &'a str,
-}
-
-fn event_message(
-    record: &Value,
-    event: &Value,
-    session_id: &str,
-    ordinal: i64,
-    context: CursorMessageContext<'_>,
-) -> Option<SessionMessageRecord> {
-    let role = record
-        .get("role")
-        .and_then(Value::as_str)
-        .filter(|role| !role.is_empty())?;
-    let message = record.get("message").unwrap_or(record);
-    let content = message.get("content").unwrap_or(message);
-    if content_is_only_subagent_dispatch(content) {
-        return None;
-    }
-    let (text, tool_names) = content_storage_text_and_tools(
-        content,
-        message
-            .get("tool_calls")
-            .or_else(|| record.get("tool_calls")),
-    );
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let message_id = record
-        .get("id")
-        .or_else(|| message.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || format!("{session_id}:{ordinal}"),
-            std::string::ToString::to_string,
-        );
-    let model = cursor_record_message_model(record, message)
-        .or_else(|| context.model_fallback.map(str::to_string))
-        .or_else(|| cursor_model_string(event));
-
-    Some(SessionMessageRecord {
-        provider: "cursor".to_string(),
-        message_id,
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp: record_timestamp(record)
-            .or_else(|| record_timestamp(event))
-            .or(context.derived_timestamp),
-        ordinal,
-        text,
-        kind: content_kind(content).map(str::to_string),
-        model,
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(context.transcript_path.to_string_lossy().to_string()),
-        source_offset: Some(context.source_offset),
-        metadata_json: serde_json::to_string(&message_metadata(
-            record,
-            message,
-            content,
-            event,
-            context.source_offset,
-            context.event_cwd,
-            context.event_location_provenance,
-        ))
-        .ok(),
-    })
-}
-
-fn event_dispatch_messages(
-    record: &Value,
-    event: &Value,
-    session_id: &str,
-    context: CursorMessageContext<'_>,
-) -> Vec<SessionMessageRecord> {
-    let Some(role) = record
-        .get("role")
-        .and_then(Value::as_str)
-        .filter(|role| !role.is_empty())
-    else {
-        return Vec::new();
-    };
-    let message = record.get("message").unwrap_or(record);
-    let content = message.get("content").unwrap_or(message);
-    let Some(items) = content.as_array() else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let Some(name) = item.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        if !is_subagent_dispatch_tool(name) {
-            continue;
-        }
-        let Some(text) = dispatch_text(item) else {
-            continue;
-        };
-        let tool_use_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty());
-        let message_id = tool_use_id.map_or_else(
-            || {
-                format!(
-                    "{}:tool_dispatch:{}:{index}",
-                    session_id, context.source_offset
-                )
-            },
-            |id| format!("{session_id}:tool_dispatch:{id}"),
-        );
-        out.push(SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id,
-            session_id: session_id.to_string(),
-            role: role.to_string(),
-            timestamp: record_timestamp(record)
-                .or_else(|| record_timestamp(event))
-                .or(context.derived_timestamp),
-            ordinal: context.source_offset.saturating_add(index as i64),
-            text,
-            kind: Some("tool_dispatch".to_string()),
-            model: cursor_dispatch_model(item)
-                .or_else(|| cursor_record_message_model(record, message))
-                .or_else(|| context.model_fallback.map(str::to_string))
-                .or_else(|| cursor_model_string(event)),
-            tool_names: Some(name.to_string()),
-            source_path: Some(context.transcript_path.to_string_lossy().to_string()),
-            source_offset: Some(context.source_offset),
-            metadata_json: serde_json::to_string(&dispatch_message_metadata(
-                record,
-                event,
-                context.source_offset,
-                tool_use_id,
-                context.event_cwd,
-                context.event_location_provenance,
-            ))
-            .ok(),
-        });
-    }
-    out
-}
-
-fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
-    cursor_model_string(record).or_else(|| cursor_model_string(message))
-}
-
-fn content_is_only_subagent_dispatch(content: &Value) -> bool {
-    let Some(items) = content.as_array() else {
-        return false;
-    };
-    !items.is_empty()
-        && items.iter().all(|item| {
-            item.get("type").and_then(Value::as_str) == Some("tool_use")
-                && item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(is_subagent_dispatch_tool)
-        })
-}
-
-fn content_kind(content: &Value) -> Option<&'static str> {
-    if content.is_array() {
-        Some("message")
-    } else if content.is_string() {
-        Some("text")
-    } else {
-        None
-    }
-}
-
 fn event_session_id(event: &Value, transcript_path: &Path) -> String {
     event
         .get("session_id")
@@ -1740,153 +1353,6 @@ fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
         }
     }
     candidates
-}
-
-fn record_timestamp(value: &Value) -> Option<i64> {
-    value
-        .get("timestamp")
-        .or_else(|| value.get("created_at"))
-        .and_then(|timestamp| {
-            timestamp
-                .as_i64()
-                .or_else(|| timestamp.as_str().and_then(|s| s.parse::<i64>().ok()))
-        })
-}
-
-fn event_location_provenance(event: &Value) -> &str {
-    event
-        .get("tracedecay_location_provenance")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("hook_event")
-}
-
-fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance: &str) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "conversation_id".to_string(),
-        event.get("conversation_id").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "hook_event_name".to_string(),
-        event.get("hook_event_name").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "cursor_version".to_string(),
-        event.get("cursor_version").cloned().unwrap_or(Value::Null),
-    );
-    if let Some(roots) = event.get("workspace_roots") {
-        metadata.insert("workspace_roots".to_string(), roots.clone());
-    }
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    Value::Object(metadata)
-}
-
-fn message_metadata(
-    record: &Value,
-    message: &Value,
-    content: &Value,
-    event: &Value,
-    source_offset: i64,
-    event_cwd: Option<&Path>,
-    location_provenance: &str,
-) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "raw_type".to_string(),
-        record.get("type").cloned().unwrap_or(Value::Null),
-    );
-    append_host_event_ordering(&mut metadata, event, source_offset);
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    append_tool_calls_metadata(&mut metadata, message);
-    append_tool_event_metadata(&mut metadata, content);
-    // These JSONL agent-transcript lines carry no token counters (verified
-    // across 100k+ real lines). Cursor *does* record per-turn token counts, but
-    // only in the composer store (`state.vscdb` bubbles), which the richer
-    // `cursor_composer` sweep reads and maps to `usage`. This probe stays as
-    // future-proofing in case the JSONL format gains counters too.
-    append_usage_metadata(&mut metadata, &[record, message]);
-    Value::Object(metadata)
-}
-
-fn append_host_event_ordering(
-    metadata: &mut serde_json::Map<String, Value>,
-    event: &Value,
-    transcript_offset: i64,
-) {
-    metadata.insert(
-        "cursor_transcript_offset".to_string(),
-        Value::from(transcript_offset),
-    );
-    if let Some(event_id) = ["event_id", "eventId"]
-        .into_iter()
-        .find_map(|key| event.get(key).and_then(Value::as_str))
-        .filter(|value| !value.is_empty())
-    {
-        metadata.insert(
-            "cursor_host_event_id".to_string(),
-            Value::String(event_id.to_string()),
-        );
-    }
-    if let Some(sequence) = ["event_sequence", "eventSequence", "sequence"]
-        .into_iter()
-        .find_map(|key| event.get(key))
-        .filter(|value| value.is_i64() || value.is_u64() || value.is_string())
-    {
-        metadata.insert("cursor_host_event_sequence".to_string(), sequence.clone());
-    }
-    if let Some(timestamp) = record_timestamp(event) {
-        metadata.insert(
-            "cursor_host_event_timestamp".to_string(),
-            Value::from(timestamp),
-        );
-    }
-}
-
-fn dispatch_message_metadata(
-    record: &Value,
-    event: &Value,
-    source_offset: i64,
-    tool_use_id: Option<&str>,
-    event_cwd: Option<&Path>,
-    location_provenance: &str,
-) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("cursor_transcript".to_string()),
-    );
-    metadata.insert(
-        "raw_type".to_string(),
-        record.get("type").cloned().unwrap_or(Value::Null),
-    );
-    metadata.insert(
-        "tool_use_id".to_string(),
-        tool_use_id.map_or(Value::Null, |id| Value::String(id.to_string())),
-    );
-    append_host_event_ordering(&mut metadata, event, source_offset);
-    append_location_metadata(
-        &mut metadata,
-        CURSOR_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(event_cwd, location_provenance),
-    );
-    Value::Object(metadata)
 }
 
 #[cfg(test)]
