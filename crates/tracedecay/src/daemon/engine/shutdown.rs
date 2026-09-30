@@ -267,33 +267,14 @@ impl DaemonEngine {
 
     pub(in crate::daemon) fn memory_graph_reconciliation_shutdown_owner(&self) -> ShutdownOwner {
         let administration = self.store_administration.clone();
-        let store_telemetry_sampling = self.store_administration.store_telemetry_sampling();
+        // Every step stays bounded by this owner's deadline, so a genuinely
+        // stuck pass still surfaces as a typed timeout.
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
             move |_| {
                 hotpath::future!(
-                    async move {
-                        // Ordering is the correctness contract here: close registry
-                        // admission, cancel reconciliation, JOIN the workers while
-                        // their runtimes are still alive, and only then drain the
-                        // retained owners and close the graphs. Closing before the
-                        // join leaves the standing owner attachments leased and the
-                        // close reports a structural Conflict on every shutdown.
-                        // Every step stays bounded by this owner's deadline, so a
-                        // genuinely stuck pass still surfaces as a typed timeout.
-                        let owner = administration
-                            .prepare_memory_graph_reconciliation_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        owner.cancel();
-                        owner.shutdown().await?;
-                        store_telemetry_sampling.release_retained_handles_for_shutdown();
-                        administration
-                            .close_retained_graph_runtimes_for_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())
-                    },
+                    async move { administration.close_stores_for_shutdown().await },
                     label = "daemon.engine.memory_graph_reconciliation"
                 )
             },

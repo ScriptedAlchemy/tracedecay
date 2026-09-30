@@ -358,20 +358,9 @@ async fn run_foreground_loopback(
             "memory_graph_reconciliation",
             || {},
             move |_| async move {
-                // Same ordering contract as the engine owner: cancel, join the
-                // reconciliation workers while their runtimes are alive, then
-                // drain the retained owners and close the graphs. Closing before
-                // the join conflicts on the standing owner attachments.
-                let owner = memory_graph_reconciliation_join
-                    .prepare_memory_graph_reconciliation_shutdown()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                owner.cancel();
-                owner.shutdown().await?;
                 memory_graph_reconciliation_join
-                    .close_retained_graph_runtimes_for_shutdown()
+                    .close_stores_for_shutdown()
                     .await
-                    .map_err(|error| error.to_string())
             },
         );
     let server_store_administration = store_administration.clone();
