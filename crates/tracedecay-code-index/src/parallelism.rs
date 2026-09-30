@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
 };
+use tracedecay_domain::process_heap::collect_calling_thread_allocator_v1;
 pub use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_runtime_core::resident_memory::collect_calling_thread_allocator_v1;
 
 /// Operator override for the indexing width. It has higher precedence than
 /// the profile setting and must be a positive `u16`.
@@ -824,7 +824,7 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
-    use tracedecay_runtime_core::resident_memory::{
+    use tracedecay_domain::process_heap::{
         ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
     };
 
@@ -881,6 +881,7 @@ mod tests {
         install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
             release: release_nothing,
             collect_calling_thread: count_worker_collect,
+            owner_heaps: None,
         })
         .expect("the only allocator release installed in this binary");
         let owner = CodeIndexWorkerRuntimeV1::build(

@@ -61,7 +61,7 @@ const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
       'environment.global_accounting_enabled',
       'environment.global_accounting_mode',
       'environment.pricing_offline',
-      'environment.variables.TRACEDECAY_ENABLE_GLOBAL_DB',
+      'environment.variables.TRACEDECAY_DISABLE_GLOBAL_DB',
       'environment.variables.TRACEDECAY_DATA_DIR',
     ],
   ],
@@ -189,14 +189,14 @@ describe('SettingsPage effective configuration review', () => {
         value: '/srv/tracedecay',
         description: 'Pins the user-level TraceDecay data directory.',
       },
-      { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'd' },
+      { name: 'TRACEDECAY_DISABLE_GLOBAL_DB', active: false, value: null, description: 'd' },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(envelope)));
     renderSettings();
 
     expect((await findRow(MAX_FILE_SIZE)).dataset['provenance']).toBe('unserved');
     expect(row('environment.variables.TRACEDECAY_DATA_DIR').dataset['provenance']).toBe('explicit');
-    expect(row('environment.variables.TRACEDECAY_ENABLE_GLOBAL_DB').dataset['provenance']).toBe(
+    expect(row('environment.variables.TRACEDECAY_DISABLE_GLOBAL_DB').dataset['provenance']).toBe(
       'default',
     );
     expect(
@@ -208,7 +208,7 @@ describe('SettingsPage effective configuration review', () => {
     );
     expect(served.map((element) => element.getAttribute('data-key'))).toEqual([
       'environment.variables.TRACEDECAY_DATA_DIR',
-      'environment.variables.TRACEDECAY_ENABLE_GLOBAL_DB',
+      'environment.variables.TRACEDECAY_DISABLE_GLOBAL_DB',
     ]);
     // Origin is the group's stated location, or a stated absence.
     expect(within(row(MAX_FILE_SIZE)).getByText('origin not served')).toBeTruthy();

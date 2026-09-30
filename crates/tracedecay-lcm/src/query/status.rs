@@ -350,161 +350,6 @@ fn status_from_parts(
     }
 }
 
-#[cfg(test)]
-fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
-    target.raw_message_count += source.raw_message_count;
-    target.summary_node_count += source.summary_node_count;
-    target.external_payload_count += source.external_payload_count;
-    target.missing_payload_count += source.missing_payload_count;
-    target.unreferenced_payload_count += source.unreferenced_payload_count;
-    target.maintenance_debt_count += source.maintenance_debt_count;
-    target.store.messages += source.store.messages;
-    target.store.estimated_tokens += source.store.estimated_tokens;
-    // A merged estimate is only complete when every merged scope was.
-    target.store.token_estimate.complete &= source.store.token_estimate.complete;
-    target.store.token_estimate.scanned_messages += source.store.token_estimate.scanned_messages;
-    target.store.token_estimate.next_after_store_id = min_option_i64(
-        target.store.token_estimate.next_after_store_id,
-        source.store.token_estimate.next_after_store_id,
-    );
-    target.dag.total_nodes += source.dag.total_nodes;
-    target.dag.total_tokens += source.dag.total_tokens;
-    target.dag.total_source_tokens += source.dag.total_source_tokens;
-    for (depth, source_depth) in source.dag.depths {
-        let target_depth = target
-            .dag
-            .depths
-            .entry(depth)
-            .or_insert_with(|| LcmDagDepthStatus {
-                count: 0,
-                tokens: 0,
-                source_tokens: 0,
-            });
-        target_depth.count += source_depth.count;
-        target_depth.tokens += source_depth.tokens;
-        target_depth.source_tokens += source_depth.source_tokens;
-    }
-    merge_payload_status(&mut target.payload, &source.payload);
-    merge_payload_gc_status(&mut target.payload_gc, source.payload_gc);
-    target.lifecycle.lifecycle_state_count += source.lifecycle.lifecycle_state_count;
-    target.lifecycle.frontier_count += source.lifecycle.frontier_count;
-    target.lifecycle.maintenance_debt_count += source.lifecycle.maintenance_debt_count;
-    target.summary_convergence.pending_session_count +=
-        source.summary_convergence.pending_session_count;
-    target.summary_convergence.retryable_session_count +=
-        source.summary_convergence.retryable_session_count;
-    target.summary_convergence.current_session_count +=
-        source.summary_convergence.current_session_count;
-    target.summary_convergence.unavailable_session_count +=
-        source.summary_convergence.unavailable_session_count;
-    target.summary_convergence.permanent_session_count +=
-        source.summary_convergence.permanent_session_count;
-    for reason in source.summary_convergence.reasons {
-        match target
-            .summary_convergence
-            .reasons
-            .iter_mut()
-            .find(|existing| existing.state == reason.state && existing.reason == reason.reason)
-        {
-            Some(existing) => existing.session_count += reason.session_count,
-            None => target.summary_convergence.reasons.push(reason),
-        }
-    }
-    target
-        .summary_convergence
-        .reasons
-        .sort_by(|left, right| (left.state, &left.reason).cmp(&(right.state, &right.reason)));
-    target.redaction.lossy_records += source.redaction.lossy_records;
-}
-
-#[cfg(test)]
-fn merge_payload_status(target: &mut LcmPayloadStatus, source: &LcmPayloadStatus) {
-    target.externalized_count += source.externalized_count;
-    target.missing_count += source.missing_count;
-    target.unreferenced_count += source.unreferenced_count;
-    target.placeholder_ref_count += source.placeholder_ref_count;
-    target.missing_placeholder_metadata_count += source.missing_placeholder_metadata_count;
-    target.missing_placeholder_file_count += source.missing_placeholder_file_count;
-    target.gc_candidate_count += source.gc_candidate_count;
-    target.root_contained &= source.root_contained;
-    target.orphan_file_count += source.orphan_file_count;
-    target.tombstoned_count += source.tombstoned_count;
-    target.referenced_count += source.referenced_count;
-    target.total_bytes += source.total_bytes;
-    target.referenced_bytes += source.referenced_bytes;
-    target.orphan_file_bytes += source.orphan_file_bytes;
-    target.reclaimable_bytes += source.reclaimable_bytes;
-    target.reclaimable_bytes_after_grace += source.reclaimable_bytes_after_grace;
-    target.integrity_mismatch_count = match (
-        target.integrity_mismatch_count,
-        source.integrity_mismatch_count,
-    ) {
-        (Some(left), Some(right)) => Some(left + right),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    };
-}
-
-#[cfg(test)]
-fn merge_payload_gc_status(target: &mut LcmPayloadGcStatus, source: LcmPayloadGcStatus) {
-    target.last_gc_at = max_option_i64(target.last_gc_at, source.last_gc_at);
-    target.last_gc_duration_ms =
-        max_option_u64(target.last_gc_duration_ms, source.last_gc_duration_ms);
-    if target.last_gc_status.as_deref() != Some("failed") {
-        target.last_gc_status = source.last_gc_status.or(target.last_gc_status.take());
-    }
-    target.last_gc_error = source.last_gc_error.or(target.last_gc_error.take());
-    target.last_reaped_refs = sum_option_i64(target.last_reaped_refs, source.last_reaped_refs);
-    target.last_reaped_bytes = sum_option_u64(target.last_reaped_bytes, source.last_reaped_bytes);
-    target.next_run_eligible_at =
-        min_option_i64(target.next_run_eligible_at, source.next_run_eligible_at);
-}
-
-#[cfg(test)]
-fn max_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-#[cfg(test)]
-fn min_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-#[cfg(test)]
-fn sum_option_i64(left: Option<i64>, right: Option<i64>) -> Option<i64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left + right),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-#[cfg(test)]
-fn max_option_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-#[cfg(test)]
-fn sum_option_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left + right),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
 pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmStatus {
     let gc_config = gc_config.clone().normalized();
     let grace_seconds = i64::try_from(gc_config.grace_seconds).unwrap_or(i64::MAX);
@@ -1221,57 +1066,53 @@ mod tests {
         .expect("insert maintenance debt");
     }
 
-    async fn legacy_aggregate(
-        conn: &Connection,
-        storage_root: &Path,
-        providers: &[String],
-        deep: bool,
-    ) -> LcmStatus {
-        let gc_config = LcmGcConfig::default();
-        let schema_version = schema::schema_version(conn)
+    #[tokio::test]
+    async fn deep_status_reports_only_the_recorded_gc_status() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_provider(&conn, 0).await;
+        schema::set_gc_meta(&*conn, "last_gc_at", "100")
             .await
-            .expect("read LCM schema version");
-        let mut aggregate = empty_status(schema_version, &gc_config);
-        for provider in providers {
-            let status = status_for_provider(conn, storage_root, provider, None, deep, &gc_config)
-                .await
-                .expect("load provider status");
-            merge_lcm_status(&mut aggregate, status);
-        }
-        let payload_health = if deep {
-            payload_health_detail(conn, storage_root, "all", None, true, 20, &gc_config)
-                .await
-                .expect("load aggregate payload health")
-        } else {
-            payload_health_summary(conn, storage_root, "all", None, &gc_config)
-                .await
-                .expect("load aggregate payload summary")
-        };
-        aggregate.external_payload_count = payload_health.payload.externalized_count;
-        aggregate.missing_payload_count = payload_health.payload.missing_count;
-        aggregate.unreferenced_payload_count = payload_health.payload.unreferenced_count;
-        aggregate.payload = payload_health.payload;
-        aggregate.payload_gc = payload_health.payload_gc;
-        aggregate.dag.compression_ratio = python_round_ratio_to_tenths(
-            aggregate.dag.total_source_tokens,
-            aggregate.dag.total_tokens,
+            .expect("record GC time");
+        schema::set_gc_meta(&*conn, "last_error", "disk full")
+            .await
+            .expect("record GC error");
+        let gc_config = LcmGcConfig::default();
+        let read =
+            || aggregate_provider_status_with_work(&*conn, storage.path(), None, true, &gc_config);
+
+        let (unrecorded, _) = read().await.expect("status without a recorded GC status");
+        assert_eq!(
+            (
+                unrecorded.payload_gc.last_gc_status,
+                unrecorded.payload_gc.last_gc_error.as_deref(),
+            ),
+            (None, Some("disk full"))
         );
-        aggregate.redaction.enabled = aggregate.redaction.lossy_records > 0;
-        aggregate
+
+        schema::set_gc_meta(&*conn, "last_gc_status", "partial")
+            .await
+            .expect("record GC status");
+        let (recorded, _) = read().await.expect("status with a recorded GC status");
+        assert_eq!(
+            recorded.payload_gc.last_gc_status.as_deref(),
+            Some("partial")
+        );
     }
 
     #[tokio::test]
-    async fn aggregate_status_batches_queries_and_preserves_legacy_output() {
+    async fn aggregate_status_sums_every_provider_in_batched_queries() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
         for index in 0..3 {
             seed_provider(&conn, index).await;
         }
-        let providers = (0..3)
-            .map(|index| format!("provider-{index:02}"))
-            .collect::<Vec<_>>();
+        let depth = |count, tokens, source_tokens| LcmDagDepthStatus {
+            count,
+            tokens,
+            source_tokens,
+        };
         for deep in [false, true] {
-            let expected = legacy_aggregate(&conn, storage.path(), &providers, deep).await;
             let (actual, work) = aggregate_provider_status_with_work(
                 &*conn,
                 storage.path(),
@@ -1282,7 +1123,52 @@ mod tests {
             .await
             .expect("load batched aggregate status");
 
-            assert_eq!(actual, expected);
+            assert_eq!(
+                (
+                    actual.raw_message_count,
+                    actual.summary_node_count,
+                    actual.maintenance_debt_count,
+                ),
+                (3, 3, 3),
+                "deep={deep}"
+            );
+            assert_eq!(
+                (
+                    actual.dag.total_nodes,
+                    actual.dag.total_tokens,
+                    actual.dag.total_source_tokens,
+                    actual.dag.compression_ratio.as_str(),
+                ),
+                (3, 6, 15, "2.5:1"),
+                "deep={deep}"
+            );
+            assert_eq!(
+                actual.dag.depths,
+                BTreeMap::from([
+                    ("d0".to_owned(), depth(2, 4, 10)),
+                    ("d1".to_owned(), depth(1, 2, 5)),
+                ]),
+                "deep={deep}"
+            );
+            assert_eq!(
+                (
+                    actual.lifecycle.lifecycle_state_count,
+                    actual.lifecycle.frontier_count,
+                    actual.lifecycle.maintenance_debt_count,
+                ),
+                (3, 3, 3),
+                "deep={deep}"
+            );
+            assert_eq!(
+                (actual.redaction.lossy_records, actual.redaction.enabled),
+                (1, true),
+                "deep={deep}"
+            );
+            assert_eq!(
+                actual.payload.integrity_mismatch_count,
+                deep.then_some(0),
+                "deep={deep}"
+            );
             assert_eq!(work.status_query_calls, 4);
             assert_eq!(work.payload_health_scans, 1);
         }

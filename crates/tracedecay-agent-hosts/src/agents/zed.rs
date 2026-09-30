@@ -17,13 +17,13 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, TextFileMutation, load_jsonc_file, report_mcp_registration,
-    update_text_file_transactionally,
+    McpDoctorLabels, install_mcp_server_entry, load_jsonc_file, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
 pub struct ZedIntegration;
@@ -256,60 +256,23 @@ fn install_mcp_if_selected(
     if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
-    update_text_file_transactionally(config, |existing| {
-        let mut settings = JsonConfigDialect::Jsonc.parse_for_edit(config, existing)?;
-        let root = settings
-            .as_object_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("{} must contain a JSON object", config.display()),
-            })?;
-        let servers = root
-            .entry("context_servers")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("{}.context_servers must be a JSON object", config.display()),
-            })?;
-        servers.insert(
-            "tracedecay".to_string(),
-            json!({
-                "command": ctx.tracedecay_bin.clone(),
-                "args": ["serve"],
-            }),
-        );
-        Ok((
-            (),
-            JsonConfigDialect::Jsonc.mutation(config, existing, settings)?,
-        ))
-    })?;
-    Ok(())
+    install_mcp_server_entry(
+        config,
+        "context_servers",
+        json!({
+            "command": ctx.tracedecay_bin.clone(),
+            "args": ["serve"],
+        }),
+        "Zed",
+        JsonConfigDialect::Jsonc,
+    )
 }
 
 fn uninstall_mcp_if_selected(components: &[HostComponentV1], config: &Path) -> Result<()> {
-    if !components.contains(&HostComponentV1::ContextMcp) || !config.exists() {
+    if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
-    update_text_file_transactionally(config, |existing| {
-        let mut settings = JsonConfigDialect::Jsonc.parse_for_edit(config, existing)?;
-        let Some(root) = settings.as_object_mut() else {
-            return Err(TraceDecayError::Config {
-                message: format!("{} must contain a JSON object", config.display()),
-            });
-        };
-        let Some(servers) = root
-            .get_mut("context_servers")
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            return Ok(((), TextFileMutation::Unchanged));
-        };
-        if servers.remove("tracedecay").is_none() {
-            return Ok(((), TextFileMutation::Unchanged));
-        }
-        Ok((
-            (),
-            JsonConfigDialect::Jsonc.mutation(config, existing, settings)?,
-        ))
-    })
+    uninstall_mcp_server_entry(config, "context_servers", JsonConfigDialect::Jsonc)
 }
 
 #[cfg(test)]

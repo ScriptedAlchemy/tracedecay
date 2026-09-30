@@ -23,6 +23,7 @@ use tracedecay_runtime_core::storage::profile_sharded_data_root;
 
 use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::resident_memory::release_c_library_heap_v1;
 
@@ -522,7 +523,8 @@ impl MaintenanceCoordinator {
     /// a cold index into released memory instead of refused admissions. Each
     /// sample first returns freed C-library heap, which no owner is charged
     /// for and which no other release reaches between graph publications,
-    /// and has an index pool that went idle collect its workers' heaps.
+    /// has an index pool that went idle collect its workers' heaps, and asks
+    /// the async runtime and store workers to collect theirs as they idle.
     #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
         let log = Arc::clone(&self.resident_memory_log);
@@ -532,6 +534,7 @@ impl MaintenanceCoordinator {
             Arc::new(move || {
                 let _ = release_c_library_heap_v1();
                 collect_idle_installed_worker_heaps();
+                request_idle_thread_collection_v1();
                 record_process_resident_memory_gauge(&log);
                 sweep_resident_owners();
             }),

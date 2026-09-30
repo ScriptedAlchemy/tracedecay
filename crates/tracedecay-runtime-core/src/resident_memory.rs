@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
@@ -940,41 +941,6 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
-/// The Rust global allocator's release calls, installed once by the
-/// composition root that chose the allocator.
-#[derive(Clone, Copy, Debug)]
-pub struct ProcessAllocatorReleaseV1 {
-    /// Return every pool worker's and the calling thread's freed pages.
-    pub release: fn(),
-    /// Return the calling thread's freed pages, including blocks other
-    /// threads freed into its heap. A thread-caching allocator hands those
-    /// back only when their owning thread next allocates or collects, which
-    /// an idle pool worker never does.
-    pub collect_calling_thread: fn(),
-}
-
-/// glibc's arenas are trimmed whether or not a release is installed.
-static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<ProcessAllocatorReleaseV1> = OnceLock::new();
-
-/// Install the calls that return the process allocator's freed pages to the
-/// kernel. The binary that selects a global allocator installs them at
-/// startup; a second installation is refused.
-pub fn install_process_allocator_release_v1(
-    release: ProcessAllocatorReleaseV1,
-) -> Result<(), String> {
-    PROCESS_ALLOCATOR_RELEASE_V1
-        .set(release)
-        .map_err(|_| "the process allocator release is already installed".to_owned())
-}
-
-/// Return the calling thread's freed allocator pages; a no-op without an
-/// installed release.
-pub fn collect_calling_thread_allocator_v1() {
-    if let Some(release) = PROCESS_ALLOCATOR_RELEASE_V1.get() {
-        (release.collect_calling_thread)();
-    }
-}
-
 /// Return freed-but-retained allocator pages to the kernel.
 ///
 /// Allocators keep freed pages for reuse: glibc inside its per-thread arenas
@@ -990,8 +956,7 @@ pub fn collect_calling_thread_allocator_v1() {
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
     measured_trim(|| {
-        let released = PROCESS_ALLOCATOR_RELEASE_V1
-            .get()
+        let released = installed_process_allocator_release_v1()
             .map(|release| (release.release)())
             .is_some();
         glibc_trim() || released

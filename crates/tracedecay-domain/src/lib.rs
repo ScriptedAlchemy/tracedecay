@@ -20,6 +20,7 @@ pub mod memory;
 pub mod multi_root;
 pub mod observability;
 pub mod observation;
+pub mod process_heap;
 pub mod remote;
 pub mod repository;
 pub mod research;

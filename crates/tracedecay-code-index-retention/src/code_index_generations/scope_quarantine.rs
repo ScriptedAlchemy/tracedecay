@@ -253,11 +253,7 @@ impl ScopeQuarantineAuthority {
                 None => None,
             };
             match (source, staged) {
-                // Nothing of this scope was quarantined, so there is nothing to
-                // restore. A writer that touched the source after `prepare`
-                // changed its identity and made `stage` refuse; the source is
-                // left as it is, and refusing here would pin the journal.
-                (Some(_), None) => {}
+                (Some((_, actual)), None) if actual == expected => {}
                 (None, Some((staged, actual))) => {
                     if actual != expected
                         || directory_identity(&staged).map_err(storage)? != expected
@@ -300,6 +296,9 @@ impl ScopeQuarantineAuthority {
                         "scope reconciliation rollback found duplicate '{}'",
                         scope.scope_hash
                     )));
+                }
+                (Some(_), None) => {
+                    return Err(identity_changed(&scope.scope_hash, "during rollback"));
                 }
             }
         }
@@ -830,13 +829,12 @@ mod tests {
         );
     }
 
-    /// A still-mounted worker that writes into a removed worktree's scope
-    /// after `prepare` changes the scope's identity, so the quarantine rename
-    /// is refused. Rollback then has nothing to restore and must finish, or
-    /// its journal refuses every later maintenance tick.
+    /// Collection runs only once the scope has no scheduler owner, so a write
+    /// into the source after `prepare` is a foreign writer: rollback refuses
+    /// and keeps its journal instead of treating the scope as settled.
     #[cfg(unix)]
     #[test]
-    fn rollback_finishes_when_a_touched_source_was_never_quarantined() {
+    fn rollback_refuses_a_source_a_foreign_writer_changed_before_quarantine() {
         let (store, scope) = fixture();
         let mut authority = ScopeQuarantineAuthority::prepare(
             store.path(),
@@ -858,10 +856,17 @@ mod tests {
                 if message.ends_with("changed filesystem identity before quarantine")),
             "{refused:?}"
         );
-        authority
+        let error = authority
             .rollback(std::slice::from_ref(&scope))
-            .expect("rollback has nothing of this scope to restore");
+            .expect_err("a source whose identity changed cannot be settled");
 
+        let CodeGenerationRetentionErrorV1::UnsafeState(message) = error else {
+            panic!("identity mismatch must fail as unsafe state");
+        };
+        assert_eq!(
+            message,
+            format!("stranded scope '{SCOPE_HASH}' changed filesystem identity during rollback")
+        );
         let mut kept = std::fs::read_dir(&source)
             .expect("source survives")
             .map(|entry| entry.expect("source entry").file_name())
@@ -873,7 +878,9 @@ mod tests {
                 .path()
                 .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
                 .join(RECEIPT_DIGEST)
-                .exists()
+                .join(SCOPE_HASH)
+                .exists(),
+            "nothing of the scope was quarantined"
         );
     }
 

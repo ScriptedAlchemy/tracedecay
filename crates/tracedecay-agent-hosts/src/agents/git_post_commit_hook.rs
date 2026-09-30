@@ -10,13 +10,6 @@ use std::path::{Path, PathBuf};
 use super::host_config_io::quote_posix_command_arg;
 
 /// The marker comment used to identify tracedecay's section in a hook script.
-///
-/// NOTE: Legacy hooks written by the old "tracedecay" binary used the marker
-/// "# tracedecay: auto-sync". Those are not detected by this constant, so
-/// existing tracedecay git hooks will not be treated as already-present and a
-/// second tracedecay block may be appended on offer. This is intentional
-/// (install path only writes new identity), users can manually remove the
-/// old block.
 const HOOK_MARKER: &str = "# tracedecay: auto-sync";
 
 /// The hook snippet appended to (or written as) the post-commit script.

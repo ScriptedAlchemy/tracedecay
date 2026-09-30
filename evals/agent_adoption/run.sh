@@ -135,7 +135,7 @@ fi
 # harness so fixture init and every agent tool call share one private profile
 # and socket. TRACEDECAY_BIN pins the child invocation to the same candidate
 # binary that owns the daemon.
-export TRACEDECAY_ENABLE_GLOBAL_DB=0
+export TRACEDECAY_DISABLE_GLOBAL_DB=1
 if [[ "${TRACEDECAY_AGENT_EVAL_ISOLATED:-}" != "1" ]]; then
   # Preserve only explicit read-only auth sources before changing HOME. The
   # daemon must not discover the operator's host transcripts or configuration.
@@ -352,7 +352,7 @@ have_plugin=0
 if [[ -d "$plugin_src/.claude-plugin" ]]; then
   have_plugin=1
   cat > "$mcp_cfg" <<JSON
-{"mcpServers":{"tracedecay":{"type":"stdio","command":"$TD","args":["serve"],"env":{"TRACEDECAY_DATA_DIR":"$TRACEDECAY_DATA_DIR","TRACEDECAY_ENABLE_GLOBAL_DB":"0"}}}}
+{"mcpServers":{"tracedecay":{"type":"stdio","command":"$TD","args":["serve"],"env":{"TRACEDECAY_DATA_DIR":"$TRACEDECAY_DATA_DIR","TRACEDECAY_DISABLE_GLOBAL_DB":"1"}}}}
 JSON
 fi
 

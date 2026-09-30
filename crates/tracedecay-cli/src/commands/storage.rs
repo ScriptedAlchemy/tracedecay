@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_global_db::profile_registry_maintenance::{
@@ -806,7 +807,7 @@ fn handle_list_inner(
             }
             let has_data = location.data_root.exists();
             let size = if has_data {
-                global::tracedecay_dir_size(&location.data_root)
+                dir_size_bytes(&location.data_root)
             } else {
                 0
             };
@@ -952,7 +953,7 @@ fn append_orphan_manifest_rows(
         let data_root = profile_root.join(&plan.store.store_relpath);
         let has_data = data_root.exists();
         let size = if has_data {
-            global::tracedecay_dir_size(&data_root)
+            dir_size_bytes(&data_root)
         } else {
             0
         };

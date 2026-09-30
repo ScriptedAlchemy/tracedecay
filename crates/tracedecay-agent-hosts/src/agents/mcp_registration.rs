@@ -1,8 +1,9 @@
 //! Shared MCP server registration for JSON/JSONC-configured hosts.
 //!
 //! Every such host registers tracedecay the same way: one entry named
-//! `tracedecay` under a root key (`mcpServers` for the Cline family and
-//! Gemini, `mcp` for Kilo). Only the config path, the root key, the entry
+//! `tracedecay` under a root key (`mcpServers` for the Cline family, Devin,
+//! Kimi, Kiro and Antigravity, `context_servers` for Zed, `mcp` for Kilo).
+//! Only the config path, the root key, the entry
 //! shape, and the config dialect differ, so install, uninstall, and the doctor
 //! check live here rather than once per host, alongside the advertised MCP
 //! tool allowlists hosts embed into their permission config.
@@ -42,33 +43,55 @@ pub fn install_mcp_server_entry(
     }
 
     let outcome = update_json_config_transactionally(config_path, dialect, |mut settings| {
-        if !settings.is_object() {
-            return Err(TraceDecayError::Config {
-                message: format!("{} must contain a JSON object", config_path.display()),
-            });
-        }
-        if settings
-            .get(root_key)
-            .is_some_and(|value| !value.is_object())
-        {
-            return Err(TraceDecayError::Config {
-                message: format!("{}.{root_key} must be a JSON object", config_path.display()),
-            });
-        }
-        let outcome = McpRegistrationOutcome::between(
-            settings
-                .get(root_key)
-                .and_then(|servers| servers.get("tracedecay")),
-            &entry,
-        );
+        let outcome = set_mcp_server_entry(config_path, &mut settings, root_key, entry)?;
         if outcome == McpRegistrationOutcome::Unchanged {
             return Ok((outcome, JsonConfigMutation::Unchanged));
         }
-        settings[root_key]["tracedecay"] = entry;
         Ok((outcome, JsonConfigMutation::Write(settings)))
     })?;
     outcome.report(config_path);
     Ok(())
+}
+
+/// Set the tracedecay entry under `root_key` in a config parsed from
+/// `config_path`, refusing a document or root key that is not an object.
+pub(crate) fn set_mcp_server_entry(
+    config_path: &Path,
+    settings: &mut serde_json::Value,
+    root_key: &str,
+    entry: serde_json::Value,
+) -> Result<McpRegistrationOutcome> {
+    if !settings.is_object() {
+        return Err(TraceDecayError::Config {
+            message: format!("{} must contain a JSON object", config_path.display()),
+        });
+    }
+    if settings
+        .get(root_key)
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(TraceDecayError::Config {
+            message: format!("{}.{root_key} must be a JSON object", config_path.display()),
+        });
+    }
+    let outcome = McpRegistrationOutcome::between(
+        settings
+            .get(root_key)
+            .and_then(|servers| servers.get("tracedecay")),
+        &entry,
+    );
+    if outcome != McpRegistrationOutcome::Unchanged {
+        settings[root_key]["tracedecay"] = entry;
+    }
+    Ok(outcome)
+}
+
+/// Remove the tracedecay entry under `root_key`; true when one was there.
+pub(crate) fn remove_mcp_server_entry(settings: &mut serde_json::Value, root_key: &str) -> bool {
+    settings
+        .get_mut(root_key)
+        .and_then(|servers| servers.as_object_mut())
+        .is_some_and(|servers| servers.remove("tracedecay").is_some())
 }
 
 /// What registering tracedecay did to a host config, reported as it happened
@@ -120,10 +143,7 @@ pub fn uninstall_mcp_server_entry(
     }
 
     let removed = update_json_config_transactionally(config_path, dialect, |mut settings| {
-        let removed = settings
-            .get_mut(root_key)
-            .and_then(|servers| servers.as_object_mut())
-            .is_some_and(|servers| servers.remove("tracedecay").is_some());
+        let removed = remove_mcp_server_entry(&mut settings, root_key);
         if removed {
             Ok((true, JsonConfigMutation::Write(settings)))
         } else {
@@ -220,7 +240,8 @@ pub fn mcp_config_has_tracedecay(
 /// Emit the standard doctor pass/fail line for a host MCP registration.
 ///
 /// Split out from [`doctor_check_mcp_registration`] so hosts with their own
-/// missing-file or legacy-path control flow still share the wording.
+/// missing-file control flow or registration-state readers still share the
+/// wording.
 pub fn report_mcp_registration(
     dc: &mut DoctorCounters,
     config_path: &Path,
@@ -273,8 +294,7 @@ pub fn doctor_check_mcp_registration(
 /// Shared doctor for host prompt files that must contain the word `tracedecay`.
 ///
 /// Vibe (`prompts/cli.md`) and OpenCode (`AGENTS.md`) use the same
-/// exists → contains → pass/fail/warn shape. Gemini's prompt check is the
-/// opposite polarity (legacy block must be absent) and stays host-local.
+/// exists → contains → pass/fail/warn shape.
 pub(crate) fn doctor_check_prompt_contains_tracedecay(
     dc: &mut DoctorCounters,
     prompt_path: &Path,

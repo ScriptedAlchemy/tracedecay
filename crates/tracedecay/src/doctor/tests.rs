@@ -88,49 +88,6 @@ fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
     );
 }
 
-#[test]
-fn daemon_runtime_parser_extracts_storage_health_and_owner() {
-    let parsed = super::daemon_runtime_status(&serde_json::json!({
-        "tracedecay_version": "0.0.66",
-        "process": {"pid": 1234},
-        "database": {
-            "canonical_db_path": "/tmp/project.db",
-            "quick_check_ok": true,
-            "authority_audit_ok": true,
-            "authority_audit_error": null,
-            "dirty_marker": {"exists": false}
-        },
-        "doctor_report": {"kind": "unknown", "table_growth_evidence": []}
-    }))
-    .unwrap()
-    .expect("published database telemetry is ready status");
-
-    assert_eq!(
-        parsed.pointer("/storage_health/quick_check_ok"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/daemon_owner_pid"),
-        Some(&serde_json::json!(1234))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/daemon_version"),
-        Some(&serde_json::json!("0.0.66"))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/authority_audit_ok"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        parsed.pointer("/storage_health/authority_audit_error"),
-        Some(&serde_json::Value::Null)
-    );
-    assert_eq!(
-        parsed.pointer("/doctor_report/kind"),
-        Some(&serde_json::json!("unknown"))
-    );
-}
-
 #[tokio::test]
 async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -253,32 +210,37 @@ fn storage_runtime_finding(
     .unwrap()
 }
 
+/// The rendered canonical findings are the only verdict: a degraded storage
+/// runtime finding is one issue line, and the exit counts exactly that line.
 #[test]
-fn canonical_storage_runtime_findings_are_the_only_storage_verdict() {
+fn a_degraded_canonical_finding_is_the_one_issue_the_exit_counts() {
     use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
-    let healthy = storage_runtime_finding(State::HealthyCompleteCoverage, "runtime.healthy");
-    let unknown = storage_runtime_finding(State::Denied, "runtime.denied");
-    let failed = storage_runtime_finding(State::Degraded, "runtime.degraded");
+    let mut healthy = DoctorCounters::new();
+    super::render_doctor_finding(
+        &mut healthy,
+        &storage_runtime_finding(State::HealthyCompleteCoverage, "runtime.healthy"),
+    );
+    assert_eq!(
+        super::doctor_result(&healthy, false),
+        super::DoctorCompletion::Healthy
+    );
 
+    let mut degraded = DoctorCounters::new();
+    for (state, reference) in [
+        (State::HealthyCompleteCoverage, "runtime.healthy"),
+        (State::Degraded, "runtime.degraded"),
+    ] {
+        super::render_doctor_finding(&mut degraded, &storage_runtime_finding(state, reference));
+    }
     assert_eq!(
-        super::database_health_from_storage_runtime_findings([&healthy]),
-        DatabaseHealth::Healthy
+        degraded.checks[1].message,
+        "storage_runtime: canonical storage runtime evidence (runtime.degraded)"
     );
-    assert!(matches!(
-        super::database_health_from_storage_runtime_findings([&healthy, &unknown]),
-        DatabaseHealth::Unknown { .. }
-    ));
     assert_eq!(
-        super::database_health_from_storage_runtime_findings([&healthy, &unknown, &failed]),
-        DatabaseHealth::Failed {
-            reason: "runtime.degraded".to_string()
-        }
+        super::doctor_result(&degraded, false),
+        super::DoctorCompletion::Issues(1)
     );
-    assert!(matches!(
-        super::database_health_from_storage_runtime_findings(std::iter::empty()),
-        DatabaseHealth::Unknown { .. }
-    ));
 }
 
 #[test]
@@ -325,7 +287,7 @@ fn a_live_ingest_refusal_is_reported_informationally_and_never_fails_the_exit() 
          identity is already retained) (observability.ingest-coverage.refused-informational)"
     );
     assert_eq!(
-        super::doctor_result(&counters, &DatabaseHealth::Healthy, false),
+        super::doctor_result(&counters, false),
         super::DoctorCompletion::Healthy
     );
 }
@@ -405,14 +367,24 @@ fn canonical_doctor_revalidates_observed_report_wire_contract() {
 #[test]
 fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
     let pending =
-        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}})).unwrap();
+        super::daemon_runtime_status(serde_json::json!({"process": {"pid": 1234}})).unwrap();
     assert!(
         pending.is_none(),
         "absent telemetry is warming, not an error"
     );
 
+    let published = serde_json::json!({
+        "process": {"pid": 1234},
+        "database": {"quick_check_ok": true},
+        "doctor_report": {"kind": "unknown", "table_growth_evidence": []}
+    });
+    assert_eq!(
+        super::daemon_runtime_status(published.clone()).unwrap(),
+        Some(published)
+    );
+
     let malformed =
-        super::daemon_runtime_status(&serde_json::json!({"process": {"pid": 1234}, "database": 7}))
+        super::daemon_runtime_status(serde_json::json!({"process": {"pid": 1234}, "database": 7}))
             .unwrap_err();
     assert!(malformed.to_string().contains("was not an object"));
 }
@@ -449,15 +421,19 @@ fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
             && !message.contains("WAL:"),
         "{message}"
     );
-    let health = super::classify_daemon_status_error(
-        &mut DoctorCounters::new(),
+    let mut counters = DoctorCounters::new();
+    let findings = super::classify_daemon_status_error(
+        &mut counters,
         std::path::Path::new("/Volumes/external/profile"),
         path,
         &blocked,
     );
-    assert!(
-        matches!(health, super::DatabaseHealth::Unknown { reason } if reason == "daemon_warming"),
-        "discovery-blocked warming must stay unknown health, not a store failure"
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("discovery-blocked warming must stay an unread report: {findings:?}");
+    };
+    assert_eq!(
+        (reason, counters.issues, counters.warnings),
+        ("daemon_warming", 0, 1)
     );
 
     let warming = tracedecay_domain::errors::TraceDecayError::project_route(
@@ -500,27 +476,8 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     assert_eq!(counters.issues, 1, "an unobserved store is not a warning");
     assert_eq!(counters.warnings, 0);
     assert_eq!(
-        super::doctor_result(
-            &counters,
-            &DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
-            true,
-        ),
+        super::doctor_result(&counters, true),
         super::DoctorCompletion::Issues(1)
-    );
-}
-
-#[test]
-fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
-    let counters = DoctorCounters::new();
-    assert_eq!(
-        super::doctor_result(
-            &counters,
-            &DatabaseHealth::Unknown {
-                reason: "canonical_doctor_report_unavailable".to_string(),
-            },
-            false,
-        ),
-        super::DoctorCompletion::Healthy
     );
 }
 
@@ -530,7 +487,7 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
 fn doctor_result_reports_a_pending_reset_without_issues_as_pending() {
     let counters = DoctorCounters::new();
     assert_eq!(
-        super::doctor_result(&counters, &DatabaseHealth::unknown("reset_required"), true),
+        super::doctor_result(&counters, true),
         super::DoctorCompletion::PendingOperatorAction
     );
 }

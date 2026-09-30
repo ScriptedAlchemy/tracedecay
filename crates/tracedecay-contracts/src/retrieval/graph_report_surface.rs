@@ -232,7 +232,6 @@ pub struct TestMapSurfaceRequestV1 {
     /// Source file path to find test coverage for.
     pub file: Option<String>,
     /// Specific node ID to find test coverage for (alternative to file).
-    #[serde(alias = "id")]
     pub node_id: Option<String>,
 }
 

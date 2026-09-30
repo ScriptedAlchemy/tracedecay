@@ -94,7 +94,7 @@ is `SCENARIO_TIMEOUT`; the tool budget is scored, not enforced.
 ## Store isolation & auth
 
 The runner points `TRACEDECAY_DATA_DIR` at a throwaway dir and sets
-`TRACEDECAY_ENABLE_GLOBAL_DB=0`, so the fixture graph and seeded facts never
+`TRACEDECAY_DISABLE_GLOBAL_DB=1`, so the fixture graph and seeded facts never
 touch your real tracedecay store, and `tracedecay init` stays fast (indexing the
 multi-thousand-node global DB is what makes a naive `init` hang). Each host gets
 a throwaway `HOME` and config directory. Only its auth file is copied in, mode

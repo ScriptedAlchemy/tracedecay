@@ -8,6 +8,7 @@ use parking_lot::{
     RawRwLock, RwLock as ParkingRwLock, RwLockUpgradableReadGuard,
     RwLockWriteGuard as ParkingRwLockWriteGuard,
 };
+use tracedecay_domain::process_heap::OwnerHeapV1;
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
@@ -89,6 +90,10 @@ pub(crate) struct Inner {
     serving_pins: AtomicUsize,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
+    /// The heap a lazily opened engine was built in and the bytes of the
+    /// pages it occupied when the open returned. Declared after `database`,
+    /// so dropping the engine empties the heap before the heap is deleted.
+    engine_heap: Mutex<Option<(OwnerHeapV1, u64)>>,
 }
 
 /// Keeps one graph database's native engine resident for as long as the
@@ -135,6 +140,62 @@ struct OpenedGraphState {
     identity: Option<ContainerIdentity>,
 }
 
+/// Open a lazily mounted engine, recovering a deterministically corrupt or
+/// superseded existing container by the same rules as an eager open.
+fn open_lazy_engine(
+    validated: &ValidatedOpen,
+    persistent_store_state: PersistentGraphStoreState,
+) -> Result<OpenedGraphState, GraphDbError> {
+    let opened = match open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse) {
+        Ok(opened) => opened,
+        Err(GraphDbError::Corrupt { message })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            let path = validated.config.path.as_deref().ok_or_else(|| {
+                GraphDbError::unavailable("persistent graph database has no container path")
+            })?;
+            match crate::corrupt_store::recover_deterministically_corrupt_container_with(
+                path,
+                &message,
+                &|| open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse),
+            )? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let mut fresh = validated.clone();
+                    fresh.preexisting_store = false;
+                    let opened = open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?;
+                    tracing::info!(
+                        event = "store_rebuilt_after_corruption",
+                        container = %path.display(),
+                        "fresh graph store opened after deleting a corrupt container; \
+                         canonical replay authorities re-project its generations"
+                    );
+                    opened
+                }
+            }
+        }
+        Err(GraphDbError::FormatSuperseded { .. })
+            if persistent_store_state == PersistentGraphStoreState::Existing =>
+        {
+            let path = validated.config.path.as_deref().ok_or_else(|| {
+                GraphDbError::unavailable("persistent graph database has no container path")
+            })?;
+            match crate::corrupt_store::replace_superseded_container(path, &|| {
+                open_validated_graph(validated, GraphEngineOpenSite::LazyFirstUse)
+            })? {
+                crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
+                crate::corrupt_store::CorruptStoreRecovery::Deleted => {
+                    let mut fresh = validated.clone();
+                    fresh.preexisting_store = false;
+                    open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(opened)
+}
+
 impl Inner {
     pub(crate) fn invalidate_store_epoch_caches(&self) {
         self.identity_indexes.invalidate();
@@ -150,6 +211,24 @@ impl Inner {
             + self.label_keys.heap_bytes()
             + self.adjacency_ids.heap_bytes()
             + self.projection_approvals.heap_bytes()
+    }
+
+    /// Bytes of the pages the engine's open left in its own heap.
+    fn engine_heap_bytes(&self) -> u64 {
+        self.engine_heap
+            .lock()
+            .map_or(0, |heap| heap.as_ref().map_or(0, |(_, bytes)| *bytes))
+    }
+
+    /// Delete the engine's heap once the engine itself is dropped, returning
+    /// every page it built on whichever thread freed it.
+    fn release_engine_heap(&self) {
+        let heap = self
+            .engine_heap
+            .lock()
+            .map(|mut heap| heap.take())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().take());
+        drop(heap);
     }
 }
 
@@ -233,6 +312,7 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
+                engine_heap: Mutex::new(None),
             }),
         });
         graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
@@ -267,6 +347,7 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
+                engine_heap: Mutex::new(None),
             }),
         }))
     }
@@ -1013,6 +1094,7 @@ impl GraphDb {
             ContainerIdentity::from_engine(&database)
         };
         drop(database);
+        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1155,6 +1237,7 @@ impl GraphDb {
         test_seams::fire(test_seams::Seam::MarkerPublish);
         let closed = ContainerIdentity::from_engine(&database_to_close);
         drop(database_to_close);
+        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1404,10 +1487,12 @@ impl GraphDb {
             .read()
             .map(|database| {
                 database.as_ref().map(|database| {
-                    u64::try_from(
-                        database.memory_usage().total_bytes + self.inner.store_epoch_cache_bytes(),
+                    let engine = u64::try_from(database.memory_usage().total_bytes)
+                        .unwrap_or(u64::MAX)
+                        .max(self.inner.engine_heap_bytes());
+                    engine.saturating_add(
+                        u64::try_from(self.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX),
                     )
-                    .unwrap_or(u64::MAX)
                 })
             })
             .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
@@ -1593,54 +1678,12 @@ impl GraphDb {
                 )
             })?;
         validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
-        let opened = match open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse) {
-            Ok(opened) => opened,
-            Err(GraphDbError::Corrupt { message })
-                if persistent_store_state == PersistentGraphStoreState::Existing =>
-            {
-                let path = validated.config.path.as_deref().ok_or_else(|| {
-                    GraphDbError::unavailable("persistent graph database has no container path")
-                })?;
-                match crate::corrupt_store::recover_deterministically_corrupt_container_with(
-                    path,
-                    &message,
-                    &|| open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse),
-                )? {
-                    crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
-                    crate::corrupt_store::CorruptStoreRecovery::Deleted => {
-                        let mut fresh = validated.clone();
-                        fresh.preexisting_store = false;
-                        let opened =
-                            open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?;
-                        tracing::info!(
-                            event = "store_rebuilt_after_corruption",
-                            container = %path.display(),
-                            "fresh graph store opened after deleting a corrupt container; \
-                             canonical replay authorities re-project its generations"
-                        );
-                        opened
-                    }
-                }
-            }
-            Err(GraphDbError::FormatSuperseded { .. })
-                if persistent_store_state == PersistentGraphStoreState::Existing =>
-            {
-                let path = validated.config.path.as_deref().ok_or_else(|| {
-                    GraphDbError::unavailable("persistent graph database has no container path")
-                })?;
-                match crate::corrupt_store::replace_superseded_container(path, &|| {
-                    open_validated_graph(&validated, GraphEngineOpenSite::LazyFirstUse)
-                })? {
-                    crate::corrupt_store::CorruptStoreRecovery::Reopened(opened) => opened,
-                    crate::corrupt_store::CorruptStoreRecovery::Deleted => {
-                        let mut fresh = validated.clone();
-                        fresh.preexisting_store = false;
-                        open_validated_graph(&fresh, GraphEngineOpenSite::LazyFirstUse)?
-                    }
-                }
-            }
-            Err(error) => return Err(error),
-        };
+        // The engine's long-lived state is built in a heap of its own: its
+        // pages then hold nothing else, are charged as the engine's, and are
+        // returned whole when it hibernates.
+        let (opened, heap) =
+            OwnerHeapV1::build(|| open_lazy_engine(&validated, persistent_store_state));
+        let opened = opened?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
         }
@@ -1661,6 +1704,11 @@ impl GraphDb {
         // opened.
         self.inner.markers.bind(opened.identity);
         *database = Some(opened.database);
+        *self
+            .inner
+            .engine_heap
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("graph engine heap lock is poisoned"))? = heap;
         *self
             .inner
             .lazy_store_state

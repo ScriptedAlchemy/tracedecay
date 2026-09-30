@@ -231,23 +231,14 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
 /// evidence.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {
-    #[serde(alias = "symbol_name")]
     SymbolName,
-    #[serde(alias = "qualified_name")]
     QualifiedName,
-    #[serde(alias = "path")]
     Path,
-    #[serde(alias = "signature")]
     Signature,
-    #[serde(alias = "documentation")]
     Documentation,
-    #[serde(alias = "body_text")]
     BodyText,
-    #[serde(alias = "preamble_text")]
     PreambleText,
-    #[serde(alias = "exact_term")]
     ExactTerm,
-    #[serde(alias = "subtoken")]
     Subtoken,
 }
 

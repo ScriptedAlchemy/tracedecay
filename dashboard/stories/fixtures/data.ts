@@ -3360,13 +3360,13 @@ const settingsPayload: Record<string, unknown> = {
     host_mode: 'standalone_backend',
   },
   environment: {
-    global_accounting_mode: 'auto',
+    global_accounting_mode: 'default',
     global_accounting_enabled: true,
     // Pricing is an immutable bundled authority and never performs a network
     // read, so this is a capability fact rather than an environment override.
     pricing_offline: true,
     variables: [
-      { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'Force-enables or disables global savings-ledger recording.' },
+      { name: 'TRACEDECAY_DISABLE_GLOBAL_DB', active: false, value: null, description: 'A truthy value disables global savings/accounting recording.' },
       { name: 'TRACEDECAY_DATA_DIR', active: false, value: null, description: 'Pins the user-level TraceDecay data directory.' },
     ],
   },

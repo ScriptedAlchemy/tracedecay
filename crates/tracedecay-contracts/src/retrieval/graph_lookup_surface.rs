@@ -62,7 +62,6 @@ pub struct ByQualifiedNameResultV1(pub Vec<PrimitiveSymbolLocationV1>);
 #[serde(deny_unknown_fields)]
 pub struct SymbolSelectorSurfaceRequestV1 {
     /// Look up a single node by its ID instead of qualified_name.
-    #[serde(alias = "id")]
     pub node_id: Option<String>,
     /// The exact qualified name (or short name) to look up.
     pub qualified_name: Option<String>,

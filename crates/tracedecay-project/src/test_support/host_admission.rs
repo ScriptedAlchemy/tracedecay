@@ -764,8 +764,9 @@ impl HostAdmissionTestRuntimeV1 {
             )
         })?;
         tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
-            .sessions_for_with_relation(query, relation)
+            .sessions_for_with_relation_and_presence(query, relation)
             .await
+            .map(|(hits, _)| hits)
     }
 
     /// Fails the calling test loudly: a fixture whose accounting write is

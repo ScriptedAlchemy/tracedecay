@@ -209,11 +209,6 @@ fn map_repository_error(
                 stderr: detail,
             }
         }
-        GitRepositoryError::DiscoveryBlocked { path } => GitIntelligenceError::GitFailed {
-            operation: "repository discovery",
-            status: "blocked".to_owned(),
-            stderr: format!("repository discovery blocked on {path}"),
-        },
         GitRepositoryError::UnreadableHead { detail } => GitIntelligenceError::GitFailed {
             operation: "HEAD",
             status: "gix".to_owned(),
@@ -1966,6 +1961,51 @@ mod tests {
             }),
             1
         );
+    }
+
+    /// Status asked while another thread walks the checkout is answered by
+    /// that walk, not failed as a blocked repository discovery.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_shares_the_discovery_walk_another_thread_owns() {
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        fixture.write("untracked.txt", "untracked\n");
+        let root = fixture.path().canonicalize().unwrap();
+        let mut block =
+            tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(&root);
+        let owner = tokio::task::spawn_blocking({
+            let adapter = fixture.adapter();
+            move || adapter.status()
+        });
+        block.wait_entered().await;
+        let joined = tokio::task::spawn_blocking({
+            let adapter = fixture.adapter();
+            move || adapter.status()
+        });
+        tracedecay_runtime_core::git_repository::wait_for_topology_callers_for_test(
+            &root,
+            1,
+            || u64::from(joined.is_finished()),
+        )
+        .await;
+        block.release();
+
+        for status in [owner.await.unwrap(), joined.await.unwrap()] {
+            let status = status.expect("status answered by the shared walk");
+            assert_eq!(status.head.branch(), Some("main"));
+            assert_eq!(
+                status.entries,
+                vec![GitStatusEntryV1::Untracked {
+                    path: "untracked.txt".to_owned()
+                }]
+            );
+        }
+        assert_eq!(
+            tracedecay_runtime_core::git_repository::repository_discovery_count_for_test(&root),
+            1
+        );
+        tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&root);
     }
 
     fn conflicted_fixture() -> Option<Fixture> {

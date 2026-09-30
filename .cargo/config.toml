@@ -25,8 +25,8 @@ LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_ME
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
 # write temp-project rows into the developer's real ~/.tracedecay/global.db.
-# Keep cargo-launched processes hermetic; tests that exercise the ledger opt
-# back in with TRACEDECAY_ENABLE_GLOBAL_DB=1.
+# Keep cargo-launched processes hermetic; tests that exercise the ledger
+# remove TRACEDECAY_DISABLE_GLOBAL_DB from the child they launch.
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 

@@ -109,12 +109,15 @@ pub type DaemonFeedbackProximityInvocationFuture<'a> = Pin<
 >;
 
 /// Whether an advisory-cycle owner answers for its project now, or stands in
-/// for a full cycle a ready sealed generation is mounting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// for a full cycle its mount is still publishing.
 pub enum DaemonAdvisoryCycleMountV1 {
     Answers,
-    Mounting,
+    /// Resolves when the owner's own mount state next moves, so a waiting
+    /// request re-reads it instead of holding out for its deadline.
+    Mounting(DaemonAdvisoryCycleMountChangedFuture),
 }
+
+pub type DaemonAdvisoryCycleMountChangedFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub type DaemonAdvisoryCycleMountFuture<'a> =
     Pin<Box<dyn Future<Output = DaemonAdvisoryCycleMountV1> + Send + 'a>>;
@@ -960,11 +963,12 @@ impl DaemonInvocationService {
     /// The owner that answers an advisory-cycle request for `project_root`.
     ///
     /// A reopened project serves its first requests while project open is
-    /// still publishing owners, and then while a ready sealed generation
-    /// mounts the full cycle behind a placeholder. Those requests wait for the
-    /// publication within their own deadline instead of failing a call a
-    /// retry would answer. A finished publication without an owner, or an
-    /// owner that answers, returns at once.
+    /// still publishing owners, and then while its mount publishes the full
+    /// cycle behind a placeholder. Those requests wait for the publication
+    /// within their own deadline instead of failing a call a retry would
+    /// answer, and re-read the placeholder whenever its mount state moves. A
+    /// finished publication without an owner, or an owner that answers,
+    /// returns at once.
     #[hotpath::measure(label = "daemon.service.feedback.advisory_owner_wait", future = true)]
     pub(super) async fn answering_advisory_cycle_owner(
         &self,
@@ -975,18 +979,30 @@ impl DaemonInvocationService {
         loop {
             let (owner, publication, mut changed) =
                 self.project_runtimes.advisory_cycle_view(project_root);
-            let waits = match &owner {
-                Some(owner) => owner.service.mount().await == DaemonAdvisoryCycleMountV1::Mounting,
-                None => publication == Some(ProjectRuntimePublicationStateV1::Warming),
+            let mount_changed: DaemonAdvisoryCycleMountChangedFuture = match &owner {
+                Some(current) => match current.service.mount().await {
+                    DaemonAdvisoryCycleMountV1::Answers => return owner,
+                    DaemonAdvisoryCycleMountV1::Mounting(mount_changed) => mount_changed,
+                },
+                None if publication == Some(ProjectRuntimePublicationStateV1::Warming) => {
+                    Box::pin(std::future::pending())
+                }
+                None => return owner,
             };
             let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
-            if !waits || remaining_micros <= 0 {
+            if remaining_micros <= 0 {
                 return owner;
             }
             let remaining = Duration::from_micros(remaining_micros.unsigned_abs());
-            match tokio::time::timeout(remaining, changed.changed()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => return owner,
+            let woke = tokio::time::timeout(remaining, async {
+                tokio::select! {
+                    published = changed.changed() => published.is_ok(),
+                    () = mount_changed => true,
+                }
+            })
+            .await;
+            if !matches!(woke, Ok(true)) {
+                return owner;
             }
         }
     }

@@ -20,6 +20,15 @@ thread_local! {
         const { RefCell::new(String::new()) };
 }
 
+/// Drop the calling thread's pooled canonical serialization buffers; its next
+/// serialization allocates them again. A thread keeps up to eight 1 MiB object
+/// buffers and a 64 KiB digest buffer between calls.
+pub fn release_thread_canonical_scratch() {
+    canonical_serializer::release_thread_object_buffers();
+    // An exiting thread has already dropped its buffer.
+    let _ = CANONICAL_SHA256_SINK_BUFFER.try_with(RefCell::take);
+}
+
 impl ManifestDigest {
     /// Canonical `sha256:`-tagged encoding of raw SHA-256 digest bytes, the
     /// one constructor for digest material, so call sites never re-roll their
