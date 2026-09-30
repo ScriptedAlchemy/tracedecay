@@ -1277,10 +1277,17 @@ fn serve_broker_socket_client_inner(
                     &first_request,
                     || {
                         Box::pin(async {
-                            Ok(engine
-                                .cached_project_server(&handshake)
-                                .await?
-                                .is_some_and(|server| server.doctor_report_ready()))
+                            if let Some(server) = engine.cached_project_server(&handshake).await? {
+                                return Ok(server.doctor_report_ready());
+                            }
+                            // Only the project owner publishes the report, so a
+                            // Doctor asking about an unopened project admits
+                            // and opens it the way an initialize would.
+                            Box::pin(
+                                engine.schedule_project_server_warmup(handshake.clone(), None),
+                            )
+                            .await?;
+                            Ok(false)
                         })
                     },
                 ))
@@ -1444,7 +1451,7 @@ fn serve_broker_socket_client_inner(
                                         {
                                             Box::pin(engine.schedule_project_server_warmup(
                                                 handshake.clone(),
-                                                request.clone(),
+                                                Some(request.clone()),
                                             ))
                                             .await
                                             .err()
@@ -1795,14 +1802,32 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         || async {
             let (canonical_project_path, _) =
                 project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
-            Ok(Box::pin(portable_cached_project_server(
+            if let Some(server) = Box::pin(portable_cached_project_server(
                 &store_administration,
                 &canonical_project_path,
                 &handshake,
                 ProjectServerRequirement::Core,
             ))
             .await?
-            .is_some_and(|server| server.doctor_report_ready()))
+            {
+                return Ok(server.doctor_report_ready());
+            }
+            // Only the project owner publishes the report, so a Doctor asking
+            // about an unopened project admits and opens it the way an
+            // initialize would.
+            Box::pin(schedule_portable_project_server_warmup(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                handshake.clone(),
+                None,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
+            .await?;
+            Ok(false)
         },
     ))
     .await?
@@ -1983,7 +2008,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                                 invocation.clone(),
                                 http_application_registry.clone(),
                                 handshake.clone(),
-                                request.clone(),
+                                Some(request.clone()),
                                 #[cfg(test)]
                                 project_open_attempts.clone(),
                             ))

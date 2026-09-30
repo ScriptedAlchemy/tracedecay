@@ -640,7 +640,7 @@ impl DaemonEngine {
     pub(super) async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> Result<()> {
         self.schedule_project_server_warmup_inner(handshake, initialize_request)
             .await
@@ -649,7 +649,7 @@ impl DaemonEngine {
     fn schedule_project_server_warmup_inner(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
@@ -657,7 +657,7 @@ impl DaemonEngine {
             if self.cached_project_server(&handshake).await?.is_some() {
                 return Ok(());
             }
-            match Box::pin(self.begin_project_open(handshake, Some(initialize_request))).await? {
+            match Box::pin(self.begin_project_open(handshake, initialize_request)).await? {
                 ProjectOpenTaskClaim::InFlight(_) => Ok(()),
                 ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
                 ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
