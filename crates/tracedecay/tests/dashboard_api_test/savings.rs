@@ -18,7 +18,6 @@ use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::dashboard;
-use tracedecay_global_db::ParseOffset;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionRecord;
@@ -101,30 +100,22 @@ impl SavingsSeed<'_> {
     async fn upsert_session_message(
         &self,
         message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> bool {
+    ) {
         self.0
             .upsert_session_message_for_test(HostAdmissionScope::Project, message)
             .await
             .expect("seed savings session message")
     }
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
-    ) -> bool {
+    ) {
         self.0
-            .upsert_transcript_batch_for_test(
-                HostAdmissionScope::Project,
-                session,
-                messages,
-                source,
-                offset,
-            )
+            .seed_session_messages_for_test(HostAdmissionScope::Project, session, messages)
             .await
-            .is_ok()
+            .expect("seed savings session messages");
     }
 }
 
@@ -163,8 +154,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
+    gdb.upsert_session_message(&message(
             "m-usage-1",
             "sess-usage",
             "assistant",
@@ -178,8 +168,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
                 ),
             },
         ))
-        .await
-    );
+        .await;
 
     // S2: no usage anywhere → estimated (chars/4, user→input, assistant→output).
     assert!(
@@ -191,36 +180,32 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-est-1",
-            "sess-estimated",
-            "user",
-            1,
-            TEXT_USER,
-            MessageDetails {
-                timestamp: day_start + 210,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-est-2",
-            "sess-estimated",
-            "assistant",
-            2,
-            TEXT_ASSISTANT,
-            MessageDetails {
-                timestamp: day_start + 220,
-                model: Some("gpt-5.5-high"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-est-1",
+        "sess-estimated",
+        "user",
+        1,
+        TEXT_USER,
+        MessageDetails {
+            timestamp: day_start + 210,
+            model: Some("gpt-5.5-high"),
+            metadata_json: None,
+        },
+    ))
+    .await;
+    gdb.upsert_session_message(&message(
+        "m-est-2",
+        "sess-estimated",
+        "assistant",
+        2,
+        TEXT_ASSISTANT,
+        MessageDetails {
+            timestamp: day_start + 220,
+            model: Some("gpt-5.5-high"),
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S3: no model id recorded at all → "unknown model" row, never priced.
     assert!(
@@ -232,21 +217,19 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-unknown-1",
-            "sess-unknown",
-            "assistant",
-            1,
-            TEXT_UNKNOWN,
-            MessageDetails {
-                timestamp: day_start + 310,
-                model: None,
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-unknown-1",
+        "sess-unknown",
+        "assistant",
+        1,
+        TEXT_UNKNOWN,
+        MessageDetails {
+            timestamp: day_start + 310,
+            model: None,
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S4: usage (OpenAI field names) + a usage-less message → mixed.
     assert!(
@@ -258,36 +241,32 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-mixed-1",
-            "sess-mixed",
-            "assistant",
-            1,
-            TEXT_ASSISTANT,
-            MessageDetails {
-                timestamp: day_start + 410,
-                model: Some("claude-opus-4-8-thinking-max"),
-                metadata_json: Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#,),
-            },
-        ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(&message(
-            "m-mixed-2",
-            "sess-mixed",
-            "assistant",
-            2,
-            TEXT_MIXED,
-            MessageDetails {
-                timestamp: day_start + 420,
-                model: Some("claude-opus-4-8-thinking-max"),
-                metadata_json: None,
-            },
-        ))
-        .await
-    );
+    gdb.upsert_session_message(&message(
+        "m-mixed-1",
+        "sess-mixed",
+        "assistant",
+        1,
+        TEXT_ASSISTANT,
+        MessageDetails {
+            timestamp: day_start + 410,
+            model: Some("claude-opus-4-8-thinking-max"),
+            metadata_json: Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#),
+        },
+    ))
+    .await;
+    gdb.upsert_session_message(&message(
+        "m-mixed-2",
+        "sess-mixed",
+        "assistant",
+        2,
+        TEXT_MIXED,
+        MessageDetails {
+            timestamp: day_start + 420,
+            model: Some("claude-opus-4-8-thinking-max"),
+            metadata_json: None,
+        },
+    ))
+    .await;
 
     // S5: transcript metadata carries the shape Codex backfill writes. It is
     // still content metadata, not provider-usage billing authority.
@@ -300,8 +279,7 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         ))
         .await
     );
-    assert!(
-        gdb.upsert_session_message(&message(
+    gdb.upsert_session_message(&message(
             "m-codex-1",
             "sess-codex",
             "assistant",
@@ -315,25 +293,22 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
                 ),
             },
         ))
-        .await
-    );
-    assert!(
-        gdb.upsert_session_message(
-            &MessageRecordBuilder::new(
-                "cursor",
-                "m-codex-summary",
-                "sess-codex",
-                "assistant",
-                2,
-                "Synthetic Codex compaction placeholder that is not real model output.",
-                "summary",
-            )
-            .with_timestamp(Some(day_start + 520))
-            .with_model(Some("gpt-5.3-codex-high"))
-            .build()
+        .await;
+    gdb.upsert_session_message(
+        &MessageRecordBuilder::new(
+            "cursor",
+            "m-codex-summary",
+            "sess-codex",
+            "assistant",
+            2,
+            "Synthetic Codex compaction placeholder that is not real model output.",
+            "summary",
         )
-        .await
-    );
+        .with_timestamp(Some(day_start + 520))
+        .with_model(Some("gpt-5.3-codex-high"))
+        .build(),
+    )
+    .await;
 }
 
 async fn seed_daily_limit_regression(
@@ -379,15 +354,7 @@ async fn seed_daily_limit_regression(
         },
     ));
 
-    assert!(
-        gdb.upsert_transcript_batch(
-            &daily_session,
-            &messages,
-            "daily-limit-regression.jsonl",
-            ParseOffset::default(),
-        )
-        .await
-    );
+    gdb.seed_session_messages(&daily_session, &messages).await;
 }
 
 async fn start_fixture(seed: FixtureSeed) -> Fixture {

@@ -277,15 +277,13 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
             .await
             .unwrap_or_else(|e| panic!("seed session: {e}"))
     );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &message("s1", "s1-m1", 1_050, "work on main"),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("seed session message: {e}"))
-    );
+    runtime
+        .upsert_session_message_for_test(
+            HostAdmissionScope::Project,
+            &message("s1", "s1-m1", 1_050, "work on main"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("seed session message: {e}"));
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
         cg,
         None,

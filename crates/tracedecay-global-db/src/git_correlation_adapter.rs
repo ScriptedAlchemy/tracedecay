@@ -325,12 +325,8 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
 #[cfg(test)]
 mod tests {
     use super::GlobalDbGitCorrelationStore;
-    use crate::{
-        ParseOffset, TranscriptPersistenceError,
-        tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime},
-    };
+    use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
     use tracedecay_domain::ProjectId;
-    use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
         CommitRelationFilter, GitCorrelationError, GitRefFilter, GitScopeFilter, SessionsForQuery,
         SpanObservation, SpanSource, SystemGit,
@@ -479,58 +475,10 @@ mod tests {
                 if message.contains("ProjectSessions")
         ));
 
-        let session = SessionRecord {
-            provider: "codex".to_owned(),
-            session_id: "profile-git-evidence".to_owned(),
-            project_key: "user".to_owned(),
-            project_path: "user".to_owned(),
-            title: None,
-            started_at: Some(1),
-            ended_at: Some(1),
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-        let error = harness
-            .registered
-            .persist_transcript_batch_with_git_evidence_result(
-                &session,
-                &[],
-                "profile-git-evidence.jsonl",
-                ParseOffset::default(),
-                ParseOffset::default(),
-                tracedecay_sessions::runtime::TranscriptGitEvidence::new(
-                    &[],
-                    &[SpanObservation {
-                        provider: "codex".to_owned(),
-                        session_id: session.session_id.clone(),
-                        thread_id: None,
-                        branch: Some("main".to_owned()),
-                        worktree: "/repo".to_owned(),
-                        ts: 1,
-                        source: SpanSource::Ingest,
-                    }],
-                ),
-            )
-            .await
-            .expect_err("profile transcript authority must reject project Git evidence");
         assert!(matches!(
-            error,
-            TranscriptPersistenceError::Storage { operation, source }
-                if operation == "record transcript git evidence"
-                    && source.to_string().contains("ProjectSessions")
+            store.record_span_observation(&span_observation(10), 5).await,
+            Err(GitCorrelationError::Db(message))
+                if message.contains("ProjectSessions")
         ));
-        assert_eq!(
-            harness
-                .registered
-                .get_session("codex", "profile-git-evidence")
-                .await
-                .expect("load profile session"),
-            None,
-            "scope rejection must happen before transcript rows commit"
-        );
     }
 }

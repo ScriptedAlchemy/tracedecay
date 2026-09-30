@@ -7,7 +7,6 @@ use serde_json::json;
 use tracedecay_dashboard_api::{
     DashboardGitCorrelationReadFutureV1, DashboardGitCorrelationReadPortV1,
 };
-use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
@@ -298,13 +297,11 @@ fn loom_temporal_serves_recorded_tool_and_pull_request_events_in_recorded_time_o
         for (record, messages) in batches {
             fixture
                 .host_runtime
-                .upsert_transcript_batch_for_test(
-                    HostAdmissionScope::Project,
-                    record,
-                    &messages,
-                    &format!("loom-events:{}", record.session_id),
-                    ParseOffset::default(),
-                )
+                .seed_session_messages_for_test(
+                        HostAdmissionScope::Project,
+                        record,
+                        &messages,
+                    )
                 .await
                 .unwrap_or_else(|error| panic!("seed {}: {error}", record.session_id));
         }
@@ -376,7 +373,7 @@ fn loom_temporal_serves_an_empty_event_stream_as_complete_zero_coverage() {
         };
         fixture
             .host_runtime
-            .upsert_transcript_batch_for_test(
+            .seed_session_messages_for_test(
                 HostAdmissionScope::Project,
                 &quiet,
                 &[loom_message(
@@ -388,8 +385,6 @@ fn loom_temporal_serves_an_empty_event_stream_as_complete_zero_coverage() {
                     None,
                     "hello",
                 )],
-                "loom-events:quiet",
-                ParseOffset::default(),
             )
             .await
             .unwrap_or_else(|error| panic!("seed quiet session: {error}"));
@@ -632,12 +627,10 @@ fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
                 large_history_session(&fixture.host_runtime, &fixture.project_root, index);
             fixture
                 .host_runtime
-                .upsert_transcript_batch_for_test(
+                .seed_session_messages_for_test(
                     HostAdmissionScope::Project,
                     &session,
                     &large_history_messages(&session),
-                    &format!("large-history:{}", session.session_id),
-                    ParseOffset::default(),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("seed {}: {error}", session.session_id));

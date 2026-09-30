@@ -199,12 +199,10 @@ async fn seed_session_store(runtime: &DashboardTestRuntimeV1, project: &Path) {
     ];
 
     for row in rows {
-        assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
-                .await
-                .expect("seed analytics session message")
-        );
+        runtime
+            .upsert_session_message_for_test(HostAdmissionScope::Project, &row)
+            .await
+            .expect("seed analytics session message");
     }
 }
 

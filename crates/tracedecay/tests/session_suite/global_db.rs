@@ -157,7 +157,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     async fn lcm_load_raw_message(

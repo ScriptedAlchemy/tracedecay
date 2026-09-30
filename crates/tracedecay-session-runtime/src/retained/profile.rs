@@ -547,17 +547,10 @@ mod tests {
             .project_observation(observation.observation_id())
             .await
             .expect("project canonical observation");
-        assert!(
-            database
-                .upsert_transcript_batch(
-                    &owning_session,
-                    std::slice::from_ref(&owning_message),
-                    &format!("profile-retained-{message_id}.jsonl"),
-                    tracedecay_global_db::ParseOffset::default(),
-                )
-                .await,
-            "seed canonical owning transcript",
-        );
+        database
+            .lcm_ingest_raw_message(database.db_path().parent().unwrap(), &owning_message)
+            .await
+            .expect("seed canonical owning raw message");
         database
             .lcm_protect_session_raw_messages(provider, session_id)
             .await

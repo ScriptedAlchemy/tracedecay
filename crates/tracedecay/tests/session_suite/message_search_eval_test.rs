@@ -83,13 +83,14 @@ async fn seed_corpus(db: &HostAdmissionTestRuntimeV1, fixture: &Value) {
             .with_tool_names(message["tool_names"].as_str())
             .with_source(Some("/tmp/project/transcript.jsonl"), Some(ordinal as i64))
             .build();
-            assert!(
-                db.upsert_session_message_for_test(HostAdmissionScope::Project, &record)
-                    .await
-                    .expect("seed registered session message"),
-                "seed message {}",
-                message["id"].as_str().unwrap_or("?")
-            );
+            db.upsert_session_message_for_test(HostAdmissionScope::Project, &record)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "seed message {}: {error}",
+                        message["id"].as_str().unwrap_or("?")
+                    )
+                });
         }
     }
 }

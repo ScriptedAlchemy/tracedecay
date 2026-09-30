@@ -160,11 +160,9 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
         "x".repeat(tracedecay_lcm::MAX_DERIVED_TEXT_CHARS * 5)
     );
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
+        .await
+        .unwrap();
 
     let results = db
         .search_session_messages_for_test(

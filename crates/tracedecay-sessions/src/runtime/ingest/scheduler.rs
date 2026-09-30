@@ -213,7 +213,7 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_store::{
         ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
-        TranscriptWriteBatch, TranscriptWriteKind,
+        TranscriptWriteBatch,
     };
 
     use crate::runtime::hosts::codex;
@@ -254,18 +254,7 @@ mod tests {
             &self,
             batch: TranscriptWriteBatch,
         ) -> impl std::future::Future<Output = TranscriptStoreResult<()>> + Send {
-            let (cursor_path, kind) = batch.into_parts();
-            let (expected, next) = match kind {
-                TranscriptWriteKind::AdvanceOffset {
-                    expected_offset,
-                    next_offset,
-                }
-                | TranscriptWriteKind::Upsert {
-                    expected_offset,
-                    next_offset,
-                    ..
-                } => (expected_offset, next_offset),
-            };
+            let (cursor_path, expected, next) = batch.into_parts();
             let mut offsets = self.offsets.lock().expect("offset lock");
             let actual = *offsets.get(&cursor_path).unwrap_or(&ParseOffset::default());
             let result = if actual == expected {

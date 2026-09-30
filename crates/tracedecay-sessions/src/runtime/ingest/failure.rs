@@ -350,15 +350,6 @@ pub fn classify_transcript_ingest_disposition(
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidCursorPath) => {
             ("transcript_cursor_path_invalid", false, Degraded)
         }
-        source::TranscriptIngestError::Store(TranscriptStoreError::InvalidTranscriptPath) => {
-            ("transcript_path_invalid", false, Degraded)
-        }
-        source::TranscriptIngestError::Store(TranscriptStoreError::MissingTranscriptPath {
-            ..
-        }) => ("transcript_path_missing", false, Degraded),
-        source::TranscriptIngestError::Store(TranscriptStoreError::MessageIdentityMismatch {
-            ..
-        }) => ("transcript_message_identity_mismatch", false, Degraded),
         source::TranscriptIngestError::ScanIo { .. } => {
             ("transcript_source_io_failed", true, Unavailable)
         }

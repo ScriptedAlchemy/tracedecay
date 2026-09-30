@@ -1461,29 +1461,27 @@ async fn seed_lcm_message_with_role(
             .await
             .unwrap()
     );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &SessionMessageRecord {
-                    provider: provider.to_string(),
-                    message_id: message_id.to_string(),
-                    session_id: session_id.to_string(),
-                    role: role.to_string(),
-                    timestamp: Some(ordinal + 1),
-                    ordinal,
-                    text: text.into(),
-                    kind: Some(kind.to_string()),
-                    model: Some("test-model".to_string()),
-                    tool_names: None,
-                    source_path: Some(format!("{session_id}.jsonl")),
-                    source_offset: Some(0),
-                    metadata_json: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    runtime
+        .upsert_session_message_for_test(
+            HostAdmissionScope::Project,
+            &SessionMessageRecord {
+                provider: provider.to_string(),
+                message_id: message_id.to_string(),
+                session_id: session_id.to_string(),
+                role: role.to_string(),
+                timestamp: Some(ordinal + 1),
+                ordinal,
+                text: text.into(),
+                kind: Some(kind.to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some(format!("{session_id}.jsonl")),
+                source_offset: Some(0),
+                metadata_json: None,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 #[cfg(feature = "test-transport")]
@@ -1629,13 +1627,10 @@ pub(crate) async fn seed_temporal_lcm_tool_result_message(
         .await
         .unwrap()
         .expect("canonical tool result must project to the compatibility store");
-    assert!(
-        runtime
-            .upsert_session_message_for_test(HostAdmissionScope::Project, &projected)
-            .await
-            .unwrap(),
-        "canonical compatibility output must apply the bounded payload policy"
-    );
+    runtime
+        .upsert_session_message_for_test(HostAdmissionScope::Project, &projected)
+        .await
+        .expect("canonical compatibility output must apply the bounded payload policy");
     projection
 }
 

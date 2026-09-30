@@ -3,12 +3,10 @@ use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 
 use tracedecay_store::{
-    ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
-    TranscriptWriteBatch, TranscriptWriteKind,
+    ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult, TranscriptWriteBatch,
 };
 
 use tracedecay_global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
-use tracedecay_sessions::runtime::TranscriptGitEvidence;
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 
 /// Transcript-store adapter over an already-open authoritative
@@ -76,66 +74,39 @@ where
 
     #[hotpath::skip]
     async fn persist_batch(&self, batch: TranscriptWriteBatch) -> TranscriptStoreResult<()> {
-        let (cursor_path, kind) = batch.into_parts();
+        let (cursor_path, mut expected_offset, next_offset) = batch.into_parts();
         let cursor_key = Self::path_text(&cursor_path);
-        match kind {
-            TranscriptWriteKind::AdvanceOffset {
-                expected_offset,
-                next_offset,
-            } => {
-                // Offset-only batches contain no parse products, so advancing
-                // across a compatible append winner cannot persist stale rows.
-                // Full batches below must never rewrite their observed cursor:
-                // their caller has to re-read and reparse after a conflict.
-                let mut expected_offset = expected_offset;
-                loop {
-                    match self
-                        .db()
-                        .persist_transcript_offset_result(&cursor_key, expected_offset, next_offset)
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(TranscriptPersistenceError::Conflict { expected, actual }) => {
-                            if actual == next_offset {
-                                return Ok(());
-                            }
-                            let compatible_successor = actual.file_id != 0
-                                && actual.file_id == next_offset.file_id
-                                && actual.byte_offset > expected.byte_offset
-                                && actual.mtime >= expected.mtime
-                                && next_offset.byte_offset > actual.byte_offset
-                                && next_offset.mtime >= actual.mtime;
-                            if !compatible_successor {
-                                return Err(Self::persistence_error(
-                                    &cursor_path,
-                                    TranscriptPersistenceError::Conflict { expected, actual },
-                                ));
-                            }
-                            expected_offset = actual;
-                        }
-                        Err(error) => {
-                            return Err(Self::persistence_error(&cursor_path, error));
-                        }
+        // Offset-only batches contain no parse products, so advancing across a
+        // compatible append winner cannot persist stale rows.
+        loop {
+            match self
+                .db()
+                .persist_transcript_offset_result(&cursor_key, expected_offset, next_offset)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(TranscriptPersistenceError::Conflict { expected, actual }) => {
+                    if actual == next_offset {
+                        return Ok(());
                     }
+                    let compatible_successor = actual.file_id != 0
+                        && actual.file_id == next_offset.file_id
+                        && actual.byte_offset > expected.byte_offset
+                        && actual.mtime >= expected.mtime
+                        && next_offset.byte_offset > actual.byte_offset
+                        && next_offset.mtime >= actual.mtime;
+                    if !compatible_successor {
+                        return Err(Self::persistence_error(
+                            &cursor_path,
+                            TranscriptPersistenceError::Conflict { expected, actual },
+                        ));
+                    }
+                    expected_offset = actual;
+                }
+                Err(error) => {
+                    return Err(Self::persistence_error(&cursor_path, error));
                 }
             }
-            TranscriptWriteKind::Upsert {
-                session,
-                messages,
-                expected_offset,
-                next_offset,
-            } => self
-                .db()
-                .persist_transcript_batch_with_git_evidence_result(
-                    &session,
-                    &messages,
-                    &cursor_key,
-                    expected_offset,
-                    next_offset,
-                    TranscriptGitEvidence::new(&[], &[]),
-                )
-                .await
-                .map_err(|error| Self::persistence_error(&cursor_path, error)),
         }
     }
 }

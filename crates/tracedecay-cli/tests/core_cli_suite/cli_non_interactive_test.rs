@@ -266,26 +266,24 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
                 .await
                 .expect("session fixture write")
         );
-        assert!(
-            runtime
-                .upsert_session_message_for_test(
-                    HostAdmissionScope::Project,
-                    &MessageRecordBuilder::new(
-                        "claude",
-                        "message-1",
-                        "session-1",
-                        "assistant",
-                        1,
-                        "Blocked: waiting on missing deploy credentials",
-                        "message",
-                    )
-                    .with_source(Some("/tmp/project/transcript.jsonl"), Some(1))
-                    .with_metadata(Some(r#"{"task_id":"task-7"}"#))
-                    .build(),
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "claude",
+                    "message-1",
+                    "session-1",
+                    "assistant",
+                    1,
+                    "Blocked: waiting on missing deploy credentials",
+                    "message",
                 )
-                .await
-                .expect("session message fixture write")
-        );
+                .with_source(Some("/tmp/project/transcript.jsonl"), Some(1))
+                .with_metadata(Some(r#"{"task_id":"task-7"}"#))
+                .build(),
+            )
+            .await
+            .expect("session message fixture write");
         // The daemon started below opens this database as a separate process.
         // Checkpoint and release the writer here so it sees the fixture rows
         // and can take the single-writer authority, the same discipline the

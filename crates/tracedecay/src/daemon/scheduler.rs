@@ -1687,17 +1687,10 @@ mod global_retention_tests {
             source_offset: None,
             metadata_json: None,
         };
-        assert!(
-            database
-                .upsert_transcript_batch(
-                    &session,
-                    std::slice::from_ref(&message),
-                    "global-retention-fixture",
-                    tracedecay_global_db::ParseOffset::default(),
-                )
-                .await,
-            "project the registered retention fixture message"
-        );
+        database
+            .lcm_ingest_raw_message(database.db_path().parent().unwrap(), &message)
+            .await
+            .expect("seed the registered retention fixture message");
 
         let transaction = database
             .begin_write_transaction()

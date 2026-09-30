@@ -1,5 +1,4 @@
 use tempfile::TempDir;
-use tracedecay_global_db::ParseOffset;
 use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
@@ -27,12 +26,10 @@ trait ProfileLcmFixture {
 
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool;
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
     ) -> bool;
 
     async fn lcm_insert_summary_node(
@@ -58,25 +55,17 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
-    async fn upsert_transcript_batch(
+    async fn seed_session_messages(
         &self,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
-        source: &str,
-        offset: ParseOffset,
     ) -> bool {
-        self.upsert_transcript_batch_for_test(
-            HostAdmissionScope::Profile,
-            session,
-            messages,
-            source,
-            offset,
-        )
-        .await
-        .is_ok()
+        self.seed_session_messages_for_test(HostAdmissionScope::Profile, session, messages)
+            .await
+            .is_ok()
     }
 
     async fn lcm_insert_summary_node(
@@ -159,15 +148,9 @@ async fn insert_raw_messages(
             raw_message(provider, &message_id, session_id, (idx + 1) as i64, content)
         })
         .collect();
-    db.upsert_transcript_batch_for_test(
-        HostAdmissionScope::Profile,
-        &session,
-        &messages,
-        &format!("session-lcm-query-{provider}-{session_id}.jsonl"),
-        ParseOffset::default(),
-    )
-    .await
-    .expect("registered transcript fixture should write")
+    db.seed_session_messages_for_test(HostAdmissionScope::Profile, &session, &messages)
+        .await
+        .expect("registered transcript fixture should write")
 }
 
 async fn replace_inline_content_without_updating_hash(
