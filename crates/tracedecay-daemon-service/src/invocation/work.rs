@@ -357,11 +357,11 @@ mod placement_observation_tests {
             .expect("placement releases or quarantines")
     }
 
-    #[test]
-    fn release_keeps_only_commits_not_reachable_from_another_ref() {
-        let sandbox = tempfile::tempdir().expect("sandbox");
-        let repository_root = sandbox.path().join("repository");
-        let placement_root = sandbox.path().join("placement");
+    /// A linked worktree `placement` of a one-commit `main` repository, and
+    /// its placement target.
+    fn linked_placement(sandbox: &std::path::Path) -> (std::path::PathBuf, WorkPlacementTargetV1) {
+        let repository_root = sandbox.join("repository");
+        let placement_root = sandbox.join("placement");
         std::fs::create_dir(&repository_root).expect("repository root");
         git(
             &repository_root,
@@ -390,6 +390,7 @@ mod placement_observation_tests {
                 "main",
             ],
         );
+        let placement_root = placement_root.canonicalize().expect("canonical placement");
         let target = WorkPlacementTargetV1::new(
             WorkPlacementKindV1::LinkedWorktree,
             Some(
@@ -402,6 +403,61 @@ mod placement_observation_tests {
             true,
         )
         .expect("linked target");
+        (placement_root, target)
+    }
+
+    /// A placement observed while another thread walks its checkout reports
+    /// the checkout's real state, not an unreadable target with no dirt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn placement_observation_shares_the_discovery_walk_another_thread_owns() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let (placement_root, target) = linked_placement(sandbox.path());
+        std::fs::write(placement_root.join("fixture"), "edited\n").expect("dirty fixture");
+        std::fs::write(placement_root.join("scratch"), "scratch\n").expect("untracked file");
+
+        let mut block =
+            tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(
+                &placement_root,
+            );
+        let owner = tokio::task::spawn_blocking({
+            let target = target.clone();
+            move || observe_placement_target(None, &target, UtcMicros(100))
+        });
+        block.wait_entered().await;
+        let joined = tokio::task::spawn_blocking({
+            let target = target.clone();
+            move || observe_placement_target(None, &target, UtcMicros(100))
+        });
+        tracedecay_runtime_core::git_repository::wait_for_topology_callers_for_test(
+            &placement_root,
+            1,
+            || u64::from(joined.is_finished()),
+        )
+        .await;
+        block.release();
+
+        for observation in [owner.await.unwrap(), joined.await.unwrap()] {
+            let observation = observation.expect("observation");
+            assert!(observation.readable, "the placement checkout is readable");
+            assert_eq!(observation.dirty_tracked_paths, 1);
+            assert_eq!(observation.untracked_paths, 1);
+            assert_eq!(observation.unique_commits, Some(0));
+        }
+        assert_eq!(
+            tracedecay_runtime_core::git_repository::repository_discovery_count_for_test(
+                &placement_root
+            ),
+            1
+        );
+        tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(
+            &placement_root,
+        );
+    }
+
+    #[test]
+    fn release_keeps_only_commits_not_reachable_from_another_ref() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let (placement_root, target) = linked_placement(sandbox.path());
 
         let clean = observe_placement_target(None, &target, UtcMicros(100)).expect("observation");
         assert_eq!(clean.unique_commits, Some(0));

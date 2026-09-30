@@ -167,15 +167,12 @@ pub(super) async fn project_open_gate(
     match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
         Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
         Ok(None) => {}
-        Err(tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
-            ..
-        }) => {
+        Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { .. }) => {
             return Err(super::core_proxy::repository_discovery_deferred(
                 &route.project_path,
                 tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
             ));
         }
-        Err(_) => {}
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates
@@ -225,7 +222,10 @@ where
     Value: Send + 'static,
 {
     let probe = tokio::task::spawn_blocking(probe);
-    let budget = repository_probe_budget(project_path);
+    let budget = tracedecay_runtime_core::git_discovery::repository_discovery_budget(
+        project_path,
+        std::time::Instant::now() + REPOSITORY_DISCOVERY_DEADLINE,
+    );
     tokio::pin!(probe);
     tokio::pin!(budget);
     match tokio::select! {
@@ -243,19 +243,6 @@ where
             tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
         )),
     }
-}
-
-/// Wall-clock discovery budget, or the moment a test parks the walk.
-///
-/// The parked walk is already past any useful wait: returning here marks the
-/// project discovery-blocked without sleeping out the production deadline.
-async fn repository_probe_budget(project_path: &Path) {
-    if tracedecay_runtime_core::git_repository::wait_until_repository_discovery_blocks(project_path)
-        .await
-    {
-        return;
-    }
-    tokio::time::sleep(REPOSITORY_DISCOVERY_DEADLINE).await;
 }
 
 /// Finish or refuse repository discovery before any cross-project admission lock.

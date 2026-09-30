@@ -87,18 +87,13 @@ impl TraceDecay {
             project_root,
         ) {
             Ok(git_common_dir) => git_common_dir,
-            Err(
-                tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
-                    path,
-                },
-            ) => {
+            Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { path }) => {
                 return Err(TraceDecayError::project_route(
                     tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
                     true,
                     format!("repository discovery blocked on {path}"),
                 ));
             }
-            Err(_) => None,
         };
         if selected.is_none()
             && let Some(registry_database) = registry_database
