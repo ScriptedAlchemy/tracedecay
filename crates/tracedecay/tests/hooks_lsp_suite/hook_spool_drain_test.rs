@@ -81,8 +81,13 @@ fn capture_edit(home: &Path, project: &Path, generation: &str) {
         "edits": [{ "old_string": "pub fn drained() {}", "new_string": generation }],
         "workspace_roots": [project],
     });
+    run_hook(home, project, "hook-cursor-after-file-edit", &event);
+}
+
+/// Runs `command` as the host invokes it and requires it to succeed.
+fn run_hook(home: &Path, project: &Path, command: &str, event: &serde_json::Value) {
     let mut child = tracedecay_command_with_home(home)
-        .arg("hook-cursor-after-file-edit")
+        .arg(command)
         .current_dir(project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -99,7 +104,7 @@ fn capture_edit(home: &Path, project: &Path, generation: &str) {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "capture failed: {}",
+        "{command} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -116,27 +121,7 @@ fn capture_stop(home: &Path, project: &Path, generation: &str) {
         "loop_count": 0,
         "workspace_roots": [project],
     });
-    let mut child = tracedecay_command_with_home(home)
-        .arg("hook-cursor-stop")
-        .current_dir(project)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(event.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stop failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    run_hook(home, project, "hook-cursor-stop", &event);
 }
 
 fn published_receipts(receipts: &Path) -> Vec<PathBuf> {
@@ -159,14 +144,7 @@ fn published_receipts(receipts: &Path) -> Vec<PathBuf> {
 /// Seconds until the Cursor receipt spool is empty again, or `None` when it
 /// still holds a receipt at `limit`.
 fn receipt_drain_latency(receipts: &Path, limit: Duration) -> Option<Duration> {
-    let started = Instant::now();
-    while started.elapsed() < limit {
-        if published_receipts(receipts).is_empty() {
-            return Some(started.elapsed());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    None
+    latency_until(limit, || published_receipts(receipts).is_empty())
 }
 
 fn publish(receipts: &Path, receipt: &HookDeliverySourceReceiptV1) {
@@ -185,9 +163,13 @@ fn spooled_bytes(records: &Path) -> u64 {
 /// Seconds until the Cursor spool's records file is empty again, or `None`
 /// when it is still holding records at `limit`.
 fn drain_latency(records: &Path, limit: Duration) -> Option<Duration> {
+    latency_until(limit, || spooled_bytes(records) == 0)
+}
+
+fn latency_until(limit: Duration, drained: impl Fn() -> bool) -> Option<Duration> {
     let started = Instant::now();
     while started.elapsed() < limit {
-        if spooled_bytes(records) == 0 {
+        if drained() {
             return Some(started.elapsed());
         }
         std::thread::sleep(Duration::from_millis(50));
