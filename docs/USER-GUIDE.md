@@ -490,7 +490,7 @@ tracedecay tool search "authenticate" --limit 5
 tracedecay tool context "implement user authentication"
 ```
 
-This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to the human text rendering; use `--json` for the raw payload.
+This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to the human text rendering. `--json` prints the MCP tool result every tool prints: the rendered `content`, `isError`, and `structuredContent` holding the whole typed result (or a refusal's typed `problem` record). `--format json` prints only the typed result.
 
 ```bash
 tracedecay tool context "implement user authentication" --json --max-nodes 30
@@ -504,7 +504,7 @@ The `--max-nodes` flag controls how many symbols are included (default: 20).
 tracedecay tool files                           # all files
 tracedecay tool files --path src/mcp            # only files under src/mcp/
 tracedecay tool files --pattern "**/*.rs"       # only Rust files
-tracedecay tool files --json                    # machine-readable output
+tracedecay tool files --json                    # tool result; typed payload in structuredContent
 ```
 
 ### Running the MCP server directly
@@ -761,7 +761,7 @@ tracedecay tool affected --args '{"files":["src/lib.rs"],"depth":3}'
 # custom test file pattern
 tracedecay tool affected --args '{"files":["src/lib.rs"],"filter":"*_test.rs"}'
 
-# raw JSON payload instead of the human rendering
+# the tool result, with the typed payload under structuredContent
 tracedecay tool affected --args '{"files":["src/lib.rs"]}' --json
 ```
 

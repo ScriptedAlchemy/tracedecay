@@ -4,7 +4,9 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult};
+use tracedecay_contracts::{
+    ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationProblemRecord, ApplicationResult,
+};
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
@@ -88,7 +90,7 @@ pub fn render_application_result(
     });
     match result {
         Ok(envelope) => {
-            let mut rendered = text_tool_result(&text, Vec::new());
+            let mut rendered = text_tool_result(&text, Vec::new()).with_structured_result(value);
             ResponseTrailer {
                 touched_files: &envelope.touched_files,
                 code_graph: envelope.code_graph.as_ref(),
@@ -97,7 +99,7 @@ pub fn render_application_result(
             .attach(&mut rendered);
             Ok(rendered)
         }
-        Err(problem) => problem_tool_result(&text, problem),
+        Err(problem) => problem_tool_result(&text, &problem.problem),
     }
 }
 
@@ -106,8 +108,8 @@ pub fn render_application_result(
 /// would strand the problem in prose no client can classify; the legal
 /// actions, retry directive, detail, and any committed receipt are what a
 /// caller acts on.
-pub fn problem_tool_result(text: &str, problem: &ApplicationProblemEnvelope) -> Result<ToolResult> {
-    let failure_message = match problem.problem.kind() {
+pub fn problem_tool_result(text: &str, problem: &ApplicationProblemRecord) -> Result<ToolResult> {
+    let failure_message = match problem.kind {
         ApplicationProblemKind::NotFoundOrNotAuthorized => {
             "application surface was not found or is not authorized"
         }
@@ -118,7 +120,7 @@ pub fn problem_tool_result(text: &str, problem: &ApplicationProblemEnvelope) -> 
     if let Some(object) = rendered.value.as_object_mut() {
         object.insert(
             "structuredContent".to_string(),
-            problem_structured_content(&problem.problem)?,
+            problem_structured_content(problem)?,
         );
     }
     Ok(rendered

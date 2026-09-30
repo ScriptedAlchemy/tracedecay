@@ -512,12 +512,12 @@ fn invocation_terminal(result: &ApplicationSurfaceInvocationResult) -> Value {
     }
 }
 
-/// The application envelope a CLI `--json` call printed: the envelope
-/// itself for an answer, and for a refusal the tool result's envelope text,
+/// The application envelope a CLI `--json` call printed: an answer's
+/// `structuredContent`, and for a refusal the tool result's envelope text,
 /// whose record is the one at `structuredContent.problem`.
 fn cli_terminal(printed: Value) -> Value {
     if printed["isError"] != true {
-        return printed;
+        return printed["structuredContent"].clone();
     }
     let envelope: Value = serde_json::from_str(
         printed["content"][0]["text"]
@@ -1560,7 +1560,8 @@ fn cli_symbol_search_payload(
     let output = run_symbol_search_cli(fixture.home(), &fixture.project, query, cursor);
     assert_command_success("CLI code_symbol_search", &output);
     let envelope: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&output.stdout).expect("CLI application envelope");
+        serde_json::from_value(common::tool_json_structured_content(&output.stdout))
+            .expect("CLI application envelope");
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
         panic!("CLI code_symbol_search must return an evidence outcome");
     };
