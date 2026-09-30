@@ -1019,33 +1019,19 @@ impl ProcessAllocatorTrimV1 {
 /// RSS is what admission trusts, so those pages refuse real work until the
 /// allocator is asked for them.
 ///
-/// A mimalloc global allocator serves only Rust allocations. `SQLite`,
-/// tree-sitter, and libgit2 call `malloc` directly, so glibc's arenas are
-/// trimmed after the installed release as well.
+/// The composition root that installs an allocator routes `SQLite` and
+/// tree-sitter through it, so its release returns their pages too. Without
+/// one, glibc serves everything and is trimmed.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
-    measured_trim(|| {
-        let released = installed_process_allocator_release_v1()
-            .map(|release| (release.release)())
-            .is_some();
-        glibc_trim() || released
-    })
-}
-
-/// Return freed glibc arena pages to the kernel without the installed release.
-///
-/// C-library churn (`SQLite` statements and caches on the store writers,
-/// tree-sitter parses on the index workers) accumulates between the events
-/// that run the full release, so the daemon runs this on its resident-memory
-/// sampling cadence. It never waits on a busy worker pool.
-#[must_use]
-pub fn release_c_library_heap_v1() -> ProcessAllocatorTrimV1 {
-    measured_trim(glibc_trim)
-}
-
-fn measured_trim(trim: impl FnOnce() -> bool) -> ProcessAllocatorTrimV1 {
     let before_bytes = sampled_process_resident_bytes_v1();
-    let trimmed = trim();
+    let trimmed = match installed_process_allocator_release_v1() {
+        Some(release) => {
+            (release.release)();
+            true
+        }
+        None => glibc_trim(),
+    };
     let after_bytes = sampled_process_resident_bytes_v1();
     let trim = ProcessAllocatorTrimV1 {
         trimmed,

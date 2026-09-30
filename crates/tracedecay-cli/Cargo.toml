@@ -40,6 +40,11 @@ path = "tests/host_journeys_suite/main.rs"
 required-features = ["test-transport"]
 
 [[test]]
+name = "c_library_allocator"
+path = "tests/c_library_allocator.rs"
+required-features = ["alloc-mimalloc"]
+
+[[test]]
 name = "work_loop_journey"
 path = "tests/work_loop_journey.rs"
 required-features = ["test-transport"]
@@ -195,6 +200,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
+tree-sitter = "0.26"
 # Self-update authenticates a release archive by its GitHub build-provenance
 # attestation against the embedded Sigstore public-good trust root; without
 # `tuf` the root is pinned by this version rather than fetched at runtime.
@@ -240,6 +246,7 @@ tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tree-sitter-rust = "0.24"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 xattr = "1"

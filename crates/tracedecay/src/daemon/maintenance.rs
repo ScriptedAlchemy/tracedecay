@@ -25,8 +25,6 @@ use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_runtime_core::resident_memory::release_c_library_heap_v1;
-
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
 
@@ -521,10 +519,9 @@ impl MaintenanceCoordinator {
     /// cancelled. Publishing a sample runs the pressure reclaimers when it
     /// reaches the high watermark, so this loop is what turns a climb during
     /// a cold index into released memory instead of refused admissions. Each
-    /// sample first returns freed C-library heap, which no owner is charged
-    /// for and which no other release reaches between graph publications,
-    /// has an index pool that went idle collect its workers' heaps, and asks
-    /// the async runtime and store workers to collect theirs as they idle.
+    /// sample first has an index pool that went idle collect its workers'
+    /// heaps, and asks the async runtime and store workers to collect theirs
+    /// as they idle.
     #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
         let log = Arc::clone(&self.resident_memory_log);
@@ -532,7 +529,6 @@ impl MaintenanceCoordinator {
             &self.cancellation,
             RESIDENT_MEMORY_SAMPLE_INTERVAL_V1,
             Arc::new(move || {
-                let _ = release_c_library_heap_v1();
                 collect_idle_installed_worker_heaps();
                 request_idle_thread_collection_v1();
                 record_process_resident_memory_gauge(&log);
