@@ -284,7 +284,7 @@ const CuratorResolvedScopeSchema = ResolvedScopeSchema.extend({
   scope_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
 });
 
-const AutomaticCuratorResponseSchema = z
+export const AutomaticCuratorResponseSchema = z
   .object({
     kind: z.literal("success"),
     value: z.object({
