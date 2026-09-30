@@ -95,6 +95,33 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
             "jobs:\n  test:\n    runs-on: ${{ inputs.runner }}\n"
         )
 
+    def test_accepts_literal_hosted_runner_choices(self) -> None:
+        workflow = """jobs:
+  test:
+    runs-on: ${{ matrix.lane == 'product' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_repository(root, workflow)
+            self.policy.validate_repository(root)
+
+    def test_rejects_custom_runner_in_either_literal_choice(self) -> None:
+        for first, second in (
+            ("self-hosted", "ubuntu-24.04-arm"),
+            ("ubuntu-24.04", "tracedecay-linux-64core"),
+        ):
+            with self.subTest(first=first, second=second):
+                self.assert_rejected(
+                    "jobs:\n  test:\n    runs-on: ${{ matrix.lane == 'product' "
+                    f"&& '{first}' || '{second}' }}}}\n"
+                )
+
+    def test_rejects_dynamic_runner_choice(self) -> None:
+        self.assert_rejected(
+            "jobs:\n  test:\n    runs-on: ${{ matrix.lane == 'product' "
+            "&& 'ubuntu-24.04' || inputs.runner }}\n"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

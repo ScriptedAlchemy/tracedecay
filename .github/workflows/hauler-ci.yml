@@ -104,11 +104,21 @@ jobs:
       pull-requests: read
       checks: write
       actions: read
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Authenticate toolchain image pull
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/hauler-ci-docker
+        run: |
+          umask 077
+          mkdir -p "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Drain eligible PR snapshots
         id: hauler
         uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
@@ -129,3 +139,6 @@ jobs:
           path: ${{ steps.hauler.outputs.evidence }}
           if-no-files-found: error
           retention-days: 7
+      - name: Remove image pull credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/hauler-ci-docker"

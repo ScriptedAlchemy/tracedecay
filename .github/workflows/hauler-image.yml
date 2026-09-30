@@ -1,0 +1,159 @@
+name: Hauler toolchain image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/hauler/Dockerfile
+      - .github/workflows/hauler-image.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: hauler-image-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/scriptedalchemy/tracedecay-ci
+
+jobs:
+  build:
+    if: github.repository == 'ScriptedAlchemy/tracedecay' && github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: '"ubuntu-24.04"'
+          - arch: arm64
+            runner: '"ubuntu-24.04-arm"'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Authenticate image publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/hauler-image-docker
+        run: |
+          umask 077
+          mkdir -p "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build and publish native image
+        run: |
+          docker buildx create --name hauler-image --driver docker-container --use
+          docker buildx build .github/hauler --file .github/hauler/Dockerfile \
+            --platform "linux/$ARCH" --provenance=false --push \
+            --tag "$IMAGE:$GITHUB_SHA-$ARCH" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --metadata-file "$RUNNER_TEMP/image-metadata.json"
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          digest = json.loads((root / "image-metadata.json").read_text())["containerimage.digest"]
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest), digest
+          arch = os.environ["ARCH"]
+          reference = f"{os.environ['IMAGE']}@{digest}"
+          subprocess.run(["docker", "pull", "--quiet", reference], check=True, stdout=subprocess.DEVNULL)
+          subprocess.run([
+              "docker", "run", "--rm", "--pull", "never", "--network", "none", "--user", "10001:10001",
+              "--env", "HOME=/tmp", "--env", "CARGO_HOME=/tmp/cargo", reference, "sh", "-ec",
+              'node --version; hauler --version; test "$(hauler --version)" = "cargo-hauler 0.12.0"; '
+              'rustc --version; pnpm --version; cargo-nextest --version',
+          ], check=True, timeout=60)
+          (root / f"image-{arch}.json").write_text(json.dumps({
+              "image": os.environ["IMAGE"], "revision": os.environ["GITHUB_SHA"],
+              "architecture": arch, "digest": digest,
+          }) + "\n")
+          PY
+      - name: Preserve architecture digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hauler-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove publisher credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/hauler-image-docker"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+      reference: ${{ steps.index.outputs.reference }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: hauler-image-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/image-digests
+      - name: Authenticate image publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/hauler-image-docker
+        run: |
+          umask 077
+          mkdir -p "$DOCKER_CONFIG"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish and verify multi-platform index
+        id: index
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          image, revision = os.environ["IMAGE"], os.environ["GITHUB_SHA"]
+          digests = {}
+          for arch in ("amd64", "arm64"):
+              row = json.loads((root / "image-digests" / f"image-{arch}.json").read_text())
+              assert row["image"] == image and row["revision"] == revision
+              assert row["architecture"] == arch
+              assert re.fullmatch(r"sha256:[0-9a-f]{64}", row["digest"])
+              digests[arch] = row["digest"]
+          tag = f"{image}:{revision}"
+          subprocess.run(["docker", "buildx", "imagetools", "create", "--tag", tag,
+                          *(f"{image}@{digest}" for digest in digests.values())], check=True)
+          manifest = json.loads(subprocess.check_output([
+              "docker", "buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", tag,
+          ]))
+          actual = {(row["platform"]["os"], row["platform"]["architecture"]): row["digest"]
+                    for row in manifest["manifests"]}
+          assert actual == {("linux", arch): digest for arch, digest in digests.items()}, actual
+          digest = manifest["digest"]
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+          reference = f"{image}@{digest}"
+          (root / "hauler-image.json").write_text(json.dumps({
+              "image": image, "revision": revision, "digest": digest,
+              "reference": reference, "platforms": digests,
+          }, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"digest={digest}\nreference={reference}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Published `{reference}` for linux/amd64 and linux/arm64.\n")
+          PY
+      - name: Preserve verified image reference
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hauler-image
+          path: ${{ runner.temp }}/hauler-image.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove publisher credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/hauler-image-docker"
