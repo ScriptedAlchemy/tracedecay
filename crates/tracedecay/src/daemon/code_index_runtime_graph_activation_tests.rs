@@ -1792,10 +1792,10 @@ async fn first_search_after_restart_serves_text_while_the_graph_head_recovers() 
         .send(())
         .expect("release the retained graph head recovery");
     let seat_deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while !registry
+    while registry
         .retained_text_owner_for_root(&canonical_fixture)
         .await
-        .is_some_and(|text| text.interactive_graph_store().is_ok())
+        .is_none_or(|text| text.interactive_graph_store().is_err())
     {
         assert!(
             std::time::Instant::now() <= seat_deadline,
