@@ -894,12 +894,11 @@ const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native 
      search keep serving, and the graph retries on its own once retained memory is given \
      back or RSS falls (a source change that seals a new generation also retries it)";
 
-/// Remediation when another holder kept the code-generation store lock through
-/// every bounded seat retry of a sealed generation.
-const CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1: &str = "the sealed code generation \
-     could not seat because another owner held the code-generation store lock through every \
-     retry; exact and lexical search keep serving, and `tracedecay sync` or the next source \
-     change retries the seat";
+/// Remediation when a worktree refused by a held code-generation store lock
+/// cannot wait for that lock's release.
+const CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1: &str = "the worktree could not wait \
+     for the code-generation store lock to be released; exact and lexical search keep serving, \
+     and `tracedecay sync` or the next source change retries";
 
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a

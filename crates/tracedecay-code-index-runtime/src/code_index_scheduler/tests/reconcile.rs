@@ -3273,10 +3273,9 @@ async fn hold_second_publication_at_decode(
 }
 
 /// A publication's serving decode can meet another holder of the
-/// code-generation store lock. That holder releases without waking the
-/// worktree, so the refusal itself must re-arm the seat: once the lock is
-/// free the new generation seats and reads `ready`, instead of staying
-/// `indexing` on a sealed generation nothing retries.
+/// code-generation store lock. The holder's release is what seats the new
+/// generation: however long the lock stays held, the worktree neither parks
+/// nor needs a sync or edit, and it reads `ready` once the lock is free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -3287,10 +3286,30 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
     let holder = acquire_code_generation_store_lock(&held.scoped_store)
         .expect("hold the code-generation store lock");
     let (second, release_after_decode) = held.decode().await;
-    drop(holder);
     release_after_decode
         .send(())
         .expect("release graph prepare");
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let while_held = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness read")
+        .expect("mounted worktree");
+    assert_eq!(while_held.parked, None, "{while_held:?}");
+    assert_ne!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        Some(second.clone()),
+        "the generation cannot seat while the lock is held"
+    );
+    drop(holder);
 
     let ready = wait_for_ready_generation(&registry, fixture.path())
         .await

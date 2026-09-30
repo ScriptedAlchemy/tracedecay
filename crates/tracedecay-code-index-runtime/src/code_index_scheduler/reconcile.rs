@@ -405,11 +405,10 @@ impl CodeIndexSchedulerErrorV1 {
     /// because a bounded shared resource was already fully held, and it is
     /// released by whoever holds it rather than by anything about this input.
     ///
-    /// The background worker schedules its own delayed retry for exactly these,
-    /// because releasing shared capacity emits no wake: a sibling worktree or
-    /// artifact build finishing does not notify this worktree, so without a
-    /// self-scheduled retry it stayed stale until an unrelated query or edit
-    /// happened to wake it.
+    /// The background worker retries these on its own, because a sibling
+    /// worktree or artifact build finishing does not notify this worktree: a
+    /// held store lock is retried when the kernel reports its release, and
+    /// memory after a delay, since RSS can fall with no owner releasing it.
     ///
     /// The distinction the admission failure carries is the whole point. A
     /// request that exceeds the *entire* process limit is shaped like a
@@ -439,6 +438,17 @@ impl CodeIndexSchedulerErrorV1 {
             )) => true,
             _ => false,
         }
+    }
+
+    /// Another owner, in this or another process, holds this scope's
+    /// code-generation store lock.
+    pub fn is_store_lock_contended(&self) -> bool {
+        matches!(
+            self,
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::StoreLockContended,
+            ))
+        )
     }
 
     /// The transient refusals that resident memory given back lifts, as

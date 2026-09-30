@@ -481,12 +481,11 @@ async fn a_transient_capacity_refusal_is_retried_without_an_external_wake() {
 }
 
 /// A pass refused because another owner holds this scope's code-generation
-/// store lock is retried by the worker on its own, and the worktree converges
-/// once the holder lets go. Retention and sibling publications release the
-/// lock without waking this worktree, so a refusal classified as reproducing
-/// parked the edit unindexed until unrelated input arrived.
+/// store lock runs again exactly when the holder lets go: no pass repeats the
+/// refusal while the lock stays held, and the worktree converges after the
+/// release with no further hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_held_generation_store_lock_is_retried_until_the_worktree_converges() {
+async fn a_held_generation_store_lock_retries_on_its_release() {
     let fixture = Fixture::mount("project.reconcile-store-lock-retry").await;
     let sealed_before = wait_for_latest_generation(&fixture).await;
     fixture.settle_for(MOUNT_QUIET_WINDOW).await;
@@ -513,13 +512,21 @@ async fn a_held_generation_store_lock_is_retried_until_the_worktree_converges() 
         ),
         "the hint must reach the mounted scheduler"
     );
-    let refused_passes = wait_for_attempts(&passes, 2).await;
-    drop(holder);
-    assert!(
-        refused_passes >= 2,
-        "a pass refused by a held store lock must schedule its own retry; only \
-         {refused_passes} pass(es) ran after a single hint"
+    assert_eq!(wait_for_attempts(&passes, 1).await, 1);
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "a held lock must not be polled by repeated passes"
     );
+    let parked = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness")
+        .parked;
+    assert_eq!(parked, None, "a held lock is a wait, not a park");
+    drop(holder);
 
     let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;

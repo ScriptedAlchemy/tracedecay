@@ -53,7 +53,7 @@ use locking::acquire_generation_segments_lock_checked;
 pub use locking::{
     CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
     acquire_generation_segments_publication_lock, try_acquire_code_generation_store_lock,
-    try_acquire_code_generation_store_read_lock,
+    try_acquire_code_generation_store_read_lock, wait_for_code_generation_store_release,
 };
 pub use scope_roots::{
     CodeIndexScopeV1, RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
