@@ -506,6 +506,7 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         if hook == "hook-stop" {
             let deliveries = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host),
+                std::time::Duration::ZERO,
             )
             .unwrap();
             let pending = deliveries.pending(2).unwrap();

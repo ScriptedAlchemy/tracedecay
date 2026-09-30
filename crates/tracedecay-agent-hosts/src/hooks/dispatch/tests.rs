@@ -953,6 +953,7 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
     .unwrap();
     let delivery = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
         tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+        std::time::Duration::ZERO,
     )
     .unwrap();
     let callback = std::thread::spawn(move || {

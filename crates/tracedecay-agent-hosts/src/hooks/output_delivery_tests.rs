@@ -28,7 +28,7 @@ async fn concurrent_hooks_on_a_slow_disk_all_succeed_with_one_receipt_each() {
     assert!(store_layout::enrolled_layout(profile.data_dir(), &project_root).is_some());
     let host = NativeHostIdentityV1::Hermes;
     let spool = tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host);
-    drop(tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&spool).unwrap());
+    drop(tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&spool, Duration::ZERO).unwrap());
     // Every receipt-spool durability barrier waits like a loaded disk (#2659).
     let _slow_disk = sync_latency::inject(&spool, Duration::from_millis(20));
 
@@ -52,7 +52,7 @@ async fn concurrent_hooks_on_a_slow_disk_all_succeed_with_one_receipt_each() {
     }
 
     assert_eq!(succeeded, vec![true; HOOKS]);
-    let mut settled = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&spool)
+    let mut settled = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&spool, Duration::ZERO)
         .unwrap()
         .pending(64)
         .unwrap()

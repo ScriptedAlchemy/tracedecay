@@ -37,7 +37,8 @@ pub use core_events::{
 };
 pub use delivery_spool::{
     HookDeliveryReceiptSpoolV1, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
-    HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
+    HookDeliverySourceReceiptV1, hook_delivery_publication_name, hook_delivery_receipt_spool_root,
+    hook_delivery_spool_directory,
 };
 pub use hook_v2_replay::{
     HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookReplayTombstoneReasonV1,
