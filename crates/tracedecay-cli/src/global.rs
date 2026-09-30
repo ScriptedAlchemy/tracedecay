@@ -165,32 +165,6 @@ pub(crate) fn check_for_update(
     }
 }
 
-/// Returns the total size in bytes of every file under `dir`. Best-effort.
-pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
-    fn walk(p: &Path, acc: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(p) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            // One stat per entry instead of file_type() + metadata():
-            // `metadata()` already carries the file-type bits, so calling
-            // both means a redundant syscall on filesystems that don't
-            // cache the dirent stat.
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                walk(&entry.path(), acc);
-            } else if meta.is_file() {
-                *acc = acc.saturating_add(meta.len());
-            }
-        }
-    }
-    let mut total = 0u64;
-    walk(dir, &mut total);
-    total
-}
-
 /// Returns the project paths the `wipe` / `list` commands should act on.
 ///
 /// `--all` returns every path tracked in the global DB (including stale rows).
