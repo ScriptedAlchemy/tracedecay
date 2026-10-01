@@ -56,6 +56,7 @@ mod mimalloc_v3 {
         fn mi_heap_collect(heap: *mut c_void, force: bool);
         fn mi_heap_theap(heap: *mut c_void) -> *mut c_void;
         fn mi_theap_get_default() -> *mut c_void;
+        fn mi_theap_collect(theap: *mut c_void, force: bool);
         // 3.3.2 declares `mi_theap_set_default` without defining it; this is
         // the definition its allocation path reads the default theap from.
         fn _mi_theap_default_set(theap: *mut c_void);
@@ -197,10 +198,19 @@ mod mimalloc_v3 {
         }
     }
 
+    /// Collects the owner heap's theap of the calling thread before leaving
+    /// it. Each thread owns its own pages of a shared heap, and frees other
+    /// threads push onto them are folded in, and emptied pages returned, only
+    /// by that thread: a worker that never enters the heap again would keep
+    /// them, and the owner would be charged for them, indefinitely.
     fn heap_leave(previous: usize) {
-        // SAFETY: `previous` is the calling thread's default theap that
-        // `heap_enter` replaced on this same thread.
-        unsafe { _mi_theap_default_set(previous as *mut c_void) };
+        // SAFETY: the calling thread's default theap is the owner heap's
+        // theap that `heap_enter` installed on this thread, and `previous`
+        // is the theap it replaced.
+        unsafe {
+            mi_theap_collect(mi_theap_get_default(), false);
+            _mi_theap_default_set(previous as *mut c_void);
+        }
     }
 
     /// Granule both residency queries report in.
@@ -374,6 +384,42 @@ mod mimalloc_v3 {
             drop(heap);
             assert_eq!(escaped[BLOCK_BYTES - 1], 9);
             assert_eq!(outside.len(), BLOCKS);
+        }
+
+        /// Pages of an owner heap whose blocks another thread freed stay
+        /// charged to the worker that allocated them until that worker
+        /// collects them, which it does whenever it leaves the heap.
+        #[test]
+        fn leaving_an_owner_heap_returns_the_pages_other_threads_emptied() {
+            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
+            super::install();
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let heap = &heap;
+            let (to_worker, work) = std::sync::mpsc::channel::<bool>();
+            let (to_main, built) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
+            std::thread::scope(|threads| {
+                threads.spawn(move || {
+                    for allocate in work {
+                        let blocks = heap.scope(|| if allocate { blocks() } else { Vec::new() });
+                        to_main.send(blocks).expect("the test receives");
+                    }
+                });
+                to_worker.send(true).expect("the worker runs");
+                drop(built.recv().expect("the worker's blocks"));
+                let stranded = heap.resident_bytes();
+                to_worker.send(false).expect("the worker runs");
+                assert!(built.recv().expect("an empty scope").is_empty());
+                let returned = heap.resident_bytes();
+                drop(to_worker);
+                assert!(
+                    stranded >= SMALL_PAGE_BYTES,
+                    "freed on another thread, blocks stay on the worker's pages: {stranded} B"
+                );
+                assert_eq!(
+                    returned, 0,
+                    "leaving the heap returns the pages they emptied"
+                );
+            });
         }
 
         /// A page built on freed, not yet purged memory holds that memory
