@@ -20,7 +20,7 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
     CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     SealedGenerationFileWindowsV1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -366,6 +366,44 @@ fn a_full_build_leaves_live_only_what_its_generation_charges() {
     assert!(
         live * 10 <= retained * 11,
         "a full build left {live} bytes live but its generation charges {retained}"
+    );
+}
+
+/// The daemon keeps one physical artifact pool for its lifetime. A `Weak`
+/// keeps its allocation, so every index entry whose generation is gone pins
+/// that artifact's allocation until the pool drops the entry.
+#[test]
+fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
+    let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
+    drop(
+        CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+            .expect("owner")
+            .build_and_publish(request(300), &Active)
+            .expect("warm build"),
+    );
+    let pool = SharedPhysicalCodeArtifactPoolV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+        .expect("owner")
+        .with_physical_artifact_pool(pool.clone());
+
+    let before = LIVE.load(Ordering::Relaxed);
+    drop(
+        owner
+            .build_and_publish(request(300), &Active)
+            .expect("build"),
+    );
+    let pinned = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+    pool.release_dead_entries();
+    let left = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+    eprintln!("ACCOUNTING dead entries pinned {pinned} left {left}");
+    assert_eq!(pool.stats().resident, 0);
+    assert!(
+        pinned >= 300 * 512,
+        "300 dead entries pin their artifacts' allocations: {pinned} bytes"
+    );
+    assert!(
+        left <= pinned / 20,
+        "dropping the dead entries left {left} of {pinned} bytes live"
     );
 }
 
