@@ -12,7 +12,7 @@ use tracedecay_daemon_protocol::{
     parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::application_output::tool_result::{
     ApplicationRefusal, render_application_result,
 };
@@ -600,12 +600,16 @@ pub(crate) fn graph_tool_error_problem(
         return graph_tool_unavailable(reason_code, retryable, detail);
     }
     match error {
-        TraceDecayError::Config { message } => {
-            tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
-                "application.surface.invalid_request",
-                safe_diagnostic_message(message),
-            )
-        }
+        TraceDecayError::Config { message }
+        | TraceDecayError::InvalidRequest { message, .. }
+        | TraceDecayError::ProjectOpen {
+            kind:
+                ProjectOpenFailureKind::IdentityUnregistered | ProjectOpenFailureKind::IndexMissing,
+            detail: message,
+        } => tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
+            "application.surface.invalid_request",
+            safe_diagnostic_message(message),
+        ),
         TraceDecayError::ProjectRoute {
             reason_code,
             detail,

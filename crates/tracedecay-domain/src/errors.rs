@@ -92,6 +92,23 @@ pub enum TraceDecayError {
         typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
+    /// A project open failed for a reason its admission acts on: first-touch
+    /// bootstrap, the read-only fallback, and the reopen backoff all match
+    /// `kind`, never `detail`.
+    #[error("{detail}")]
+    ProjectOpen {
+        kind: ProjectOpenFailureKind,
+        detail: String,
+    },
+
+    /// A request the caller has to correct; repeating it unchanged repeats
+    /// the answer.
+    #[error("{message}")]
+    InvalidRequest {
+        reason: InvalidRequestReason,
+        message: String,
+    },
+
     /// A command answered with a typed refusal rather than failing; the
     /// process boundary names the refusal and its stable code.
     #[error(transparent)]
@@ -122,6 +139,43 @@ pub enum TraceDecayError {
 }
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
+
+/// Why a project open failed, as the open's admission decides recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectOpenFailureKind {
+    /// Identity resolution found no enrollment marker or registry match.
+    IdentityUnregistered,
+    /// The project has no index database yet; first-touch init creates it.
+    IndexMissing,
+    /// The project store refused a write; it can still be served read-only.
+    StoreReadOnly,
+    /// Every code-runtime seat is taken; one frees when another project
+    /// retires.
+    CodeRuntimeBudgetExhausted { limit: usize },
+    /// The global authority audit judged persisted rows and rejected them.
+    /// The verdict is a property of the stored data, so reopening repeats it
+    /// unless `migration_pending` names a migration that can still clear it.
+    AuthorityVerdict { migration_pending: bool },
+    /// An earlier failure of this route is backed off until its retry time.
+    BackedOff { retry_after_ms: u64 },
+}
+
+/// Why a request has to be corrected before it can succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidRequestReason {
+    MissingRequiredParameter,
+    NotFound,
+}
+
+impl InvalidRequestReason {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingRequiredParameter => "missing_required_parameter",
+            Self::NotFound => "not_found",
+        }
+    }
+}
 
 /// `code` is the refusal record's own code when the result carries one.
 #[derive(Debug, Error)]
@@ -345,6 +399,35 @@ impl TraceDecayError {
             reason: self.to_string(),
             remedy: remedy.to_owned(),
         })
+    }
+
+    pub fn project_open(kind: ProjectOpenFailureKind, detail: impl Into<String>) -> Self {
+        Self::ProjectOpen {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn project_open_failure_kind(&self) -> Option<ProjectOpenFailureKind> {
+        match self {
+            Self::ProjectOpen { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    pub fn missing_required_parameter(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::MissingRequiredParameter,
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::NotFound,
+            message: message.into(),
+        }
     }
 
     pub fn project_route(

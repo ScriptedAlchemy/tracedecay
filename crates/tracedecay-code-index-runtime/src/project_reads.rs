@@ -134,6 +134,20 @@ impl ProjectCodeGraphServingAuthorityV1 {
             .latest_complete_serving_for_root_scope(&self.project_root, &self.scope, lease)
             .await
         else {
+            // A park no wake retries is why the graph never seats; reporting
+            // it as not-ready-yet invites a retry that cannot change.
+            if let Some(parked) = self
+                .schedulers
+                .convergence_park(&self.project_root)
+                .await
+                .filter(|parked| !parked.retries_on_wake)
+            {
+                return Err(CodeGraphReadError::Parked {
+                    cause: parked.reason,
+                    remedy: parked.remediation,
+                    retries_on_wake: parked.retries_on_wake,
+                });
+            }
             return Err(CodeGraphReadError::Unavailable {
                 detail: "the verified code graph is not ready for the exact project root"
                     .to_owned(),

@@ -22,6 +22,17 @@ impl ProjectRouteFailureKind {
         }
     }
 
+    fn from_reason_code(reason_code: &str) -> Option<Self> {
+        [
+            Self::NotFound,
+            Self::NotAuthorized,
+            Self::Ambiguous,
+            Self::Unavailable,
+        ]
+        .into_iter()
+        .find(|kind| kind.reason_code() == reason_code)
+    }
+
     #[hotpath::skip]
     pub const fn retryable(self) -> bool {
         matches!(self, Self::Unavailable)
@@ -39,31 +50,50 @@ impl ProjectRouteFailure {
         TraceDecayError::project_route(self.kind.reason_code(), self.kind.retryable(), self.detail)
     }
 
+    /// The route failure a registry or project-open error reports. Only a
+    /// typed route refusal names its kind; every other failure leaves the
+    /// route unavailable.
     pub fn from_selection_error(error: &TraceDecayError) -> Self {
-        let detail = error.to_string();
-        let kind = match error {
-            TraceDecayError::ProjectRoute { reason_code, .. } => match reason_code.as_str() {
-                "project_route_not_found" => ProjectRouteFailureKind::NotFound,
-                "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
-                "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
-                _ => ProjectRouteFailureKind::Unavailable,
-            },
-            TraceDecayError::Config { message } if message.contains("not found for selector") => {
-                ProjectRouteFailureKind::NotFound
-            }
-            TraceDecayError::Config { message }
-                if message.contains("ambiguous") || message.contains("multiple stores") =>
-            {
-                ProjectRouteFailureKind::Ambiguous
-            }
-            TraceDecayError::Config { message }
-                if message.contains("registry is unavailable")
-                    || message.contains("profile identity") =>
-            {
-                ProjectRouteFailureKind::NotAuthorized
-            }
-            _ => ProjectRouteFailureKind::Unavailable,
+        let kind = error
+            .project_route_context()
+            .and_then(|(reason_code, _, _)| ProjectRouteFailureKind::from_reason_code(reason_code))
+            .unwrap_or(ProjectRouteFailureKind::Unavailable);
+        Self {
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::errors::TraceDecayError;
+
+    use super::{ProjectRouteFailure, ProjectRouteFailureKind};
+
+    #[test]
+    fn a_route_failure_kind_comes_from_its_reason_code_not_its_text() {
+        let ambiguous = TraceDecayError::project_route(
+            "project_route_ambiguous",
+            false,
+            "two registered projects claim this workspace",
+        );
+        assert_eq!(
+            ProjectRouteFailure::from_selection_error(&ambiguous).kind,
+            ProjectRouteFailureKind::Ambiguous
+        );
+
+        // Project open raises this when the Context Scout registrar holds no
+        // registry for the project. The text names a registry, but nothing
+        // about the route's authorization was decided.
+        let mounting = TraceDecayError::Config {
+            message: "project-open Context Scout address registry is unavailable".to_owned(),
         };
-        Self { kind, detail }
+        let failure = ProjectRouteFailure::from_selection_error(&mounting);
+        assert_eq!(failure.kind, ProjectRouteFailureKind::Unavailable);
+        assert_eq!(
+            failure.detail,
+            "config error: project-open Context Scout address registry is unavailable"
+        );
     }
 }

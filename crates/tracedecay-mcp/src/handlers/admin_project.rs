@@ -188,9 +188,7 @@ pub async fn compute_admin_project(
                 .get_project_memory_automatic_fact_receipt(apply_id, run_control.read_control())
                 .await
                 .map_err(|error| memory_application_error(&error))?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "automatic fact receipt not found".to_string(),
-                })?;
+                .ok_or_else(|| TraceDecayError::not_found("automatic fact receipt not found"))?;
             AdminProjectResultV1::AutomaticFactReceiptView(Box::new(AutomaticFactReceiptViewV1 {
                 receipt: automatic_fact_receipt(&receipt),
             }))

@@ -58,12 +58,13 @@ pub(super) async fn open_project_for_handshake(
             )
         }
         Err(err) if is_unregistered_identity_error(&err) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay index found at '{}'; run 'tracedecay init' first",
                     project_path.display()
                 ),
-            });
+            ));
         }
         Err(err) => return Err(err),
     };
@@ -186,34 +187,15 @@ fn refuse_enrollment_from_another_build(
 /// Whether `err` is the specific fail-closed error raised when identity
 /// resolution finds no enrollment marker or registry match for a project.
 fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains(
-                "registered configuration layout requires an enrolled or registry-resolved project identity"
-            )
-    )
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IdentityUnregistered)
 }
 
 pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains("no TraceDecay index found")
-                || message.contains("no TraceDecay database found")
-    )
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IndexMissing)
 }
 
 fn is_readonly_database_error(err: &TraceDecayError) -> bool {
-    if !err.is_database_error() {
-        return false;
-    }
-    match err {
-        TraceDecayError::Database { message, .. } => {
-            message.to_ascii_lowercase().contains("readonly database")
-        }
-        _ => false,
-    }
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::StoreReadOnly)
 }
 
 pub(super) async fn write_project_open_error(
@@ -315,20 +297,19 @@ pub(crate) fn project_open_error_response(
                 Some(data),
             )
         }
-        TraceDecayError::Config { message }
-            if message.contains(PROJECT_OPEN_FAILURE_RETRY_HINT) =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_route_open_backoff",
-                    "retryable": true,
-                    "retry_after_ms": PROJECT_OPEN_FAILURE_RETRY_BACKOFF.as_millis() as u64,
-                })),
-            )
-        }
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            detail.clone(),
+            Some(json!({
+                "kind": "project_route_open_backoff",
+                "retryable": true,
+                "retry_after_ms": retry_after_ms,
+            })),
+        ),
         _ => match tracedecay_mcp::reset_required_context(error) {
             Some((authority, reason)) => JsonRpcResponse::error_with_data(
                 id,
