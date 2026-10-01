@@ -6952,6 +6952,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hotpath",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
