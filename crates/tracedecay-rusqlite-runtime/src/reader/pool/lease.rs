@@ -306,6 +306,10 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
                 self.checkout.retire = true;
             }
             Err(RecvTimeoutError::Timeout) => {
+                self.checkout
+                    .inner
+                    .checkpoint_blockers
+                    .release(self.checkout.worker.id);
                 self.checkout.deferred_end = Some(receive);
             }
         }

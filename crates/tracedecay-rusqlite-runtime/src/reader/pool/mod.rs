@@ -6,7 +6,7 @@
 //! [`outcome`] the result vocabulary an acquisition reports in.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, Weak},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -79,6 +79,9 @@ const MAX_CHECKPOINT_BLOCKERS: usize = 16;
 #[derive(Clone, Default)]
 pub(crate) struct ReaderCheckpointBlockers {
     active: Arc<Mutex<BTreeMap<u64, Instant>>>,
+    /// Active snapshots whose lease already ended: the worker's rollback
+    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return thread.
+    released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
 }
 
 impl ReaderCheckpointBlockers {
@@ -90,11 +93,27 @@ impl ReaderCheckpointBlockers {
             .is_none()
     }
 
+    pub(super) fn release(&self, reader_id: u64) {
+        self.released
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(reader_id);
+    }
+
     pub(super) fn finish(&self, reader_id: u64) {
         self.active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&reader_id);
+        let (released, settled) = &*self.released;
+        if released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&reader_id)
+        {
+            settled.notify_all();
+        }
     }
 }
 
@@ -117,6 +136,22 @@ impl CheckpointBlockerSource for ReaderCheckpointBlockers {
             blockers,
             omitted: active.len().saturating_sub(MAX_CHECKPOINT_BLOCKERS),
         }
+    }
+
+    /// A return thread writes off a worker that misses
+    /// [`DEFERRED_SNAPSHOT_END_LIMIT`], so the wait shares that bound; a
+    /// reader still pinned past it is reported by the checkpoint itself.
+    fn await_released_snapshots(&self) {
+        let (released, settled) = &*self.released;
+        let released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let awaited = released.clone();
+        let _ = settled
+            .wait_timeout_while(released, DEFERRED_SNAPSHOT_END_LIMIT, |released| {
+                !released.is_disjoint(&awaited)
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 

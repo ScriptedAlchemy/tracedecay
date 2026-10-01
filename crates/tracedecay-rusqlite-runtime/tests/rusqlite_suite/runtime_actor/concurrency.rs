@@ -1,5 +1,5 @@
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
@@ -7,8 +7,8 @@ use tracedecay_store::{
 };
 
 use super::support::{
-    ExecutorControl, TestBinding, TestDatabase, TestProbe, marker_count, release, request, runtime,
-    unwrap_arc, writer,
+    ExecutorControl, ReleaseOnDrop, TestBinding, TestDatabase, TestProbe, marker_count, release,
+    request, runtime, unwrap_arc, writer,
 };
 
 #[test]
@@ -47,6 +47,7 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
         AdmissionConfigV1::default(),
         ExecutorControl::default(),
     );
+    let _open_gate_on_failure = ReleaseOnDrop(Arc::clone(&gate));
     runtime().block_on(async {
         let task_writer = Arc::clone(&writer_a);
         let probe_a = TestProbe::fixed(&request_a);
@@ -54,7 +55,8 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
         tokio::task::yield_now().await;
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
-        let started = Instant::now();
+        // Writer A stays parked inside its open transaction until the gate
+        // opens, so B can only commit on a thread and connection of its own.
         assert!(matches!(
             writer_b
                 .submit(request_b.clone(), TestProbe::fixed(&request_b))
@@ -67,7 +69,9 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
                 }
             }
         ));
-        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(!task_a.is_finished());
+        assert_eq!(marker_count(&database_a), 0);
+        assert_eq!(marker_count(&database_b), 1);
         release(&gate);
         assert!(matches!(
             task_a.await.unwrap().unwrap(),
