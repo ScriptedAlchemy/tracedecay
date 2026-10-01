@@ -20,8 +20,8 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
-    ProjectionProgressBaseline, digest_bytes,
-    persist_session_temporal_projection_batch_in_transaction, validate_final_projection_receipt,
+    digest_bytes, persist_session_temporal_projection_batch_in_transaction,
+    validate_final_projection_receipt,
 };
 use super::query::{
     decode_generation_i64, discard_candidate_rows, encode_watermarks, frontier_i64, generation_i64,
@@ -372,7 +372,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     &transaction,
                     &batch,
                     &execution_control,
-                    ProjectionProgressBaseline::SeededFromActive,
                 )
                 .await?;
                 require_batch_binding(
@@ -406,7 +405,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             &transaction,
             &batch,
             &execution_control,
-            ProjectionProgressBaseline::SeededFromActive,
         )
         .await?;
         validate_next_progress(

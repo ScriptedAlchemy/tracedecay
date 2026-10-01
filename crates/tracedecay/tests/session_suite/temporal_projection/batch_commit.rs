@@ -17,41 +17,32 @@ async fn batch_receipts_require_contiguous_ordinals_and_replay_exactly() {
     let session_id = session("session.temporal.receipts");
     let persisted = persist_observation(&observation_store, &session_id, 0, "receipt").await;
     let projected = occurrence(&session_id, &persisted);
-    begin_candidate(&store, &session_id, 2, 1).await;
+    let candidate = begin_candidate(&store, &session_id, 1).await;
 
-    let skipped = batch(&session_id, 2, 1, vec![projected.clone()], vec![], vec![])
+    let skipped = batch(&candidate, vec![projected.clone()], vec![], vec![])
         .with_checkpoint(1, 1, 1)
         .unwrap();
-    assert!(
-        store
-            .persist_session_temporal_projection_batch(skipped)
-            .await
-            .is_err()
-    );
+    assert!(persist_batch(&store, &candidate, skipped).await.is_err());
 
-    let first = batch(&session_id, 2, 1, vec![projected], vec![], vec![])
+    let first = batch(&candidate, vec![projected], vec![], vec![])
         .with_checkpoint(0, 1, 1)
         .unwrap();
     assert_eq!(
-        store
-            .persist_session_temporal_projection_batch(first.clone())
+        persist_batch(&store, &candidate, first.clone())
             .await
             .unwrap()
             .disposition(),
         SessionTemporalProjectionBatchDispositionV1::Applied
     );
     assert_eq!(
-        store
-            .persist_session_temporal_projection_batch(first)
+        persist_batch(&store, &candidate, first)
             .await
             .unwrap()
             .disposition(),
         SessionTemporalProjectionBatchDispositionV1::ExactReplay
     );
     let wrong_ordinal = batch(
-        &session_id,
-        2,
-        1,
+        &candidate,
         vec![occurrence(&session_id, &persisted)],
         vec![],
         vec![],
@@ -59,8 +50,7 @@ async fn batch_receipts_require_contiguous_ordinals_and_replay_exactly() {
     .with_checkpoint(1, 1, 1)
     .unwrap();
     assert!(
-        store
-            .persist_session_temporal_projection_batch(wrong_ordinal)
+        persist_batch(&store, &candidate, wrong_ordinal)
             .await
             .is_err()
     );
@@ -73,15 +63,10 @@ async fn batch_receipts_require_contiguous_ordinals_and_replay_exactly() {
         1
     );
 
-    let conflict = batch(&session_id, 2, 1, vec![], vec![], vec![])
+    let conflict = batch(&candidate, vec![], vec![], vec![])
         .with_checkpoint(0, 1, 1)
         .unwrap();
-    assert!(
-        store
-            .persist_session_temporal_projection_batch(conflict)
-            .await
-            .is_err()
-    );
+    assert!(persist_batch(&store, &candidate, conflict).await.is_err());
     assert_eq!(
         scalar(
             &path,
@@ -110,7 +95,7 @@ async fn caller_forged_occurrence_fields_never_cross_the_canonical_boundary() {
     let first = persist_observation(&observation_store, &session_id, 0, "first").await;
     let second = persist_observation(&observation_store, &session_id, 1, "second").await;
     let canonical = occurrence(&session_id, &first);
-    begin_candidate(&store, &session_id, 2, 2).await;
+    let candidate = begin_candidate(&store, &session_id, 2).await;
 
     let mut forged = Vec::new();
     let mut knowledge = canonical.clone();
@@ -128,17 +113,13 @@ async fn caller_forged_occurrence_fields_never_cross_the_canonical_boundary() {
 
     for occurrence in forged {
         assert!(
-            store
-                .persist_session_temporal_projection_batch(batch(
-                    &session_id,
-                    2,
-                    2,
-                    vec![occurrence],
-                    vec![],
-                    vec![],
-                ))
-                .await
-                .is_err()
+            persist_batch(
+                &store,
+                &candidate,
+                batch(&candidate, vec![occurrence], vec![], vec![]),
+            )
+            .await
+            .is_err()
         );
     }
     assert_eq!(
@@ -173,18 +154,19 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
     let persisted = persist_observation(&observation_store, &session_id, 0, "atomic").await;
     let persisted_occurrence = occurrence(&session_id, &persisted);
     let missing = occurrence(&session_id, &observation(&session_id, 99, "not persisted"));
-    begin_candidate(&store, &session_id, 2, 1).await;
+    let candidate = begin_candidate(&store, &session_id, 1).await;
 
-    let result = store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            1,
+    let result = persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
             vec![persisted_occurrence.clone()],
             vec![parent_message_copy(&persisted_occurrence, &missing)],
             vec![],
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     assert!(matches!(result, Err(SessionStoreError::Storage { .. })));
     assert_eq!(
@@ -235,33 +217,32 @@ async fn batches_reject_cross_session_and_cross_generation_ownership() {
         .unwrap();
     let session_id = session("session.temporal.owner");
     let observation = persist_observation(&observation_store, &session_id, 0, "owner").await;
-    begin_candidate(&store, &session_id, 2, 1).await;
+    let candidate = begin_candidate(&store, &session_id, 1).await;
 
     let other_session = session("session.temporal.other");
     assert!(matches!(
         SessionTemporalProjectionBatchV1::new(
             session_id.clone(),
-            generation(2),
-            watermarks(1, 1),
+            candidate.candidate_generation(),
+            candidate.frozen_watermarks().clone(),
             vec![occurrence(&other_session, &observation)],
             vec![],
             vec![],
         ),
         Err(SessionStoreError::SessionMismatch { .. })
     ));
+    let other_generation = SessionTemporalProjectionBatchV1::new(
+        session_id.clone(),
+        generation(candidate.candidate_generation().value() + 1),
+        candidate.frozen_watermarks().clone(),
+        vec![occurrence(&session_id, &observation)],
+        vec![],
+        vec![],
+    )
+    .unwrap();
     assert!(matches!(
-        store
-            .persist_session_temporal_projection_batch(batch(
-                &session_id,
-                3,
-                1,
-                vec![occurrence(&session_id, &observation)],
-                vec![],
-                vec![],
-            ))
-            .await,
-        Err(SessionStoreError::MissingGeneration { .. })
-            | Err(SessionStoreError::ProjectionBatchGenerationMismatch)
+        persist_batch(&store, &candidate, other_generation).await,
+        Err(SessionStoreError::ProjectionBatchGenerationMismatch)
     ));
 }
 
@@ -282,20 +263,18 @@ async fn exact_replay_is_idempotent_and_conflicting_replay_rolls_back() {
     let session_id = session("session.temporal.replay");
     let observation = persist_observation(&observation_store, &session_id, 0, "replay").await;
     let occurrence = occurrence(&session_id, &observation);
-    begin_candidate(&store, &session_id, 2, 1).await;
-    let projection = batch(&session_id, 2, 1, vec![occurrence.clone()], vec![], vec![]);
+    let candidate = begin_candidate(&store, &session_id, 1).await;
+    let projection = batch(&candidate, vec![occurrence.clone()], vec![], vec![]);
 
     assert_eq!(
-        store
-            .persist_session_temporal_projection_batch(projection.clone())
+        persist_batch(&store, &candidate, projection.clone())
             .await
             .unwrap()
             .disposition(),
         SessionTemporalProjectionBatchDispositionV1::Applied
     );
     assert_eq!(
-        store
-            .persist_session_temporal_projection_batch(projection)
+        persist_batch(&store, &candidate, projection)
             .await
             .unwrap()
             .disposition(),
@@ -310,16 +289,12 @@ async fn exact_replay_is_idempotent_and_conflicting_replay_rolls_back() {
     let mut conflicting = occurrence;
     conflicting.knowledge_at = UtcMicros(51);
     assert!(matches!(
-        store
-            .persist_session_temporal_projection_batch(batch(
-                &session_id,
-                2,
-                1,
-                vec![conflicting],
-                vec![],
-                vec![],
-            ))
-            .await,
+        persist_batch(
+            &store,
+            &candidate,
+            batch(&candidate, vec![conflicting], vec![], vec![]),
+        )
+        .await,
         Err(SessionStoreError::Storage { .. })
     ));
     assert_eq!(
@@ -374,34 +349,24 @@ async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically()
         observation_with_message_ids(&session_id, 1, "second", duplicate, None),
     )
     .await;
-    begin_candidate(&store, &session_id, 2, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
+    let candidate = begin_candidate(&store, &session_id, 2).await;
+    persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
             vec![
                 occurrence_with_message_id(&session_id, &first, duplicate),
                 occurrence_with_message_id(&session_id, &second, duplicate),
             ],
             vec![],
             vec![],
-        ))
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
 
-    let error = store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(&session_id, 1, 2),
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap_err();
+    let error = complete_candidate(&store, &candidate).await.unwrap_err();
     assert!(
         format!("{error:?}").contains("resolves to 2 occurrences"),
         "unexpected ambiguity error: {error:?}"
@@ -413,7 +378,7 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
     let tmp = TempDir::new().unwrap();
     let session_id = session("session.temporal.duplicate-restart");
     let duplicate = "message.temporal.duplicate";
-    let second = {
+    let (second, operation_id) = {
         let runtime = profile_runtime(&tmp).await;
         let observation_store = runtime
             .observation_store(HostAdmissionScope::Profile)
@@ -431,59 +396,44 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
             observation_with_message_ids(&session_id, 1, "second", duplicate, None),
         )
         .await;
-        begin_candidate(&store, &session_id, 2, 2).await;
-        store
-            .persist_session_temporal_projection_batch(
-                batch(
-                    &session_id,
-                    2,
-                    2,
-                    vec![occurrence_with_message_id(&session_id, &first, duplicate)],
-                    vec![],
-                    vec![],
-                )
-                .with_checkpoint(0, 1, 1)
-                .unwrap(),
+        let candidate = begin_candidate(&store, &session_id, 2).await;
+        persist_batch(
+            &store,
+            &candidate,
+            batch(
+                &candidate,
+                vec![occurrence_with_message_id(&session_id, &first, duplicate)],
+                vec![],
+                vec![],
             )
-            .await
-            .unwrap();
-        second
+            .with_checkpoint(0, 1, 1)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        (second, candidate.operation_id().clone())
     };
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
         .session_temporal_store(HostAdmissionScope::Profile)
         .unwrap();
-    assert_eq!(
-        begin_candidate(&store, &session_id, 2, 2).await,
-        SessionGenerationRebuildDispositionV1::Resumed
-    );
-    store
-        .persist_session_temporal_projection_batch(
-            batch(
-                &session_id,
-                2,
-                2,
-                vec![occurrence_with_message_id(&session_id, &second, duplicate)],
-                vec![],
-                vec![],
-            )
-            .with_checkpoint(1, 2, 2)
-            .unwrap(),
+    let candidate = begin_candidate(&store, &session_id, 2).await;
+    assert_eq!(candidate.operation_id(), &operation_id);
+    persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
+            vec![occurrence_with_message_id(&session_id, &second, duplicate)],
+            vec![],
+            vec![],
         )
-        .await
-        .unwrap();
+        .with_checkpoint(1, 2, 2)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
 
-    let error = store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(&session_id, 1, 2),
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap_err();
+    let error = complete_candidate(&store, &candidate).await.unwrap_err();
     assert!(format!("{error:?}").contains("resolves to 2 occurrences"));
 }
