@@ -54,6 +54,7 @@ include = [
     "/vendor/**",
     "/dashboard/hermes-wrapper/manifest.json",
     "/dashboard/hermes-wrapper/plugin_api.py",
+    "/dashboard/hermes-wrapper/embed_proxy.py",
     "/dashboard/hermes-wrapper/src/**",
 ]
 

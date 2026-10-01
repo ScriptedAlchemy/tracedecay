@@ -38,9 +38,9 @@ Use ``TRACEDECAY_*`` environment variables for runtime configuration.
 from __future__ import annotations
 
 import atexit
-import base64
 import concurrent.futures
 import ctypes
+import importlib.util
 import json
 import logging
 import os
@@ -62,89 +62,28 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-try:
-    from embed_proxy import (
-        DASHBOARD_EMBED_PATH,
-        dashboard_upstream,
-        embed_upstream_path,
-        is_event_stream,
-        is_html_content_type,
-        rewrite_dashboard_html,
-    )
-except ImportError:  # pragma: no cover - Hermes deploys this file alone
-    EMBED_MOUNT = "/api/plugins/tracedecay/embed"
-    DASHBOARD_EMBED_PATH = f"{EMBED_MOUNT}/"
-    _ATTR_URL_RE = re.compile(
-        r"""(?P<attr>\b(?:src|href))=(?P<quote>['"])/(?P<path>(?!/))""",
-        re.IGNORECASE,
-    )
 
-    def dashboard_upstream(launch_url: str) -> tuple[str, dict[str, str]]:
-        parts = urllib.parse.urlsplit(launch_url)
-        base = f"{parts.scheme}://{parts.netloc}"
-        tokens = urllib.parse.parse_qs(parts.query).get("token")
-        if not tokens:
-            return base, {}
-        credential = base64.b64encode(f"tracedecay:{tokens[0]}".encode()).decode()
-        return base, {"Authorization": f"Basic {credential}"}
+def _load_embed_proxy():
+    """Load the sibling ``embed_proxy.py`` by path. Hermes imports this file
+    through ``spec_from_file_location``, so its directory is not on
+    ``sys.path``."""
+    path = Path(__file__).with_name("embed_proxy.py")
+    spec = importlib.util.spec_from_file_location(f"{__name__}_embed_proxy", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    def embed_upstream_path(subpath: str) -> str:
-        tail = subpath.strip("/")
-        return f"/{tail}" if tail else "/"
 
-    def is_html_content_type(content_type: str | None) -> bool:
-        if content_type is None:
-            return False
-        media = content_type.split(";", 1)[0].strip().lower()
-        return media in {"text/html", "application/xhtml+xml"}
+_embed_proxy_module = _load_embed_proxy()
+DASHBOARD_EMBED_PATH = _embed_proxy_module.DASHBOARD_EMBED_PATH
+dashboard_upstream = _embed_proxy_module.dashboard_upstream
+embed_upstream_path = _embed_proxy_module.embed_upstream_path
+is_event_stream = _embed_proxy_module.is_event_stream
+is_html_content_type = _embed_proxy_module.is_html_content_type
+rewrite_dashboard_html = _embed_proxy_module.rewrite_dashboard_html
 
-    def is_event_stream(upstream_path: str, accept: str) -> bool:
-        if "text/event-stream" in accept.lower():
-            return True
-        return upstream_path.rstrip("/") == "/api/events"
-
-    def _dashboard_bridge_script() -> str:
-        return (
-            "<script>"
-            "(function(){"
-            f"var p={EMBED_MOUNT!r};"
-            "function rw(u){"
-            "if(typeof u!=='string')return u;"
-            "if(u.indexOf('/api/')===0)return p+u;"
-            "return u;"
-            "}"
-            "var f=window.fetch;"
-            "window.fetch=function(i,n){"
-            "if(typeof i==='string')i=rw(i);"
-            "else if(typeof Request!=='undefined'&&i instanceof Request)"
-            "i=new Request(rw(i.url),i);"
-            "return f.call(this,i,n);"
-            "};"
-            "var ES=window.EventSource;"
-            "function P(u,c){return new ES(rw(u),c)}"
-            "P.prototype=ES.prototype;"
-            "P.CONNECTING=ES.CONNECTING;P.OPEN=ES.OPEN;P.CLOSED=ES.CLOSED;"
-            "window.EventSource=P;"
-            "window.__webpack_public_path__=p+'/';"
-            "})();"
-            "</script>"
-        )
-
-    def rewrite_dashboard_html(html: str) -> str:
-        rewritten = _ATTR_URL_RE.sub(
-            lambda match: (
-                f"{match.group('attr')}={match.group('quote')}"
-                f"{EMBED_MOUNT}/{match.group('path')}"
-            ),
-            html,
-        )
-        script = _dashboard_bridge_script()
-        lower = rewritten.lower()
-        idx = lower.find("<head>")
-        if idx == -1:
-            return script + rewritten
-        insert_at = idx + len("<head>")
-        return rewritten[:insert_at] + script + rewritten[insert_at:]
 
 router = APIRouter()
 
