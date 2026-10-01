@@ -94,15 +94,24 @@ async fn record_pending_effect_journal(
         )
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-    if changed != 1 {
-        // The journal row for this generation already holds a different
-        // projection. The next pass would submit the same row and be refused
-        // again, so retire the refresh instead of retrying it.
-        return Err(SessionStoreError::ReceiptIdentityMismatch {
-            context: "immutable relation effect journal",
-        });
+    if changed == 1 {
+        return Ok(());
     }
-    Ok(())
+    let generation = SessionProjectionGenerationV1::new(projection.generation)
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let (_, pending) = expected_receipt(conn, &projection.session_id, generation).await?;
+    if !pending {
+        // The receipt upsert matched this projection's watermark, so an
+        // applied receipt means the graph already holds it: a retried
+        // completion replays the apply instead of journaling it again.
+        return Ok(());
+    }
+    // The journal row for this generation already holds a different
+    // projection. The next pass would submit the same row and be refused
+    // again, so retire the refresh instead of retrying it.
+    Err(SessionStoreError::ReceiptIdentityMismatch {
+        context: "immutable relation effect journal",
+    })
 }
 
 #[hotpath::measure(future = true, label = "session_temporal.txn.apply_relation")]
