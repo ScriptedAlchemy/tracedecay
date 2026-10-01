@@ -13,10 +13,10 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitV1,
-    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
-    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceStoreErrorV1,
-    SourceStoreStateV1, apply_source_authority_publication, apply_source_commit,
-    apply_source_projection, build_source_projection,
+    SourceObjectCoverageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+    SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1,
+    SourceStoreErrorV1, SourceStoreStateV1, apply_source_authority_publication,
+    apply_source_commit, apply_source_projection, build_source_projection,
 };
 
 use tracedecay_domain::test_fixtures::digest;
@@ -341,6 +341,7 @@ fn replay_partial_coverage_and_complete_snapshot_preserve_tombstone_rules() {
     assert_eq!(
         state
             .latest_mutation(live.native_object())
+            .unwrap()
             .unwrap()
             .observation(),
         &live,
@@ -668,6 +669,7 @@ fn revision_history_and_explicit_lineage_are_immutable() {
     assert_eq!(
         state
             .latest_mutation(initial.native_object())
+            .unwrap()
             .unwrap()
             .observation(),
         &reappeared
@@ -1212,4 +1214,112 @@ fn authority_publication_revalidates_the_mutated_successor() {
     let round_tripped: SourceStoreStateV1 = serde_json::from_str(&revised_encoded).unwrap();
     assert_eq!(round_tripped, *revised);
     assert!(round_tripped.validate().is_ok());
+}
+
+#[test]
+fn restored_state_decides_only_about_the_objects_it_loaded() {
+    let definition = definition();
+    let binding = binding(&definition);
+    let partition = partition();
+    let initial = object();
+    let first = mutation(
+        &binding,
+        &partition,
+        initial.clone(),
+        None,
+        SourceObjectTransitionV1::Initial,
+        '2',
+    );
+    let full = committed(
+        apply_source_commit(
+            None,
+            commit(
+                &definition,
+                &binding,
+                None,
+                SourceCoverageV1::Partial,
+                vec![first.clone()],
+                None,
+                '2',
+            ),
+        )
+        .unwrap(),
+    );
+    let restore = |observed, objects| {
+        SourceStoreStateV1::restore(
+            full.definition().clone(),
+            full.binding().clone(),
+            full.source_frontier().clone(),
+            None,
+            observed,
+            Vec::new(),
+            full.receipt().clone(),
+            SourceObjectCoverageV1::Objects(objects),
+        )
+        .unwrap()
+    };
+    let successor = commit(
+        &definition,
+        &binding,
+        Some(full.source_frontier().clone()),
+        SourceCoverageV1::Partial,
+        vec![mutation(
+            &binding,
+            &partition,
+            object_with('c', '6', '7', SourceContentStateV1::Live),
+            Some(initial.revision().clone()),
+            SourceObjectTransitionV1::Successor,
+            '3',
+        )],
+        None,
+        '3',
+    );
+    let second_initial = commit(
+        &definition,
+        &binding,
+        Some(full.source_frontier().clone()),
+        SourceCoverageV1::Partial,
+        vec![mutation(
+            &binding,
+            &partition,
+            object_with('c', '8', '9', SourceContentStateV1::Live),
+            None,
+            SourceObjectTransitionV1::Initial,
+            '4',
+        )],
+        None,
+        '4',
+    );
+
+    let unloaded = restore(Vec::new(), BTreeSet::new());
+    assert!(matches!(
+        unloaded.observed_object(initial.native_object()),
+        Err(SourceStoreErrorV1::ObjectNotLoaded)
+    ));
+    assert!(matches!(
+        apply_source_commit(Some(&unloaded), second_initial.clone()),
+        Err(SourceStoreErrorV1::ObjectNotLoaded)
+    ));
+    assert!(matches!(
+        apply_source_commit(Some(&unloaded), successor.clone()),
+        Err(SourceStoreErrorV1::ObjectNotLoaded)
+    ));
+
+    let loaded = restore(
+        vec![first],
+        BTreeSet::from([initial.native_object().clone()]),
+    );
+    assert!(matches!(
+        apply_source_commit(Some(&loaded), second_initial),
+        Err(SourceStoreErrorV1::LineageConflict)
+    ));
+    let advanced = committed(apply_source_commit(Some(&loaded), successor).unwrap());
+    assert_eq!(
+        advanced
+            .observed_object(initial.native_object())
+            .unwrap()
+            .unwrap()
+            .revision(),
+        &SourceObjectRevisionV1::new(digest('6'))
+    );
 }

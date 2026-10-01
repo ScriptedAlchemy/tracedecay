@@ -8,9 +8,9 @@ use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAcquisitionQueueCasV1,
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
-    SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourcePendingProjectionV1,
-    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceStoreStateV1,
-    apply_source_authority_publication_owned, apply_source_commit_owned,
+    SourceCommitReceiptV1, SourceCommitV1, SourceObjectCoverageV1, SourceObjectMutationV1,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1,
+    SourceStoreStateV1, apply_source_authority_publication_owned, apply_source_commit_owned,
     apply_source_projection_owned, build_source_projection,
 };
 
@@ -178,36 +178,11 @@ CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1
     WHERE not_before_micros IS NOT NULL;
 ";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SourceStateMarker {
-    data_version: i64,
-    definition_revision: i64,
-    definition_digest: String,
-    binding_revision: i64,
-    binding_digest: String,
-    source_frontier_digest: String,
-    projection_frontier_digest: Option<String>,
-    latest_source_receipt_digest: String,
-    latest_projection_receipt_digest: Option<String>,
-}
-
-struct CachedSourceState {
-    marker: SourceStateMarker,
-    state: SourceStoreStateV1,
-}
-
-#[derive(Default)]
-pub struct ExternalSourceExecutor {
-    verified_states: BTreeMap<String, CachedSourceState>,
-}
-
-impl Clone for ExternalSourceExecutor {
-    /// Executor clones may be mounted on another SQLite connection. Verified
-    /// state is connection-local provenance and must reload there.
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
+/// Answers external-source repository operations. Each operation restores
+/// only the current objects it decides about, so its reads scale with the
+/// operation rather than with the binding.
+#[derive(Clone, Default)]
+pub struct ExternalSourceExecutor;
 
 impl ExternalSourceExecutor {
     #[hotpath::measure(label = "rusqlite.external_source.execute_write")]
@@ -229,14 +204,13 @@ impl ExternalSourceExecutor {
                 ))
             };
         }
-        let current = self.take_verified_state(savepoint, &binding)?;
+        let current = load_state(savepoint, &binding, &commit.object_coverage())?;
         let mutation_encodings = validate_revision_collisions(savepoint, &binding, commit)?;
         match apply_source_commit_owned(current, commit.clone()).map_err(invalid)? {
             SourceCommitApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
             SourceCommitApplyOutcomeV1::Committed(state) => {
                 let state = *state;
-                persist_source_commit(savepoint, &state, state.receipt(), mutation_encodings)?;
-                self.cache_verified_state(savepoint, state)
+                persist_source_commit(savepoint, &state, state.receipt(), mutation_encodings)
             }
         }
     }
@@ -263,15 +237,17 @@ impl ExternalSourceExecutor {
                 ))
             };
         }
-        let current = self
-            .take_verified_state(savepoint, &binding)?
-            .ok_or_else(|| invalid("external source authority publication has no source state"))?;
+        let current = load_state(
+            savepoint,
+            &binding,
+            &SourceObjectCoverageV1::Objects(BTreeSet::new()),
+        )?
+        .ok_or_else(|| invalid("external source authority publication has no source state"))?;
         let outcome = apply_source_authority_publication_owned(current, publication.clone())
             .map_err(invalid)?;
         let (revised, receipt) = outcome.into_parts();
         let revised = *revised;
-        persist_authority_publication(savepoint, &revised, &receipt)?;
-        self.cache_verified_state(savepoint, revised)
+        persist_authority_publication(savepoint, &revised, &receipt)
     }
 
     #[hotpath::measure(label = "rusqlite.external_source.execute_projection_write")]
@@ -291,12 +267,11 @@ impl ExternalSourceExecutor {
                 Err(invalid("external source projection digest collision"))
             };
         }
-        let current = self
-            .take_verified_state(savepoint, binding)?
-            .ok_or_else(|| invalid("external source projection has no committed source state"))?;
         let pending = load_next_pending_projection(savepoint, binding)?.ok_or_else(|| {
             invalid("external source projection has no exact pending predecessor")
         })?;
+        let current = load_state(savepoint, binding, &pending.object_coverage(projection))?
+            .ok_or_else(|| invalid("external source projection has no committed source state"))?;
         let expected =
             build_source_projection(&pending, projection.projector().clone()).map_err(invalid)?;
         if &expected != projection {
@@ -310,8 +285,7 @@ impl ExternalSourceExecutor {
             SourceProjectionApplyOutcomeV1::ExactDuplicate(_) => Ok(()),
             SourceProjectionApplyOutcomeV1::Projected(state) => {
                 let state = *state;
-                persist_projection(savepoint, &state, pending.receipt(), projection)?;
-                self.cache_verified_state(savepoint, state)
+                persist_projection(savepoint, &state, pending.receipt(), projection)
             }
         }
     }
@@ -370,10 +344,14 @@ impl ExternalSourceExecutor {
         operation: &ExternalSourceReadOperationV1,
     ) -> rusqlite::Result<ExternalSourceReadResultV1> {
         match operation {
-            ExternalSourceReadOperationV1::State { binding } => {
+            ExternalSourceReadOperationV1::State { binding, objects } => {
                 binding.validate().map_err(invalid)?;
-                load_state(snapshot, binding)
-                    .map(|state| ExternalSourceReadResultV1::State(state.map(Box::new)))
+                load_state(
+                    snapshot,
+                    binding,
+                    &SourceObjectCoverageV1::Objects(objects.clone()),
+                )
+                .map(|state| ExternalSourceReadResultV1::State(state.map(Box::new)))
             }
             ExternalSourceReadOperationV1::CommitReceipt {
                 binding,
@@ -419,35 +397,6 @@ impl ExternalSourceExecutor {
                 })
                 .map(ExternalSourceReadResultV1::AcquisitionPendingCount),
         }
-    }
-
-    #[hotpath::measure(label = "rusqlite.external_source.cache.take_verified")]
-    fn take_verified_state(
-        &mut self,
-        connection: &rusqlite::Connection,
-        binding: &SourceBindingIdentityV1,
-    ) -> rusqlite::Result<Option<SourceStoreStateV1>> {
-        let marker = load_state_marker(connection, binding)?;
-        match self.verified_states.remove(binding.binding_id.as_str()) {
-            Some(cached) if marker.as_ref() == Some(&cached.marker) => Ok(Some(cached.state)),
-            Some(_) | None => load_state(connection, binding),
-        }
-    }
-
-    #[hotpath::measure(label = "rusqlite.external_source.cache.store_verified")]
-    fn cache_verified_state(
-        &mut self,
-        connection: &rusqlite::Connection,
-        state: SourceStoreStateV1,
-    ) -> rusqlite::Result<()> {
-        let binding = state.binding().immutable_identity().map_err(invalid)?;
-        let marker = load_state_marker(connection, &binding)?
-            .ok_or_else(|| invalid("external source persisted state marker is missing"))?;
-        self.verified_states.insert(
-            binding.binding_id.as_str().to_owned(),
-            CachedSourceState { marker, state },
-        );
-        Ok(())
     }
 }
 
@@ -504,42 +453,11 @@ fn load_next_ready_acquisition(
     Ok(state)
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_state_marker")]
-fn load_state_marker(
-    connection: &rusqlite::Connection,
-    binding: &SourceBindingIdentityV1,
-) -> rusqlite::Result<Option<SourceStateMarker>> {
-    let data_version =
-        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
-    connection
-        .prepare_cached(
-            "SELECT definition_revision, definition_digest,
-                    binding_revision, binding_digest,
-                    source_frontier_digest, projection_frontier_digest,
-                    latest_source_receipt_digest, latest_projection_receipt_digest
-             FROM external_source_states_v1
-             WHERE binding_id = ?1",
-        )?
-        .query_row(params![binding.binding_id.as_str()], |row| {
-            Ok(SourceStateMarker {
-                data_version,
-                definition_revision: row.get(0)?,
-                definition_digest: row.get(1)?,
-                binding_revision: row.get(2)?,
-                binding_digest: row.get(3)?,
-                source_frontier_digest: row.get(4)?,
-                projection_frontier_digest: row.get(5)?,
-                latest_source_receipt_digest: row.get(6)?,
-                latest_projection_receipt_digest: row.get(7)?,
-            })
-        })
-        .optional()
-}
-
 #[hotpath::measure(label = "rusqlite.external_source.load_state")]
 fn load_state(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
+    coverage: &SourceObjectCoverageV1,
 ) -> rusqlite::Result<Option<SourceStoreStateV1>> {
     let row = connection
         .prepare_cached(
@@ -586,9 +504,9 @@ fn load_state(
         .map(|digest| load_projection_receipt_by_digest(connection, binding, digest))
         .transpose()?
         .flatten();
-    let observed = load_current_mutations(connection, "external_source_objects_v2", binding)?;
+    let observed = load_current_mutations(connection, CurrentObjects::Observed, binding, coverage)?;
     let projected =
-        load_current_mutations(connection, "external_source_projected_objects_v2", binding)?;
+        load_current_mutations(connection, CurrentObjects::Projected, binding, coverage)?;
     let state = SourceStoreStateV1::restore(
         definition,
         stored_binding,
@@ -597,6 +515,7 @@ fn load_state(
         observed,
         projected,
         receipt,
+        coverage.clone(),
     )
     .map_err(invalid)?;
     Ok(Some(state))
@@ -634,55 +553,73 @@ fn load_binding(
     decode(encoded)
 }
 
+#[derive(Clone, Copy)]
+enum CurrentObjects {
+    Observed,
+    Projected,
+}
+
 #[hotpath::measure(label = "rusqlite.external_source.load_current_mutations")]
 fn load_current_mutations(
     connection: &rusqlite::Connection,
-    table: &str,
+    table: CurrentObjects,
     binding: &SourceBindingIdentityV1,
+    coverage: &SourceObjectCoverageV1,
 ) -> rusqlite::Result<Vec<SourceObjectMutationV1>> {
+    let table = match table {
+        CurrentObjects::Observed => "external_source_objects_v2",
+        CurrentObjects::Projected => "external_source_projected_objects_v2",
+    };
     // LEFT JOIN so a current row whose digest names no history row surfaces
     // as corruption instead of silently vanishing from the current state.
-    let sql = match table {
-        "external_source_objects_v2" => {
-            "SELECT history.mutation_json, history.native_object_digest,
-                    history.revision_digest, current.mutation_digest
-             FROM external_source_objects_v2 AS current
-             LEFT JOIN external_source_mutations_v1 AS history
-               ON history.binding_id = current.binding_id
-              AND history.mutation_digest = current.mutation_digest
-             WHERE current.binding_id = ?1"
-        }
-        "external_source_projected_objects_v2" => {
-            "SELECT history.mutation_json, history.native_object_digest,
-                    history.revision_digest, current.mutation_digest
-             FROM external_source_projected_objects_v2 AS current
-             LEFT JOIN external_source_mutations_v1 AS history
-               ON history.binding_id = current.binding_id
-              AND history.mutation_digest = current.mutation_digest
-             WHERE current.binding_id = ?1"
-        }
-        _ => return Err(invalid("unknown external source current-object table")),
+    let select = format!(
+        "SELECT history.mutation_json, history.native_object_digest,
+                history.revision_digest, current.mutation_digest
+         FROM {table} AS current
+         LEFT JOIN external_source_mutations_v1 AS history
+           ON history.binding_id = current.binding_id
+          AND history.mutation_digest = current.mutation_digest
+         WHERE current.binding_id = ?1"
+    );
+    let hydrate = |row: &rusqlite::Row<'_>| {
+        let absent =
+            || invalid("external source current object names a mutation absent from history");
+        let slim: String = row.get::<_, Option<String>>(0)?.ok_or_else(absent)?;
+        let native_object: String = row.get::<_, Option<String>>(1)?.ok_or_else(absent)?;
+        let revision: String = row.get::<_, Option<String>>(2)?.ok_or_else(absent)?;
+        let mutation_digest: String = row.get(3)?;
+        slim::hydrate_mutation(
+            &slim,
+            binding,
+            slim::MutationRowKeys {
+                native_object: &native_object,
+                revision: &revision,
+                mutation_digest: &mutation_digest,
+            },
+        )
     };
-    let mut statement = connection.prepare_cached(sql)?;
-    statement
-        .query_map([binding.binding_id.as_str()], |row| {
-            let absent =
-                || invalid("external source current object names a mutation absent from history");
-            let slim: String = row.get::<_, Option<String>>(0)?.ok_or_else(absent)?;
-            let native_object: String = row.get::<_, Option<String>>(1)?.ok_or_else(absent)?;
-            let revision: String = row.get::<_, Option<String>>(2)?.ok_or_else(absent)?;
-            let mutation_digest: String = row.get(3)?;
-            slim::hydrate_mutation(
-                &slim,
-                binding,
-                slim::MutationRowKeys {
-                    native_object: &native_object,
-                    revision: &revision,
-                    mutation_digest: &mutation_digest,
-                },
-            )
-        })?
-        .collect()
+    match coverage {
+        SourceObjectCoverageV1::Complete => connection
+            .prepare_cached(&select)?
+            .query_map([binding.binding_id.as_str()], hydrate)?
+            .collect(),
+        SourceObjectCoverageV1::Objects(objects) => {
+            let mut statement = connection
+                .prepare_cached(&format!("{select} AND current.native_object_digest = ?2"))?;
+            objects
+                .iter()
+                .filter_map(|native_object| {
+                    statement
+                        .query_row(
+                            params![binding.binding_id.as_str(), native_object.digest().as_str()],
+                            hydrate,
+                        )
+                        .optional()
+                        .transpose()
+                })
+                .collect()
+        }
+    }
 }
 
 const ROOT_PROJECTION_FRONTIER: &str = "root";

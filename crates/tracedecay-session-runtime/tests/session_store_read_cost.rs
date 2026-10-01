@@ -557,11 +557,11 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
     );
 }
 
-/// Appends `count` messages to the live session one at a time, draining and
-/// refreshing each, and returns the bytes the process read and the VM steps
-/// the store's writer executed per message while projecting it: the drain
-/// and the temporal refresh, not the capture that admitted it.
-async fn project_live_messages(
+/// Streams `count` messages into the live session one at a time, capturing,
+/// draining, and refreshing each, and returns the bytes the process read and
+/// the VM steps the store's writer executed per message across that whole
+/// ingest.
+async fn ingest_live_messages(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
     database: &RegisteredGlobalDbLeaseV1,
@@ -573,13 +573,13 @@ async fn project_live_messages(
     let (mut read, mut steps) = (0, 0);
     for _ in 0..count {
         let timestamp = SEED_TIMESTAMP + i64::try_from(cursor.next_ordinal).unwrap();
+        let steps_before = writer_work(database).0;
+        let before = process_read_bytes();
         capture(
             facade,
             message_requests(project, &scope, cursor, 1, timestamp, PROMPT_TITLE_WORDS),
         )
         .await;
-        let steps_before = writer_work(database).0;
-        let before = process_read_bytes();
         assert_eq!(drain(facade, &scope).await, 1);
         assert_eq!(refresh_until_idle(database, refresh).await, 1);
         read += process_read_bytes() - before;
@@ -589,7 +589,7 @@ async fn project_live_messages(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_message_projection_work_does_not_grow_with_the_live_session() {
+async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
     const BASE_LENGTH: u64 = 16;
     const PROBE_MESSAGES: u64 = 4;
     let _measured = MEASURED.lock().await;
@@ -602,7 +602,7 @@ async fn streamed_message_projection_work_does_not_grow_with_the_live_session() 
     let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
     let mut live = session_cursor(0);
 
-    project_live_messages(
+    ingest_live_messages(
         &facade,
         &fixture,
         &database,
@@ -611,7 +611,7 @@ async fn streamed_message_projection_work_does_not_grow_with_the_live_session() 
         BASE_LENGTH - PROBE_MESSAGES,
     )
     .await;
-    let (base_read, base_steps) = project_live_messages(
+    let (base_read, base_steps) = ingest_live_messages(
         &facade,
         &fixture,
         &database,
@@ -629,7 +629,7 @@ async fn streamed_message_projection_work_does_not_grow_with_the_live_session() 
             project,
             &scope,
             &mut live,
-            7 * BASE_LENGTH - PROBE_MESSAGES,
+            6 * BASE_LENGTH,
             SEED_TIMESTAMP + i64::try_from(BASE_LENGTH).unwrap(),
             PROMPT_TITLE_WORDS,
         ),
@@ -637,7 +637,16 @@ async fn streamed_message_projection_work_does_not_grow_with_the_live_session() 
     .await;
     drain(&facade, &scope).await;
     assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
-    let (grown_read, grown_steps) = project_live_messages(
+    ingest_live_messages(
+        &facade,
+        &fixture,
+        &database,
+        &refresh,
+        &mut live,
+        BASE_LENGTH - PROBE_MESSAGES,
+    )
+    .await;
+    let (grown_read, grown_steps) = ingest_live_messages(
         &facade,
         &fixture,
         &database,
@@ -657,17 +666,17 @@ async fn streamed_message_projection_work_does_not_grow_with_the_live_session() 
     );
 
     eprintln!(
-        "live-session streamed message projection: read bytes base={base_read} \
+        "live-session streamed message ingest: read bytes base={base_read} \
          grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}"
     );
     assert!(
         grown_read * 5 <= base_read * 6,
-        "an 8x longer live session must keep each streamed message's projection reads \
+        "an 8x longer live session must keep each streamed message's ingest reads \
          within 1.2x: base={base_read} grown={grown_read}"
     );
     assert!(
         grown_steps * 5 <= base_steps * 6,
-        "an 8x longer live session must keep each streamed message's projection writer \
+        "an 8x longer live session must keep each streamed message's ingest writer \
          work within 1.2x: base={base_steps} grown={grown_steps}"
     );
 }

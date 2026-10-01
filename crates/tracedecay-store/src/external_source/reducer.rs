@@ -56,6 +56,12 @@ fn reduce_source_commit(
     } else if commit.expected_frontier().is_some() {
         return Err(SourceStoreErrorV1::FrontierConflict);
     }
+    let coverage = current
+        .as_ref()
+        .map_or(SourceObjectCoverageV1::Complete, |state| {
+            state.coverage.clone()
+        });
+    coverage.require_all(&commit.object_coverage())?;
 
     let (
         mut observed_objects,
@@ -133,6 +139,7 @@ fn reduce_source_commit(
             latest_mutations,
             projected_mutations,
             receipt,
+            coverage,
             verified: ValidationMemoV1::default(),
         }
         .verified_successor(),
