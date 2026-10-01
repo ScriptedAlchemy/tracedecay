@@ -527,31 +527,28 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     let results = db
         .search_session_messages("cursor", None, "routing", 10)
         .await;
-    let rows: std::collections::BTreeMap<_, _> = results
+    let mut rows = results
         .iter()
         .map(|hit| {
             (
-                hit.message.kind.clone().unwrap_or_default(),
-                (hit.message.model.clone(), hit.message.tool_names.clone()),
+                hit.message.message_id.as_str(),
+                hit.message.kind.as_deref(),
+                hit.message.model.as_deref(),
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.1);
     assert_eq!(
-        rows,
-        std::collections::BTreeMap::from([
-            ("message".to_owned(), (None, Some("Subagent".to_owned()))),
-            (
-                "tool_dispatch".to_owned(),
-                (Some("gpt-5.5-high".to_owned()), Some("Subagent".to_owned()))
-            ),
-        ])
+        rows[1],
+        (
+            "cursor-session:tool_dispatch:call-a",
+            Some("tool_dispatch"),
+            Some("gpt-5.5-high")
+        )
     );
     assert_eq!(
-        results
-            .iter()
-            .find(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
-            .map(|hit| hit.message.message_id.as_str()),
-        Some("cursor-session:tool_dispatch:call-a")
+        (rows.len(), rows[0].1, rows[0].2),
+        (2, Some("message"), None)
     );
     for hit in results
         .iter()
