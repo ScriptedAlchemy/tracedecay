@@ -385,3 +385,14 @@ pub(crate) fn release(control: &Arc<(Mutex<bool>, Condvar)>) {
     *released.lock().unwrap() = true;
     condition.notify_all();
 }
+
+/// Opens an executor gate when dropped. Declare it after the writers it
+/// gates: a failed assertion then opens the gate before the writer's drop
+/// joins a worker that would otherwise stay parked on it forever.
+pub(crate) struct ReleaseOnDrop(pub(crate) Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        release(&self.0);
+    }
+}
