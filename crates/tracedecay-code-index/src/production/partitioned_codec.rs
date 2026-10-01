@@ -313,12 +313,11 @@ struct PartitionedGenerationEvidenceV1 {
     projection_request: PersistedProjectionRequestV1,
     #[serde(deserialize_with = "deserialize_evidence_projection_receipt")]
     projection_receipt: PersistedBatchReceiptV1,
-    #[serde(deserialize_with = "deserialize_evidence_cross_file_edges")]
     cross_file_edges: PersistedCrossFileEdgesV1,
 }
 
 /// The generation evidence stream decodes on one thread, so each of its
-/// three payloads is measured separately.
+/// lineage, request, and receipt payloads is measured separately.
 fn deserialize_evidence_lineage<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<PersistedLineageV1, D::Error> {
@@ -342,15 +341,6 @@ fn deserialize_evidence_projection_receipt<'de, D: serde::Deserializer<'de>>(
 ) -> Result<PersistedBatchReceiptV1, D::Error> {
     hotpath::measure_block!(
         "code_index.restore.evidence_projection_receipt",
-        Deserialize::deserialize(deserializer)
-    )
-}
-
-fn deserialize_evidence_cross_file_edges<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<PersistedCrossFileEdgesV1, D::Error> {
-    hotpath::measure_block!(
-        "code_index.restore.evidence_cross_file_edges",
         Deserialize::deserialize(deserializer)
     )
 }
