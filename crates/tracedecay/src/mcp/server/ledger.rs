@@ -663,10 +663,10 @@ mod tests {
 
         for _ in 0..2 {
             let previous = last_flushed.load(Ordering::Acquire);
-            if current > previous {
-                if persist_worldwide_delta(profile, current - previous, false).is_ok() {
-                    last_flushed.store(current, Ordering::Release);
-                }
+            if current > previous
+                && persist_worldwide_delta(profile, current - previous, false).is_ok()
+            {
+                last_flushed.store(current, Ordering::Release);
             }
         }
 
