@@ -5,8 +5,9 @@ use serde_json::{Map, Value, json};
 
 use crate::message_storage_text;
 use crate::retrieval_content::projected_content_hash;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlValue, params};
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_store::{SessionMessageRecord, session_project_fields};
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
@@ -155,6 +156,7 @@ pub async fn lifecycle_state(
 /// while pressure is still unrelieved.
 pub async fn record_session_boundary(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     match compression_decision::boundary_transition_decision(
@@ -165,7 +167,7 @@ pub async fn record_session_boundary(
             Ok(session_boundary_response(false, "not_compression_boundary"))
         }
         compression_decision::BoundaryTransitionDecision::CarryOver { old_session_id } => {
-            link_session_boundary(conn, &request, &old_session_id).await
+            link_session_boundary(conn, scope, &request, &old_session_id).await
         }
         compression_decision::BoundaryTransitionDecision::StartCooldown { boundary_skip_at } => {
             conn.execute(
@@ -197,10 +199,11 @@ pub async fn record_session_boundary(
 /// lifecycle rows retain their original owner.
 async fn link_session_boundary(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    ensure_session(conn, &request.provider, &request.session_id).await?;
+    ensure_session(conn, scope, &request.provider, &request.session_id).await?;
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
     // The link carries only frozen lifecycle coordinates. Authority rows keep
@@ -367,6 +370,7 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
 #[hotpath::measure(label = "sessions.lcm.compress", future = true)]
 pub async fn compress(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: &LcmCompressionRequest,
@@ -374,6 +378,7 @@ pub async fn compress(
 ) -> Result<LcmCompressionResponse, LcmError> {
     let response = compress_inner(
         conn,
+        scope,
         publisher,
         storage_root,
         request,
@@ -397,6 +402,7 @@ pub async fn compress(
 /// same lifecycle CAS without materializing a mega-session in one future.
 pub async fn compress_retained_page(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: &LcmCompressionRequest,
@@ -405,6 +411,7 @@ pub async fn compress_retained_page(
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let response = compress_inner(
         conn,
+        scope,
         publisher,
         storage_root,
         request,
@@ -420,6 +427,7 @@ pub async fn compress_retained_page(
 
 async fn compress_inner(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: &LcmCompressionRequest,
@@ -459,7 +467,7 @@ async fn compress_inner(
         });
     }
 
-    ensure_session(conn, &request.provider, &request.session_id).await?;
+    ensure_session(conn, scope, &request.provider, &request.session_id).await?;
     let ingested = ingest_active_messages(
         conn,
         storage_root,
@@ -2390,45 +2398,25 @@ async fn update_active_replay_metadata(
     Ok(())
 }
 
-/// Project fields on a session row LCM inserts only so foreign keys resolve.
-/// Not a project identity. A later rollout projection overwrites them.
-pub const LCM_UNKNOWN_PROJECT_KEY: &str = "unknown";
-
-/// Historical placeholder `ensure_session` used to write as if it were a project.
-/// Live stores still hold it; projection treats it as unscoped, same as
-/// [`LCM_UNKNOWN_PROJECT_KEY`].
-pub const LCM_LEGACY_PLACEHOLDER_PROJECT_KEY: &str = "lcm-active-context";
-
-/// Whether both project fields are an LCM placeholder rather than a project.
-pub fn lcm_unscoped_session_project(project_key: &str, project_path: &str) -> bool {
-    project_key == project_path
-        && matches!(
-            project_key,
-            LCM_UNKNOWN_PROJECT_KEY | LCM_LEGACY_PLACEHOLDER_PROJECT_KEY | ""
-        )
-}
-
-/// Inserts the session row LCM foreign keys require without claiming a project.
+/// Inserts the session row LCM foreign keys require.
 ///
+/// `scope` is the session store's own scope, so the row carries the same
+/// project fields the rollout projection writes for that store; the
+/// projection's working directory later refines `project_path`.
 /// `INSERT OR IGNORE` leaves a row the rollout projection already created.
-/// Callers that run first store [`LCM_UNKNOWN_PROJECT_KEY`] in both project
-/// fields so the projector can replace them with the real project.
 pub async fn ensure_session(
     conn: &impl Executor,
+    scope: &ObservationScopeV1,
     provider: &str,
     session_id: &str,
 ) -> Result<(), LcmError> {
+    let (project_key, project_path) = session_project_fields(scope);
     conn.execute(
         "INSERT OR IGNORE INTO sessions (
             provider, session_id, project_key, project_path, started_at
          )
          VALUES (?1, ?2, ?3, ?4, unixepoch())",
-        params![
-            provider,
-            session_id,
-            LCM_UNKNOWN_PROJECT_KEY,
-            LCM_UNKNOWN_PROJECT_KEY,
-        ],
+        params![provider, session_id, project_key, project_path],
     )
     .await?;
     Ok(())

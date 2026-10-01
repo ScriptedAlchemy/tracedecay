@@ -260,6 +260,7 @@ impl RegisteredGlobalDb {
         F: FnOnce() -> Result<(), LcmError>,
     {
         check_execution(control)?;
+        let scope = SessionStoreAccess::new(self).lcm_session_scope()?;
         let storage_root = self.lcm_storage_root()?;
         let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
             LcmError::Db(format!(
@@ -288,6 +289,7 @@ impl RegisteredGlobalDb {
         );
         let mut response = compression::compress(
             &transaction,
+            &scope,
             &publisher,
             storage_root,
             request,
@@ -330,6 +332,7 @@ impl RegisteredGlobalDb {
         F: FnOnce() -> Result<(), LcmError>,
     {
         check_execution(control)?;
+        let scope = SessionStoreAccess::new(self).lcm_session_scope()?;
         let storage_root = self.lcm_storage_root()?;
         let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
             LcmError::Db(format!(
@@ -369,6 +372,7 @@ impl RegisteredGlobalDb {
         );
         let bounded = compression::compress_retained_page(
             &transaction,
+            &scope,
             &publisher,
             storage_root,
             request,

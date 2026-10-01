@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_canonical_text};
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, LocatorDigest, ProjectId, RefId, RepositoryId,
@@ -170,6 +171,22 @@ impl StoreShardScopeV1 {
             Self::Project { project_id }
             | Self::ProjectSessions { project_id }
             | Self::Code { project_id, .. } => Some(project_id),
+        }
+    }
+
+    /// The observation scope whose sessions this shard stores; `None` for a
+    /// shard that holds no sessions.
+    pub fn session_scope(&self) -> Option<ObservationScopeV1> {
+        match self {
+            Self::ProfileSessions => Some(ObservationScopeV1::Profile),
+            Self::ProjectSessions { project_id } => Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            }),
+            Self::Profile
+            | Self::ProfileMemory
+            | Self::RemoteNode { .. }
+            | Self::Project { .. }
+            | Self::Code { .. } => None,
         }
     }
 

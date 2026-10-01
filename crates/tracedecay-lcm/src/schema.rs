@@ -22,9 +22,10 @@ use super::util;
 /// serves both LCM grep and session message search. There are no LCM summary
 /// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
-/// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
-/// reset.
-pub const LCM_SCHEMA_VERSION: i64 = 13;
+/// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
+/// scope as project fields (version 14); older stores hold rows with an
+/// invented project and require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 14;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's

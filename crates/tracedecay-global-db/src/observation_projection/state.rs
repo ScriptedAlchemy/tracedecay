@@ -1273,11 +1273,6 @@ pub(super) fn reconcile_session_rows_detailed(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return Err(SessionReconcileConflict("identity"));
     }
-    // LCM may insert this host session before the rollout projection, with no
-    // project. That row is not a second root: the observation replaces it.
-    if session_project_is_unscoped_placeholder(actual) {
-        return Ok(expected.clone());
-    }
     // `expected` is the projection being applied now. A typed project id that
     // changed (re-enroll/reset, or a cwd that now resolves to another
     // registered project) moves this host session onto that current id.
@@ -1364,16 +1359,6 @@ pub(super) fn reconcile_session_rows_detailed(
 
 fn project_key_is_directory(session: &SessionRecord) -> bool {
     session.project_key == session.project_path
-}
-
-/// An LCM foreign-key shell: placeholder project fields, no transcript, no metadata.
-fn session_project_is_unscoped_placeholder(session: &SessionRecord) -> bool {
-    session.transcript_path.is_none()
-        && session.metadata_json.is_none()
-        && tracedecay_lcm::compression::lcm_unscoped_session_project(
-            &session.project_key,
-            &session.project_path,
-        )
 }
 
 fn reconcile_optional<T: Clone + Eq>(
@@ -1574,13 +1559,14 @@ mod reconcile_tests {
         CanonicalObservationEnvelopeV1, ComponentVersion, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
         ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        PayloadReferenceV1, ProjectId, RetentionClass, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     };
     #[cfg(unix)]
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_store::{
         ObservationProjection, ProjectionStoreError, SessionMessageRecord, SessionRecord,
+        session_project_fields,
     };
 
     use super::{
@@ -1805,35 +1791,37 @@ mod reconcile_tests {
     }
 
     #[test]
-    fn lcm_placeholder_project_is_replaced_by_the_rollout_session() {
-        let mut stored = record("lcm-active-context");
-        stored.title = Some("LCM active context".to_owned());
-        let mut rollout = record("/Volumes/bigssd/projects/core");
-        rollout.title = Some("rollout".to_owned());
-        rollout.transcript_path = Some("/Volumes/bigssd/projects/core/session.jsonl".to_owned());
+    fn a_scope_shell_row_takes_the_rollout_working_directory() {
+        for (scope, key) in [
+            (
+                ObservationScopeV1::Project {
+                    project_id: ProjectId::new("project.core").unwrap(),
+                },
+                "project.core",
+            ),
+            (ObservationScopeV1::Profile, "user"),
+        ] {
+            let (shell_key, shell_path) = session_project_fields(&scope);
+            let mut shell = record(&shell_path);
+            shell.project_key = shell_key;
+            shell.started_at = Some(5);
+            let mut rollout = record("/work/repo");
+            rollout.project_key = key.to_owned();
+            rollout.title = Some("rollout".to_owned());
+            rollout.transcript_path = Some("/work/repo/session.jsonl".to_owned());
 
-        let merged = reconcile_session_rows_detailed(&stored, &rollout)
-            .expect("an LCM placeholder must take the rollout project");
+            let merged = reconcile_session_rows_detailed(&shell, &rollout)
+                .expect("the shell row and the rollout name one session");
 
-        assert_eq!(merged.project_key, "/Volumes/bigssd/projects/core");
-        assert_eq!(merged.project_path, "/Volumes/bigssd/projects/core");
-        assert_eq!(merged.title.as_deref(), Some("rollout"));
-        assert_eq!(
-            merged.transcript_path.as_deref(),
-            Some("/Volumes/bigssd/projects/core/session.jsonl")
-        );
-    }
-
-    #[test]
-    fn unknown_project_placeholder_is_replaced_by_the_rollout_session() {
-        let stored = record("unknown");
-        let rollout = record("/work/repo");
-
-        let merged = reconcile_session_rows_detailed(&stored, &rollout)
-            .expect("an unknown project shell must take the rollout project");
-
-        assert_eq!(merged.project_key, "/work/repo");
-        assert_eq!(merged.project_path, "/work/repo");
+            assert_eq!(merged.project_key, key);
+            assert_eq!(merged.project_path, "/work/repo");
+            assert_eq!(merged.title.as_deref(), Some("rollout"));
+            assert_eq!(merged.started_at, Some(1));
+            assert_eq!(
+                merged.transcript_path.as_deref(),
+                Some("/work/repo/session.jsonl")
+            );
+        }
     }
 
     #[test]

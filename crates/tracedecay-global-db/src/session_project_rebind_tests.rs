@@ -1,7 +1,9 @@
 //! A host session is keyed by provider and session id. LCM may insert that
-//! row before the rollout projection, and a later project binding must replace
-//! the placeholder. A genuine collision stays on that queue row and must not
-//! stop later sessions.
+//! row before the rollout projection, under its store's scope; the rollout
+//! then refines its working directory. A genuine collision stays on that
+//! queue row and must not stop later sessions.
+
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -14,12 +16,15 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite,
 };
+
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, reopen_project_sessions_database,
@@ -310,8 +315,57 @@ async fn changed_project_key_rebinds_without_blocking_other_sessions() {
     );
 }
 
+fn lcm_request(provider: &str, session_id: &str) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: provider.to_owned(),
+        session_id: session_id.to_owned(),
+        messages: vec![json!({"id": "lcm-active-1", "role": "user", "content": "active turn"})],
+        current_tokens: Some(100),
+        focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id: None,
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        incremental_max_depth: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
+        summarizer: LcmSummarizerMode::Noop,
+    }
+}
+
+async fn lcm_compress(database: &RegisteredGlobalDb, provider: &str, session_id: &str) {
+    let control = ExecutionControl::new(Some(Instant::now() + Duration::from_secs(30)));
+    let response = database
+        .lcm_compress_guarded(&lcm_request(provider, session_id), &control, || Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(response.status, "ok");
+}
+
+async fn stored_project(
+    runtime: &HostAdmissionTestRuntimeV1,
+    scope: HostAdmissionScope,
+    provider: &str,
+    session_id: &str,
+) -> (String, String) {
+    let session = runtime
+        .session_for_test(scope, provider, session_id)
+        .await
+        .unwrap()
+        .expect("LCM compression stores the session it ingested");
+    (session.project_key, session.project_path)
+}
+
 #[tokio::test]
-async fn lcm_ensure_session_then_rollout_keeps_the_real_project() {
+async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_scope() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
     let project_root = tmp.path().join("repo");
@@ -327,32 +381,41 @@ async fn lcm_ensure_session_then_rollout_keeps_the_real_project() {
     let database = runtime
         .registered_database(HostAdmissionScope::Project)
         .unwrap();
-    let transaction = database
-        .runtime_database()
-        .begin_write_transaction("ensure lcm session before rollout projection")
-        .await
-        .unwrap();
-    tracedecay_lcm::compression::ensure_session(&transaction, "codex", CODEX_SESSION)
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
+    lcm_compress(database, "codex", CODEX_SESSION).await;
+    lcm_compress(
+        runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap(),
+        "codex",
+        "session.profile-only",
+    )
+    .await;
 
-    let (project_key, project_path) =
-        session_project_binding(database, "codex", CODEX_SESSION).await;
     assert_eq!(
-        project_key,
-        tracedecay_lcm::compression::LCM_UNKNOWN_PROJECT_KEY,
-        "LCM must not store a fake project key"
+        stored_project(
+            &runtime,
+            HostAdmissionScope::Project,
+            "codex",
+            CODEX_SESSION
+        )
+        .await,
+        ("project.core".to_owned(), "project.core".to_owned())
     );
     assert_eq!(
-        project_path,
-        tracedecay_lcm::compression::LCM_UNKNOWN_PROJECT_KEY
+        stored_project(
+            &runtime,
+            HostAdmissionScope::Profile,
+            "codex",
+            "session.profile-only"
+        )
+        .await,
+        ("user".to_owned(), "user".to_owned())
     );
     assert!(
         session_title(database, "codex", CODEX_SESSION)
             .await
             .is_none(),
-        "the foreign-key shell must not invent a session title"
+        "LCM must not invent a session title"
     );
 
     let store = runtime
@@ -383,17 +446,23 @@ async fn lcm_ensure_session_then_rollout_keeps_the_real_project() {
     .await;
     drain_projection_queue(&store).await;
 
-    let (project_key, project_path) =
-        session_project_binding(database, "codex", CODEX_SESSION).await;
-    assert_eq!(project_key, "project.core");
-    assert_eq!(project_path, durable_project_path_key(&cwd));
+    assert_eq!(
+        stored_project(
+            &runtime,
+            HostAdmissionScope::Project,
+            "codex",
+            CODEX_SESSION
+        )
+        .await,
+        ("project.core".to_owned(), durable_project_path_key(&cwd))
+    );
     assert!(
         projected_text_contains(database, "codex", CODEX_SESSION, ORIGINAL_TEXT).await,
-        "the rollout message must project onto the placeholder session"
+        "the rollout message must project onto the session LCM created"
     );
     assert!(
         projected_text_contains(database, "cursor", CURSOR_SESSION, CURSOR_TEXT).await,
-        "a later session must project after the placeholder is replaced"
+        "a later session must project after the rollout refines the session"
     );
     assert!(
         store.next_queued_observation().await.unwrap().is_none(),
