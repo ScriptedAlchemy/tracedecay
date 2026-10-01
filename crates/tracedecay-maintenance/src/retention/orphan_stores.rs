@@ -142,21 +142,26 @@ fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
         .chain(entry.alias_roots.iter().map(PathBuf::as_path))
 }
 
-fn classify_one(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
-    if entry.expected_data_root_fence == StoreDirectoryFence::Unverifiable {
-        return StoreDisposition::Unverifiable {
-            reason: UnverifiableReason::RootInspectionFailed,
-        };
-    }
-    // A project root with a live owner is live even once it is gone from
-    // disk: the owner can still write into the store until it is retired and
-    // joined. Only the exact registered root counts.
+/// A project root with a live owner is live even once it is gone from disk:
+/// the owner can still write into the store until it is retired and joined.
+/// Only the exact registered root counts.
+fn classify_owned(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
     if std::iter::once(&entry.canonical_root)
         .chain(entry.display_root.as_ref())
         .chain(&entry.alias_roots)
         .any(|root| owner_roots.contains(root))
     {
         return StoreDisposition::Live;
+    }
+    classify_one(entry)
+}
+
+/// The disposition the store's roots and manifest prove on disk.
+fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
+    if entry.expected_data_root_fence == StoreDirectoryFence::Unverifiable {
+        return StoreDisposition::Unverifiable {
+            reason: UnverifiableReason::RootInspectionFailed,
+        };
     }
     let identity = identity_roots(entry).fold(RootLivenessV1::Absent, |liveness, root| {
         liveness.merge(probe_root(root))
@@ -216,7 +221,7 @@ pub fn classify_stores(
             project_id: entry.project_id.clone(),
             store_id: entry.store_id.clone(),
             data_root: entry.data_root.clone(),
-            disposition: classify_one(entry, owner_roots),
+            disposition: classify_owned(entry, owner_roots),
             age_secs: now.saturating_sub(entry.last_write_secs).max(0),
             size_bytes: entry.size_bytes,
             expected_store_relpath: entry.expected_store_relpath.clone(),

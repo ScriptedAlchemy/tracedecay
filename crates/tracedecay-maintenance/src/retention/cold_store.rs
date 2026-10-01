@@ -100,6 +100,7 @@ pub async fn run_cold_store_page(
             }
         }
     }
+    let mut collected_store_ids = BTreeSet::new();
     if let Some(days) = orphan_store_gc_days {
         let now = now_secs_i64().map_err(|message| {
             tracedecay_domain::errors::TraceDecayError::Config {
@@ -120,8 +121,16 @@ pub async fn run_cold_store_page(
         if !outcome.errors.is_empty() {
             report.outcome = ColdStorePageOutcomeV1::Unreadable;
         }
+        collected_store_ids.extend(outcome.collected.into_iter().map(|store| store.store_id));
     }
-    let sweep = incident_debris::sweep_incident_debris(&page.entries, profile_root);
+    // A store this page collected is gone, so it has no debris left to sweep.
+    let surviving: Vec<_> = page
+        .entries
+        .iter()
+        .filter(|entry| !collected_store_ids.contains(&entry.store_id))
+        .cloned()
+        .collect();
+    let sweep = incident_debris::sweep_incident_debris(&surviving, profile_root);
     report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(sweep.reclaimed_bytes);
     report.unavailable_stores = report
         .unavailable_stores
