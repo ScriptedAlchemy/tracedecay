@@ -1504,7 +1504,7 @@ async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
         let cwd = temp.path().join("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
         let path = temp.path().join("rollout.jsonl");
-        let _warm = HoldUnchangedGenerationCache::enter(&path);
+        let _warm = HoldUnchangedGenerationCache::enter(temp.path());
         let original = (0..records)
             .map(|index| catch_up_rollout_line(index, &cwd, "original"))
             .collect::<String>();
