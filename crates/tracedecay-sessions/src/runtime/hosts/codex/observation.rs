@@ -237,6 +237,8 @@ pub struct CodexJsonlAdmissionProgress {
     /// so a caller can report the replay as a duplicate rather than as a pass
     /// that captured nothing.
     pub resumed: bool,
+    /// The committed source cursor's position once this pass settled.
+    pub covered_through: u64,
 }
 
 /// Admit a Codex rollout for one exact project identity.
@@ -737,5 +739,6 @@ async fn admit_codex_jsonl_page(
         frames_refused: progress.frames_refused,
         frames_persisted: progress.frames_persisted,
         resumed: progress.resumed,
+        covered_through: progress.covered_through,
     })
 }
