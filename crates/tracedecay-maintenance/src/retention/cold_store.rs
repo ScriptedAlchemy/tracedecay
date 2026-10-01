@@ -3,6 +3,7 @@
 //! mounted or not, is a unit of the maintenance tick's store window
 //! (`store_maintenance::run_registered_code_generation_retention`).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,12 +56,14 @@ impl Default for ColdStorePageReportV1 {
     }
 }
 
-/// Applies one bounded orphan and debris page to profile stores.
+/// Applies one bounded orphan and debris page to profile stores. A store of
+/// any of `owner_roots` is live whether or not its root is still on disk.
 #[hotpath::measure(label = "maintenance.cold_store.page", future = true)]
 pub async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &RegisteredGlobalDb,
     orphan_store_gc_days: Option<u64>,
+    owner_roots: &BTreeSet<PathBuf>,
     cancellation: &CancellationToken,
 ) -> tracedecay_domain::errors::Result<ColdStorePageReportV1> {
     let checkpoint_path = checkpoint_path(profile_root);
@@ -103,7 +106,7 @@ pub async fn run_cold_store_page(
                 message: message.to_owned(),
             }
         })?;
-        let findings = orphan_stores::classify_stores(&page.entries, now);
+        let findings = orphan_stores::classify_stores(&page.entries, now, owner_roots);
         let plan = orphan_stores::plan_collection(findings, retention_window_secs(days));
         let (outcome, _) =
             orphan_stores::execute_registered_collection(profile_database, &plan, profile_root)

@@ -842,12 +842,22 @@ impl MaintenanceCoordinator {
             }
         }
         if continuation.is_none() && !self.cancellation.is_cancelled() {
+            let mut owner_roots = tracedecay_maintenance::store_maintenance::scheduler_owner_roots(
+                code_index_schedulers,
+            )
+            .await;
+            owner_roots.extend(
+                project_graphs
+                    .iter()
+                    .map(|graph| graph.project_root().to_path_buf()),
+            );
             match administration
                 .try_with_writer(|| {
                     tracedecay_maintenance::retention::cold_store::run_cold_store_page(
                         profile_root,
                         profile_database,
                         retention.orphan_store_gc_days,
+                        &owner_roots,
                         &self.cancellation,
                     )
                 })

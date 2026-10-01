@@ -29,7 +29,7 @@ mod scope_reconciliation;
 use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
 #[cfg(test)]
 pub(crate) mod registered_tests;
-pub use scope_reconciliation::run_code_index_scope_reconciliation;
+pub use scope_reconciliation::{run_code_index_scope_reconciliation, scheduler_owner_roots};
 
 /// Outcome of one bounded code-generation retention pass.
 ///

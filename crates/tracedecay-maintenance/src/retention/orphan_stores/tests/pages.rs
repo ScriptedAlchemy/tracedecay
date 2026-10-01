@@ -436,12 +436,12 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     );
 }
 
-/// An unregistered store whose own manifest names a project root that no
-/// longer exists is debris the moment the census sees it: the retention
-/// window exists for stores whose root might still come back, and a missing
-/// or unreadable manifest, or a root that is still present, keeps that window.
+/// A manifest root that is gone from disk is no proof the store is
+/// abandoned: its owner can still write into it until it is retired and
+/// joined. Such a store waits out the retention window like one whose root
+/// is present or whose manifest is missing.
 #[tokio::test]
-async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once() {
+async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
@@ -485,28 +485,28 @@ async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once()
         .unwrap();
     assert_eq!(findings.len(), 3);
     let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert!(plan.collect.is_empty(), "{:?}", plan.collect);
+    let mut retained = plan
+        .retained_immature
+        .iter()
+        .map(|finding| (finding.project_dir_name.as_str(), finding.abandoned_root))
+        .collect::<Vec<_>>();
+    retained.sort_unstable();
     assert_eq!(
-        plan.collect
-            .iter()
-            .map(|finding| finding.project_dir_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["proj_vanished_root"],
-        "only the store whose root is gone skips the retention window"
-    );
-    assert!(plan.collect[0].abandoned_root);
-    assert_eq!(plan.retained_immature.len(), 2);
-    assert!(
-        plan.retained_immature
-            .iter()
-            .all(|finding| !finding.abandoned_root)
+        retained,
+        [
+            ("proj_no_manifest", false),
+            ("proj_present_root", false),
+            ("proj_vanished_root", false),
+        ]
     );
 
     let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
         .await
         .unwrap();
-    assert_eq!(outcome.collected.len(), 1);
+    assert!(outcome.collected.is_empty());
     assert!(outcome.errors.is_empty());
-    assert!(!vanished.exists());
+    assert!(vanished.exists());
     assert!(present.exists());
     assert!(unmanifested.exists());
 }

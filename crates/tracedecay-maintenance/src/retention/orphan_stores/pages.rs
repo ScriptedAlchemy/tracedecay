@@ -437,7 +437,7 @@ pub(crate) async fn sweep_orphan_stores(
     apply: bool,
 ) -> tracedecay_domain::errors::Result<OrphanSweepReport> {
     let census = build_store_census(db, profile_root).await?;
-    let findings = classify_stores(&census, now);
+    let findings = classify_stores(&census, now, &std::collections::BTreeSet::new());
     let plan = plan_collection(findings, retention_secs);
 
     if !apply {
@@ -597,10 +597,11 @@ pub fn plan_unregistered_collection(
 }
 
 /// Whether the manifest under `data_root` names a project root this durable
-/// profile can never register again: one under the OS temp directory, or one
-/// that is definitively gone. A missing or unreadable manifest, a root that
-/// still exists, or an unreadable root all answer `false` and leave the
-/// retention window in charge.
+/// profile can never register again: one under the OS temp directory. A root
+/// that is gone from disk proves nothing, since its owner can still write
+/// into the store until it is retired and joined, so it, a missing or
+/// unreadable manifest, and every other root leave the retention window in
+/// charge.
 pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Path) -> bool {
     let Ok(manifest) = tracedecay_runtime_core::storage::read_store_manifest(
         &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
@@ -611,10 +612,6 @@ pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Pat
         return false;
     }
     tracedecay_global_db::ephemeral_root_rejection(&manifest.project_root, profile_root).is_some()
-        || matches!(
-            std::fs::symlink_metadata(&manifest.project_root),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        )
 }
 
 /// Deletes unregistered directories after content/durable inspection and a

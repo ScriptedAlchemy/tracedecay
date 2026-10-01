@@ -159,7 +159,7 @@ async fn retire_removed_scope_owners(
 }
 
 /// Every root with a scheduler owner: mounted, or retired but still draining.
-async fn scheduler_owner_roots(schedulers: &CodeIndexSchedulerRegistryV1) -> BTreeSet<PathBuf> {
+pub async fn scheduler_owner_roots(schedulers: &CodeIndexSchedulerRegistryV1) -> BTreeSet<PathBuf> {
     let mut roots = schedulers.mounted_roots().await;
     roots.extend(schedulers.retiring.lock().await.keys().cloned());
     roots
