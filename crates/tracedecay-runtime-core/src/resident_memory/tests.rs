@@ -1442,3 +1442,70 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
     );
     assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
 }
+
+/// Every admission sizes from one view: the ceiling less the larger of the
+/// ledger and the measured process, and nothing while the pressure latch
+/// holds, so a width planned from it is one admission accepts.
+#[test]
+fn headroom_is_the_ceiling_less_the_larger_of_ledger_and_measurement() {
+    const MIB: u64 = 1024 * 1024;
+    let measured = Arc::new(AtomicU64::new(300 * MIB));
+    let sampled = Arc::clone(&measured);
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000 * MIB),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(1000 * MIB),
+            Arc::new(move || {
+                let observed = sampled.load(Ordering::SeqCst);
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: observed,
+                    unreclaimable_bytes: observed,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        )),
+    ));
+    let owner = key("project-a", "worktree-a", "generation-a", "reader");
+    let charged = authority
+        .reserve(owner.clone(), bytes(100 * MIB))
+        .expect("charged owner");
+
+    let headroom = authority.headroom_below(u64::MAX);
+    assert_eq!(
+        (
+            headroom.used_bytes,
+            headroom.observed_bytes,
+            headroom.available_bytes
+        ),
+        (100 * MIB, 300 * MIB, 700 * MIB),
+        "state no owner charges counts through the measurement"
+    );
+    assert_eq!(
+        authority.headroom_below(500 * MIB).available_bytes,
+        200 * MIB
+    );
+    assert!(
+        authority.reserve(owner.clone(), bytes(701 * MIB)).is_err(),
+        "admission refuses past the same view"
+    );
+
+    let in_flight = authority
+        .reserve(owner, bytes(300 * MIB))
+        .expect("in-flight work");
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        600 * MIB,
+        "a ledger above the measurement counts in full"
+    );
+
+    measured.store(990 * MIB, Ordering::SeqCst);
+    assert_eq!(authority.headroom_below(u64::MAX).available_bytes, 0);
+    measured.store(800 * MIB, Ordering::SeqCst);
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        0,
+        "the latch holds until the low watermark"
+    );
+    drop((charged, in_flight));
+}

@@ -2422,14 +2422,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 None => return Ok(None),
             },
         };
-        let pressure = admission.resident_memory.pressure();
-        let watermark = pressure
-            .high_watermark_bytes()
-            .min(admission.resident_memory.snapshot().limit_bytes);
+        let watermark = admission.resident_memory.admission_watermark_bytes();
         let admissible = || -> Result<(), String> {
-            let used = admission.resident_memory.snapshot().used_bytes;
-            let observed = pressure.measure_admission_bytes();
-            let available = watermark.saturating_sub(used.max(observed));
+            let available = admission
+                .resident_memory
+                .headroom_below(watermark)
+                .available_bytes;
             if requested.get() <= available {
                 Ok(())
             } else {

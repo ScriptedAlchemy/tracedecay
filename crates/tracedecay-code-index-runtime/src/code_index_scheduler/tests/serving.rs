@@ -2097,38 +2097,23 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
 fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_floor() {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
-    let limit = 26 * GIB;
-    let preferred = limit / 8;
+    let preferred = 26 * GIB / 8;
     let minimum = 1536 * MIB;
-    let watermark_headroom = limit - (limit * 900 / 1000);
-    let observed = 21 * GIB;
-    let available = limit - observed - watermark_headroom;
 
     assert_eq!(
-        super::super::text_artifact_admitted_build_budget(
-            preferred,
-            minimum,
-            limit,
-            0,
-            observed,
-            watermark_headroom,
-        ),
-        Ok(available),
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, 2 * GIB),
+        Ok(2 * GIB),
         "a replacement build must use the supported smaller budget instead of deadlocking behind the stale graph"
     );
     assert_eq!(
-        super::super::text_artifact_admitted_build_budget(
-            preferred,
-            minimum,
-            limit,
-            0,
-            22 * GIB,
-            watermark_headroom,
-        ),
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, 8 * GIB),
+        Ok(preferred),
+    );
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, GIB),
         Err(
             tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(format!(
-                "text-artifact build needs at least {minimum} bytes; {} bytes are available below the resident-memory watermark",
-                limit - 22 * GIB - watermark_headroom
+                "text-artifact build needs at least {minimum} bytes; {GIB} bytes are available below the resident-memory watermark"
             ))
         ),
         "less than the builder's supported floor must remain a typed capacity refusal"
