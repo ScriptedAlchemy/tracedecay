@@ -1,7 +1,9 @@
 use super::*;
 
+const OMITTED_LINEAGE_REFUSAL: &str = "session-temporal storage operation activate session temporal generation failed: candidate omits canonical typed assertion lineage through the frozen frontier";
+
 #[tokio::test]
-async fn activation_rejects_omitted_canonical_assertion_lineage() {
+async fn refused_activation_retries_and_a_corrected_refresh_activates() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let observation_store = runtime
@@ -28,34 +30,59 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
         )
         .await,
     );
-    begin_candidate(&store, &session_id, 2, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
+    let refused = begin_candidate(&store, &session_id, 2).await;
+    persist_batch(
+        &store,
+        &refused,
+        batch(
+            &refused,
             vec![first.clone(), second.clone()],
-            vec![parent_message_copy(&second, &first)],
             vec![],
-        ))
-        .await
-        .unwrap();
+            vec![],
+        ),
+    )
+    .await
+    .unwrap();
 
-    let error = store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(&session_id, 1, 2),
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
+    let error = complete_candidate(&store, &refused)
         .await
         .expect_err("activation must refuse a graph missing its supersession lineage");
+    assert_eq!(error.to_string(), OMITTED_LINEAGE_REFUSAL);
+    // The refused attempt already applied the candidate's relation graph; a
+    // retry must reach the same validation instead of a receipt conflict.
+    let retried = complete_candidate(&store, &refused)
+        .await
+        .expect_err("a retried incomplete candidate stays refused");
+    assert_eq!(retried.to_string(), OMITTED_LINEAGE_REFUSAL);
+
+    fail_candidate(&store, &refused).await;
+    let corrected = begin_candidate(&store, &session_id, 2).await;
+    assert_ne!(corrected.operation_id(), refused.operation_id());
+    persist_batch(
+        &store,
+        &corrected,
+        batch(
+            &corrected,
+            vec![first.clone(), second.clone()],
+            vec![],
+            vec![assertion(&second, &first)],
+        ),
+    )
+    .await
+    .unwrap();
+    complete_candidate(&store, &corrected).await.unwrap();
     assert_eq!(
-        error.to_string(),
-        "session-temporal storage operation activate session temporal generation failed: candidate omits canonical typed assertion lineage through the frozen frontier"
+        rows_runtime(
+            &runtime,
+            "SELECT generation || ':' || state
+             FROM session_temporal_generations
+             WHERE session_id = 'session.temporal.omitted-relations' AND state = 'active'"
+        )
+        .await,
+        vec![format!(
+            "{}:active",
+            corrected.candidate_generation().value()
+        )]
     );
 }
 
@@ -88,30 +115,20 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
         )
         .await,
     );
-    begin_candidate(&store, &session_id, 2, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
+    let candidate = begin_candidate(&store, &session_id, 2).await;
+    persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
             vec![first.clone(), second.clone()],
-            vec![parent_message_copy(&second, &first)],
+            vec![],
             vec![assertion(&second, &first)],
-        ))
-        .await
-        .unwrap();
-    store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(&session_id, 1, 2),
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
+    complete_candidate(&store, &candidate).await.unwrap();
 
     assert_eq!(
         rows(
@@ -196,19 +213,20 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
         assertion(&fourth, &third),
     ];
     let terminal_assertion_id = assertions[2].assertion_id.as_str().to_owned();
-    begin_candidate(&store, &session_id, 2, 4).await;
+    let candidate = begin_candidate(&store, &session_id, 4).await;
 
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            4,
+    persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
             vec![first.clone(), second.clone(), third.clone(), fourth],
             vec![],
             assertions.clone(),
-        ))
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
 
     let mut expected_supersession = vec![
         format!(
@@ -261,44 +279,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
 }
 
 #[tokio::test]
-async fn failed_activation_leaves_the_prior_generation_active() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
-    let session_id = session("session.temporal.activation-failure");
-    let store = runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap();
-    begin_candidate(&store, &session_id, 2, 0).await;
-
-    assert!(
-        store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(2),
-                    snapshot(&session_id, 1, 0),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        rows(
-            path,
-            "SELECT generation || ':' || state
-             FROM session_temporal_generations
-             WHERE state = 'active'"
-        )
-        .await,
-        vec!["1:active"]
-    );
-}
-
-#[tokio::test]
-async fn activation_is_pinned_to_the_snapshot_active_generation() {
+async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let path = runtime
@@ -313,18 +294,19 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
         .unwrap();
     let session_id = session("session.temporal.pinning");
     let observation = persist_observation(&observation_store, &session_id, 0, "pinning").await;
-    begin_candidate(&store, &session_id, 2, 1).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            1,
+    let candidate = begin_candidate(&store, &session_id, 1).await;
+    persist_batch(
+        &store,
+        &candidate,
+        batch(
+            &candidate,
             vec![occurrence(&session_id, &observation)],
             vec![],
             vec![],
-        ))
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
@@ -348,18 +330,10 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
     .unwrap();
 
     assert!(matches!(
-        store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(2),
-                    snapshot(&session_id, 1, 1),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
-            )
-            .await,
-        Err(SessionStoreError::StaleGeneration { .. })
+        complete_candidate(&store, &candidate).await,
+        Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh candidate base generation is no longer active"
+        })
     ));
     assert_eq!(
         rows(
@@ -373,13 +347,17 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
     );
 }
 
-/// Persists observations `one` and `two` in a fresh profile and projects
-/// candidate generation 2 through the frozen frontier of 2: both occurrences
-/// and their parent copy when `complete`, otherwise only `one`.
+/// Persists observations `one` and `two` in a fresh profile and projects the
+/// refresh candidate through the frozen frontier of 2: both occurrences when
+/// `complete`, otherwise only `one`.
 async fn frontier_digest_fixture(
     tmp: &TempDir,
     complete: bool,
-) -> (HostAdmissionTestRuntimeV1, std::path::PathBuf, SessionId) {
+) -> (
+    HostAdmissionTestRuntimeV1,
+    std::path::PathBuf,
+    SessionRefreshRecoveryV1,
+) {
     let runtime = profile_runtime(tmp).await;
     let path = runtime
         .database_path(HostAdmissionScope::Profile)
@@ -396,46 +374,34 @@ async fn frontier_digest_fixture(
     let second = persist_observation(&observation_store, &session_id, 1, "two").await;
     let first = occurrence(&session_id, &first);
     let second = occurrence(&session_id, &second);
-    begin_candidate(&store, &session_id, 2, 2).await;
-    let (occurrences, copies) = if complete {
-        let copy = parent_message_copy(&second, &first);
-        (vec![first, second], vec![copy])
+    let candidate = begin_candidate(&store, &session_id, 2).await;
+    let occurrences = if complete {
+        vec![first, second]
     } else {
-        (vec![first], vec![])
+        vec![first]
     };
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
-            occurrences,
-            copies,
-            vec![],
-        ))
-        .await
-        .unwrap();
+    persist_batch(
+        &store,
+        &candidate,
+        batch(&candidate, occurrences, vec![], vec![]),
+    )
+    .await
+    .unwrap();
     drop(observation_store);
-    (runtime, path, session_id)
+    (runtime, path, candidate)
 }
 
-async fn activate_frontier_digest_candidate(
+async fn complete_frontier_digest_candidate(
     runtime: &HostAdmissionTestRuntimeV1,
-    session_id: &SessionId,
+    candidate: &SessionRefreshRecoveryV1,
 ) -> Result<(), SessionStoreError> {
-    runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap()
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(session_id, 1, 2),
-                ExecutionControl::default(),
-            )
+    complete_candidate(
+        &runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
             .unwrap(),
-        )
-        .await
-        .map(|_| ())
+        candidate,
+    )
+    .await
 }
 
 async fn active_generations(path: &std::path::Path) -> Vec<String> {
@@ -453,26 +419,31 @@ async fn active_generations(path: &std::path::Path) -> Vec<String> {
 #[tokio::test]
 async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
     let incomplete_profile = TempDir::new().unwrap();
-    let (runtime, path, session_id) = frontier_digest_fixture(&incomplete_profile, false).await;
-    assert!(
-        activate_frontier_digest_candidate(&runtime, &session_id)
+    let (runtime, path, candidate) = frontier_digest_fixture(&incomplete_profile, false).await;
+    assert_eq!(
+        complete_frontier_digest_candidate(&runtime, &candidate)
             .await
-            .is_err()
+            .expect_err("activation must refuse a candidate missing frontier outputs")
+            .to_string(),
+        "session-temporal storage operation activate session temporal generation failed: candidate occurrence coverage does not equal the frozen source frontier"
     );
     assert_eq!(active_generations(&path).await, vec!["1:active"]);
 
     let tampered_profile = TempDir::new().unwrap();
-    let (runtime, path, session_id) = frontier_digest_fixture(&tampered_profile, true).await;
+    let (runtime, path, candidate) = frontier_digest_fixture(&tampered_profile, true).await;
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute(
             "UPDATE session_occurrences
              SET index_text = 'tampered'
-             WHERE session_id = ?1 AND generation = 2",
-            rusqlite::params![session_id.as_str()],
+             WHERE session_id = ?1 AND generation = ?2",
+            rusqlite::params![
+                candidate.session_id().as_str(),
+                i64::try_from(candidate.candidate_generation().value()).unwrap()
+            ],
         )
         .unwrap();
-    let error = activate_frontier_digest_candidate(&runtime, &session_id)
+    let error = complete_frontier_digest_candidate(&runtime, &candidate)
         .await
         .expect_err("activation must refuse rows that no longer match their receipt");
     assert_eq!(

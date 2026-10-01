@@ -44,7 +44,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
-    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
     checkpoint_relation_rebuild_control(control)?;
     let generation = read_generation(
@@ -112,7 +111,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         batch_digest.as_str(),
         &coverage,
         committed_at.0,
-        baseline,
     )
     .await?;
     SessionTemporalProjectionBatchReceiptV1::applied(
@@ -123,12 +121,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         batch.assertions().len(),
         committed_at,
     )
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ProjectionProgressBaseline {
-    Empty,
-    SeededFromActive,
 }
 
 struct CanonicalOccurrenceProjection {
