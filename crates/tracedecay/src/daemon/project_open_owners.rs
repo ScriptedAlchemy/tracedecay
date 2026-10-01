@@ -426,26 +426,29 @@ pub(super) async fn register_project_open_production_owners(
     );
     owner_phase_started = Instant::now();
 
-    // One worktree discovery serves both the Git transaction authority here
-    // and the native-integration mount below.
+    // One worktree discovery serves both the Git transaction owner here and
+    // the native-integration mount below.
     let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_root);
     if let Some(repository_root) = repository_root.as_deref() {
+        // Mounting reconciles durable Git transaction records before the
+        // mutation lane below opens.
         hotpath::future!(
-            git_transactions.install_authority(
-                repository_root,
-                access.clone(),
+            git_transactions.mount(
                 session_db.clone(),
+                repository_root.to_path_buf(),
+                access.clone(),
+                now_micros(),
                 tokio::runtime::Handle::current(),
             ),
-            label = "daemon.project.open.owners.git_authority"
+            label = "daemon.project.open.owners.git_transactions"
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Git authority registration failed: {error}"),
+            message: format!("project-open Git transaction owner did not mount: {error}"),
         })?;
     }
     // Preview executors were published with the read-only core. Open their
-    // mutation lane only after the exact Git transaction authority exists.
+    // mutation lane only after the exact Git transaction owner exists.
     // A later failure in this function retires the whole server, and project
     // open marks the lane failed as it does so, so the lane never stays warming.
     source_edit_mutation.mark_ready();

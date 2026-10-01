@@ -18,8 +18,9 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{
     ActorId, GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId,
     GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, GitOperationStateV1, LocatorDigest,
-    ManifestDigest, ProjectId, RepositoryId, RepositoryIndexStateV1, UtcMicros, WorktreeId,
+    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitOperationStateV1, LocatorDigest, ManifestDigest, ProjectId, RepositoryId,
+    RepositoryIndexStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
@@ -40,7 +41,8 @@ use super::test_support::{
 };
 use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
-    DaemonGitIndexTransactionServiceRegistry,
+    DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
+    SharedDaemonGitIndexTransactionStore,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
@@ -865,6 +867,24 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
     assert_eq!(harness.recovery_calls.load(Ordering::SeqCst), 2);
 }
 
+async fn mount_owner(
+    registry: &DaemonGitIndexTransactionServiceRegistry,
+    database: &RegisteredGlobalDbHarness,
+    repository_root: &std::path::Path,
+    project_id: &ProjectId,
+    ordinal: i64,
+) -> Result<DaemonGitInvocationOwner, GitIndexTransactionPortError> {
+    registry
+        .mount(
+            database.registered.clone(),
+            repository_root.to_path_buf(),
+            source_access(project_id),
+            fixture_time(ordinal),
+            tokio::runtime::Handle::current(),
+        )
+        .await
+}
+
 #[tokio::test]
 async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
@@ -872,26 +892,14 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
     let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_snapshot);
     let project_id = id::<ProjectId>("project.singleton.fixture");
 
-    let first = registry
-        .ensure(
-            database.registered.clone(),
-            directory.path().to_path_buf(),
-            project_id.clone(),
-            fixture_time(20),
-        )
+    let first = mount_owner(&registry, &database, directory.path(), &project_id, 20)
         .await
         .expect("first project service");
-    let second = registry
-        .ensure(
-            database.registered.clone(),
-            directory.path().to_path_buf(),
-            project_id,
-            fixture_time(21),
-        )
+    let second = mount_owner(&registry, &database, directory.path(), &project_id, 21)
         .await
         .expect("reused project service");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(Arc::ptr_eq(&first.service, &second.service));
 }
 
 #[tokio::test]
@@ -899,18 +907,26 @@ async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_
     let directory = tempfile::tempdir().expect("project directory");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-shutdown").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_snapshot);
-    let project_id = id::<ProjectId>("project.shutdown.fixture");
-    let service = registry
-        .ensure(
-            database.registered.clone(),
-            directory.path().to_path_buf(),
-            project_id.clone(),
-            fixture_time(20),
-        )
+    let project_id = id::<ProjectId>("project.singleton.fixture");
+    mount_owner(&registry, &database, directory.path(), &project_id, 20)
         .await
-        .expect("project service");
+        .expect("project open mounts the owner");
+    let owner = registry
+        .for_repository_root(directory.path())
+        .await
+        .expect("owner lookup")
+        .expect("mounted owner");
 
     let receipt = registry.shutdown().await.expect("Git owner shutdown");
+
+    assert_eq!(
+        owner
+            .current_authority(GitIndexTransactionOperationV1::StageHunks)
+            .err(),
+        Some(GitIndexTransactionPortError::DaemonUnavailable),
+        "a request already routed to the owner must see the daemon shutting down, \
+         not an authority-missing policy denial"
+    );
 
     assert_eq!(
         receipt,
@@ -928,19 +944,96 @@ async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_
         Err(GitIndexTransactionPortError::DaemonUnavailable)
     ));
     assert!(matches!(
-        registry
-            .ensure(
-                database.registered.clone(),
-                directory.path().to_path_buf(),
-                project_id,
-                fixture_time(21),
-            )
-            .await,
+        mount_owner(&registry, &database, directory.path(), &project_id, 21).await,
         Err(GitIndexTransactionPortError::DaemonUnavailable)
     ));
     assert_eq!(
-        service.read_preview(&GitIndexPreviewId::new("preview.after-shutdown").unwrap()),
+        owner
+            .service
+            .read_preview(&GitIndexPreviewId::new("preview.after-shutdown").unwrap()),
         Err(GitIndexTransactionPortError::DaemonUnavailable)
+    );
+}
+
+/// A request racing a cold mount resolves either nothing (the caller answers
+/// `mounting`) or the owner with its authority, never an owner without one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_owner_racing_a_cold_mount_is_absent_until_published_with_authority() {
+    let directory = tempfile::tempdir().expect("project directory");
+    let database = RegisteredGlobalDbHarness::open("git-index-owner-cold-mount").await;
+    let registry = Arc::new(DaemonGitIndexTransactionServiceRegistry::new(
+        test_catalog_snapshot,
+    ));
+    let project_id = id::<ProjectId>("project.singleton.fixture");
+    let mounted_authority = DaemonGitAuthorityStateV1 {
+        scope: source_access(&project_id).scope,
+        requester: id::<ActorId>("actor.singleton.fixture"),
+        effective_capabilities: BTreeSet::new(),
+        grant_expires_at: fixture_time(100),
+        policy_revision: 7,
+        policy_digest: digest('1'),
+        configuration_digest: digest('2'),
+        catalog_digest: digest('3'),
+        privacy_digest: digest('4'),
+        evaluated_at: fixture_time(20),
+    };
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let mount = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        let database_path = database.registered.db_path().to_path_buf();
+        let store_database = database.registered.clone();
+        let repository_root = directory.path().to_path_buf();
+        let project_id = project_id.clone();
+        let source = Arc::new(MutableDaemonGitAuthority {
+            current: Mutex::new(mounted_authority.clone()),
+        });
+        async move {
+            registry
+                .mount_with(
+                    database_path,
+                    repository_root,
+                    project_id,
+                    source,
+                    fixture_time(20),
+                    move || {
+                        entered_tx.send(()).expect("mount reached the store open");
+                        release_rx.recv().expect("test releases the store open");
+                        DaemonGitIndexTransactionStore::open(store_database).map(|store| {
+                            SharedDaemonGitIndexTransactionStore::from_arc(Arc::new(store))
+                        })
+                    },
+                )
+                .await
+        }
+    });
+    entered_rx.await.expect("mount reached the store open");
+
+    assert!(
+        registry
+            .for_repository_root(directory.path())
+            .await
+            .expect("lookup while mounting")
+            .is_none(),
+        "an owner still mounting must not be resolvable"
+    );
+
+    release_tx.send(()).expect("release the store open");
+    let mounted = mount
+        .await
+        .expect("mount task")
+        .expect("mount publishes the owner");
+    let resolved = registry
+        .for_repository_root(directory.path())
+        .await
+        .expect("lookup after mount")
+        .expect("published owner");
+    assert!(Arc::ptr_eq(&resolved.service, &mounted.service));
+    assert_eq!(
+        resolved
+            .current_authority(GitIndexTransactionOperationV1::StageHunks)
+            .map(|authority| (authority.policy_revision, authority.policy_digest)),
+        Ok((7, digest('1')))
     );
 }
 
@@ -951,55 +1044,24 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     let database = RegisteredGlobalDbHarness::open("git-index-owner-worktrees").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_snapshot);
     let project_id = id::<ProjectId>("project.singleton.fixture");
-    let primary = registry
-        .ensure(
-            database.registered.clone(),
-            directory.path().to_path_buf(),
-            project_id.clone(),
-            fixture_time(20),
-        )
+    let primary = mount_owner(&registry, &database, directory.path(), &project_id, 20)
         .await
         .expect("first project service");
-    let linked = registry
-        .ensure(
-            database.registered.clone(),
-            alternate.path().to_path_buf(),
-            project_id.clone(),
-            fixture_time(21),
-        )
+    let linked = mount_owner(&registry, &database, alternate.path(), &project_id, 21)
         .await
         .expect("linked worktree service");
 
     assert!(
-        !Arc::ptr_eq(&primary, &linked),
+        !Arc::ptr_eq(&primary.service, &linked.service),
         "worktrees sharing one store need independent native executors"
     );
     assert!(
         Arc::ptr_eq(
-            primary.mutation_queue_for_test(),
-            linked.mutation_queue_for_test()
+            primary.service.mutation_queue_for_test(),
+            linked.service.mutation_queue_for_test()
         ),
         "all Git mutation services must serialize through the daemon registry queue"
     );
-    assert!(
-        registry
-            .for_repository_root(directory.path())
-            .await
-            .expect("mounting owner lookup")
-            .is_none(),
-        "an owner whose authority project open has not installed yet is still mounting"
-    );
-    for root in [directory.path(), alternate.path()] {
-        registry
-            .install_authority(
-                root,
-                source_access(&project_id),
-                database.registered.clone(),
-                tokio::runtime::Handle::current(),
-            )
-            .await
-            .expect("project open installs each worktree's authority");
-    }
     let primary_owner = registry
         .for_repository_root(directory.path())
         .await
@@ -1010,8 +1072,8 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
         .await
         .expect("linked owner lookup")
         .expect("linked owner");
-    assert!(Arc::ptr_eq(&primary_owner.service, &primary));
-    assert!(Arc::ptr_eq(&linked_owner.service, &linked));
+    assert!(Arc::ptr_eq(&primary_owner.service, &primary.service));
+    assert!(Arc::ptr_eq(&linked_owner.service, &linked.service));
 }
 
 fn source_access(project_id: &ProjectId) -> ProjectSourceAccessSnapshot {
@@ -1056,26 +1118,14 @@ async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
     let database = RegisteredGlobalDbHarness::open("git-index-owner-alias").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_snapshot);
     let project_id = id::<ProjectId>("project.alias.fixture");
-    let first = registry
-        .ensure(
-            database.registered.clone(),
-            directory.path().to_path_buf(),
-            project_id.clone(),
-            fixture_time(30),
-        )
+    let first = mount_owner(&registry, &database, directory.path(), &project_id, 30)
         .await
         .expect("mount through real root");
-    let second = registry
-        .ensure(
-            database.registered.clone(),
-            alias,
-            project_id,
-            fixture_time(31),
-        )
+    let second = mount_owner(&registry, &database, &alias, &project_id, 31)
         .await
         .expect("reuse through symlink alias");
     assert!(
-        Arc::ptr_eq(&first, &second),
+        Arc::ptr_eq(&first.service, &second.service),
         "symlink alias must resolve to the same mounted owner as the canonical root"
     );
 }

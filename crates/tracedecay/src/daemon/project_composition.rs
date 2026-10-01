@@ -613,10 +613,8 @@ struct PublishedFullServer {
 }
 
 /// What the published full server still has to mount before it serves: the
-/// project session database its dependent owners open, and the Doctor report
-/// reader published once they have.
+/// Doctor report reader published once its dependent owners have.
 struct PendingFullServerOwners {
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
 }
 
@@ -1448,7 +1446,6 @@ impl ProjectOpenInputs<'_> {
         Ok(PublishedFullServer {
             server: full_candidate,
             pending: PendingFullServerOwners {
-                session_db,
                 doctor_report_reader,
             },
         })
@@ -1468,7 +1465,6 @@ impl ProjectOpenInputs<'_> {
         opened: &OpenedProjectGraph,
         core: &ComposedCoreServer,
         full_server: &crate::mcp::McpServer,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         core_source_edit_mutation: Option<
             Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>,
         >,
@@ -1496,14 +1492,6 @@ impl ProjectOpenInputs<'_> {
             )
         };
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
-        ensure_git_index_transactions_for_mutation_owners(
-            self.store_administration,
-            session_db,
-            self.canonical_project_path,
-            opened.key.owner.project_id.as_deref(),
-        )
-        .await?;
-        self.log_phase("git_transactions_ready", None, full_setup_started);
         let dependent_owners = if opened.project_database_is_read_only {
             None
         } else {
@@ -1561,7 +1549,6 @@ impl ProjectOpenInputs<'_> {
         pending: PendingFullServerOwners,
     ) -> Result<()> {
         let PendingFullServerOwners {
-            session_db,
             doctor_report_reader,
         } = pending;
         self.log_phase("session_capabilities_published", None, self.started);
@@ -1569,7 +1556,6 @@ impl ProjectOpenInputs<'_> {
             opened,
             core,
             full_server.as_ref(),
-            session_db,
             activation.core_source_edit_mutation.clone(),
         ))
         .await?;
