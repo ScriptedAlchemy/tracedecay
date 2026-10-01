@@ -170,12 +170,23 @@ pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResettableStoreV1 {
     ProfileSessions,
-    ProjectSessions { project_id: String },
+    ProjectSessions {
+        project_id: String,
+    },
+    /// Every host's Hook V2 admission ledger for profile-scoped events.
+    ProfileHookAdmissions,
+    /// Every host's Hook V2 admission ledger, and pre-ledger pending work,
+    /// in one project's hook data root.
+    ProjectHookAdmissions {
+        project_id: String,
+    },
 }
 
 impl ResettableStoreV1 {
     const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
     const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
+    const PROFILE_HOOK_ADMISSIONS_LABEL: &'static str = "profile hook admissions";
+    const PROJECT_HOOK_ADMISSIONS_PREFIX: &'static str = "project hook admissions ";
 
     #[must_use]
     pub fn label(&self) -> String {
@@ -184,6 +195,10 @@ impl ResettableStoreV1 {
             Self::ProjectSessions { project_id } => {
                 format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
             }
+            Self::ProfileHookAdmissions => Self::PROFILE_HOOK_ADMISSIONS_LABEL.to_owned(),
+            Self::ProjectHookAdmissions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+            }
         }
     }
 
@@ -191,14 +206,22 @@ impl ResettableStoreV1 {
     /// resettable on its own.
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
-        if label == Self::PROFILE_SESSIONS_LABEL {
-            return Some(Self::ProfileSessions);
+        match label {
+            Self::PROFILE_SESSIONS_LABEL => return Some(Self::ProfileSessions),
+            Self::PROFILE_HOOK_ADMISSIONS_LABEL => return Some(Self::ProfileHookAdmissions),
+            _ => {}
         }
-        label
-            .strip_prefix(Self::PROJECT_SESSIONS_PREFIX)
-            .filter(|project_id| !project_id.is_empty())
-            .map(|project_id| Self::ProjectSessions {
-                project_id: project_id.to_owned(),
+        let project_id = |prefix: &str| {
+            label
+                .strip_prefix(prefix)
+                .filter(|project_id| !project_id.is_empty())
+                .map(str::to_owned)
+        };
+        project_id(Self::PROJECT_SESSIONS_PREFIX)
+            .map(|project_id| Self::ProjectSessions { project_id })
+            .or_else(|| {
+                project_id(Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+                    .map(|project_id| Self::ProjectHookAdmissions { project_id })
             })
     }
 }

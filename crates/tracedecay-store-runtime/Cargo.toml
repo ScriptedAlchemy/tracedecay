@@ -44,6 +44,7 @@ tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }

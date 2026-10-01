@@ -7110,6 +7110,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-hooks",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
