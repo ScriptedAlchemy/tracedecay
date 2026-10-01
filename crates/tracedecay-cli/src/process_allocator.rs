@@ -242,7 +242,13 @@ mod mimalloc_v3 {
 
     #[cfg(test)]
     mod tests {
+        use tracedecay_code_extraction::LanguageRegistry;
+        use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
+        use tracedecay_code_index::retained_parse::SharedRetainedParsePool;
+        use tracedecay_domain::RepositoryDirtyStateV1;
         use tracedecay_domain::process_heap::OwnerHeapV1;
+        use tracedecay_domain::source_path_policy::IndexPathPolicyV1;
+        use tracedecay_domain::test_fixtures::id;
 
         const BLOCKS: usize = 16 * 1024;
         const BLOCK_BYTES: usize = 256;
@@ -277,6 +283,85 @@ mod mimalloc_v3 {
             drop(heap);
             assert_eq!(escaped[BLOCK_BYTES - 1], 9);
             assert_eq!(outside.len(), BLOCKS);
+        }
+
+        /// Path matching keeps nothing in the matching thread's heap: the
+        /// glob sets' per-thread match caches outlive any one capture, and
+        /// left among its transient blocks they pin its pages.
+        #[test]
+        fn path_matching_leaves_no_blocks_in_the_matching_threads_heap() {
+            super::install();
+            let policy = IndexPathPolicyV1::new(
+                vec!["**/fixtures/**".to_owned(), "*.min.js".to_owned()],
+                vec!["src/kept/**".to_owned()],
+            )
+            .expect("valid patterns");
+            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let excluded = probe.scope(|| {
+                (0..2_000)
+                    .filter(|index| {
+                        policy.excludes(&format!("src/m{index}/fixtures/case{index}/f{index}.rs"))
+                    })
+                    .count()
+            });
+            assert_eq!(excluded, 2_000);
+            assert_eq!(probe.resident_bytes(), 0);
+            assert!(!policy.excludes("src/kept/fixtures/case/f.rs"));
+        }
+
+        /// A retained parse charges the extraction it keeps. The retained
+        /// artifact shares its token streams with the extraction that built
+        /// it, so the extraction has to allocate in the pool's heap too.
+        #[test]
+        fn a_retained_parse_charges_the_extraction_it_keeps() {
+            super::install();
+            let source = (0..400)
+                .map(|index| {
+                    format!(
+                        "pub fn f{index}(a: u32, b: u32) -> u32 {{ let c = a * {index} + b; \
+                         if c > {index} {{ c - a }} else {{ b + c }} }}\n"
+                    )
+                })
+                .collect::<String>();
+            let registry = LanguageRegistry::new();
+            let extractor = registry
+                .extractor_for_file("src/lib.rs")
+                .expect("Rust extractor");
+            let identity = || ParseDocumentIdentity::Repository {
+                project_id: id("project.retained"),
+                repository_id: id("repository.retained"),
+                worktree_id: None,
+                reference: None,
+                commit: None,
+                tree: None,
+                dirty: RepositoryDirtyStateV1::Dirty,
+                logical_path: "src/lib.rs".to_owned(),
+            };
+            let held = |pool: &SharedRetainedParsePool| {
+                pool.holding()
+                    .and_then(|holding| holding.bytes)
+                    .expect("an owner-heap measurement")
+            };
+            let parsed = SharedRetainedParsePool::default();
+            parsed.parse(identity(), "rust", &source).expect("parse");
+            let extracted = SharedRetainedParsePool::default();
+            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let edited = format!("{source}pub fn edited() -> u32 {{ 3 }}\n");
+            for source in [&source, &edited] {
+                let (_, extraction) = probe.scope(|| {
+                    extracted
+                        .parse_and_extract_artifact(identity(), "rust", source, extractor)
+                        .expect("extraction")
+                });
+                assert!(!extraction.artifact.clone_bodies.is_empty());
+            }
+            let (parsed, extracted, outside) =
+                (held(&parsed), held(&extracted), probe.resident_bytes());
+            assert!(
+                extracted > parsed,
+                "the pool charges the artifact it keeps: {extracted} B vs {parsed} B parsed only"
+            );
+            assert_eq!(outside, 0, "the extracting thread keeps none of it");
         }
     }
 }

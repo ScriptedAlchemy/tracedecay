@@ -178,12 +178,12 @@ struct InstalledCodeIndexWorkerRuntimeV1 {
     activity: PoolActivityV1,
 }
 
-/// Fan-outs running on the pool now, and whether one finished since its
-/// workers last returned their allocator pages.
+/// Fan-outs running on the pool now, and whether its workers have freed
+/// pages to return since they last collected.
 #[derive(Default)]
 struct PoolActivityV1 {
     running: AtomicUsize,
-    ran_since_collect: AtomicBool,
+    collect_pending: AtomicBool,
 }
 
 struct RunningFanOutV1<'pool>(&'pool PoolActivityV1);
@@ -197,7 +197,7 @@ impl<'pool> RunningFanOutV1<'pool> {
 
 impl Drop for RunningFanOutV1<'_> {
     fn drop(&mut self) {
-        self.0.ran_since_collect.store(true, Ordering::Release);
+        self.0.collect_pending.store(true, Ordering::Release);
         self.0.running.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -225,6 +225,10 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
             .with_yielded_permits(|| self.pool.install(operation))
     }
 
+    fn collect_worker_heaps_when_idle(&self) {
+        self.activity.collect_pending.store(true, Ordering::Release);
+    }
+
     /// Each worker returns its allocator pages once the pool has gone idle
     /// after a fan-out. Workers allocate a build's rows and scratch; other
     /// threads free most of it after the build, and those frees reach the
@@ -234,10 +238,7 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
     /// whatever the workers run next, so this never waits on a busy pool.
     fn collect_idle_worker_heaps(&self) -> bool {
         if self.activity.running.load(Ordering::Acquire) != 0
-            || !self
-                .activity
-                .ran_since_collect
-                .swap(false, Ordering::AcqRel)
+            || !self.activity.collect_pending.swap(false, Ordering::AcqRel)
         {
             return false;
         }
@@ -620,8 +621,20 @@ pub fn run_on_every_installed_worker(operation: fn()) {
     }
 }
 
+/// Have the installed pool's workers collect their heaps again once it is
+/// idle. A fan-out's rows outlive it: the build that ran it and the serving
+/// swap that retires the generation it replaced free them on other threads
+/// after the fan-out's own collection, and those pages reach the kernel only
+/// when the worker that owns them collects.
+pub fn collect_installed_worker_heaps_when_idle() {
+    if let Some(runtime) = WORKER_RUNTIME.get() {
+        runtime.0.collect_worker_heaps_when_idle();
+    }
+}
+
 /// Queue an allocator collection on every worker of the installed pool when
-/// it is idle and ran a fan-out since its last collection. Returns whether a
+/// it is idle and has a collection pending: a fan-out finished, or
+/// [`collect_installed_worker_heaps_when_idle`] asked. Returns whether a
 /// collection was queued.
 pub fn collect_idle_installed_worker_heaps() -> bool {
     WORKER_RUNTIME
@@ -875,7 +888,7 @@ mod tests {
 
     /// Workers return their allocator heaps once per idle period: not while a
     /// fan-out runs, once on every worker after it ends, and not again until
-    /// another fan-out ran.
+    /// another fan-out ran or a release of what one built asked for it.
     #[test]
     fn an_idle_pool_collects_every_worker_heap_once_after_a_fan_out() {
         install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
@@ -916,6 +929,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 2);
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        runtime.collect_worker_heaps_when_idle();
+        assert!(runtime.collect_idle_worker_heaps());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while COLLECTED_ON_WORKERS.load(Ordering::SeqCst) < 4
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 4);
         assert!(!runtime.collect_idle_worker_heaps());
     }
 

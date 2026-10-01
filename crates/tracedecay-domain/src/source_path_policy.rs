@@ -1,5 +1,8 @@
+use std::sync::OnceLock;
+
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
+use crate::process_heap::OwnerHeapV1;
 use crate::repository_path_matches_scope;
 
 /// Directory-name segments treated as generated or vendored content across
@@ -192,19 +195,40 @@ fn compile(patterns: &[String]) -> Result<GlobSet, IndexPathPatternError> {
     })
 }
 
+/// The heap path matching allocates from. A glob set keeps one lazy-DFA cache
+/// per matching thread for as long as the set lives and grows it as it meets
+/// new paths. Allocated from the matching thread's heap, those long-lived
+/// blocks fall between a capture's transient allocations and keep the pages
+/// resident after the capture frees everything else on them.
+fn path_match_heap() -> Option<&'static OwnerHeapV1> {
+    static HEAP: OnceLock<OwnerHeapV1> = OnceLock::new();
+    if HEAP.get().is_none()
+        && let Some(heap) = OwnerHeapV1::new()
+    {
+        let _ = HEAP.set(heap);
+    }
+    HEAP.get()
+}
+
 fn matches_path_or_parent(set: &GlobSet, logical_path: &str) -> bool {
     if set.is_empty() {
         return false;
     }
-    let mut candidate = logical_path;
-    loop {
-        if set.is_match(candidate) {
-            return true;
+    let matches = || {
+        let mut candidate = logical_path;
+        loop {
+            if set.is_match(candidate) {
+                return true;
+            }
+            match candidate.rfind('/') {
+                Some(index) => candidate = &candidate[..index],
+                None => return false,
+            }
         }
-        match candidate.rfind('/') {
-            Some(index) => candidate = &candidate[..index],
-            None => return false,
-        }
+    };
+    match path_match_heap() {
+        Some(heap) => heap.scope(matches),
+        None => matches(),
     }
 }
 
