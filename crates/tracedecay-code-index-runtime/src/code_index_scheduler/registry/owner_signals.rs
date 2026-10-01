@@ -50,19 +50,6 @@ pub enum CodeIndexSeatParkV1 {
     Unreachable(String),
 }
 
-impl CodeIndexSeatParkV1 {
-    /// The readiness-wait reason this park reports.
-    fn readiness_reason(self) -> String {
-        match self {
-            Self::Convergence(_) => "code_index_convergence_parked".to_owned(),
-            Self::Unpublished => "code_index_unpublished".to_owned(),
-            Self::PublicationUnreadable => "code_index_publication_unreadable".to_owned(),
-            Self::SeatNotServable => "code_index_seat_not_servable".to_owned(),
-            Self::Unreachable(reason) => reason,
-        }
-    }
-}
-
 /// How one wait for a worktree's seat ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexSeatWaitV1<T> {
@@ -500,8 +487,13 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexSeatWaitV1::Seated(reading) => CodeIndexReadinessWaitReadV1::Reached {
                 reading: Box::new(reading),
             },
-            CodeIndexSeatWaitV1::Parked(park) => CodeIndexReadinessWaitReadV1::Unreachable {
-                reason: park.readiness_reason(),
+            CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Unreachable(reason)) => {
+                CodeIndexReadinessWaitReadV1::Unreachable { reason }
+            }
+            // Besides the probe's own readiness, only the worker's park ends
+            // this wait.
+            CodeIndexSeatWaitV1::Parked(_) => CodeIndexReadinessWaitReadV1::Unreachable {
+                reason: "code_index_convergence_parked".to_owned(),
             },
             CodeIndexSeatWaitV1::Cancelled => CodeIndexReadinessWaitReadV1::Unreachable {
                 reason: "code_index_scheduler_registry_closed".to_owned(),
