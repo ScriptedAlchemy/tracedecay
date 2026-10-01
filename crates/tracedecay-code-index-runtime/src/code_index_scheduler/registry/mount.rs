@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tracedecay_code_index::parallelism::collect_installed_worker_heaps_when_idle;
 use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexPublicationStoreErrorV1,
 };
@@ -2924,6 +2925,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 drop(reconcile_pass.take());
                 worker_byte_pool.release_dead_entries();
+                collect_installed_worker_heaps_when_idle();
                 let refused_for_memory = matches!(
                     &result,
                     Ok((Err(error), _, _)) if error.is_resident_memory_refusal()

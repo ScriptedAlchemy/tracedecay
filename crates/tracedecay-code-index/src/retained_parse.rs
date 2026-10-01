@@ -367,15 +367,21 @@ impl SharedRetainedParsePool {
                     limit: self.limits.max_total_source_bytes,
                 });
             }
-            let key = ParseDocumentKey::for_identity(&identity);
-            let (existing, admission_epoch) = {
+            // Everything a retained document keeps lives in the pool's heap,
+            // its identity and the pool's bookkeeping included: allocated on
+            // an indexing worker, those long-lived blocks pin that worker's
+            // pages among the build's transient ones.
+            let (identity, key, existing, admission_epoch) = self.in_heap(|| {
+                let identity = identity.clone();
+                let key = ParseDocumentKey::for_identity(&identity);
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 touch(&mut state.lru, &key);
-                (state.documents.get(&key).cloned(), state.clear_epoch)
-            };
+                let existing = state.documents.get(&key).cloned();
+                (identity, key, existing, state.clear_epoch)
+            });
 
             match existing {
                 Some(entry) => self.parse_existing(
@@ -393,7 +399,7 @@ impl SharedRetainedParsePool {
                     // Serialize first admission per document. Unrelated documents
                     // parse concurrently; a second lookup after acquiring this
                     // key's gate keeps one retained tree for duplicate callers.
-                    let first_admission = self.first_admission(&key);
+                    let first_admission = self.in_heap(|| self.first_admission(&key));
                     let _first_admission_guard = first_admission
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -402,7 +408,7 @@ impl SharedRetainedParsePool {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(entry) = state.documents.get(&key).cloned() {
-                        touch(&mut state.lru, &key);
+                        self.in_heap(|| touch(&mut state.lru, &key));
                         drop(state);
                         return self.parse_existing(
                             key,
@@ -417,56 +423,56 @@ impl SharedRetainedParsePool {
                         );
                     }
                     drop(state);
-                    let opened = self
-                        .in_heap(|| {
-                            self.open_document(
-                                identity,
-                                language_id,
-                                source,
-                                prepared_source,
-                                grammar_key,
-                                control,
-                            )
-                        })
-                        .and_then(|(document, report)| {
-                            let parsed = extraction
-                                .map(|(extractor, _)| {
-                                    document.extract_canonical_artifact(extractor, &report, None)
-                                })
-                                .transpose()?;
-                            Ok((document, report, parsed))
-                        });
-                    let (document, report, parsed) = match opened {
+                    let opened = self.in_heap(|| {
+                        let (document, report) = self.open_document(
+                            identity,
+                            language_id,
+                            source,
+                            prepared_source,
+                            grammar_key,
+                            control,
+                        )?;
+                        let parsed = extraction
+                            .map(|(extractor, _)| {
+                                document.extract_canonical_artifact(extractor, &report, None)
+                            })
+                            .transpose()?;
+                        let retained_artifact =
+                            parsed.as_ref().map(|parsed| parsed.artifact.clone());
+                        Ok((document, report, parsed, retained_artifact))
+                    });
+                    let (document, report, parsed, retained_artifact) = match opened {
                         Ok(opened) => opened,
                         Err(error) => {
                             self.record_failure_at(admission_epoch);
                             return Err(error);
                         }
                     };
-                    let retained_artifact = parsed
-                        .as_ref()
-                        .map(|parsed| self.in_heap(|| parsed.artifact.clone()));
                     let current_size = document.retained_source_bytes();
-                    let entry = Arc::new(Mutex::new(RetainedEntry {
-                        document,
-                        artifact: retained_artifact,
-                        artifact_revision: extraction.and_then(|(_, revision)| revision.cloned()),
-                    }));
-                    let mut state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if state.clear_epoch != admission_epoch {
-                        return Ok((report, parsed));
-                    }
-                    state.documents.insert(key.clone(), Arc::clone(&entry));
-                    state.source_bytes.insert(key.clone(), current_size);
-                    state.last_retained = Some(Instant::now());
-                    touch(&mut state.lru, &key);
-                    evict_to_limits(&mut state, &key, self.limits);
-                    record_success(&mut state.stats, &report, parsed.as_ref());
-                    state.stats.retained_documents = state.documents.len();
-                    state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
+                    self.in_heap(|| {
+                        let entry = Arc::new(Mutex::new(RetainedEntry {
+                            document,
+                            artifact: retained_artifact,
+                            artifact_revision: extraction
+                                .and_then(|(_, revision)| revision.cloned()),
+                        }));
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if state.clear_epoch != admission_epoch {
+                            return;
+                        }
+                        state.documents.insert(key.clone(), Arc::clone(&entry));
+                        state.source_bytes.insert(key.clone(), current_size);
+                        state.last_retained = Some(Instant::now());
+                        touch(&mut state.lru, &key);
+                        evict_to_limits(&mut state, &key, self.limits);
+                        record_success(&mut state.stats, &report, parsed.as_ref());
+                        state.stats.retained_documents = state.documents.len();
+                        state.stats.retained_source_bytes =
+                            state.source_bytes.values().copied().sum();
+                    });
                     Ok((report, parsed))
                 }
             }
@@ -645,13 +651,19 @@ impl SharedRetainedParsePool {
                 } else {
                     retained.artifact.as_ref()
                 };
-                match retained
-                    .document
-                    .extract_canonical_artifact(extractor, &report, previous)
-                {
-                    Ok(extraction) => {
-                        retained.artifact = Some(self.in_heap(|| extraction.artifact.clone()));
-                        retained.artifact_revision = artifact_revision.cloned();
+                let extracted = self.in_heap(|| {
+                    retained
+                        .document
+                        .extract_canonical_artifact(extractor, &report, previous)
+                        .map(|extraction| {
+                            let artifact = extraction.artifact.clone();
+                            (extraction, artifact)
+                        })
+                });
+                match extracted {
+                    Ok((extraction, artifact)) => {
+                        retained.artifact = Some(artifact);
+                        retained.artifact_revision = self.in_heap(|| artifact_revision.cloned());
                         Some(extraction)
                     }
                     Err(error) => {
@@ -670,23 +682,25 @@ impl SharedRetainedParsePool {
             }
         };
         let current_size = retained.document.retained_source_bytes();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let is_still_retained = state
-            .documents
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, &entry));
-        if is_still_retained {
-            state.source_bytes.insert(key.clone(), current_size);
-            state.last_retained = Some(Instant::now());
-            touch(&mut state.lru, &key);
-            evict_to_limits(&mut state, &key, self.limits);
-        }
-        record_success(&mut state.stats, &report, extraction.as_ref());
-        state.stats.retained_documents = state.documents.len();
-        state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
+        self.in_heap(|| {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let is_still_retained = state
+                .documents
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &entry));
+            if is_still_retained {
+                state.source_bytes.insert(key.clone(), current_size);
+                state.last_retained = Some(Instant::now());
+                touch(&mut state.lru, &key);
+                evict_to_limits(&mut state, &key, self.limits);
+            }
+            record_success(&mut state.stats, &report, extraction.as_ref());
+            state.stats.retained_documents = state.documents.len();
+            state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
+        });
         Ok((report, extraction))
     }
 
