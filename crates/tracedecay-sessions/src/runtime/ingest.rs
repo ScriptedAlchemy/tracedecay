@@ -22,6 +22,7 @@ pub use project::{
 pub use startup::{
     TranscriptIngestOutcome, ingest_user_global_sources_for_startup_with_db,
     ingest_user_global_sources_for_startup_with_db_and_codex_state,
+    subscribe_history_capacity_release,
 };
 pub use user::{
     CodexHookIngestOutcome, ingest_user_global_sources_for_provider_with_authorities,

@@ -366,7 +366,7 @@ impl ProjectRootMatcher {
             return ProjectMembership::Unknown;
         }
 
-        let path_identity = identity_resolver(path);
+        let path_identity = identity_resolver(nearest_existing_ancestor(path));
         match (&self.identity, path_identity) {
             (
                 GitRepositoryIdentityOutcome::Resolved(project_identity),
@@ -395,6 +395,20 @@ impl ProjectRootMatcher {
                 .is_some_and(|discovered| paths_equal(discovered, &self.root)),
         )
     }
+}
+
+/// A transcript's working directory may since have been deleted. Git cannot
+/// probe a missing directory, so it would stay undecidable forever, while the
+/// directory still lies inside whatever worktree its nearest surviving
+/// ancestor belongs to. A relative path, or one whose existence cannot be
+/// read, is probed as given.
+fn nearest_existing_ancestor(path: &Path) -> &Path {
+    if !path.is_absolute() {
+        return path;
+    }
+    path.ancestors()
+        .find(|ancestor| !matches!(ancestor.try_exists(), Ok(false)))
+        .unwrap_or(path)
 }
 
 /// Source-lifetime cache of project matchers keyed by canonical project root.
@@ -975,6 +989,42 @@ mod tests {
         );
 
         assert_eq!(membership, ProjectMembership::Unknown);
+    }
+
+    #[test]
+    fn deleted_working_directory_membership_is_decided_by_its_surviving_repository() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("project");
+        let other_root = temp.path().join("other");
+        for root in [&project_root, &other_root] {
+            std::fs::create_dir_all(root).expect("repository root");
+            let status = std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root)
+                .status()
+                .expect("git init");
+            assert!(status.success());
+        }
+        let deleted_in_project = project_root.join("deleted/worktree");
+        let deleted_in_other = other_root.join("deleted");
+        let surviving_in_project = project_root.join("packages");
+        std::fs::create_dir_all(&surviving_in_project).expect("surviving cwd");
+        assert!(!deleted_in_project.exists());
+        assert!(!deleted_in_other.exists());
+        let matcher = ProjectRootMatcher::new(&project_root);
+
+        assert_eq!(
+            matcher.contains_status(&deleted_in_project),
+            ProjectMembership::Match
+        );
+        assert_eq!(
+            matcher.contains_status(&deleted_in_other),
+            ProjectMembership::NoMatch
+        );
+        assert_eq!(
+            matcher.contains_status(&surviving_in_project),
+            ProjectMembership::Match
+        );
     }
 
     #[test]

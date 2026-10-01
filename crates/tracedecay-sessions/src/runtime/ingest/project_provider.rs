@@ -93,6 +93,7 @@ fn claude_provider_run_outcome(
 ) -> ProviderRunOutcome {
     let mut outcome =
         ProviderRunOutcome::bounded(stats.transcript, stats.source_bytes_scanned, false);
+    outcome.coverage_advanced = stats.advanced_coverage();
     outcome.add_deferred_units(
         stats
             .deferred_sources

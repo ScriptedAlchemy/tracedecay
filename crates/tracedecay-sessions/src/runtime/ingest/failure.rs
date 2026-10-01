@@ -194,6 +194,8 @@ pub struct IngestPassOutcome {
     /// False when an admitted provider API performs an internally unbounded
     /// sweep and therefore cannot honor the pass byte budget end-to-end.
     pub byte_bounds_enforced: bool,
+    /// The pass durably advanced source coverage beyond its upserts.
+    pub coverage_advanced: bool,
 }
 
 impl IngestPassOutcome {
@@ -207,6 +209,7 @@ impl IngestPassOutcome {
             units_completed: 0,
             units_failed: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
         }
     }
 

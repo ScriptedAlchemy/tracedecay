@@ -129,6 +129,11 @@ impl ClaudeSource {
         }) {
             return None;
         }
+        // An unchanged transcript scans no frame; probing its head for a cwd
+        // would be its only read.
+        if scan.frames.is_empty() {
+            return Some(Vec::new());
+        }
 
         let scan_start = match scan.coverage {
             ClaudeFrameCoverage::Complete { start_offset, .. }

@@ -6,7 +6,7 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -404,6 +404,15 @@ pub(in crate::runtime) fn shared_jsonl_background_cpu()
             provider: "codex",
             resource: "process background CPU authority",
         })
+}
+
+/// Changes each time a shared JSONL memory reservation refused for lack of
+/// headroom could be admitted again. `None` until the composition root mounts
+/// the authority, when nothing has been refused against it either.
+pub(in crate::runtime) fn shared_jsonl_memory_headroom() -> Option<watch::Receiver<u64>> {
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map(|authority| authority.memory.pressure().subscribe_headroom())
 }
 
 pub(in crate::runtime) fn reserve_shared_jsonl_page()

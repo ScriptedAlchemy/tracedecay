@@ -69,6 +69,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
@@ -156,6 +157,7 @@ pub struct CodexDiscoveryState {
 #[derive(Clone, Default)]
 pub struct CodexDiscoveryHub {
     inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
+    scan_released: watch::Sender<u64>,
 }
 
 #[derive(Default)]
@@ -362,6 +364,12 @@ impl CodexDiscoveryHub {
         background_cpu: std::sync::Arc<ProcessBackgroundCpuV1>,
     ) -> TranscriptIngestResult<()> {
         install_shared_jsonl_preparation_authority(memory, background_cpu)
+    }
+
+    /// Advances each time a discovery scan step ends, releasing the scanner a
+    /// consumer reported `Waiting` behind.
+    pub(crate) fn subscribe_scan_release(&self) -> watch::Receiver<u64> {
+        self.scan_released.subscribe()
     }
 
     pub fn register(&self, consumer: &str, source_home: Option<&Path>) {
@@ -703,6 +711,8 @@ impl CodexDiscoveryHub {
                     detail: "Codex discovery hub lock is poisoned",
                 }
             })?;
+            self.scan_released
+                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
             if shared {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;

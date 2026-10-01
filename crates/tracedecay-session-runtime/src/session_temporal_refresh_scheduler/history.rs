@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use futures_util::future::select_all;
+use tokio::sync::watch;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::ProfileIdentityReadPort;
@@ -54,8 +57,39 @@ impl SessionHistoricalIngestOutcome {
     }
 }
 
+/// The capacity-release signals a pass that committed nothing waits on before
+/// it runs again, in place of a retry timer.
+pub struct SessionHistoricalCapacityRelease {
+    signals: Vec<watch::Receiver<u64>>,
+}
+
+impl SessionHistoricalCapacityRelease {
+    /// Each signal advances when capacity the pass may have been refused is
+    /// released. Values already published are treated as seen.
+    pub fn new(signals: Vec<watch::Receiver<u64>>) -> Self {
+        Self { signals }
+    }
+
+    /// Resolves once any signal advances. A closed signal never releases.
+    pub async fn released(&mut self) {
+        if self.signals.is_empty() {
+            return std::future::pending().await;
+        }
+        let changes = self.signals.iter_mut().map(|signal| {
+            Box::pin(async move {
+                if signal.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            })
+        });
+        select_all(changes).await;
+    }
+}
+
 pub trait SessionHistoricalIngestor: Send + Sync {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
+    /// Subscribed immediately before each pass.
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease;
     fn cancel(&self);
 }
 
@@ -143,6 +177,12 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
             .await;
             classify_transcript_ingest_outcome(outcome, &self.cancellation)
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(
+            tracedecay_sessions::runtime::subscribe_history_capacity_release(&self.codex_discovery),
+        )
     }
 
     fn cancel(&self) {
@@ -260,6 +300,12 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(
+            tracedecay_sessions::runtime::subscribe_history_capacity_release(&self.codex_discovery),
+        )
+    }
+
     fn cancel(&self) {
         self.cancellation.cancel();
         self.deregister_codex_once();
@@ -321,6 +367,7 @@ mod tests {
             }],
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
+            coverage_advanced: false,
         }
     }
 
@@ -379,6 +426,7 @@ mod tests {
                 }],
                 coverage: IngestPassCoverage::Complete,
                 scheduling_state_written: false,
+                coverage_advanced: false,
             },
             &ObservationCancellation::default(),
         );

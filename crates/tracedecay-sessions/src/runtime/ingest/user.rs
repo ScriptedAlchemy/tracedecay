@@ -756,6 +756,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         units_completed: provider_runs.units_completed,
         units_failed: provider_runs.units_failed,
         byte_bounds_enforced: provider_runs.byte_bounds_enforced,
+        coverage_advanced: provider_runs.coverage_advanced || scheduling_state_written,
     }
 }
 

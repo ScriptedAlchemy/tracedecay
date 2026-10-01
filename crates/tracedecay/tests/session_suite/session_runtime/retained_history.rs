@@ -23,7 +23,8 @@ use tracedecay_domain::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_runtime::session_sync::test_harness::configure_scheduler;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
-    SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
+    SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
+    SessionHistoricalIngestor,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
@@ -71,6 +72,10 @@ impl SessionHistoricalIngestor for ScriptedHistoricalIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
 }
 
@@ -85,12 +90,14 @@ struct RetryThenBlockHistoricalIngestor {
     passes: AtomicUsize,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
     third_entered: AtomicBool,
     release_third: tokio::sync::Notify,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct CountingDeferredProjector {
@@ -182,6 +189,10 @@ impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
 }
 
@@ -201,6 +212,10 @@ impl SessionHistoricalIngestor for CompleteHealthyProvidersIngestor {
                 .await;
             SessionHistoricalIngestOutcome::Complete
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
     }
 
     fn cancel(&self) {}
@@ -248,6 +263,10 @@ impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
 }
 
@@ -257,6 +276,7 @@ impl RetryThenBlockHistoricalIngestor {
             passes: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
+            capacity: tokio::sync::watch::Sender::new(0),
         }
     }
 }
@@ -267,6 +287,7 @@ impl BlockThirdHistoricalIngestor {
             passes: AtomicUsize::new(0),
             third_entered: AtomicBool::new(false),
             release_third: tokio::sync::Notify::new(),
+            capacity: tokio::sync::watch::Sender::new(0),
         }
     }
 }
@@ -276,9 +297,13 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
         Box::pin(async move {
             match self.passes.fetch_add(1, Ordering::AcqRel) {
                 0 => SessionHistoricalIngestOutcome::Complete,
-                1 => SessionHistoricalIngestOutcome::Pending {
-                    made_progress: false,
-                },
+                1 => {
+                    // The refused capacity frees while this pass is running.
+                    self.capacity.send_modify(|epoch| *epoch += 1);
+                    SessionHistoricalIngestOutcome::Pending {
+                        made_progress: false,
+                    }
+                }
                 _ => {
                     self.third_entered.store(true, Ordering::Release);
                     self.release_third.notified().await;
@@ -289,6 +314,10 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                 }
             }
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(vec![self.capacity.subscribe()])
     }
 
     fn cancel(&self) {
@@ -311,6 +340,10 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
             }
             SessionHistoricalIngestOutcome::Cancelled
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(vec![self.capacity.subscribe()])
     }
 
     fn cancel(&self) {
@@ -342,6 +375,10 @@ impl SessionHistoricalIngestor for CancelAwareHistoricalIngestor {
             self.exited.store(true, Ordering::Release);
             SessionHistoricalIngestOutcome::Cancelled
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
     }
 
     fn cancel(&self) {
@@ -759,12 +796,17 @@ async fn retrying_history_is_typed_stale() {
         .await;
     assert!(
         wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 2,
+            || ingestor.passes.load(Ordering::Acquire) >= 1,
             Duration::from_secs(2),
         )
         .await
     );
-
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        ingestor.passes.load(Ordering::Acquire),
+        1,
+        "a pass that committed nothing must not rerun before its capacity is released"
+    );
     let status = wake.serving_status();
     assert_eq!(
         status.state,
@@ -773,6 +815,16 @@ async fn retrying_history_is_typed_stale() {
                 reason_code: "provider_busy".to_owned(),
             },
         }
+    );
+
+    ingestor.capacity.send_modify(|epoch| *epoch += 1);
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 2,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the released capacity must resume the backpressured pass"
     );
 
     registry.shutdown().await;
