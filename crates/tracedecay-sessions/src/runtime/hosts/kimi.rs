@@ -18,10 +18,11 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, admit_jsonl_observations,
 };
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
@@ -99,6 +100,7 @@ impl KimiSource {
         bounds: TranscriptDiscoveryBounds,
         frontier_path: Option<PathBuf>,
         mut budget: HostScanBudget,
+        convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
         hotpath::measure_block!("sessions.hosts.kimi.discover", {
             let mut discovery = KimiDiscoveryReport {
@@ -157,16 +159,37 @@ impl KimiSource {
                         discovery.reached_end = false;
                         break 'session_dirs;
                     }
+                    let state_path = session_dir.join("state.json");
+                    let CandidateConvergence::Pending(state_pending) = converging_candidate(
+                        convergence,
+                        &state_path,
+                        &mut discovery,
+                        &mut budget,
+                    )?
+                    else {
+                        continue;
+                    };
                     let Some(state) =
                         read_session_state(&session_dir, &mut discovery, &mut budget)?
                     else {
                         continue;
                     };
-                    if state.session_id(&session_dir).is_none()
-                        || !matcher.accepts(state.working_directory())
-                    {
+                    if state.session_id(&session_dir).is_none() {
                         continue;
                     }
+                    if !matcher.accepts(state.working_directory()) {
+                        if matcher.membership(state.working_directory())
+                            == ProjectMembership::NoMatch
+                        {
+                            state_pending.finished(&state_path)?;
+                        }
+                        continue;
+                    }
+                    // The session's state is finished only when every agent
+                    // it names already converged: their transcripts are then
+                    // in the discovery queue and nothing here is new.
+                    let agents = state.agents.len();
+                    let mut converged_agents = 0_usize;
                     let agents_dir = session_dir.join("agents");
                     if !validate_real_directory(
                         &agents_dir,
@@ -224,6 +247,19 @@ impl KimiSource {
                         {
                             continue;
                         }
+                        match converging_candidate(
+                            convergence,
+                            &candidate,
+                            &mut discovery,
+                            &mut budget,
+                        )? {
+                            CandidateConvergence::Pending(_) => {}
+                            CandidateConvergence::Finished => {
+                                converged_agents += 1;
+                                continue;
+                            }
+                            CandidateConvergence::Unreadable => continue,
+                        }
                         if !charge_discovered_path(&mut budget, &candidate)? {
                             discovery.scan_complete = false;
                             discovery.reached_end = false;
@@ -238,6 +274,9 @@ impl KimiSource {
                                 paths.push(candidate);
                             }
                         }
+                    }
+                    if agents > 0 && converged_agents == agents {
+                        state_pending.finished(&state_path)?;
                     }
                 }
             }
@@ -258,6 +297,36 @@ impl KimiSource {
             }
             Ok((discovery, budget))
         })
+    }
+}
+
+enum CandidateConvergence<'a> {
+    /// The discovery consumer already finished this file unchanged.
+    Finished,
+    /// Its identity could not be read; the failure is recorded.
+    Unreadable,
+    Pending(PendingTranscript<'a>),
+}
+
+fn converging_candidate<'a>(
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str)>,
+    path: &Path,
+    discovery: &mut KimiDiscoveryReport,
+    budget: &mut HostScanBudget,
+) -> TranscriptIngestResult<CandidateConvergence<'a>> {
+    match PendingTranscript::observe_blocking(convergence, path) {
+        Ok(Some(pending)) => Ok(CandidateConvergence::Pending(pending)),
+        Ok(None) => Ok(CandidateConvergence::Finished),
+        Err(TranscriptIngestError::ScanIo { source, .. }) => {
+            discovery.record_failure(
+                KimiDiscoveryFailureKind::SessionMetadataUnavailable,
+                path,
+                &source,
+                budget,
+            );
+            Ok(CandidateConvergence::Unreadable)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -409,6 +478,7 @@ pub async fn capture_kimi_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
     hotpath::future!(
         async {
@@ -443,6 +513,8 @@ pub async fn capture_kimi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
+            let owned_convergence =
+                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
             let discovered = hotpath::future!(
                 tokio::task::spawn_blocking(move || {
                     owned_source.discover(
@@ -450,6 +522,9 @@ pub async fn capture_kimi_observations(
                         TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
                         frontier_path,
                         scan_budget,
+                        owned_convergence
+                            .as_ref()
+                            .map(|(hub, consumer)| (hub, consumer.as_str())),
                     )
                 }),
                 label = "sessions.hosts.kimi.discover_task"
@@ -554,6 +629,21 @@ pub async fn capture_kimi_observations(
                     outcome.deferred = true;
                     break;
                 }
+                let pending = match PendingTranscript::observe(convergence, &path) {
+                    Ok(Some(pending)) => pending,
+                    Ok(None) => {
+                        processed_sequence = Some(sequence);
+                        continue;
+                    }
+                    Err(TranscriptIngestError::ScanIo { .. }) => {
+                        warn_isolated_source(&path, "source_identity_unavailable");
+                        outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
+                        outcome.deferred = true;
+                        processed_sequence = Some(sequence);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let (session_id, agent_id) = match kimi_session_identity(&path) {
                     Ok(identity) => identity,
                     Err(_) => {
@@ -657,6 +747,7 @@ pub async fn capture_kimi_observations(
                     }
                     Err(error) => return Err(error),
                 };
+                pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
                 outcome.bytes_consumed = outcome
                     .bytes_consumed
                     .saturating_add(progress.bytes_consumed);
@@ -926,6 +1017,7 @@ mod tests {
             ObservationScopeV1::Profile,
             Some(first.len() as u64),
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -939,6 +1031,7 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -998,6 +1091,7 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1028,6 +1122,7 @@ mod tests {
                 TranscriptDiscoveryBounds::default_walk(),
                 None,
                 discovery_budget(),
+                None,
             )
             .unwrap()
             .0;
@@ -1038,6 +1133,7 @@ mod tests {
                 TranscriptDiscoveryBounds::default_walk(),
                 None,
                 discovery_budget(),
+                None,
             )
             .unwrap()
             .0;
@@ -1085,6 +1181,7 @@ mod tests {
                 TranscriptDiscoveryBounds::default_walk(),
                 None,
                 budget,
+                None,
             )
             .unwrap();
 
@@ -1110,6 +1207,7 @@ mod tests {
             TranscriptDiscoveryBounds::default_walk(),
             None,
             discovery_budget(),
+            None,
         ) {
             Ok(_) => panic!("linked Kimi sessions root must not be discovered"),
             Err(error) => error,
@@ -1200,6 +1298,7 @@ mod tests {
                 ObservationScopeV1::Profile,
                 None,
                 &ObservationCancellation::default(),
+                None,
             )
             .await
             .unwrap();
@@ -1226,6 +1325,7 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1265,6 +1365,7 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();

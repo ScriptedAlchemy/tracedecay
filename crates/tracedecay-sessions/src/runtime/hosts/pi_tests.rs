@@ -69,6 +69,7 @@ async fn capture(layout: &Layout, admission: &MemoryHostAdmission) -> super::PiC
         ObservationScopeV1::Profile,
         None,
         &ObservationCancellation::default(),
+        None,
     )
     .await
     .unwrap()

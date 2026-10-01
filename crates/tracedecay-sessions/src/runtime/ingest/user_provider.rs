@@ -373,6 +373,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -435,6 +436,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {

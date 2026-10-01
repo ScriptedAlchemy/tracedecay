@@ -79,6 +79,62 @@ fn write_codex(home: &Path, cwd: &Path, index: u32) -> PathBuf {
     path
 }
 
+/// One session per host whose adapter reads something besides the
+/// transcript's new bytes before its cursor can answer: a Pi session header,
+/// a Kimi `state.json`, and a Cursor transcript. Returns every file such a
+/// read touches.
+fn write_peer_hosts(home: &Path, cwd: &Path, index: u32) -> Vec<PathBuf> {
+    let stamp = format!("2026-09-30T10:00:{index:02}.000Z");
+    let pi = home.join(format!(
+        ".pi/agent/sessions/--idle--/2026-09-30T10-00-{index:02}-000Z_idle-pi-{index}.jsonl"
+    ));
+    std::fs::create_dir_all(pi.parent().unwrap()).unwrap();
+    append_jsonl(
+        &pi,
+        &[
+            json!({"type": "session", "version": 3, "id": format!("idle-pi-{index}"), "timestamp": stamp, "cwd": cwd}),
+            json!({"type": "message", "id": format!("{index:08}"), "parentId": null, "timestamp": stamp, "message": {"role": "user", "content": format!("pi turn {index}"), "timestamp": 1_790_359_201_000_u64}}),
+        ],
+    );
+
+    let kimi = home.join(format!(".kimi-code/sessions/wd_project/idle-kimi-{index}"));
+    let kimi_wire = kimi.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(kimi_wire.parent().unwrap()).unwrap();
+    let kimi_state = kimi.join("state.json");
+    std::fs::write(
+        &kimi_state,
+        json!({"id": format!("idle-kimi-{index}"), "version": 2, "cwd": cwd, "agents": {"main": {"type": "main"}}}).to_string(),
+    )
+    .unwrap();
+    append_jsonl(
+        &kimi_wire,
+        &[
+            json!({"type": "context.append_message", "agentId": "main", "message": {"role": "user", "content": [{"type": "text", "text": format!("kimi turn {index}")}], "toolCalls": []}, "time": 1_790_359_201 + u64::from(index)}),
+        ],
+    );
+
+    let slug = cwd
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+    let cursor = home.join(format!(
+        ".cursor/projects/{slug}/agent-transcripts/idle-cursor-{index}.jsonl"
+    ));
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let mut cursor_record: Value = serde_json::from_str(CURSOR_ASSISTANT).unwrap();
+    cursor_record["id"] = json!(format!("idle-cursor-{index}"));
+    cursor_record["timestamp"] = json!(stamp);
+    append_jsonl(&cursor, &[cursor_record]);
+
+    vec![pi, kimi_state, kimi_wire, cursor]
+}
+
+const CURSOR_ASSISTANT: &str =
+    include_str!("../../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json");
 const CODEX_META: &str = include_str!(
     "../../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
 );
@@ -113,7 +169,7 @@ impl TranscriptReads {
                 "inotify_add_watch: {}",
                 std::io::Error::last_os_error()
             );
-            names.insert(wd, path.file_name().unwrap().to_string_lossy().into_owned());
+            names.insert(wd, path.to_string_lossy().into_owned());
         }
         Self { fd, names }
     }
@@ -256,8 +312,75 @@ async fn streamed_codex_message_reads_only_its_rollout() {
     converged_messages(&harness, &project, u64::from(unchanged) + 2).await;
     assert_eq!(
         reads.take(),
-        BTreeSet::from([live.file_name().unwrap().to_string_lossy().into_owned()])
+        BTreeSet::from([live.to_string_lossy().into_owned()])
     );
+
+    harness.shutdown().await;
+}
+
+async fn quiet_converged(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    reads: &TranscriptReads,
+) -> (Value, BTreeSet<String>) {
+    let deadline = Instant::now() + CONVERGENCE_DEADLINE;
+    let mut read = BTreeSet::new();
+    loop {
+        tokio::time::sleep(QUIET_WINDOW).await;
+        let window = reads.take();
+        let status = lcm_status(harness, project).await;
+        if window.is_empty() && status["projection"]["convergence"]["state"] == json!("converged") {
+            return (status, read);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "history never went quiet: read {window:?} under {}",
+            status["projection"]["convergence"]
+        );
+        read.extend(window);
+    }
+}
+
+/// A message streamed into one Codex rollout runs a history pass for every
+/// host. Each peer adapter used to read its unchanged sessions' headers or
+/// sidecars before its cursor could prove them unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_message_reads_no_peer_host_session() {
+    let isolation = tempfile::TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    git(&project, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(project.join("src/lib.rs"), "pub fn idle() {}\n").unwrap();
+    let cwd = std::fs::canonicalize(&project).unwrap();
+    let home =
+        ProductionProjectCompositionHarnessV1::transcript_source_home(isolation.path()).unwrap();
+    let live = write_codex(&home, &cwd, 0);
+    let mut watched = vec![live.clone()];
+    for index in 0..3 {
+        watched.extend(write_peer_hosts(&home, &cwd, index));
+    }
+    let reads = TranscriptReads::watch(&watched);
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .unwrap();
+    let (converged, caught_up) = quiet_converged(&harness, &project, &reads).await;
+    assert_eq!(
+        caught_up.len(),
+        watched.len(),
+        "catch-up reads {caught_up:?}"
+    );
+    let messages = converged["lcm"]["store"]["messages"].as_u64().unwrap();
+
+    let mut streamed = codex_record(CODEX_MESSAGE, 3_000);
+    streamed["payload"]["message"] = json!("streamed codex turn");
+    append_jsonl(&live, &[streamed]);
+    converged_messages(&harness, &project, messages + 1).await;
+    let (_, after) = quiet_converged(&harness, &project, &reads).await;
+    assert_eq!(after, BTreeSet::from([live.to_string_lossy().into_owned()]));
 
     harness.shutdown().await;
 }
