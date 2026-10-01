@@ -292,6 +292,35 @@ where
     observation
 }
 
+/// Persists a `first` observation and a `second` whose anchor supersedes it,
+/// returning their canonical occurrences.
+pub(crate) async fn persist_superseding_pair<S>(
+    store: &S,
+    session_id: &SessionId,
+) -> (MessageOccurrenceRecordV1, MessageOccurrenceRecordV1)
+where
+    S: ObservationStore + ObservationProjectionStore,
+{
+    let first = occurrence(
+        session_id,
+        &persist_observation(store, session_id, 0, "first").await,
+    );
+    let second = occurrence(
+        session_id,
+        &persist_observation_with_lineage(
+            store,
+            session_id,
+            1,
+            "second",
+            AnchorProvenanceRelation::Supersedes,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    (first, second)
+}
+
 pub(crate) fn occurrence(
     session_id: &SessionId,
     observation: &DurableObservationV1,

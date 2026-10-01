@@ -13,23 +13,7 @@ async fn refused_activation_retries_and_a_corrected_refresh_activates() {
         .session_temporal_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = session("session.temporal.omitted-relations");
-    let first = occurrence(
-        &session_id,
-        &persist_observation(&observation_store, &session_id, 0, "first").await,
-    );
-    let second = occurrence(
-        &session_id,
-        &persist_observation_with_lineage(
-            &observation_store,
-            &session_id,
-            1,
-            "second",
-            AnchorProvenanceRelation::Supersedes,
-            first.retrieval_anchor_id.clone(),
-            None,
-        )
-        .await,
-    );
+    let (first, second) = persist_superseding_pair(&observation_store, &session_id).await;
     let refused = begin_candidate(&store, &session_id, 2).await;
     persist_batch(
         &store,
@@ -98,23 +82,7 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
         .session_temporal_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = session("session.temporal.complete");
-    let first = occurrence(
-        &session_id,
-        &persist_observation(&observation_store, &session_id, 0, "first").await,
-    );
-    let second = occurrence(
-        &session_id,
-        &persist_observation_with_lineage(
-            &observation_store,
-            &session_id,
-            1,
-            "second",
-            AnchorProvenanceRelation::Supersedes,
-            first.retrieval_anchor_id.clone(),
-            None,
-        )
-        .await,
-    );
+    let (first, second) = persist_superseding_pair(&observation_store, &session_id).await;
     let candidate = begin_candidate(&store, &session_id, 2).await;
     persist_batch(
         &store,

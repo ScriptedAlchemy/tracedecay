@@ -41,23 +41,7 @@ async fn project_parity_fixture(tmp: &TempDir, incremental: bool) -> Vec<Vec<Str
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = session("session.temporal.parity");
-    let first = occurrence(
-        &session_id,
-        &persist_observation(&observation_store, &session_id, 0, "first").await,
-    );
-    let second = occurrence(
-        &session_id,
-        &persist_observation_with_lineage(
-            &observation_store,
-            &session_id,
-            1,
-            "second",
-            AnchorProvenanceRelation::Supersedes,
-            first.retrieval_anchor_id.clone(),
-            None,
-        )
-        .await,
-    );
+    let (first, second) = persist_superseding_pair(&observation_store, &session_id).await;
     let edge = parent_message_copy(&second, &first);
     let assertion = assertion(&second, &first);
     let store = runtime
