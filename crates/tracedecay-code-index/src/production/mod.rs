@@ -62,6 +62,7 @@ use super::{
 
 mod canonical_json;
 mod clone_rows;
+mod edge_rows;
 mod helpers;
 mod lineage_rows;
 mod module_resolution;

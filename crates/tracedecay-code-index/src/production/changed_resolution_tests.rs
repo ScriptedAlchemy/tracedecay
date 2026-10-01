@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use tracedecay_domain::{LanguageId, SanitizationReceiptId, SensitivityLevelV1};
+use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
 use super::changed_resolution::{ChangedSitesV1, pair_edited_files};
 use super::graph_inputs::resolve_files;
 use super::worker_tests::{
-    WorkerProjectionSink, WorkerPublicationStore, worker_config, worker_id,
-    worker_request_with_source,
+    WorkerProjectionSink, WorkerPublicationStore, partitioned_restore, partitioned_seal,
+    worker_config, worker_id, worker_request_with_source,
 };
 use super::*;
 
@@ -338,4 +338,68 @@ fn ruby_edits_resolve_from_the_base_like_a_whole_resolution() {
             moved: 52,
         }
     );
+}
+
+/// Fails on a restore that re-derives its generation's cross-file edges by
+/// resolving the whole corpus. A daemon restart restores the sealed parent
+/// and builds the next edit over it: neither may resolve the corpus whole,
+/// and both must hold exactly the edges a whole resolution derives.
+#[test]
+fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
+    for language in ["rust", "typescript", "python", "go", "java", "ruby"] {
+        let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
+        let mut owner = CodeIndexProductionOwnerV1::new(
+            worker_config(),
+            WorkerPublicationStore::default(),
+            WorkerProjectionSink,
+        )
+        .expect("production owner");
+        let parent = publish(&mut owner, &tree, None, false, 1_000_000);
+        assert!(
+            parent
+                .edges
+                .iter()
+                .any(|edge| edge.authority == EdgeAuthorityV1::NameResolved),
+            "{language}: the fixture resolves cross-file edges"
+        );
+        let (manifest, segments) = partitioned_seal(&parent);
+        drop(owner);
+
+        super::helpers::take_seal_reference_resolutions();
+        let restored = Arc::new(partitioned_restore(&manifest, &segments));
+        assert_eq!(
+            super::helpers::take_seal_reference_resolutions(),
+            0,
+            "{language}: the restore resolved the corpus whole"
+        );
+        assert_eq!(restored.edges, parent.edges, "{language}: restored edges");
+        assert_eq!(restored.edge_abstentions, parent.edge_abstentions);
+
+        let store = WorkerPublicationStore::default();
+        *store.active.lock().expect("publication lock") = Some(restored);
+        let mut restarted =
+            CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+                .expect("restarted production owner");
+        let index = tree
+            .iter()
+            .position(|(path, _)| {
+                !matches!(language_for(path), "toml" | "json") && !path.ends_with("go.mod")
+            })
+            .expect("a source file");
+        let mut shifted = tree.clone();
+        shifted[index].1 = format!("\n\n{}", tree[index].1);
+        let edited = publish(&mut restarted, &shifted, Some(index), true, 1_100_000);
+        assert_eq!(
+            super::helpers::take_seal_reference_resolutions(),
+            0,
+            "{language}: the first build after the restart resolved the corpus whole"
+        );
+        assert_eq!(
+            edited.edges,
+            collect_edge_evidence(&edited.files)
+                .expect("whole edge evidence")
+                .0,
+            "{language}: edges of the first build after the restart"
+        );
+    }
 }

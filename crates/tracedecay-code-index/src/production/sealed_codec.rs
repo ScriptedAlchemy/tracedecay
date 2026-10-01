@@ -38,14 +38,15 @@ use super::*;
 /// every unchanged file's symbols. `full_replay_digest` is sealed as a
 /// parent delta (optional parent binding). Evidence lineage, request, and
 /// receipt rows leave implicit what the generation's own symbols and chunks
-/// imply.
+/// imply. Evidence also carries the cross-file edges sealing resolved, so a
+/// restore never re-resolves the corpus.
 ///
 /// Every other revision is refused through
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
 /// successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 16;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 17;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
@@ -1062,6 +1063,8 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
     pub(super) capability: CodeIndexCapabilityManifestV1,
     pub(super) projection_request: ProjectionBatchRequestV1,
     pub(super) projection_receipt: ProjectionBatchReceiptV1,
+    /// The edges sealing derived across files, restored as sealed.
+    pub(super) cross_file_edges: Vec<CanonicalRelationEdgeV1>,
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -1142,6 +1145,7 @@ pub(super) fn assemble_published_generation(
         capability,
         projection_request,
         projection_receipt,
+        cross_file_edges,
     } = generation;
     let files = content.files.clone();
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
@@ -1187,8 +1191,8 @@ pub(super) fn assemble_published_generation(
             });
             let (edges, edge_abstentions) =
                 hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
-                    collect_edge_evidence(&files)
-                })?;
+                    edge_evidence(&files, cross_file_edges)
+                });
             probe.sample();
             let projection =
                 hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
