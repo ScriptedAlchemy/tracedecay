@@ -24,6 +24,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -89,22 +90,27 @@ impl VibeSource {
         self
     }
 
-    fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
-        let meta = read_meta(&path.parent()?.join("meta.json"))?;
-        // `Unknown` (bounded git timeout) is excluded exactly like `NoMatch`:
-        // no cursor is persisted for a `None` here, so the next scan pass
-        // re-resolves the membership instead of misfiling the session.
-        if TranscriptScopeMatcher::for_scope_cached(
+    fn scoped_meta(&self, path: &Path, project_root: &Path) -> ScopedMeta {
+        let Some(meta) = path
+            .parent()
+            .and_then(|session| read_meta(&session.join("meta.json")))
+        else {
+            return ScopedMeta::Undecided;
+        };
+        // `Unknown` (bounded git timeout) stays undecided: nothing is
+        // recorded, so the next scan pass re-resolves the membership instead
+        // of misfiling the session.
+        match TranscriptScopeMatcher::for_scope_cached(
             project_root,
             self.user_registered_roots.as_deref(),
             &self.project_matchers,
         )
         .membership(Some(&meta.working_directory))
-            != ProjectMembership::Match
         {
-            return None;
+            ProjectMembership::Match => ScopedMeta::InScope(meta),
+            ProjectMembership::NoMatch => ScopedMeta::OutsideScope,
+            ProjectMembership::Unknown => ScopedMeta::Undecided,
         }
-        Some(meta)
     }
 
     /// Eligible `messages.jsonl` only, newest-first under `max_files`, with
@@ -157,6 +163,30 @@ impl TranscriptSource for VibeSource {
     }
 }
 
+enum ScopedMeta {
+    InScope(VibeMeta),
+    OutsideScope,
+    Undecided,
+}
+
+/// The session this pass must admit, or `None` when its transcript already
+/// converged, lies outside the scope, or cannot be scoped yet.
+fn pending_session<'a>(
+    source: &VibeSource,
+    path: &Path,
+    project_root: &Path,
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str)>,
+) -> TranscriptIngestResult<Option<(PendingTranscript<'a>, VibeMeta)>> {
+    let Some(pending) = PendingTranscript::observe_blocking(convergence, path)? else {
+        return Ok(None);
+    };
+    match source.scoped_meta(path, project_root) {
+        ScopedMeta::InScope(meta) => Ok(Some((pending, meta))),
+        ScopedMeta::OutsideScope => pending.finished(path).map(|()| None),
+        ScopedMeta::Undecided => Ok(None),
+    }
+}
+
 #[hotpath::measure(label = "sessions.hosts.vibe.capture", future = true)]
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
@@ -165,6 +195,7 @@ pub async fn capture_vibe_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
     let discovery = hotpath::measure_block!(
         "sessions.hosts.vibe.discover_blocking",
@@ -189,16 +220,25 @@ pub async fn capture_vibe_observations(
             outcome.deferred = true;
             break;
         }
+        let Some((pending, meta)) = hotpath::measure_block!(
+            "sessions.hosts.vibe.meta_blocking",
+            run_blocking_transcript_section(|| {
+                pending_session(source, &path, project_root, convergence)
+            })
+        )?
+        else {
+            continue;
+        };
         let progress = capture_vibe_path(
             facade,
-            source,
             &path,
-            project_root,
+            meta,
             scope.clone(),
             max_new_bytes.map(|_| remaining),
             cancellation,
         )
         .await?;
+        pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
         outcome.bytes_consumed = outcome
             .bytes_consumed
             .saturating_add(progress.bytes_consumed);
@@ -210,19 +250,12 @@ pub async fn capture_vibe_observations(
 
 async fn capture_vibe_path(
     facade: &dyn HostAdmission,
-    source: &VibeSource,
     path: &Path,
-    project_root: &Path,
+    meta: VibeMeta,
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
-    let Some(meta) = hotpath::measure_block!(
-        "sessions.hosts.vibe.meta_blocking",
-        run_blocking_transcript_section(|| source.scoped_meta(path, project_root))
-    ) else {
-        return Ok(JsonlObservationAdmissionProgress::default());
-    };
     let provider = ProviderId::new(PROVIDER)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
     let canonical_session_id = protect_sensitive_structural_id(&meta.session_id)

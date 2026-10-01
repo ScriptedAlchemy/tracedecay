@@ -132,6 +132,22 @@ pub(super) fn cancelled_provider_outcome(
     error.is_cancelled().then(ProviderRunOutcome::skipped)
 }
 
+/// A provider run whose observation capture failed: cancellation skips the
+/// provider, any other failure is warned once and charges `charged_bytes`.
+pub(super) fn failed_observation_run(
+    provider: &'static str,
+    error: &source::TranscriptIngestError,
+    message: &'static str,
+    charged_bytes: u64,
+) -> ProviderRunOutcome {
+    cancelled_provider_outcome(error).unwrap_or_else(|| {
+        ProviderRunOutcome::failed(
+            warn_transcript_catch_up_failure(provider, "observation", error, message),
+            charged_bytes,
+        )
+    })
+}
+
 pub(super) fn cancelled_claude_provider_outcome(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> Option<ProviderRunOutcome> {

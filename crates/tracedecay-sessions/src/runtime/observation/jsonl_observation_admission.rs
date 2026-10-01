@@ -2322,7 +2322,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 if is_admission_cancellation(&outcome, &cancellation) {
                     TranscriptIngestError::Cancelled { provider }
                 } else {
-                    TranscriptIngestError::InvalidFrameState { provider }
+                    host_admission_error(provider, outcome)
                 }
             })?;
     if cancellation.is_cancelled() {
@@ -2387,7 +2387,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 if is_admission_cancellation(&outcome, &cancellation) {
                     TranscriptIngestError::Cancelled { provider }
                 } else {
-                    TranscriptIngestError::InvalidFrameState { provider }
+                    host_admission_error(provider, outcome)
                 }
             })?;
         prefix_recovery = JsonlPrefixRecovery::committed(&committed);

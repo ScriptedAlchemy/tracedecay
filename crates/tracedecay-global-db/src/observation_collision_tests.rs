@@ -2635,6 +2635,7 @@ async fn run_vibe_trigger(
         ObservationScopeV1::Profile,
         None,
         &tracedecay_sessions::observation::ObservationCancellation::default(),
+        None,
     )
     .await
 }

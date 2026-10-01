@@ -27,19 +27,23 @@ fn probe_distinguishes_unknown_provider_and_unbound_project_authority() {
 }
 
 #[test]
-fn all_production_provider_ids_are_supported() {
-    for provider in tracedecay_sessions::runtime::SessionProvider::ALL
-        .into_iter()
-        .filter(|provider| provider.supports_host_admission())
-    {
+fn provider_capture_admits_providers_refused_as_direct_host_calls() {
+    for provider in SessionProvider::ALL {
         assert!(
-            supported_provider(provider.id()),
-            "unsupported provider {}",
+            admits_provider_capture(provider.id()),
+            "provider capture refuses {}",
+            provider.id()
+        );
+        assert_eq!(
+            admits_direct_host_call(provider.id()),
+            provider.supports_host_admission(),
+            "direct host admission of {}",
             provider.id()
         );
     }
-    assert!(!supported_provider("roo"));
-    assert!(!supported_provider("vibe"));
+    assert!(!admits_direct_host_call("vibe"));
+    assert!(!admits_provider_capture("roo"));
+    assert!(!admits_direct_host_call("roo"));
 }
 
 #[test]

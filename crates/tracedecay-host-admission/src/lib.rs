@@ -36,6 +36,7 @@ use tracedecay_sessions::observation::{
     ObservationApplicationError, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
     canonical_observation_git_evidence,
@@ -524,8 +525,18 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
+    /// Direct host-call admission, the gate every host route consults before
+    /// it captures through this façade.
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
-        if !supported_provider(provider) {
+        self.authority_probe(admits_direct_host_call(provider), scope)
+    }
+
+    fn authority_probe(
+        &self,
+        provider_admitted: bool,
+        scope: HostAdmissionScope,
+    ) -> HostAdmissionOutcome {
+        if !provider_admitted {
             return admission_outcome(
                 HostAdmissionStatus::Unknown,
                 false,
@@ -769,7 +780,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<GlobalDbObservationStore, HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let scope = host_scope(scope);
-        let probe = self.probe(provider, scope);
+        let probe = self.authority_probe(admits_provider_capture(provider), scope);
         if probe.status != HostAdmissionStatus::Supported {
             return Err(probe);
         }
@@ -970,10 +981,14 @@ fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {
     }
 }
 
-fn supported_provider(provider: &str) -> bool {
-    matches!(provider, "kimi" | "opencode")
-        || tracedecay_sessions::runtime::SessionProvider::parse(provider)
-            .is_some_and(tracedecay_sessions::runtime::SessionProvider::supports_host_admission)
+fn admits_direct_host_call(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some_and(SessionProvider::supports_host_admission)
+}
+
+/// Observation-store access admits every session provider: canonical capture
+/// from provider ingestion includes providers with no direct host surface.
+fn admits_provider_capture(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some()
 }
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {

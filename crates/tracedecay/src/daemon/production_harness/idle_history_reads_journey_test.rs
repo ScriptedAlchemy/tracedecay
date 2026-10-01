@@ -79,10 +79,31 @@ fn write_codex(home: &Path, cwd: &Path, index: u32) -> PathBuf {
     path
 }
 
+/// A Vibe session: `meta.json` binds it to `cwd`, `messages.jsonl` holds one
+/// user turn. Returns both files.
+fn write_vibe(home: &Path, cwd: &Path, session: &str, text: &str) -> Vec<PathBuf> {
+    let dir = home.join(format!(
+        ".vibe/logs/session/session_20260930_100000_{session}"
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        json!({"session_id": session, "environment": {"working_directory": cwd}}).to_string(),
+    )
+    .unwrap();
+    let messages = dir.join("messages.jsonl");
+    append_jsonl(
+        &messages,
+        &[json!({"role": "user", "content": text, "timestamp": 1_790_359_201})],
+    );
+    vec![meta, messages]
+}
+
 /// One session per host whose adapter reads something besides the
 /// transcript's new bytes before its cursor can answer: a Pi session header,
-/// a Kimi `state.json`, and a Cursor transcript. Returns every file such a
-/// read touches.
+/// a Kimi `state.json`, a Vibe `meta.json`, and a Cursor transcript. Returns
+/// every file such a read touches.
 fn write_peer_hosts(home: &Path, cwd: &Path, index: u32) -> Vec<PathBuf> {
     let stamp = format!("2026-09-30T10:00:{index:02}.000Z");
     let pi = home.join(format!(
@@ -130,7 +151,14 @@ fn write_peer_hosts(home: &Path, cwd: &Path, index: u32) -> Vec<PathBuf> {
     cursor_record["timestamp"] = json!(stamp);
     append_jsonl(&cursor, &[cursor_record]);
 
-    vec![pi, kimi_state, kimi_wire, cursor]
+    let mut written = vec![pi, kimi_state, kimi_wire, cursor];
+    written.extend(write_vibe(
+        home,
+        cwd,
+        &format!("idle-vibe-{index}"),
+        &format!("vibe turn {index}"),
+    ));
+    written
 }
 
 const CURSOR_ASSISTANT: &str =
@@ -381,6 +409,67 @@ async fn streamed_message_reads_no_peer_host_session() {
     converged_messages(&harness, &project, messages + 1).await;
     let (_, after) = quiet_converged(&harness, &project, &reads).await;
     assert_eq!(after, BTreeSet::from([live.to_string_lossy().into_owned()]));
+
+    harness.shutdown().await;
+}
+
+/// Vibe has no direct host surface, yet its sessions are captured by
+/// provider ingestion. Its catch-up used to be refused at the direct
+/// host-admission gate, so history never converged for any project that had
+/// a Vibe session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vibe_session_converges_beside_a_peer_host_and_is_searchable() {
+    let isolation = tempfile::TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    git(&project, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(project.join("src/lib.rs"), "pub fn idle() {}\n").unwrap();
+    let cwd = std::fs::canonicalize(&project).unwrap();
+    let home =
+        ProductionProjectCompositionHarnessV1::transcript_source_home(isolation.path()).unwrap();
+    write_codex(&home, &cwd, 0);
+    write_vibe(&home, &cwd, "vibe-search", "marmalade vibe handoff");
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .unwrap();
+    converged_messages(&harness, &project, 2).await;
+
+    let search = |provider: &'static str| {
+        let harness = &harness;
+        let project = &project;
+        async move {
+            let response = harness
+                .call_tool(
+                    project,
+                    "tracedecay_message_search",
+                    json!({"query": "marmalade", "provider": provider, "format": "json"}),
+                )
+                .await
+                .unwrap();
+            let (_, payload) = tool_answer(&response);
+            let payload = resolved(harness, project, "tracedecay_message_search", payload).await;
+            payload["outcome"]["value"]["payload"]["results"]
+                .as_array()
+                .unwrap_or_else(|| panic!("message search returned no results: {payload}"))
+                .iter()
+                .map(|hit| {
+                    (
+                        hit["message"]["provider"].clone(),
+                        hit["message"]["text"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        search("vibe").await,
+        vec![(json!("vibe"), json!("marmalade vibe handoff"))]
+    );
+    assert_eq!(search("codex").await, Vec::new());
 
     harness.shutdown().await;
 }

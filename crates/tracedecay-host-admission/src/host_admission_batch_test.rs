@@ -183,6 +183,38 @@ async fn empty_capture_batch_opens_no_writer_transaction() {
 }
 
 #[tokio::test]
+async fn provider_capture_reads_a_cursor_direct_host_admission_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, _) = profile_facade(&runtime);
+    let source = |provider: &str| {
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new(provider).unwrap(),
+            SessionId::new("session.capture-split").unwrap(),
+        )
+        .unwrap()
+    };
+
+    let direct = facade.accept_replay("vibe", HostAdmissionScope::Profile);
+    assert_eq!(direct.status, HostAdmissionStatus::Unknown);
+    assert_eq!(direct.reason_code, Some("unknown_provider"));
+    assert_eq!(
+        HostAdmission::get_source_cursor(&facade, &source("vibe"), &ObservationScopeV1::Profile)
+            .await,
+        Ok(None)
+    );
+
+    let unknown =
+        HostAdmission::get_source_cursor(&facade, &source("roo"), &ObservationScopeV1::Profile)
+            .await
+            .unwrap_err();
+    assert_eq!(unknown.status, HostAdmissionStatus::Unknown);
+    assert_eq!(unknown.reason_code, Some("unknown_provider"));
+}
+
+#[tokio::test]
 async fn mounted_capture_batch_reduces_writer_transactions() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())

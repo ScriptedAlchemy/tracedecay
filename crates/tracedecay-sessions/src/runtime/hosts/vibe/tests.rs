@@ -97,6 +97,25 @@ fn pagination_completes_older_work_then_surfaces_finite_new_arrivals() {
     assert!(!page0_after.paths.contains(&oldest));
 }
 
+/// One unbounded profile-scope capture of the Vibe home under `home`.
+async fn capture_profile(
+    admission: &MemoryHostAdmission,
+    home: &Path,
+    project: &Path,
+) -> VibeCaptureOutcome {
+    capture_vibe_observations(
+        admission,
+        &VibeSource::with_home(home),
+        project,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+        None,
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn accepted_prefixed_session_and_nonmessage_prefix_share_canonical_cursor_identity() {
     crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
@@ -124,19 +143,9 @@ async fn accepted_prefixed_session_and_nonmessage_prefix_share_canonical_cursor_
         ),
     )
     .unwrap();
-    let source = VibeSource::with_home(tmp.path());
     let admission = MemoryHostAdmission::default();
 
-    let outcome = capture_vibe_observations(
-        &admission,
-        &source,
-        &project,
-        ObservationScopeV1::Profile,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
+    let outcome = capture_profile(&admission, tmp.path(), &project).await;
 
     assert!(!outcome.deferred);
     let observations = admission.observations();
@@ -180,16 +189,7 @@ async fn vibe_workflow_lookalike_admits_as_one_ordinary_message() {
     std::fs::write(session.join("messages.jsonl"), format!("{input}\n")).unwrap();
     let admission = MemoryHostAdmission::default();
 
-    capture_vibe_observations(
-        &admission,
-        &VibeSource::with_home(tmp.path()),
-        &project,
-        ObservationScopeV1::Profile,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
+    capture_profile(&admission, tmp.path(), &project).await;
 
     let observations = admission.observations();
     assert_eq!(observations.len(), 1);
