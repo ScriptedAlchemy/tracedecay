@@ -489,7 +489,14 @@ async fn handle_status_command_within(
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),
     })??;
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir());
+    let mut config =
+        match tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir()) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                eprintln!("warning: {error}");
+                None
+            }
+        };
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
@@ -511,18 +518,17 @@ async fn handle_status_command_within(
     // has expired, one refresh for the next invocation starts here so its
     // round-trip overlaps the render, and is joined after it within the
     // command deadline.
-    let refresh = show_online
-        .then(|| OnlineRefreshPlan::for_cache(&config, now))
+    let online_config = config.as_ref().filter(|_| show_online);
+    let refresh = online_config
+        .map(|config| OnlineRefreshPlan::for_cache(config, now))
         .filter(OnlineRefreshPlan::is_needed)
         .map(|plan| tokio::task::spawn_blocking(move || plan.fetch()));
-    let worldwide = show_online
-        .then_some(config.last_worldwide_total)
+    let worldwide = online_config
+        .map(|config| config.last_worldwide_total)
         .filter(|total| *total > 0);
-    let country_flags = if show_online {
-        config.cached_country_flags.clone()
-    } else {
-        Vec::new()
-    };
+    let country_flags = online_config
+        .map(|config| config.cached_country_flags.clone())
+        .unwrap_or_default();
     hotpath::measure_block!("cli.status.render", {
         if should_print_status_logo(short, stdout_is_terminal) {
             // Tracked render of resources/logo.png; regenerate with
@@ -591,13 +597,14 @@ async fn handle_status_command_within(
 
     if let Some(refresh) = refresh
         && let Some(fresh) = await_online_refresh(deadline, refresh).await
-        && fresh.apply(&mut config, now)
+        && let Some(config) = config.as_mut()
+        && fresh.apply(config, now)
         && let Err(err) = config.save_if_exists(profile.data_dir())
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    if stdout_is_terminal {
-        global::check_for_update(profile, &mut config, false, true);
+    if stdout_is_terminal && let Some(config) = config.as_mut() {
+        global::check_for_update(profile, config, false, true);
     }
     Ok(())
 }
