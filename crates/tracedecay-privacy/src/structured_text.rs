@@ -13,12 +13,16 @@
 //! will ever match. A raw sweep over the whole blob cannot see that; a parse
 //! can.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::OnceLock;
 
+use jsonc_parser::ast::{ObjectPropName, Value as Json};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use toml::Spanned;
+use toml::de::{DeTable, DeValue};
 use tracedecay_capture::ParseLimits;
 use tracedecay_domain::{
     ComponentVersion, LanguageId, PayloadReferenceV1, SanitizationReceiptId,
@@ -153,6 +157,9 @@ struct SensitiveCandidate {
     marker: &'static str,
     value_len: usize,
     decoded_value_matched: bool,
+    /// The spans came from searching the raw text for a decoded value rather
+    /// than from the parser, so they may not be exactly the value's bytes.
+    text_located: bool,
 }
 
 /// Parses `raw` as a structured document when it is one, redacts the values the
@@ -278,12 +285,14 @@ fn sanitize_structured_text_with(
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
-    // A redaction that no longer parses as the input's format is plain text,
-    // whatever format the input was.
-    let format = matches!(
-        parse_structured_text(&sanitized_text),
-        Ok(Some(ref reparsed)) if reparsed.format == parsed.format
-    )
+    // Text-located spans (YAML only) can cover more than the value, so that
+    // redaction keeps its format label only if it still parses as the input's
+    // format. Parser spans replace exactly the value token.
+    let format = (!candidates.iter().any(|candidate| candidate.text_located)
+        || matches!(
+            parse_structured_text(&sanitized_text),
+            Ok(Some(ref reparsed)) if reparsed.format == parsed.format
+        ))
     .then_some(parsed.format);
     Ok(StructuredTextSanitizationV1 {
         format,
@@ -387,6 +396,7 @@ fn line_candidates(
             spans: vec![field.value_span.clone()],
             marker: REDACTED_STRUCTURED_FIELD,
             decoded_value_matched,
+            text_located: false,
         });
     }
     candidates
@@ -414,74 +424,225 @@ fn tree_candidates(
     patterns: &CredentialPatternSet,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) -> Vec<SensitiveCandidate> {
+    let Some(document) = document_node(raw, parsed) else {
+        quarantine_findings.push(unlocatable_sensitive_field());
+        return Vec::new();
+    };
     let mut sensitive = Vec::new();
     collect_tree_fields(
-        &parsed.value,
+        document,
         policy,
         patterns,
         &mut sensitive,
         quarantine_findings,
     );
 
-    let bare_words_are_invalid = matches!(
-        parsed.format,
-        StructuredTextFormatV1::Json | StructuredTextFormatV1::Toml
-    );
     let mut candidates = Vec::new();
-    for SensitiveScalar {
-        key,
-        value,
-        is_number,
-        origin,
-    } in sensitive
-    {
-        let spans = locate_value(raw, &key, &value)
-            .or_else(|| locate_key_line_tail(raw, &key).map(|span| vec![span]));
-        let Some(spans) = spans else {
-            quarantine_findings.push(SanitizationFindingV1::new_with_origin(
-                PrivacyDetectorV1::SensitiveField,
-                SanitizationDetectorOriginV1::SanitizerPolicy,
-                "$",
-                DetectionConfidenceV1::Contextual,
-                SanitizationActionV1::Quarantined,
-            ));
-            continue;
+    for SensitiveScalar { key, value, origin } in sensitive {
+        let (spans, marker, value_len, text_located) = match value {
+            ScalarValue::Exact {
+                span,
+                marker,
+                value_len,
+            } => {
+                if raw.get(span.clone()).is_none() {
+                    quarantine_findings.push(unlocatable_sensitive_field());
+                    continue;
+                }
+                (vec![span], marker, value_len, false)
+            }
+            ScalarValue::Decoded(value) => {
+                let spans = locate_value(raw, &key, &value)
+                    .or_else(|| locate_key_line_tail(raw, &key).map(|span| vec![span]));
+                let Some(spans) = spans else {
+                    quarantine_findings.push(unlocatable_sensitive_field());
+                    continue;
+                };
+                (spans, REDACTED_STRUCTURED_FIELD, value.len(), true)
+            }
         };
         candidates.push(SensitiveCandidate {
             key,
             origin,
-            value_len: value.len(),
+            value_len,
             spans,
-            marker: if is_number && bare_words_are_invalid {
-                QUOTED_REDACTED_STRUCTURED_FIELD
-            } else {
-                REDACTED_STRUCTURED_FIELD
-            },
+            marker,
             decoded_value_matched: false,
+            text_located,
         });
     }
     candidates
 }
 
-/// A scalar under a sensitive key, as decoded by the tree parse.
+fn unlocatable_sensitive_field() -> SanitizationFindingV1 {
+    SanitizationFindingV1::new_with_origin(
+        PrivacyDetectorV1::SensitiveField,
+        SanitizationDetectorOriginV1::SanitizerPolicy,
+        "$",
+        DetectionConfidenceV1::Contextual,
+        SanitizationActionV1::Quarantined,
+    )
+}
+
+/// One node of a parsed tree document.
+enum DocumentNode<'a> {
+    Object(Vec<(Cow<'a, str>, DocumentNode<'a>)>),
+    Array(Vec<DocumentNode<'a>>),
+    Scalar(ScalarValue),
+    /// A boolean, null, or empty string: nothing to redact.
+    Empty,
+}
+
+/// Where a scalar's value sits in the raw text.
+enum ScalarValue {
+    /// The byte range the format's own parser read, and the marker that keeps
+    /// the replaced token valid in that grammar.
+    Exact {
+        span: Range<usize>,
+        marker: &'static str,
+        value_len: usize,
+    },
+    /// Only the decoded value is known (`serde_yaml_ng` reports no spans), so
+    /// the value is located by searching the raw text.
+    Decoded(String),
+}
+
+/// JSON and TOML are walked through span-reporting parsers so every value is
+/// replaced exactly where it was read. `None` when that parser refuses a
+/// document the canonical parse accepted.
+fn document_node<'a>(raw: &'a str, parsed: &'a ParsedStructuredTextV1) -> Option<DocumentNode<'a>> {
+    match parsed.format {
+        StructuredTextFormatV1::Json => {
+            let options = jsonc_parser::ParseOptions {
+                allow_comments: true,
+                allow_loose_object_property_names: false,
+                allow_trailing_commas: false,
+                allow_missing_commas: false,
+                allow_single_quoted_strings: false,
+                allow_hexadecimal_numbers: false,
+                allow_unary_plus_numbers: false,
+            };
+            let parsed = jsonc_parser::parse_to_ast(raw, &Default::default(), &options).ok()?;
+            Some(json_node(parsed.value?))
+        }
+        StructuredTextFormatV1::Toml => {
+            let table = DeTable::parse(raw).ok()?;
+            Some(toml_table_node(raw, table.into_inner()))
+        }
+        _ => Some(decoded_node(&parsed.value)),
+    }
+}
+
+fn json_node(value: Json<'_>) -> DocumentNode<'_> {
+    match value {
+        Json::Object(object) => DocumentNode::Object(
+            object
+                .properties
+                .into_iter()
+                .map(|property| {
+                    let key = match property.name {
+                        ObjectPropName::String(name) => name.value,
+                        ObjectPropName::Word(name) => Cow::Borrowed(name.value),
+                    };
+                    (key, json_node(property.value))
+                })
+                .collect(),
+        ),
+        Json::Array(array) => {
+            DocumentNode::Array(array.elements.into_iter().map(json_node).collect())
+        }
+        Json::StringLit(text) if text.value.is_empty() => DocumentNode::Empty,
+        // The range includes both quotes; the marker replaces the body only.
+        Json::StringLit(text) => DocumentNode::Scalar(ScalarValue::Exact {
+            span: text.range.start + 1..text.range.end.saturating_sub(1),
+            marker: REDACTED_STRUCTURED_FIELD,
+            value_len: text.value.len(),
+        }),
+        Json::NumberLit(number) => DocumentNode::Scalar(ScalarValue::Exact {
+            span: number.range.start..number.range.end,
+            marker: QUOTED_REDACTED_STRUCTURED_FIELD,
+            value_len: number.value.len(),
+        }),
+        Json::BooleanLit(_) | Json::NullKeyword(_) => DocumentNode::Empty,
+    }
+}
+
+fn toml_table_node<'a>(raw: &str, table: DeTable<'a>) -> DocumentNode<'a> {
+    DocumentNode::Object(
+        table
+            .into_iter()
+            .map(|(key, value)| (key.into_inner(), toml_node(raw, value)))
+            .collect(),
+    )
+}
+
+fn toml_node<'a>(raw: &str, value: Spanned<DeValue<'a>>) -> DocumentNode<'a> {
+    let span = value.span();
+    match value.into_inner() {
+        DeValue::Table(table) => toml_table_node(raw, table),
+        DeValue::Array(items) => {
+            DocumentNode::Array(items.into_iter().map(|item| toml_node(raw, item)).collect())
+        }
+        DeValue::String(text) if text.is_empty() => DocumentNode::Empty,
+        // The span includes the delimiters: `"""`/`'''` for multi-line
+        // strings, one quote otherwise. The marker replaces the body only.
+        DeValue::String(text) => {
+            let delimiter = raw
+                .get(span.clone())
+                .filter(|token| token.starts_with("\"\"\"") || token.starts_with("'''"))
+                .map_or(1, |_| 3);
+            DocumentNode::Scalar(ScalarValue::Exact {
+                span: span.start + delimiter..span.end.saturating_sub(delimiter),
+                marker: REDACTED_STRUCTURED_FIELD,
+                value_len: text.len(),
+            })
+        }
+        DeValue::Integer(_) | DeValue::Float(_) | DeValue::Datetime(_) => {
+            DocumentNode::Scalar(ScalarValue::Exact {
+                value_len: span.len(),
+                span,
+                marker: QUOTED_REDACTED_STRUCTURED_FIELD,
+            })
+        }
+        DeValue::Boolean(_) => DocumentNode::Empty,
+    }
+}
+
+fn decoded_node(value: &Value) -> DocumentNode<'_> {
+    match value {
+        Value::Object(fields) => DocumentNode::Object(
+            fields
+                .iter()
+                .map(|(key, child)| (Cow::Borrowed(key.as_str()), decoded_node(child)))
+                .collect(),
+        ),
+        Value::Array(items) => DocumentNode::Array(items.iter().map(decoded_node).collect()),
+        Value::String(text) if !text.is_empty() => {
+            DocumentNode::Scalar(ScalarValue::Decoded(text.clone()))
+        }
+        Value::Number(number) => DocumentNode::Scalar(ScalarValue::Decoded(number.to_string())),
+        Value::String(_) | Value::Bool(_) | Value::Null => DocumentNode::Empty,
+    }
+}
+
+/// A scalar under a sensitive key.
 struct SensitiveScalar {
     key: String,
-    value: String,
-    is_number: bool,
+    value: ScalarValue,
     origin: SanitizationDetectorOriginV1,
 }
 
 fn collect_tree_fields(
-    value: &Value,
+    node: DocumentNode<'_>,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
     patterns: &CredentialPatternSet,
     sensitive: &mut Vec<SensitiveScalar>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) {
-    match value {
-        Value::Object(fields) => {
+    match node {
+        DocumentNode::Object(fields) => {
             for (key, child) in fields {
-                let mut key_evidence = key.clone();
+                let mut key_evidence = key.to_string();
                 redact_text(
                     &mut key_evidence,
                     "$",
@@ -489,8 +650,8 @@ fn collect_tree_fields(
                     quarantine_findings,
                     SanitizationActionV1::Quarantined,
                 );
-                match policy.classify(&NormalizedSensitiveKey::new(key)) {
-                    Some(origin) => collect_scalars(child, key, origin, sensitive),
+                match policy.classify(&NormalizedSensitiveKey::new(&key)) {
+                    Some(origin) => collect_scalars(child, &key, origin, sensitive),
                     None => {
                         collect_tree_fields(
                             child,
@@ -503,45 +664,38 @@ fn collect_tree_fields(
                 }
             }
         }
-        Value::Array(items) => {
+        DocumentNode::Array(items) => {
             for item in items {
                 collect_tree_fields(item, policy, patterns, sensitive, quarantine_findings);
             }
         }
-        _ => {}
+        DocumentNode::Scalar(_) | DocumentNode::Empty => {}
     }
 }
 
 fn collect_scalars(
-    value: &Value,
+    node: DocumentNode<'_>,
     key: &str,
     origin: SanitizationDetectorOriginV1,
     sensitive: &mut Vec<SensitiveScalar>,
 ) {
-    match value {
-        Value::String(text) if !text.is_empty() => sensitive.push(SensitiveScalar {
+    match node {
+        DocumentNode::Scalar(value) => sensitive.push(SensitiveScalar {
             key: key.to_owned(),
-            value: text.clone(),
-            is_number: false,
+            value,
             origin,
         }),
-        Value::Number(number) => sensitive.push(SensitiveScalar {
-            key: key.to_owned(),
-            value: number.to_string(),
-            is_number: true,
-            origin,
-        }),
-        Value::Object(fields) => {
-            for child in fields.values() {
+        DocumentNode::Object(fields) => {
+            for (_, child) in fields {
                 collect_scalars(child, key, origin, sensitive);
             }
         }
-        Value::Array(items) => {
+        DocumentNode::Array(items) => {
             for item in items {
                 collect_scalars(item, key, origin, sensitive);
             }
         }
-        Value::String(_) | Value::Bool(_) | Value::Null => {}
+        DocumentNode::Empty => {}
     }
 }
 
@@ -576,8 +730,8 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
     None
 }
 
-/// Fail-closed fallback when a parsed value cannot be matched byte-for-byte in
-/// the original text, an escaped JSON string, a folded YAML block. Redacting
+/// Fail-closed fallback when a parsed YAML value cannot be matched
+/// byte-for-byte in the original text, an escaped string, a folded block. Redacting
 /// the rest of the key's line cannot leave the value behind. A value that
 /// opens a quoted string on the key's line is redacted only up to its closing
 /// quote, so the terminator and whatever follows it (a JSON `,`) survive.
