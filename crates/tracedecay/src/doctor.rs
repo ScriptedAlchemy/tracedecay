@@ -11,10 +11,9 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
-use tracedecay_contracts::{ApplicationOutcome, ConfigurationSettingFindingV1, ResolvedSetting};
+use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
-    ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, SettingKey,
-    USER_UPLOAD_ENABLED_SETTING_KEY,
+    ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
@@ -156,9 +155,6 @@ pub async fn run_doctor(
         daemon_status.as_ref(),
         &mut pending_reset,
     )?;
-    if matches!(daemon_status, Some(Ok(Some(_)))) {
-        check_project_index_paths(&mut dc, profile, &project_path).await;
-    }
     check_watcher(&mut dc, profile);
     let upload_enabled = if daemon_listening {
         configured_upload_enabled(profile)
@@ -1063,8 +1059,7 @@ fn check_automation_effect_resets(
 async fn configured_upload_enabled(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> tracedecay_domain::errors::Result<bool> {
-    // The setting belongs to the profile: the request names no project.
-    let setting = configured_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
+    let setting = configured_setting(profile, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
     match setting.effective_value {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
         _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1073,41 +1068,8 @@ async fn configured_upload_enabled(
     }
 }
 
-/// Reports every stored index path pattern the project's runtime
-/// configuration leaves unapplied, with the command that repairs it.
-#[hotpath::measure(label = "doctor.config.index_paths", future = true)]
-async fn check_project_index_paths(
-    dc: &mut DoctorCounters,
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-    project_path: &Path,
-) {
-    for key in [INDEX_EXCLUDE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY] {
-        match configured_setting(profile, Some(project_path), key).await {
-            Ok(setting) => {
-                for finding in setting.findings {
-                    match finding {
-                        ConfigurationSettingFindingV1::InvalidIndexPathPattern {
-                            pattern,
-                            message,
-                            ..
-                        } => dc.fail(&format!(
-                            "{key} stores pattern {pattern:?} that does not compile ({message}); \
-                             indexing runs without it. Set {key} to patterns that compile or \
-                             unset it (tracedecay_configuration_set / tracedecay_configuration_unset)"
-                        )),
-                    }
-                }
-            }
-            // A reset-required or still-mounting store is already reported
-            // as its own state; a read that could not run is not an issue.
-            Err(error) => dc.warn(&format!("{key} could not be read: {error}")),
-        }
-    }
-}
-
 async fn configured_setting(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
-    project_path: Option<&Path>,
     key: &str,
 ) -> tracedecay_domain::errors::Result<ResolvedSetting> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
@@ -1122,13 +1084,8 @@ async fn configured_setting(
                 message: format!("could not create Doctor configuration request: {error}"),
             }
         })?;
-    let handshake = crate::daemon::handshake_for_current_client(
-        profile,
-        project_path.map(Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
+    // The setting belongs to the profile: the request names no project.
+    let handshake = crate::daemon::handshake_for_current_client(profile, None, None, false, false)?;
     let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Cli,

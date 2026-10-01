@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
-use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_configuration::config::{PinnedRuntimeConfiguration, setting_findings};
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
@@ -27,8 +27,8 @@ use tracedecay_contracts::doctor::{
     OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
     RemoteOperationalReadV1, ResidentMemoryDoctorPort, ResidentMemoryHolderReadV1,
     ResidentMemoryOwnerReadV1, ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    StorageDoctorPort, advisory_feedback_read_from_publication, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    StorageDoctorPort, UnappliedConfigurationSettingV1, advisory_feedback_read_from_publication,
+    merge_storage_reads, runtime_health_read, storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -51,21 +51,38 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 
 /// Map a real pinned-configuration lookup outcome into a kernel read.
 ///
-/// A pinned snapshot resolves in-sync (the cache invariant guarantees the pinned
-/// configuration equals the value derived from its resolved snapshot, so within
-/// the cache there is no unobserved drift). A cold cache, the fail-closed
-/// accessor's `Err`, is a typed [`ConfigurationAuthorityReadV1::Absent`], never
-/// a fabricated healthy result.
+/// A pinned snapshot is in sync only when the runtime configuration applies
+/// every stored value; each part [`setting_findings`] reports it leaves
+/// unapplied makes the read [`ConfigurationDriftV1::Unapplied`]. A cold cache,
+/// the fail-closed accessor's `Err`, is a typed
+/// [`ConfigurationAuthorityReadV1::Absent`], never a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
     resolved: &Result<PinnedRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
-    match resolved {
-        Ok(_) => ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::InSync,
-            coverage: DoctorCoverageCompletenessV1::Complete,
+    let Ok(pinned) = resolved else {
+        return ConfigurationAuthorityReadV1::Absent;
+    };
+    let unapplied: Vec<_> = pinned
+        .snapshot()
+        .effective_values
+        .iter()
+        .flat_map(|(key, value)| {
+            setting_findings(key, value).into_iter().map(|finding| {
+                UnappliedConfigurationSettingV1 {
+                    key: key.clone(),
+                    finding,
+                }
+            })
+        })
+        .collect();
+    ConfigurationAuthorityReadV1::Resolved {
+        drift: if unapplied.is_empty() {
+            ConfigurationDriftV1::InSync
+        } else {
+            ConfigurationDriftV1::Unapplied(unapplied)
         },
-        Err(_) => ConfigurationAuthorityReadV1::Absent,
+        coverage: DoctorCoverageCompletenessV1::Complete,
     }
 }
 
