@@ -1534,6 +1534,10 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),
   requested: z.number().int().safe().min(0),
+}).strict(), z.object({
+  expected: z.string(),
+  found: z.string(),
+  kind: z.literal("workflow_placement_digest_stale"),
 }).strict()]);
 
 /** Stable application failure envelope. Partial effects and reset-required

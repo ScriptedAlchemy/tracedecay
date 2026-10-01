@@ -31,6 +31,10 @@ pub enum ApplicationProblemDetailV1 {
         requested: u64,
         current: u64,
     },
+    /// A workflow step effect named placement digest `found`, but the step's
+    /// current placement is `expected`: the effect was settled against a
+    /// placement the run has since replaced.
+    WorkflowPlacementDigestStale { expected: String, found: String },
     /// A writer lock stayed held by other writers past its admission
     /// deadline.
     LockDeadline { resource: String, deadline_ms: u64 },
@@ -147,6 +151,7 @@ impl ApplicationProblemDetailV1 {
             Self::Parked { .. } => "application.code-index.parked",
             Self::StaleRefreshFrontier { .. } => "application.retained.refresh-frontier-stale",
             Self::StalePrecondition { .. } => "application.precondition-stale",
+            Self::WorkflowPlacementDigestStale { .. } => "workflow.placement_digest_stale",
             Self::LockDeadline { .. } => "application.lock-deadline",
             Self::ResetRequired { .. } => "application.reset-required",
             Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
@@ -174,6 +179,10 @@ impl ApplicationProblemDetailV1 {
             } => format!(
                 "{field} {requested} does not match the current value {current}; refresh and \
                  resend with {field} {current}."
+            ),
+            Self::WorkflowPlacementDigestStale { expected, found } => format!(
+                "The step effect names placement digest {found}, but the step's current \
+                 placement is {expected}; reread the run and settle against its current placement."
             ),
             Self::LockDeadline {
                 resource,
@@ -261,6 +270,10 @@ impl ApplicationProblemDetailV1 {
                 ("Precondition", field.clone()),
                 ("Requested value", requested.to_string()),
                 ("Current value", current.to_string()),
+            ],
+            Self::WorkflowPlacementDigestStale { expected, found } => vec![
+                ("Expected placement digest", expected.clone()),
+                ("Found placement digest", found.clone()),
             ],
             Self::LockDeadline {
                 resource,

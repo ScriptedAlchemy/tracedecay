@@ -1098,6 +1098,7 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
             },
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
+            detail: None,
         },
         GitIndexTransactionPortError::Unsupported => ApplicationProblem::Unsupported {
             diagnostic: SafeDiagnostic {

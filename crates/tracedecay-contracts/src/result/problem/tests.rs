@@ -89,6 +89,7 @@ fn conflict_retries_only_after_revalidate_and_refresh() {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+            detail: None,
         }
     );
     assert_eq!(

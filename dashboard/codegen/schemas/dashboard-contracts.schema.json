@@ -1427,6 +1427,28 @@
         },
         {
           "additionalProperties": false,
+          "description": "A workflow step effect named placement digest `found`, but the step's\ncurrent placement is `expected`: the effect was settled against a\nplacement the run has since replaced.",
+          "properties": {
+            "expected": {
+              "type": "string"
+            },
+            "found": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "workflow_placement_digest_stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expected",
+            "found"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A writer lock stayed held by other writers past its admission\ndeadline.",
           "properties": {
             "deadline_ms": {

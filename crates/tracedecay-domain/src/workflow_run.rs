@@ -41,6 +41,13 @@ pub enum WorkflowRunStateError {
     InvalidPlacementReceipt,
     #[error("workflow step effect receipt is invalid or stale")]
     InvalidEffectReceipt,
+    #[error(
+        "workflow step effect receipt names placement digest {found}, but the step is placed at {expected}"
+    )]
+    PlacementDigestStale {
+        expected: ManifestDigest,
+        found: ManifestDigest,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -927,11 +934,14 @@ impl WorkflowRunProjection {
                 .validate_outputs(outputs)
                 .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
         }
-        if effect_receipt.run_id() != &self.run_id
-            || effect_receipt.step_id() != step_id
-            || effect_receipt.placement_digest() != placement.placement_digest()
-        {
+        if effect_receipt.run_id() != &self.run_id || effect_receipt.step_id() != step_id {
             return Err(WorkflowRunStateError::InvalidEffectReceipt);
+        }
+        if effect_receipt.placement_digest() != placement.placement_digest() {
+            return Err(WorkflowRunStateError::PlacementDigestStale {
+                expected: placement.placement_digest().clone(),
+                found: effect_receipt.placement_digest().clone(),
+            });
         }
         Ok(())
     }

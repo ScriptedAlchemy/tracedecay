@@ -48,6 +48,7 @@ fn active_request_conflict(
             },
             retry: tracedecay_contracts::RetryDirective::SameRequest,
             legal_actions: vec![tracedecay_contracts::LegalAction::Retry],
+            detail: None,
         },
     )?
     .with_owning_layer(tracedecay_contracts::ProblemOwningLayer::Adapter);

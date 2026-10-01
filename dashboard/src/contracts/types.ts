@@ -367,6 +367,11 @@ export type ApplicationProblemDetailV1 =
     committed: number;
     kind: "stale_refresh_frontier";
     requested: number;
+  }
+  | {
+    expected: string;
+    found: string;
+    kind: "workflow_placement_digest_stale";
   };
 
 export type ApplicationProblemEnvelope = {
