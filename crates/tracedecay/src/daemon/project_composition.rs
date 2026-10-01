@@ -1796,13 +1796,7 @@ impl ProjectOpenInputs<'_> {
             mutation.mark_failed();
         }
         if core_retained {
-            let reset_refusal =
-                tracedecay_mcp::reset_required_context(&error).and_then(|(authority, _)| {
-                    tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
-                        &error,
-                        tracedecay_mcp::reset_required_command(&authority, None),
-                    )
-                });
+            let reset_refusal = tracedecay_mcp::reset_required_detail(&error);
             if let Some(attempt) = &activation.publication_attempt {
                 let project_runtimes = &self.invocation.service.project_runtimes;
                 match &reset_refusal {
