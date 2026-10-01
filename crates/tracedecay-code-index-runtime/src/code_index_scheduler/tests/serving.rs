@@ -48,8 +48,9 @@ use tracedecay_query::retrieval::{
     },
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
-    sampled_process_resident_bytes_v1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryPressureV1,
+    resident_memory_watermark_bytes_v1,
 };
 
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -2053,35 +2054,30 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 fn overlapping_text_builds_share_one_admission_watermark_headroom() {
     let limit_bytes = 1_000_u64;
     let watermark_headroom = 100_u64;
-    let requested = NonZeroU64::new(200).expect("nonzero build request");
+    let requested = NonZeroU64::new(300).expect("nonzero build request");
     let mut used_bytes = 0_u64;
 
-    for observed_bytes in [300_u64, 500, 700] {
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
-        let (accounted, retained) = super::super::text_artifact_resident_memory_charges(
-            requested,
-            unmodeled_live_bytes,
-            watermark_headroom,
-        )
-        .expect("bounded admission accounting");
+    for _ in 0..3 {
+        let accounted =
+            super::super::text_artifact_resident_memory_charge(requested, watermark_headroom)
+                .expect("bounded admission accounting");
         assert!(
             used_bytes + accounted.get() <= limit_bytes,
             "each overlapping build fits beneath the same 900-byte high watermark"
         );
-        used_bytes += retained.get();
+        used_bytes += requested.get();
     }
 
     assert_eq!(
         used_bytes, 900,
-        "the retained ledger owns one observed baseline plus three build ceilings"
+        "the retained ledger owns the three build ceilings, not three margins"
     );
     for overflow in [
-        super::super::text_artifact_resident_memory_charges(
+        super::super::text_artifact_resident_memory_charge(
             NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
             1,
-            0,
         ),
-        super::super::text_artifact_resident_memory_charges(requested, 0, u64::MAX),
+        super::super::text_artifact_resident_memory_charge(requested, u64::MAX),
     ] {
         assert!(
             matches!(
@@ -2157,16 +2153,32 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         );
     }
 
-    // A request that fits the empty modeled ledger must still account the
-    // process's freshly measured, unmodeled live set before allocating.
-    if let Some(observed_bytes) = sampled_process_resident_bytes_v1() {
-        let build_bytes = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
-            .expect("build ceiling fits u64");
-        let measured_limit = NonZeroU64::new(build_bytes.saturating_add(observed_bytes / 2))
-            .expect("measured test limit");
+    // The empty ledger leaves the measured live set to decide: a build fits
+    // when the live set leaves its floor below the admission watermark, and
+    // is refused once the live set grows past that.
+    let build_floor = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .expect("build floor fits u64");
+    let measured_limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("measured test limit");
+    let watermark = resident_memory_watermark_bytes_v1(
+        measured_limit,
+        RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
+    );
+    let fitting_live = watermark - build_floor;
+    for (live_bytes, admitted) in [(fitting_live, true), (fitting_live + 1, false)] {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            measured_limit,
+            Arc::new(move || {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: live_bytes,
+                    unreclaimable_bytes: live_bytes,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        ));
         let measured = Arc::new(ProcessResidentMemoryV1::with_pressure(
             measured_limit,
-            Arc::new(ResidentMemoryPressureV1::new(measured_limit)),
+            pressure,
         ));
         let mut scheduler = scheduler(
             &fixture,
@@ -2177,18 +2189,26 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         let latest = scheduler
             .latest_complete()
             .expect("measured latest generation");
-        assert!(
-            matches!(
-                latest.advance_text_serving(1),
-                Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
-            ),
-            "fresh RSS plus the minimum build ceiling exceeds the process authority"
-        );
-        assert_eq!(
-            measured.snapshot().used_bytes,
-            0,
-            "a measured-baseline refusal must not leak a charge"
-        );
+        let advanced = latest.advance_text_serving(1);
+        if admitted {
+            assert!(
+                advanced.is_ok(),
+                "{live_bytes} B live leaves the build floor below the watermark: {advanced:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    advanced,
+                    Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
+                ),
+                "{live_bytes} B live leaves less than the build floor: {advanced:?}"
+            );
+            assert_eq!(
+                measured.snapshot().used_bytes,
+                0,
+                "a measured-baseline refusal must not leak a charge"
+            );
+        }
     }
 
     // An adequate authority admits the build and holds the reader charge

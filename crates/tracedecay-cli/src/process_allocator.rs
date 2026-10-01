@@ -17,6 +17,11 @@ mod mimalloc_v3 {
     use tracedecay_domain::process_heap::{
         OwnerHeapCallsV1, ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
     };
+    #[cfg(windows)]
+    use windows_sys::Win32::System::{
+        ProcessStatus::{PSAPI_WORKING_SET_EX_INFORMATION, QueryWorkingSetEx},
+        Threading::GetCurrentProcess,
+    };
 
     /// `mi_heap_area_t` from the vendored v3 `mimalloc.h`.
     #[repr(C)]
@@ -198,7 +203,94 @@ mod mimalloc_v3 {
         unsafe { _mi_theap_default_set(previous as *mut c_void) };
     }
 
-    unsafe extern "C" fn add_committed(
+    /// Granule both residency queries report in.
+    const OS_PAGE_BYTES: usize = 4096;
+    /// OS pages queried per call, sized for a stack buffer: the visitor runs
+    /// inside the heap walk and must not allocate.
+    const RESIDENCY_BATCH_PAGES: usize = 512;
+
+    /// Resident bytes of `[start, start + len)`, `start` OS-page aligned.
+    /// Counts a batch the kernel could not report as resident: the range is
+    /// a live page of this process, so the query fails only when the kernel
+    /// cannot allocate its own bookkeeping, and an owner must not read as
+    /// smaller than it is.
+    #[cfg(unix)]
+    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+        let mut resident = 0_u64;
+        let mut vector = [0_u8; RESIDENCY_BATCH_PAGES];
+        let mut offset = 0;
+        while offset < len {
+            let pages = (len - offset)
+                .div_ceil(OS_PAGE_BYTES)
+                .min(RESIDENCY_BATCH_PAGES);
+            // SAFETY: the range lies in a live mimalloc page mapping and
+            // `vector` holds one byte per OS page of it.
+            let status = unsafe {
+                libc::mincore(
+                    (start + offset) as *mut c_void,
+                    pages * OS_PAGE_BYTES,
+                    vector.as_mut_ptr().cast(),
+                )
+            };
+            let present = if status == 0 {
+                vector[..pages]
+                    .iter()
+                    .filter(|page| **page & 1 != 0)
+                    .count()
+            } else {
+                pages
+            };
+            resident += (present * OS_PAGE_BYTES) as u64;
+            offset += pages * OS_PAGE_BYTES;
+        }
+        resident
+    }
+
+    /// Resident bytes of `[start, start + len)`, `start` OS-page aligned.
+    /// Counts a batch the kernel could not report as resident: the range is
+    /// a live page of this process, so an owner must not read as smaller than
+    /// it is.
+    #[cfg(windows)]
+    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+        let mut resident = 0_u64;
+        let mut entries = [PSAPI_WORKING_SET_EX_INFORMATION::default(); RESIDENCY_BATCH_PAGES];
+        let mut offset = 0;
+        while offset < len {
+            let pages = (len - offset)
+                .div_ceil(OS_PAGE_BYTES)
+                .min(RESIDENCY_BATCH_PAGES);
+            for (index, entry) in entries[..pages].iter_mut().enumerate() {
+                entry.VirtualAddress = (start + offset + index * OS_PAGE_BYTES) as *mut c_void;
+            }
+            // SAFETY: `entries` holds `pages` initialized requests for this
+            // process's own addresses.
+            let queried = unsafe {
+                QueryWorkingSetEx(
+                    GetCurrentProcess(),
+                    entries.as_mut_ptr().cast(),
+                    (pages * size_of::<PSAPI_WORKING_SET_EX_INFORMATION>()) as u32,
+                )
+            };
+            let present = if queried != 0 {
+                entries[..pages]
+                    .iter()
+                    // SAFETY: every bit pattern of the union is a valid `usize`.
+                    .filter(|entry| unsafe { entry.VirtualAttributes.Flags } & 1 != 0)
+                    .count()
+            } else {
+                pages
+            };
+            resident += (present * OS_PAGE_BYTES) as u64;
+            offset += pages * OS_PAGE_BYTES;
+        }
+        resident
+    }
+
+    /// Adds the resident bytes of one page's whole extent. A page reused
+    /// from freed, not yet purged arena memory keeps that memory resident
+    /// past the blocks it has extended to, so the page's block capacity
+    /// undercounts what the owner holds.
+    unsafe extern "C" fn add_resident(
         _heap: *const c_void,
         area: *const HeapArea,
         _block: *mut c_void,
@@ -208,8 +300,12 @@ mod mimalloc_v3 {
         // SAFETY: mimalloc passes a valid area per page, and `total` is the
         // `u64` `heap_footprint` lends for the visit.
         unsafe {
+            let area = &*area;
+            let blocks = area.blocks as usize;
+            let start = blocks & !(OS_PAGE_BYTES - 1);
             let total = &mut *total.cast::<u64>();
-            *total = total.saturating_add((*area).committed as u64);
+            *total =
+                total.saturating_add(resident_page_bytes(start, blocks + area.reserved - start));
         }
         true
     }
@@ -223,12 +319,7 @@ mod mimalloc_v3 {
         // push frees onto those pages atomically.
         unsafe {
             mi_heap_collect(heap, true);
-            mi_heap_visit_blocks(
-                heap,
-                false,
-                add_committed,
-                (&raw mut total).cast::<c_void>(),
-            );
+            mi_heap_visit_blocks(heap, false, add_resident, (&raw mut total).cast::<c_void>());
         }
         total
     }
@@ -283,6 +374,39 @@ mod mimalloc_v3 {
             drop(heap);
             assert_eq!(escaped[BLOCK_BYTES - 1], 9);
             assert_eq!(outside.len(), BLOCKS);
+        }
+
+        /// A page built on freed, not yet purged memory holds that memory
+        /// resident past the blocks it has extended to, and its owner is
+        /// charged for it, never for more than its pages span.
+        #[test]
+        fn an_owner_heap_charges_the_freed_memory_its_pages_reuse() {
+            const SIZE_CLASSES: usize = 64;
+            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
+            super::install();
+            let freed = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            drop(freed.scope(|| {
+                (0..32 * 1024)
+                    .map(|_| vec![7_u8; 1_000])
+                    .collect::<Vec<_>>()
+            }));
+            drop(freed);
+
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let kept = heap.scope(|| {
+                (1..=SIZE_CLASSES)
+                    .map(|class| vec![1_u8; class * 16])
+                    .collect::<Vec<_>>()
+            });
+            let charged = heap.resident_bytes();
+            let live: u64 = kept.iter().map(|block| block.len() as u64).sum();
+            let spanned = SIZE_CLASSES as u64 * SMALL_PAGE_BYTES;
+            assert!(
+                16 * live <= charged && charged <= spanned,
+                "pages holding {live} B on reused memory charge it, within the \
+                 {spanned} B their pages can span: {charged} B"
+            );
+            assert_eq!(kept.len(), SIZE_CLASSES);
         }
 
         /// Path matching keeps nothing in the matching thread's heap: the

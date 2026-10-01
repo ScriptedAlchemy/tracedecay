@@ -50,6 +50,11 @@ path = "tests/retained_parse_heap.rs"
 required-features = ["alloc-mimalloc"]
 
 [[test]]
+name = "refresh_memory_journey"
+path = "tests/refresh_memory_journey.rs"
+required-features = ["alloc-mimalloc"]
+
+[[test]]
 name = "work_loop_journey"
 path = "tests/work_loop_journey.rs"
 required-features = ["test-transport"]
@@ -229,6 +234,11 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # sigstore-verify links aws-lc; on x86_64 MSVC it needs NASM unless its
 # prebuilt assembly objects are allowed, and release runners carry no NASM.
 aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
+# Owner-heap footprints read page residency with `QueryWorkingSetEx`.
+windows-sys = { version = "0.61", features = [
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

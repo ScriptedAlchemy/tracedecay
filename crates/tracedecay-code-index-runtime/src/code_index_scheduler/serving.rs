@@ -940,24 +940,19 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
-pub(super) fn text_artifact_resident_memory_charges(
+/// The bytes one artifact admission reserves: its ceiling plus the band above
+/// the admission watermark, so the reserve call enforces that watermark
+/// against both the ledger and the measured resident set. The band is not
+/// memory the artifact owns and is released right after the reserve;
+/// retaining it in every overlapping build would charge the same
+/// process-wide margin repeatedly. The process's live set is not charged:
+/// the reserve already compares the request with the measured resident set,
+/// which contains it.
+pub(super) fn text_artifact_resident_memory_charge(
     requested: NonZeroU64,
-    unmodeled_live_bytes: u64,
     watermark_headroom: u64,
-) -> Result<(NonZeroU64, NonZeroU64), RetrievalPortError> {
-    let retained = requested
-        .get()
-        .checked_add(unmodeled_live_bytes)
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact resident-memory accounting overflowed".to_owned(),
-            )
-        })?;
-    // Headroom makes the reserve call enforce the lower admission watermark,
-    // but it is not memory owned by this artifact. Retaining it in every
-    // overlapping build charges the same process-wide margin repeatedly.
-    let accounted = retained
+) -> Result<NonZeroU64, RetrievalPortError> {
+    requested
         .get()
         .checked_add(watermark_headroom)
         .and_then(NonZeroU64::new)
@@ -965,8 +960,7 @@ pub(super) fn text_artifact_resident_memory_charges(
             RetrievalPortError::Contract(
                 "text-artifact resident-memory accounting overflowed".to_owned(),
             )
-        })?;
-    Ok((accounted, retained))
+        })
 }
 
 pub(super) fn text_artifact_admitted_build_budget(
@@ -1169,11 +1163,10 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
     }
 
-    /// Reserve one artifact memory ceiling plus the freshly observed process
-    /// live set not already represented by reservations for this admission.
-    /// The atomic reserve also includes the process-wide high-watermark
-    /// headroom, then releases that check-only margin before returning while
-    /// the component ceiling and unmodeled live baseline remain charged.
+    /// Reserve one artifact memory ceiling. The atomic reserve also includes
+    /// the process-wide high-watermark headroom, then releases that
+    /// check-only margin before returning while the component ceiling stays
+    /// charged.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -1184,17 +1177,16 @@ impl DaemonCodeTextArtifactStoreV1 {
             .map(|(reservation, _)| reservation)
     }
 
-    /// Measure headroom and size the build: `(observed, unmodeled live,
-    /// watermark headroom, admitted)` bytes.
+    /// Measure headroom and size the build: `(observed, watermark headroom,
+    /// admitted)` bytes.
     fn text_artifact_admission(
         &self,
         preferred: NonZeroU64,
         minimum: NonZeroU64,
-    ) -> Result<(u64, u64, u64, u64), RetrievalPortError> {
+    ) -> Result<(u64, u64, u64), RetrievalPortError> {
         let admission_watermark = self.resident_memory.admission_watermark_bytes();
         let headroom = self.resident_memory.headroom_below(admission_watermark);
         let observed_bytes = headroom.observed_bytes;
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(headroom.used_bytes);
         let watermark_headroom = self
             .resident_memory
             .snapshot()
@@ -1209,12 +1201,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             self.resident_memory
                 .wait_for_headroom(minimum.get(), admission_watermark);
         })?;
-        Ok((
-            observed_bytes,
-            unmodeled_live_bytes,
-            watermark_headroom,
-            admitted_bytes,
-        ))
+        Ok((observed_bytes, watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1242,7 +1229,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (observed_bytes, unmodeled_live_bytes, watermark_headroom, admitted_bytes) =
+        let (observed_bytes, watermark_headroom, admitted_bytes) =
             match self.text_artifact_admission(preferred, minimum) {
                 Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
                     let released = self
@@ -1270,21 +1257,14 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
             )
         })?;
-        let (accounted, retained) = text_artifact_resident_memory_charges(
-            admitted,
-            unmodeled_live_bytes,
-            watermark_headroom,
-        )?;
+        let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
         hotpath::gauge!("query.artifact.admission.observed_resident_bytes")
             .set(observed_bytes as f64);
-        hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
-            .set(unmodeled_live_bytes as f64);
         hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
             .set(preferred.get() as f64);
         hotpath::gauge!("query.artifact.admission.admitted_growth_bytes")
             .set(admitted.get() as f64);
         hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
-        hotpath::gauge!("query.artifact.admission.retained_bytes").set(retained.get() as f64);
         let mut reservation = self
             .resident_memory
             .reserve(
@@ -1301,7 +1281,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact resident-memory admission was refused: {error}"
                 ))
             })?;
-        reservation.shrink_to(retained.get()).map_err(|error| {
+        reservation.shrink_to(admitted.get()).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact resident-memory headroom release failed: {error}"
             ))
