@@ -21554,6 +21554,7 @@
       "enum": [
         "registry_unavailable",
         "placement_unknown",
+        "writer_authority_unpublished",
         "authority_unreachable",
         "authority_authentication_failed",
         "caller_authentication_failed",

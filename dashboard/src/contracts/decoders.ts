@@ -7695,7 +7695,7 @@ export const ReleaseWorkPlacementCommandSchema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch"]> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch"]);
+export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]);
 
 export const RemoteAuthoritySummaryV1Schema: z.ZodType<RemoteAuthoritySummaryV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
   fence: z.lazy(() => RemoteFenceSummaryV1Schema),

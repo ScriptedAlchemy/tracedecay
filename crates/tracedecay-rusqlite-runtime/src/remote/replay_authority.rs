@@ -24,15 +24,17 @@ impl RemoteSqliteStorageV1 {
         scope
             .validate()
             .map_err(|_| RemoteExactObservationQueryErrorV1::ScopeMismatch)?;
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, writer_json, runtime_binding_json, updated_at
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(self.binding.shard_id.brain_id.as_str())],
+            "authority_state_json, writer_json, runtime_binding_json, updated_at",
+            &self.binding.shard_id.brain_id,
         )
-        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
-        let row =
-            one_row(rows).map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        .map_err(|error| match error {
+            RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+                RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished
+            }
+            _ => RemoteExactObservationQueryErrorV1::AuthorityUnavailable,
+        })?;
         let authority: CurrentRemoteAuthorityStateV1 = serde_json::from_str(
             row_text(&row, 0).map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
         )
@@ -86,14 +88,12 @@ impl RemoteReplayCurrentWriterPortV1 for RemoteSqliteStorageV1 {
         {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, writer_json, runtime_binding_json
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(frame.capture.writer.authority.fence.brain_id.as_str())],
+            "authority_state_json, writer_json, runtime_binding_json",
+            &frame.capture.writer.authority.fence.brain_id,
         )
-        .map_err(map_persistence_error)?;
-        let row = persistence_one_row(rows)?;
+        .map_err(map_authority_persistence_error)?;
         let state: CurrentRemoteAuthorityStateV1 = serde_json::from_str(row_text(&row, 0)?)
             .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
         let writer: RemoteWriterAuthorityV1 = serde_json::from_str(row_text(&row, 1)?)

@@ -199,6 +199,7 @@ fn map_lookup_error(error: RemoteSqliteStorageErrorV1) -> RemoteCredentialLookup
         | RemoteSqliteStorageErrorV1::BindingMismatch
         | RemoteSqliteStorageErrorV1::Conflict
         | RemoteSqliteStorageErrorV1::Unavailable
+        | RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished
         | RemoteSqliteStorageErrorV1::Sql(_) => RemoteCredentialLookupErrorV1::Unavailable,
     }
 }

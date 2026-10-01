@@ -269,7 +269,7 @@ where
             Err(error) => {
                 let failure = capture_protocol_failure(error);
                 let authority = CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+                    reason: failure.unavailable_reason(),
                     observed_at,
                 };
                 RemoteProtocolResponseV1::new_or_unavailable(
@@ -431,6 +431,9 @@ fn capture_protocol_failure(error: RemoteCaptureProtocolErrorV1) -> RemoteProtoc
             RemoteCaptureApplicationErrorV1::Persistence(
                 RemoteCapturePersistenceErrorV1::Overflow,
             ) => RemoteProtocolFailureV1::SpoolSaturated,
+            RemoteCaptureApplicationErrorV1::Persistence(
+                RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished,
+            ) => RemoteProtocolFailureV1::WriterAuthorityUnpublished,
             RemoteCaptureApplicationErrorV1::InvalidEnrollment
             | RemoteCaptureApplicationErrorV1::InvalidSequence
             | RemoteCaptureApplicationErrorV1::WriterFenceMismatch => {

@@ -10,7 +10,7 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_domain::{ProjectId, RemoteWriterFenceV1, canonical_sha256};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
-    RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageV1,
+    RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
 use tracedecay_store::RemoteWriterFenceInstallV1;
 
@@ -81,7 +81,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let writer = self
             .storage
             .recovery_writer(expected)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            .map_err(map_writer_lookup_error)?;
         if writer.scope != caller.scope {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
@@ -134,7 +134,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let writer = self
             .storage
             .recovery_writer_for_lineage(expected)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            .map_err(map_writer_lookup_error)?;
         if writer.scope != caller.scope {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
@@ -212,6 +212,17 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             bytes_consumed,
             interruption_observed_after_commit: interruption_value(&interruption),
         })
+    }
+}
+
+fn map_writer_lookup_error(
+    error: RemoteSqliteStorageErrorV1,
+) -> RemoteRecoveryPhysicalEffectErrorV1 {
+    match error {
+        RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished
+        }
+        _ => RemoteRecoveryPhysicalEffectErrorV1::Unavailable,
     }
 }
 

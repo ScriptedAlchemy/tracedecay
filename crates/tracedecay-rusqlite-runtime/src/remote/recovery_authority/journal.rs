@@ -371,7 +371,10 @@ pub(super) fn record_physical_failure(
         RemoteRecoveryPhysicalEffectErrorV1::TimedOut => "timed_out",
         RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired
         | RemoteRecoveryPhysicalEffectErrorV1::Unavailable
-        | RemoteRecoveryPhysicalEffectErrorV1::Corruption => "forward_recovery_required",
+        | RemoteRecoveryPhysicalEffectErrorV1::Corruption
+        | RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished => {
+            "forward_recovery_required"
+        }
     };
     update_operation_state(handle, operation_id, input_digest, state, observed_at)
 }
@@ -433,6 +436,9 @@ pub(super) fn load_authority_in(
 pub(super) fn map_store_error(error: RemoteSqliteStorageErrorV1) -> RemoteRecoveryOperationErrorV1 {
     match error {
         RemoteSqliteStorageErrorV1::Corruption => RemoteRecoveryOperationErrorV1::Corruption,
+        RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryOperationErrorV1::WriterAuthorityUnpublished
+        }
         _ => RemoteRecoveryOperationErrorV1::Unavailable,
     }
 }

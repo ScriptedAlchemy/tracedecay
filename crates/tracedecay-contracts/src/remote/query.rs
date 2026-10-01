@@ -840,22 +840,23 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                 observed_at,
             ),
             Err(error) => {
-                let authority = if matches!(
+                let unread_authority = matches!(
                     &error,
                     RemoteExactObservationQueryErrorV1::Authentication(_)
                         | RemoteExactObservationQueryErrorV1::Credential(
                             RemoteEnrollmentAuthorityErrorV1::GrantNotFound
                         )
-                ) {
+                        | RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished
+                );
+                let failure = query_protocol_failure(error);
+                let authority = if unread_authority {
                     CurrentRemoteAuthorityStateV1::Unavailable {
-                        reason:
-                            tracedecay_domain::RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+                        reason: failure.unavailable_reason(),
                         observed_at,
                     }
                 } else {
                     fallback_authority
                 };
-                let failure = query_protocol_failure(error);
                 RemoteProtocolResponseV1::new_or_unavailable(
                     request_id.clone(),
                     authority,
@@ -892,6 +893,8 @@ pub enum RemoteExactObservationQueryErrorV1 {
     PolicyUnavailable,
     #[error("remote exact observation query authority is unavailable")]
     AuthorityUnavailable,
+    #[error("no remote writer authority has been published")]
+    WriterAuthorityUnpublished,
     #[error("remote exact observation query authoritative clock is unavailable")]
     ClockUnavailable,
     #[error("remote exact observation query budget was exceeded")]
@@ -941,6 +944,9 @@ pub(super) fn query_protocol_failure(
         | RemoteExactObservationQueryErrorV1::BudgetExceeded
         | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {
             RemoteProtocolFailureV1::AuthorityUnavailable
+        }
+        RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished => {
+            RemoteProtocolFailureV1::WriterAuthorityUnpublished
         }
         RemoteExactObservationQueryErrorV1::StaleFence => {
             RemoteProtocolFailureV1::StaleAuthorityFence
