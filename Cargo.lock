@@ -6709,6 +6709,7 @@ dependencies = [
  "aho-corasick",
  "hex",
  "hotpath",
+ "jsonc-parser",
  "percent-encoding",
  "regex-automata",
  "serde",
