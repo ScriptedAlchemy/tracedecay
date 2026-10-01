@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import shutil
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from embed_proxy import (
     DASHBOARD_EMBED_PATH,
@@ -15,6 +20,8 @@ from embed_proxy import (
     is_html_content_type,
     rewrite_dashboard_html,
 )
+
+WRAPPER_DIR = Path(__file__).resolve().parent
 
 
 class DashboardUpstreamTests(unittest.TestCase):
@@ -73,12 +80,44 @@ class HtmlRewriteTests(unittest.TestCase):
         self.assertIn('src="//cdn.example/app.js"', rewritten)
         self.assertIn('href="https://example.test/app.css"', rewritten)
 
+@unittest.skipIf(
+    importlib.util.find_spec("fastapi") is None,
+    "fastapi is not installed in this environment",
+)
 class PluginApiContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Load a deployed copy the way Hermes does: by file path under its
+        plugin module name, with the plugin directory off ``sys.path``."""
+        deployed = tempfile.TemporaryDirectory()
+        self.addCleanup(deployed.cleanup)
+        self.dashboard_dir = Path(deployed.name)
+        for name in ("plugin_api.py", "embed_proxy.py"):
+            shutil.copy(WRAPPER_DIR / name, self.dashboard_dir / name)
+        module_name = "hermes_dashboard_plugin_tracedecay"
+        spec = importlib.util.spec_from_file_location(
+            module_name, self.dashboard_dir / "plugin_api.py"
+        )
+        assert spec is not None and spec.loader is not None
+        self.plugin = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = self.plugin
+        self.addCleanup(sys.modules.pop, module_name, None)
+        spec.loader.exec_module(self.plugin)
+
+    def test_embed_helpers_come_from_the_deployed_sibling(self) -> None:
+        self.assertEqual(
+            self.plugin.dashboard_upstream.__code__.co_filename,
+            str(self.dashboard_dir / "embed_proxy.py"),
+        )
+        self.assertEqual(
+            self.plugin.dashboard_upstream("http://127.0.0.1:7341/?token=ab12"),
+            (
+                "http://127.0.0.1:7341",
+                {"Authorization": "Basic dHJhY2VkZWNheTphYjEy"},
+            ),
+        )
+
     def test_get_dashboard_url_never_returns_loopback(self) -> None:
-        try:
-            import plugin_api
-        except ImportError:
-            self.skipTest("fastapi is not installed in this environment")
+        plugin_api = self.plugin
         plugin_api._upstream_base = lambda: "http://127.0.0.1:59999"  # type: ignore[method-assign]
         response = plugin_api.get_dashboard_url()
         payload = json.loads(bytes(response.body).decode("utf-8"))

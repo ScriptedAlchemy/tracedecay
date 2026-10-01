@@ -39,6 +39,9 @@ run_integration() {
                 "$hermes_python" "$REPO_ROOT/scripts/hermes_stock_check.py"
     )
 
+    echo "== dashboard wrapper loads under the Hermes interpreter"
+    "$hermes_python" -m unittest discover -s "$REPO_ROOT/dashboard/hermes-wrapper" -p 'test_*.py'
+
     echo "== hermes plugins list"
     plugins_list="$(cd "$HERMES_UPSTREAM_DIR" && COLUMNS=200 \
         timeout 120 "$HERMES_VENV/bin/hermes" plugins list)"

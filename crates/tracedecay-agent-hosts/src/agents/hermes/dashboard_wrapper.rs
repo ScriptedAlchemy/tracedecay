@@ -1,7 +1,7 @@
 //! Hermes dashboard wrapper deployment.
 //!
 //! Deploys the canonical `dashboard/hermes-wrapper/` host adapter (manifest,
-//! `plugin_api.py`, and one mount entry) into a generated Hermes plugin's
+//! `plugin_api.py` with its `embed_proxy.py` helpers, and one mount entry) into a generated Hermes plugin's
 //! `dashboard/` subdirectory, where the Hermes web server's dashboard-plugin
 //! discovery picks it up
 //! (`<hermes_home>/plugins/<name>/dashboard/manifest.json`, both stock and
@@ -27,6 +27,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 const MANIFEST_JSON: &str = include_str!("../../../../../dashboard/hermes-wrapper/manifest.json");
 /// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/tracedecay/`.
 const PLUGIN_API_PY: &str = include_str!("../../../../../dashboard/hermes-wrapper/plugin_api.py");
+/// Same-origin embed helpers `plugin_api.py` loads from its own directory.
+const EMBED_PROXY_PY: &str = include_str!("../../../../../dashboard/hermes-wrapper/embed_proxy.py");
 /// Wrapper entry bundle (deployed as `dist/index.js`; plain JS, no build step).
 const WRAPPER_ENTRY_JS: &str = include_str!("../../../../../dashboard/hermes-wrapper/src/entry.js");
 
@@ -37,6 +39,7 @@ pub(super) fn is_current(plugin_dir: &Path) -> bool {
     [
         "dashboard/manifest.json",
         "dashboard/plugin_api.py",
+        "dashboard/embed_proxy.py",
         "dashboard/dist/index.js",
     ]
     .into_iter()
@@ -61,6 +64,7 @@ pub(super) fn managed_paths(plugin_dir: &Path) -> Vec<std::path::PathBuf> {
     [
         "dashboard/manifest.json",
         "dashboard/plugin_api.py",
+        "dashboard/embed_proxy.py",
         "dashboard/dist/index.js",
     ]
     .into_iter()
@@ -101,6 +105,7 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &dashboard_dir.join("plugin_api.py"),
         &plugin_api(tracedecay_bin)?,
     )?;
+    super::write_text_file(&dashboard_dir.join("embed_proxy.py"), EMBED_PROXY_PY)?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
 
     tracing::debug!(
@@ -123,6 +128,7 @@ pub(super) fn uninstall(plugin_dir: &Path) -> Result<()> {
     super::remove_empty_dir(&dist_dir)?;
     super::remove_generated_file(&dashboard_dir.join("manifest.json"))?;
     super::remove_generated_file(&dashboard_dir.join("plugin_api.py"))?;
+    super::remove_generated_file(&dashboard_dir.join("embed_proxy.py"))?;
     if super::remove_empty_dir(&dashboard_dir)? {
         tracing::debug!(
             dashboard_dir = %dashboard_dir.display(),
