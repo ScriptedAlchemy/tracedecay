@@ -977,6 +977,16 @@ mod tests {
                 json!(["retry"]),
             ),
             (
+                TraceDecayError::reset_required(
+                    "project registry",
+                    "table 'code_projects' has an incompatible number of columns",
+                ),
+                "reset_required",
+                "application.reset-required",
+                "never",
+                json!(["reset"]),
+            ),
+            (
                 TraceDecayError::Io(std::io::Error::other("generation file vanished")),
                 "execution_failed",
                 "graph_tool.failed",
