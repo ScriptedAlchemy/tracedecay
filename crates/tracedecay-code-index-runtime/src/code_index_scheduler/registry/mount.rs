@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use tracedecay_code_index::parallelism::collect_installed_worker_heaps_when_idle;
@@ -881,6 +881,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 };
+                // Retirement and daemon shutdown set the flag, then fire this
+                // watch, so the gate wait below wakes on them.
+                let mut shutdown_observed = worker_serving_generation_changed.subscribe();
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -902,8 +905,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _build_publication = loop {
                     tokio::select! {
                         guard = &mut build_publication => break guard,
-                        () = tokio::time::sleep(Duration::from_millis(5)) => {
-                            if worker_shutting_down.load(Ordering::Acquire) {
+                        changed = shutdown_observed.changed() => {
+                            if changed.is_err() || worker_shutting_down.load(Ordering::Acquire) {
                                 tracing::info!(
                                     event = "code_index_worker_shutdown_observed",
                                     phase = "build_publication_lock",

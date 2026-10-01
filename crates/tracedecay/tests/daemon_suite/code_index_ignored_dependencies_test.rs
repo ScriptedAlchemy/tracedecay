@@ -302,7 +302,7 @@ async fn index_dependency(
     request: CodeIndexIgnoredDependencyRequestV1,
     control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync>,
 ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     registry
         .index_verified_ignored_dependency(project_root, request, control, deadline)
         .await

@@ -551,14 +551,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     if self.text_serves_search(project_root, scope).await {
                         return Ok(Some(CodeIndexSeatWaitV1::Seated(())));
                     }
-                    if !reconcile_requested.swap(true, Ordering::AcqRel) {
-                        if let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) =
+                    if !reconcile_requested.swap(true, Ordering::AcqRel)
+                        && let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) =
                             self.request_query_background_reconcile(scope).await
-                        {
-                            return Ok(Some(CodeIndexSeatWaitV1::Parked(
-                                CodeIndexSeatParkV1::Convergence(parked),
-                            )));
-                        }
+                    {
+                        return Ok(Some(CodeIndexSeatWaitV1::Parked(
+                            CodeIndexSeatParkV1::Convergence(parked),
+                        )));
                     }
                     Ok::<_, Infallible>(None)
                 },
