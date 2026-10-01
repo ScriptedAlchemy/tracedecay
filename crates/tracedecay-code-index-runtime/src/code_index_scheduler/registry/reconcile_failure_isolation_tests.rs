@@ -17,7 +17,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::ResolvedScope;
-use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+};
 
 use super::super::tests::OwnerSignals;
 use super::super::{
@@ -485,6 +487,65 @@ async fn a_transient_capacity_refusal_is_retried_without_an_external_wake() {
     );
 
     fixture.registry.shutdown().await;
+}
+
+/// A first mount refused because another owner holds the scope's
+/// code-generation store lock opens once that holder lets go, with the release
+/// as its only trigger, and its worktree then reaches fresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_mount_refused_by_a_held_store_lock_mounts_on_its_release() {
+    let root = TempDir::new().expect("fixture root");
+    let project = root.path().join("project");
+    fs::create_dir_all(project.join("src")).expect("create source root");
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    run_git_in(&project, &["init", "-q", "-b", "main"]);
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-qm", "fixture"]);
+    let store = root.path().join("store");
+    let canonical = canonical_existing_identity(&project).expect("canonical project");
+    let scope_store = super::super::scoped_code_index_store_root(&store, &canonical);
+    fs::create_dir_all(&scope_store).expect("create the scope store");
+    let holder =
+        acquire_code_generation_store_lock(&scope_store).expect("hold the scope store lock");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry.install_cold_mount_open_observer(&project);
+    let mount = tokio::spawn({
+        let registry = registry.clone();
+        let project = project.clone();
+        async move {
+            registry
+                .mount_worktree(
+                    tracedecay_domain::ProjectId::new("project.first-mount-store-lock")
+                        .expect("project identity"),
+                    &project,
+                    store,
+                )
+                .await
+        }
+    });
+    // The first open started and finished while the lock was held.
+    registry.wait_for_cold_mount_open_events(&project, 2).await;
+    drop(holder);
+
+    let mounted = tokio::time::timeout(SETTLE_DEADLINE, mount)
+        .await
+        .expect("the mount ends once the lock is released")
+        .expect("mount task");
+    assert_eq!(mounted.map_err(|error| error.to_string()), Ok(true));
+    let ready = registry
+        .wait_for_readiness(&project, CodeIndexReadinessTargetV1::Fresh, SETTLE_DEADLINE)
+        .await
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = ready else {
+        panic!("the released first mount must reach fresh: {ready:?}");
+    };
+    assert_eq!(
+        reading.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(reading.parked, None);
+    registry.shutdown().await;
 }
 
 /// A pass refused because another owner holds this scope's code-generation

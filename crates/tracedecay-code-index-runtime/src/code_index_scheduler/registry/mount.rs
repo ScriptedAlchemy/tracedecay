@@ -40,10 +40,10 @@ use super::{
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
     CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
-    ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
-    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
-    TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
-    clear_graph_resident_memory_park, convergence_park_retries_on_wake,
+    ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
+    MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
+    ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
+    clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
     is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
     retained_noop_requires_follow_up_wake,
 };
@@ -150,6 +150,43 @@ impl CodeIndexSchedulerRegistryV1 {
             Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
             true,
         );
+    }
+
+    /// Wait until the holder of the store lock that refused a cold open lets
+    /// go of it. The holder may be another process, so the kernel lock wait
+    /// is the signal; shutdown or retirement of this reservation ends the wait.
+    async fn wait_for_cold_open_store_release(
+        store_root: &Path,
+        reservation: &ColdMountReservationV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let mut cancellation = reservation.slot.cancellation.subscribe();
+        let cancelled = || {
+            CodeIndexSchedulerErrorV1::Identity(if reservation.slot.is_retired() {
+                "code-index scheduler owner is still retiring".to_owned()
+            } else {
+                "code-index scheduler is shutting down".to_owned()
+            })
+        };
+        if reservation.slot.is_cancelled() {
+            return Err(cancelled());
+        }
+        let (released_tx, released) = tokio::sync::oneshot::channel();
+        let root = store_root.to_path_buf();
+        std::thread::Builder::new()
+            .name("code-index-store-release".to_owned())
+            .spawn(move || {
+                let _ = released_tx.send(wait_for_code_generation_store_release(&root));
+            })?;
+        tokio::select! {
+            released = released => match released {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(std::io::Error::other(error.to_string()).into()),
+                Err(_) => Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index store release wait ended without a result".to_owned(),
+                )),
+            },
+            _ = cancellation.changed() => Err(cancelled()),
+        }
     }
 
     /// Spend this mount's single automatic reset on a corrupt publication.
@@ -474,40 +511,60 @@ impl CodeIndexSchedulerRegistryV1 {
         let scoped_store_root =
             super::super::scoped_code_index_store_root(&store_root, &project_root);
         let worker_scope_store_root = scoped_store_root.clone();
-        let open_project_id = project_id.clone();
-        let open_project_root = project_root.clone();
-        let open_byte_pool = Arc::clone(&self.byte_pool);
-        let open_resident_memory = Arc::clone(&self.resident_memory);
-        let open_resident_owners = Arc::clone(&self.resident_owners);
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
         let mounted_path_policy = path_policy.clone();
-        let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            Self::pause_cold_mount_open_for_test(&open_project_root);
-            let opened = CodeIndexWorktreeSchedulerV1::open_with_policy(
-                open_project_id,
-                &open_project_root,
-                scoped_store_root,
-                open_byte_pool,
-                CodeIndexHintPolicyV1::default(),
-                path_policy,
-            );
-            #[cfg(test)]
-            Self::finish_cold_mount_open_for_test(&open_project_root);
-            let mut opened = opened?;
-            opened.bind_resident_memory(open_resident_memory);
-            opened.bind_resident_owners(open_resident_owners);
-            opened.bind_progress_incarnations(
-                progress_daemon_incarnation,
-                progress_producer_incarnation,
-            );
-            Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
-        })
-        .await
-        .map_err(|error| {
-            CodeIndexSchedulerErrorV1::Identity(format!("code-index mount task failed: {error}"))
-        })??;
+        let mut cold_mount_reservation = cold_mount_reservation;
+        let opened = loop {
+            let open_project_id = project_id.clone();
+            let open_project_root = project_root.clone();
+            let open_store_root = scoped_store_root.clone();
+            let open_path_policy = path_policy.clone();
+            let open_byte_pool = Arc::clone(&self.byte_pool);
+            let open_resident_memory = Arc::clone(&self.resident_memory);
+            let open_resident_owners = Arc::clone(&self.resident_owners);
+            let (opened, reservation) = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                Self::pause_cold_mount_open_for_test(&open_project_root);
+                let opened = CodeIndexWorktreeSchedulerV1::open_with_policy(
+                    open_project_id,
+                    &open_project_root,
+                    open_store_root,
+                    open_byte_pool,
+                    CodeIndexHintPolicyV1::default(),
+                    open_path_policy,
+                );
+                #[cfg(test)]
+                Self::finish_cold_mount_open_for_test(&open_project_root);
+                let opened = opened.map(|mut opened| {
+                    opened.bind_resident_memory(open_resident_memory);
+                    opened.bind_resident_owners(open_resident_owners);
+                    opened.bind_progress_incarnations(
+                        progress_daemon_incarnation,
+                        progress_producer_incarnation,
+                    );
+                    opened
+                });
+                (opened, cold_mount_reservation)
+            })
+            .await
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::Identity(format!(
+                    "code-index mount task failed: {error}"
+                ))
+            })?;
+            cold_mount_reservation = reservation;
+            match opened {
+                Err(error) if error.is_store_lock_contended() => {
+                    Self::wait_for_cold_open_store_release(
+                        &scoped_store_root,
+                        &cold_mount_reservation,
+                    )
+                    .await?;
+                }
+                opened => break opened?,
+            }
+        };
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();

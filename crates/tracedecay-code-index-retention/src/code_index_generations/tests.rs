@@ -3646,3 +3646,37 @@ fn a_pre_key_text_artifact_descriptor_reads_as_retired_and_is_replaced() {
         "attaching a current artifact replaces the retired slot"
     );
 }
+
+/// A writer refused because readers hold the store must wait out those
+/// readers. A release wait that returned while a reader still held the lock
+/// woke the refused writer only to be refused again.
+#[test]
+fn store_release_wait_outlasts_a_reader() {
+    let store = tempfile::TempDir::new().expect("generation store");
+    let reader = try_acquire_code_generation_store_read_lock(store.path())
+        .expect("try reader lock")
+        .expect("the store is free for a reader");
+    let root = store.path().to_path_buf();
+    let (released_tx, released) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        released_tx
+            .send(wait_for_code_generation_store_release(&root).is_ok())
+            .expect("report the release");
+    });
+    assert_eq!(
+        released.recv_timeout(std::time::Duration::from_millis(300)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "the release wait must not return while a reader holds the store"
+    );
+    drop(reader);
+    assert_eq!(
+        released.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true)
+    );
+    waiter.join().expect("waiter thread");
+    assert!(
+        try_acquire_code_generation_store_lock(store.path())
+            .expect("try writer lock")
+            .is_some()
+    );
+}
