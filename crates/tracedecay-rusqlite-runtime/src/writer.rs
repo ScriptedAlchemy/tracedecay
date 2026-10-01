@@ -54,6 +54,8 @@ impl CheckpointBlockerSource for NoCheckpointBlockers {
     fn checkpoint_blockers(&self) -> CheckpointBlockers {
         CheckpointBlockers::default()
     }
+
+    fn await_released_snapshots(&self) {}
 }
 
 impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
