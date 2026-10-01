@@ -622,7 +622,10 @@ async fn admit_codex_jsonl_page(
         cancellation,
     } = context;
     let scope = admission_scope.scope();
-    let scope_matcher = admission_scope.scope_matcher();
+    // Resolving the scope runs git for the root. An unchanged rollout admits
+    // no frame and must not pay it on every pass.
+    let resolved_scope = OnceLock::new();
+    let scope_matcher = || resolved_scope.get_or_init(|| admission_scope.scope_matcher());
     let source_location_path = admission_scope.projection_project_path(Some(meta.cwd.as_path()));
     let source_location = CodexObservationLocation {
         project_path: source_location_path,
@@ -650,7 +653,9 @@ async fn admit_codex_jsonl_page(
                 scan.frame_bytes().all(|frame| !frame.is_empty()),
                 "shared JSONL admission never exposes empty native frames"
             );
-            let context = if scan.resumed {
+            // The prior context is rebuilt by reading the rollout up to its
+            // cursor; a scan with no new frame never consults it.
+            let context = if scan.resumed && scan.frame_bytes().next().is_some() {
                 CodexContextState::scan_prior(path, scan.start_offset, meta)
             } else {
                 CodexContextState::from_meta(meta)
@@ -669,7 +674,7 @@ async fn admit_codex_jsonl_page(
             // decode per frame to reach it.
             let in_scope = *state
                 .scope_verdict
-                .get_or_insert_with(|| scope_matcher.accepts(state.context.cwd.as_deref()));
+                .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()));
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -687,7 +692,7 @@ async fn admit_codex_jsonl_page(
                 }
                 if !*state
                     .scope_verdict
-                    .get_or_insert_with(|| scope_matcher.accepts(state.context.cwd.as_deref()))
+                    .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()))
                 {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);

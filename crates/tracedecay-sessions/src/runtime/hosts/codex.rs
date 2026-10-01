@@ -91,6 +91,8 @@ use crate::runtime::source::{
 };
 
 #[cfg(test)]
+pub(crate) use context::{evict_prior_context_for_test, prior_context_scan_count_for_test};
+#[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
 pub use observation::codex_observation_source_v2;

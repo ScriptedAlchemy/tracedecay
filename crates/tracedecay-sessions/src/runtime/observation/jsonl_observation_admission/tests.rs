@@ -1335,6 +1335,61 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
 }
 
 #[tokio::test]
+async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("first pass");
+    assert_eq!(first.bytes_consumed, len);
+
+    crate::runtime::hosts::codex::evict_prior_context_for_test(&path);
+    let replay =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("unchanged pass");
+    assert_eq!(replay.bytes_consumed, 0);
+    assert_eq!(replay.frames_persisted, 0);
+    assert_eq!(
+        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
+        0,
+        "an unchanged rollout admits no frame, so it must not be re-read for its context"
+    );
+
+    let appended = json!({
+        "timestamp": "2026-01-01T00:00:02.000Z",
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "appended message"}
+    })
+    .to_string()
+        + "\n";
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let resumed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("appended pass");
+    assert!(
+        resumed.resumed,
+        "the appended pass resumes at the committed cursor"
+    );
+    assert_eq!(
+        resumed.bytes_consumed,
+        u64::try_from(appended.len()).unwrap()
+    );
+    assert_eq!(
+        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
+        1
+    );
+    assert_eq!(resumed.frames_persisted, 1);
+}
+
+#[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     // The shared metadata cache retains entries up to
     // `shared_jsonl_preparation_capacity()`, so this test only observes the
