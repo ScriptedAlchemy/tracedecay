@@ -169,6 +169,24 @@ enum ScopedMeta {
     Undecided,
 }
 
+/// The session this pass must admit, or `None` when its transcript already
+/// converged, lies outside the scope, or cannot be scoped yet.
+fn pending_session<'a>(
+    source: &VibeSource,
+    path: &Path,
+    project_root: &Path,
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str)>,
+) -> TranscriptIngestResult<Option<(PendingTranscript<'a>, VibeMeta)>> {
+    let Some(pending) = PendingTranscript::observe_blocking(convergence, path)? else {
+        return Ok(None);
+    };
+    match source.scoped_meta(path, project_root) {
+        ScopedMeta::InScope(meta) => Ok(Some((pending, meta))),
+        ScopedMeta::OutsideScope => pending.finished(path).map(|()| None),
+        ScopedMeta::Undecided => Ok(None),
+    }
+}
+
 #[hotpath::measure(label = "sessions.hosts.vibe.capture", future = true)]
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
@@ -202,19 +220,14 @@ pub async fn capture_vibe_observations(
             outcome.deferred = true;
             break;
         }
-        let Some(pending) = PendingTranscript::observe(convergence, &path)? else {
-            continue;
-        };
-        let meta = match hotpath::measure_block!(
+        let Some((pending, meta)) = hotpath::measure_block!(
             "sessions.hosts.vibe.meta_blocking",
-            run_blocking_transcript_section(|| source.scoped_meta(&path, project_root))
-        ) {
-            ScopedMeta::InScope(meta) => meta,
-            ScopedMeta::OutsideScope => {
-                pending.finished(&path)?;
-                continue;
-            }
-            ScopedMeta::Undecided => continue,
+            run_blocking_transcript_section(|| {
+                pending_session(source, &path, project_root, convergence)
+            })
+        )?
+        else {
+            continue;
         };
         let progress = capture_vibe_path(
             facade,

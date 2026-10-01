@@ -23,7 +23,7 @@ use crate::runtime::{
 use super::failure::{
     ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
-    warn_transcript_catch_up_failure,
+    failed_observation_run, warn_transcript_catch_up_failure,
 };
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
@@ -442,20 +442,12 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "kiro",
-                        "observation",
-                        &error,
-                        "project Kiro observation catch-up failed",
-                    ),
-                    0,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "kiro",
+                &error,
+                "project Kiro observation catch-up failed",
+                0,
+            ),
         }
     }
 
@@ -712,20 +704,12 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "vibe",
-                        "observation",
-                        &error,
-                        "project Vibe observation catch-up failed",
-                    ),
-                    0,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "vibe",
+                &error,
+                "project Vibe observation catch-up failed",
+                0,
+            ),
         }
     }
 
