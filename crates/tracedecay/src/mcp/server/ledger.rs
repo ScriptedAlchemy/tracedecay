@@ -357,21 +357,16 @@ impl McpServer {
                     return;
                 }
             };
-            let saved = match tokio::task::spawn_blocking(move || {
+            let saved = tokio::task::spawn_blocking(move || {
                 persist_worldwide_delta(&profile_root, delta, upload_enabled)
+                    .inspect_err(|error| tracing::warn!(%error, "could not save upload config"))
+                    .is_ok()
             })
             .await
-            {
-                Ok(Ok(())) => true,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "could not save upload config");
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "worldwide counter flush task failed");
-                    false
-                }
-            };
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "worldwide counter flush task failed");
+                false
+            });
             if saved
                 && let Some(last_flushed_tokens) = server.last_flushed_tokens.as_ref()
             {

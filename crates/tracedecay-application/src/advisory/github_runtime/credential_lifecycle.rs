@@ -503,45 +503,49 @@ fn review_sources(
         }
     }
     let mut sources = Vec::new();
-    for ConfiguredGitHubRepositoryV1 {
+    for repository in repositories.into_values().flatten() {
+        match registrable_review_source(repository) {
+            Ok(source) => sources.push(source),
+            Err(finding) => findings.push(finding),
+        }
+    }
+    (sources, findings)
+}
+
+fn registrable_review_source(
+    configured: ConfiguredGitHubRepositoryV1,
+) -> Result<RegistrableGitHubReviewSourceV1, GitHubReviewSourceFindingV1> {
+    let ConfiguredGitHubRepositoryV1 {
         owner,
         repository,
         access,
         keyring_service,
         keyring_account,
-    } in repositories.into_values().flatten()
-    {
-        match (access, keyring_service, keyring_account) {
-            (ConfiguredGitHubAccessV1::Public, None, None) => {
-                sources.push(RegistrableGitHubReviewSourceV1::Public { owner, repository });
-            }
-            (ConfiguredGitHubAccessV1::Public, _, _) => {
-                findings.push(GitHubReviewSourceFindingV1::PublicWithKeyringLocator {
-                    owner,
-                    repository,
-                });
-            }
-            (ConfiguredGitHubAccessV1::OsKeyring, Some(keyring_service), Some(keyring_account))
-                if valid_locator(&keyring_service) && valid_locator(&keyring_account) =>
-            {
-                sources.push(RegistrableGitHubReviewSourceV1::OsKeyring {
-                    owner,
-                    repository,
-                    keyring_service,
-                    keyring_account,
-                });
-            }
-            (ConfiguredGitHubAccessV1::OsKeyring, Some(_), Some(_)) => {
-                findings
-                    .push(GitHubReviewSourceFindingV1::InvalidKeyringLocator { owner, repository });
-            }
-            (ConfiguredGitHubAccessV1::OsKeyring, _, _) => {
-                findings
-                    .push(GitHubReviewSourceFindingV1::MissingKeyringLocator { owner, repository });
-            }
+    } = configured;
+    match (access, keyring_service, keyring_account) {
+        (ConfiguredGitHubAccessV1::Public, None, None) => {
+            Ok(RegistrableGitHubReviewSourceV1::Public { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::Public, _, _) => {
+            Err(GitHubReviewSourceFindingV1::PublicWithKeyringLocator { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, Some(keyring_service), Some(keyring_account))
+            if valid_locator(&keyring_service) && valid_locator(&keyring_account) =>
+        {
+            Ok(RegistrableGitHubReviewSourceV1::OsKeyring {
+                owner,
+                repository,
+                keyring_service,
+                keyring_account,
+            })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, Some(_), Some(_)) => {
+            Err(GitHubReviewSourceFindingV1::InvalidKeyringLocator { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, _, _) => {
+            Err(GitHubReviewSourceFindingV1::MissingKeyringLocator { owner, repository })
         }
     }
-    (sources, findings)
 }
 
 /// The configured review sources the daemon does not register, read the way
