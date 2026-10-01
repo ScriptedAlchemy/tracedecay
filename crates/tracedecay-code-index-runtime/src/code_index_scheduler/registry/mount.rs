@@ -2960,14 +2960,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 }
-                // A publication left unseated already advertises its text
-                // owner; an occupied slot tells later passes no decode is owed,
-                // so the predecessor's seat would keep the successor unseated.
+                // A publication left unseated whose text owner already serves
+                // supersedes the predecessor's seat; an occupied slot tells
+                // later passes no decode is owed, so the successor never seats.
                 if published_pass && !matches!(&result, Ok((Ok(_), Some(_), _))) {
                     let advertised = worker_text_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
+                        .filter(|text| text.query_owners_are_ready())
                         .map(|text| text.metadata().manifest().generation_id.clone());
                     let superseded = advertised.is_some_and(|advertised| {
                         worker_serving_generation
