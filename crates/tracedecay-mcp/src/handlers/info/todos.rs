@@ -12,7 +12,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_runtime_core::storage::ProjectPath;
 
-use super::verified::{all_symbols, end_line, required_file_path, required_metadata};
+use super::verified::{
+    end_line, indexed_file_counts, required_file_path, required_metadata, symbols_in_files,
+};
 
 /// Default marker kinds recognised by `tracedecay_todos`.
 const DEFAULT_TODO_KINDS: &[&str] = &[
@@ -78,72 +80,45 @@ pub async fn compute_todos(
         .or_else(|| scope_prefix.map(str::to_owned));
     let limit = request.limit.map_or(200, |value| value.min(2000) as usize);
 
-    let symbols = hotpath::measure_block!("mcp.info.todos.symbols", all_symbols(graph)?);
-    let mut files = symbols
-        .iter()
-        .map(|symbol| required_file_path(symbol).map(str::to_owned))
-        .collect::<Result<Vec<_>>>()?;
-    files.sort();
-    files.dedup();
-    let mut symbols_by_file = HashMap::<String, Vec<(String, u32, u32)>>::new();
-    for symbol in &symbols {
-        let metadata = required_metadata(symbol)?;
-        let start = metadata.start_line.saturating_add(1);
-        let end = end_line(metadata)?.saturating_add(1);
-        symbols_by_file
-            .entry(required_file_path(symbol)?.to_owned())
-            .or_default()
-            .push((metadata.qualified_name.clone(), start, end));
+    let mut file_counts =
+        hotpath::measure_block!("mcp.info.todos.files", indexed_file_counts(graph)?);
+    if let Some(prefix) = path.as_deref() {
+        file_counts
+            .retain(|file| tracedecay_domain::path_matches_scope(&file.logical_path, Some(prefix)));
     }
-    // Graph phase is done. The marker walk reads every candidate source file,
-    // so it belongs on a blocking worker like the sibling analysis scans.
+    file_counts.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    let files = file_counts
+        .iter()
+        .map(|file| file.logical_path.clone())
+        .collect::<Vec<_>>();
+    // The marker walk reads every candidate source file, so it belongs on a
+    // blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let (markers, touched, by_kind) = hotpath::future!(
+    let (mut markers, touched, by_kind) = hotpath::future!(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut markers = Vec::<TodoMarkerV1>::new();
             let mut touched: Vec<String> = Vec::new();
             let mut by_kind = BTreeMap::<String, u64>::new();
 
             'outer: for file in &files {
-                if let Some(prefix) = path.as_deref()
-                    && !tracedecay_domain::path_matches_scope(file, Some(prefix))
-                {
-                    continue;
-                }
                 let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
                 let source =
                     tracedecay_runtime_core::sync::read_source_file(&project_path.absolute_path())
                         .map_err(|error| TraceDecayError::Config {
                             message: format!("cannot read indexed source '{file}': {error}"),
                         })?;
-                let nodes = symbols_by_file.get(file);
 
                 for (idx, line) in source.lines().enumerate() {
                     let line_no = (idx as u32) + 1;
                     for kind in &kinds {
                         if contains_marker_word(line, kind).is_some() {
-                            let mut enclosing = None;
-                            if let Some(nodes) = nodes {
-                                for (qualified_name, start, end) in nodes {
-                                    if *start <= line_no && line_no <= *end {
-                                        let span = *end - *start;
-                                        if enclosing
-                                            .as_ref()
-                                            .is_none_or(|(_, shortest_span)| span < *shortest_span)
-                                        {
-                                            enclosing = Some((qualified_name.clone(), span));
-                                        }
-                                    }
-                                }
-                            }
-                            let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
                             *by_kind.entry(kind.clone()).or_insert(0) += 1;
                             markers.push(TodoMarkerV1 {
                                 kind: kind.clone(),
                                 file: file.clone(),
                                 line: line_no,
                                 text: line.trim().to_owned(),
-                                enclosing,
+                                enclosing: None,
                             });
                             if !touched.contains(file) {
                                 touched.push(file.clone());
@@ -164,6 +139,43 @@ pub async fn compute_todos(
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("tracedecay_todos scan failed to join: {join_error}"),
     })??;
+
+    // Only files that carry a marker need their symbols, to name the
+    // innermost symbol enclosing each marker.
+    file_counts.retain(|file| touched.contains(&file.logical_path));
+    let symbols = hotpath::measure_block!(
+        "mcp.info.todos.symbols",
+        symbols_in_files(graph, &file_counts)?
+    );
+    let mut symbols_by_file = HashMap::<&str, Vec<(&str, u32, u32)>>::new();
+    for symbol in &symbols {
+        let metadata = required_metadata(symbol)?;
+        let start = metadata.start_line.saturating_add(1);
+        let end = end_line(metadata)?.saturating_add(1);
+        symbols_by_file
+            .entry(required_file_path(symbol)?)
+            .or_default()
+            .push((metadata.qualified_name.as_str(), start, end));
+    }
+    for marker in &mut markers {
+        let mut enclosing = None;
+        for (qualified_name, start, end) in symbols_by_file
+            .get(marker.file.as_str())
+            .into_iter()
+            .flatten()
+        {
+            if *start <= marker.line && marker.line <= *end {
+                let span = *end - *start;
+                if enclosing
+                    .as_ref()
+                    .is_none_or(|(_, shortest_span)| span < *shortest_span)
+                {
+                    enclosing = Some((*qualified_name, span));
+                }
+            }
+        }
+        marker.enclosing = enclosing.map(|(qualified_name, _)| qualified_name.to_owned());
+    }
 
     let result = TodosResultV1 {
         match_count: markers.len(),
