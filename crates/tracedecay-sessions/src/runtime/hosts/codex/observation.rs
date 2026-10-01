@@ -684,7 +684,7 @@ async fn admit_codex_jsonl_page(
             // decode per frame to reach it.
             let in_scope = *state
                 .scope_verdict
-                .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()));
+                .get_or_insert_with(|| scope_matcher().accepts(Some(state.context.cwd.as_path())));
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -700,10 +700,9 @@ async fn admit_codex_jsonl_page(
                     // can no longer be trusted.
                     state.scope_verdict = None;
                 }
-                if !*state
-                    .scope_verdict
-                    .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()))
-                {
+                if !*state.scope_verdict.get_or_insert_with(|| {
+                    scope_matcher().accepts(Some(state.context.cwd.as_path()))
+                }) {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }

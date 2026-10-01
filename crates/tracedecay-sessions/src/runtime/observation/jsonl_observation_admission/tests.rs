@@ -1397,8 +1397,7 @@ async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
     assert_eq!(replay.bytes_consumed, 0);
     assert_eq!(replay.frames_persisted, 0);
     assert_eq!(
-        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
-        0,
+        replay.prior_context_bytes, 0,
         "an unchanged rollout admits no frame, so it must not be re-read for its context"
     );
 
@@ -1428,8 +1427,8 @@ async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
         u64::try_from(appended.len()).unwrap()
     );
     assert_eq!(
-        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
-        1
+        resumed.prior_context_bytes, len,
+        "the evicted context walks back to the session meta that set the cwd"
     );
     assert_eq!(resumed.frames_persisted, 1);
 }

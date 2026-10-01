@@ -62,7 +62,9 @@ pub(in crate::runtime) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
 const UNCHANGED_GENERATION_CACHE_CAP: usize = 4096;
 
-/// Process-local proof that one exact durable checkpoint already reached EOF.
+/// Process-local proof that one exact durable checkpoint is still the prefix of
+/// an unchanged file: at EOF it settles a repoll, short of it the next batch
+/// resumes from its digest instead of rehashing the prefix.
 ///
 /// Entries are minted only after revalidation succeeds. A miss or any native
 /// identity, size, high-resolution token, or checkpoint mismatch falls back to
@@ -229,7 +231,7 @@ struct BoundedLatestProofCache<N, P> {
     admissions: BinaryHeap<CacheAdmission<N>>,
 }
 
-impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
+impl<N: Copy + Eq + Ord + Hash, P> BoundedLatestProofCache<N, P> {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -238,8 +240,16 @@ impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
         }
     }
 
-    fn contains(&self, native_identity: &N, proof: &P) -> bool {
-        self.entries.get(native_identity) == Some(proof)
+    fn get(&self, native_identity: &N) -> Option<&P> {
+        self.entries.get(native_identity)
+    }
+
+    #[cfg(test)]
+    fn contains(&self, native_identity: &N, proof: &P) -> bool
+    where
+        P: PartialEq,
+    {
+        self.get(native_identity) == Some(proof)
     }
 
     #[cfg(test)]
@@ -290,74 +300,62 @@ fn stable_cache_priority(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// An [`UnchangedGenerationCacheKey`] with what resuming at its position needs
+/// and the key cannot carry.
+#[derive(Clone)]
+struct UnchangedGenerationProof {
+    key: UnchangedGenerationCacheKey,
+    /// Identity window hash of the file the proving scan read, which differs
+    /// from `key.stable_file_identity` once a replaced file resumed its
+    /// recorded generation.
+    physical_identity: u64,
+    /// Digest of `[0, key.position)`.
+    digest: ResumeDigest,
+}
+
 type UnchangedGenerationCache =
-    BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationCacheKey>;
+    BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationProof>;
 
 fn unchanged_generation_cache() -> &'static Mutex<UnchangedGenerationCache> {
     static CACHE: std::sync::OnceLock<Mutex<UnchangedGenerationCache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP)))
 }
 
+/// Tests keep the process-global cache off except for the transcripts a
+/// [`HoldUnchangedGenerationCache`] names, so one test's proof never settles
+/// another test's scan. Keyed by path rather than by thread: admission scans
+/// run on blocking-pool threads, not on the test thread holding the cache.
 #[cfg(test)]
-fn reset_unchanged_generation_cache_for_test() {
-    let Ok(mut cache) = unchanged_generation_cache().lock() else {
-        return;
-    };
-    *cache = BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP);
-}
-
-/// The one transcript whose scans keep the process-global cache warm.
-///
-/// Keyed by path rather than by thread: admission scans run on blocking-pool
-/// threads, not on the test thread that holds the cache.
-#[cfg(test)]
-static HELD_UNCHANGED_GENERATION_PATH: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
-
-/// Serializes the process-global cache against the tests that need it warm.
-///
-/// The reset below is process-global, so a concurrent scan from another test
-/// used to wipe a holder's warm entry between its two polls. Every scan of
-/// another path takes this lock for the duration of its reset, and a holder
-/// keeps it for the whole test.
-#[cfg(test)]
-fn unchanged_generation_cache_isolation() -> &'static Mutex<()> {
-    static ISOLATION: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    ISOLATION.get_or_init(|| Mutex::new(()))
-}
+static HELD_UNCHANGED_GENERATION_PATHS: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
-fn isolate_unchanged_generation_cache_unless_held(path: &Path) {
-    if HELD_UNCHANGED_GENERATION_PATH
+fn unchanged_generation_cache_serves(path: &Path) -> bool {
+    HELD_UNCHANGED_GENERATION_PATHS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_deref()
-        == Some(path)
-    {
-        return;
-    }
-    let _serialized = unchanged_generation_cache_isolation()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_unchanged_generation_cache_for_test();
+        .iter()
+        .any(|held| held == path)
+}
+
+#[cfg(not(test))]
+fn unchanged_generation_cache_serves(_path: &Path) -> bool {
+    true
 }
 
 #[cfg(test)]
 pub(in crate::runtime) struct HoldUnchangedGenerationCache {
-    _serialized: std::sync::MutexGuard<'static, ()>,
+    path: std::path::PathBuf,
 }
 
 #[cfg(test)]
 impl HoldUnchangedGenerationCache {
     pub(in crate::runtime) fn enter(path: &Path) -> Self {
-        let serialized = unchanged_generation_cache_isolation()
+        HELD_UNCHANGED_GENERATION_PATHS
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_unchanged_generation_cache_for_test();
-        *HELD_UNCHANGED_GENERATION_PATH
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(path.to_path_buf());
         Self {
-            _serialized: serialized,
+            path: path.to_path_buf(),
         }
     }
 }
@@ -389,35 +387,42 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
 #[cfg(test)]
 impl Drop for HoldUnchangedGenerationCache {
     fn drop(&mut self) {
-        *HELD_UNCHANGED_GENERATION_PATH
+        HELD_UNCHANGED_GENERATION_PATHS
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        reset_unchanged_generation_cache_for_test();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|held| held != &self.path);
     }
 }
 
-fn unchanged_generation_cache_hit(key: UnchangedGenerationCacheKey) -> bool {
-    unchanged_generation_cache()
-        .lock()
-        .map(|cache| cache.contains(&key.native_identity, &key))
-        .unwrap_or(false)
+fn cached_unchanged_generation(
+    path: &Path,
+    key: UnchangedGenerationCacheKey,
+) -> Option<UnchangedGenerationProof> {
+    if !unchanged_generation_cache_serves(path) {
+        return None;
+    }
+    let cache = unchanged_generation_cache().lock().ok()?;
+    cache
+        .get(&key.native_identity)
+        .filter(|proof| proof.key == key)
+        .cloned()
 }
 
-fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
-    let Ok(mut cache) = unchanged_generation_cache().lock() else {
+fn remember_unchanged_generation_if_settled(path: &Path, proof: UnchangedGenerationProof) {
+    if !unchanged_generation_cache_serves(path) {
         return;
-    };
-    cache.insert(key.native_identity, key);
-}
-
-fn remember_unchanged_generation_if_settled(key: UnchangedGenerationCacheKey) {
+    }
     // A proof taken while the change time is still inside the coarse quantum
     // can share that token with a later same-length rewrite. Remembering it
     // would let the settled repoll skip the bytes. Record the cache only once
     // the token can no longer be shared.
-    if jsonl_change_token_settled(key.change) {
-        remember_unchanged_generation(key);
+    if !jsonl_change_token_settled(proof.key.change) {
+        return;
     }
+    let Ok(mut cache) = unchanged_generation_cache().lock() else {
+        return;
+    };
+    cache.insert(proof.key.native_identity, proof);
 }
 
 /// A cache entry needs a change token whose equality proves the bytes
@@ -430,7 +435,7 @@ fn unchanged_generation_cache_key(
     resume: JsonlResumeState,
 ) -> Option<UnchangedGenerationCacheKey> {
     if previous.position == 0
-        || previous.position != metadata.len()
+        || previous.position > metadata.len()
         || previous.file_id != resume.generation
     {
         return None;
@@ -1160,8 +1165,6 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
     prefix_recovery: JsonlPrefixRecovery,
     max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
-    #[cfg(test)]
-    isolate_unchanged_generation_cache_unless_held(path);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
@@ -1247,15 +1250,15 @@ impl<'a> PreparedJsonlScan<'a> {
         let file_size = metadata.len();
         let mtime = file_mtime_secs(&metadata);
         let change = jsonl_file_change_token_under(&metadata, witness);
-        let cached_unchanged = resume_state
+        let cached_proof = resume_state
             .and_then(|resume| {
                 unchanged_generation_cache_key(file.inner(), &metadata, change, previous, resume)
             })
-            .filter(|key| {
-                unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
-            });
-        let (physical_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
-            (key.stable_file_identity, 0)
+            .filter(|key| jsonl_change_token_settled(key.change))
+            .and_then(|key| cached_unchanged_generation(path, key));
+        let cached_unchanged = cached_proof.as_ref().map(|proof| proof.key);
+        let (physical_identity, identity_window_bytes) = if let Some(proof) = &cached_proof {
+            (proof.physical_identity, 0)
         } else {
             let (identity, read) = stable_jsonl_file_id(file.inner_mut(), &metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
@@ -1287,24 +1290,26 @@ impl<'a> PreparedJsonlScan<'a> {
             // Under `Checkpoints` the recorded cursor is one more candidate of
             // a single forward walk that stops past the first changed record,
             // rather than a whole-prefix hash that can only say "changed".
-            let (resume_matches, recovered) = if recorded.is_some() && cached_unchanged.is_some() {
-                (true, None)
-            } else {
-                match match_recorded_prefix(
-                    &mut file,
-                    path,
-                    recorded,
-                    prefix_recovery,
-                    file_size,
-                    io,
-                )? {
-                    RecordedPrefix::Resumes(digest) => {
-                        validated_prefix = digest.map(|digest| (previous.position, digest));
-                        (true, None)
+            let (resume_matches, recovered) =
+                if let Some(proof) = cached_proof.filter(|_| recorded.is_some()) {
+                    validated_prefix = Some((previous.position, proof.digest));
+                    (true, None)
+                } else {
+                    match match_recorded_prefix(
+                        &mut file,
+                        path,
+                        recorded,
+                        prefix_recovery,
+                        file_size,
+                        io,
+                    )? {
+                        RecordedPrefix::Resumes(digest) => {
+                            validated_prefix = digest.map(|digest| (previous.position, digest));
+                            (true, None)
+                        }
+                        RecordedPrefix::Diverged(recovered) => (false, recovered),
                     }
-                    RecordedPrefix::Diverged(recovered) => (false, recovered),
-                }
-            };
+                };
             if resume_matches {
                 file_identity = resume_state.file_identity;
                 (previous.position, resume_state.generation)
@@ -1515,7 +1520,14 @@ impl<'a> PreparedJsonlScan<'a> {
                     cursor,
                     resume,
                 ) {
-                    remember_unchanged_generation_if_settled(key);
+                    remember_unchanged_generation_if_settled(
+                        path,
+                        UnchangedGenerationProof {
+                            key,
+                            physical_identity: self.generation.physical_identity,
+                            digest,
+                        },
+                    );
                 }
             }
         }
@@ -1555,6 +1567,9 @@ struct RawJsonlBatchScanner<'a> {
     frames: Vec<RawJsonlRecord>,
     skipped: Vec<RawJsonlSkippedRange>,
     offset: u64,
+    /// Digest of `[0, offset)` before the reader hashed a frame this batch
+    /// then left for the next one.
+    offset_digest: ResumeDigest,
     read_through: u64,
     continuing_oversized: bool,
     frame_count: usize,
@@ -1596,9 +1611,10 @@ impl<'a> RawJsonlBatchScanner<'a> {
             max_record_bytes
         };
         let mut reader = RawJsonlFrameReader::new(reader, frame_limit);
-        reader.seed_resume_digest(resume_digest);
+        reader.seed_resume_digest(resume_digest.clone());
         Ok(Self {
             reader,
+            offset_digest: resume_digest,
             generation,
             max_new_bytes,
             max_frames,
@@ -1646,6 +1662,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 self.apply_step(&step);
                 return Ok(self);
             }
+            self.offset_digest = self.reader.resume_digest();
             let read_budget = self.read_budget();
             let frame = self
                 .reader
@@ -1828,6 +1845,13 @@ impl<'a> RawJsonlBatchScanner<'a> {
         io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<RawNewJsonl> {
         let scan_fingerprint = self.reader.resume_fingerprint(self.read_through);
+        // The reader hashed through `read_through`; a frame read past
+        // `offset` and left for the next batch sits beyond the cursor.
+        let offset_digest = if self.read_through == self.offset {
+            self.reader.resume_digest()
+        } else {
+            self.offset_digest
+        };
         let mut file = self.reader.into_inner().into_inner();
         let final_metadata = file
             .inner()
@@ -1897,26 +1921,31 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 path: path.to_path_buf(),
             });
         }
-        if self.offset == final_metadata.len() && self.deferred.is_none() {
-            let resume = JsonlResumeState {
-                generation: self.generation.file_id,
-                file_identity: self.generation.file_identity,
-                fingerprint: scan_fingerprint,
-            };
-            let cursor = StoredCursor {
-                position: self.offset,
-                mtime: file_mtime_secs(&final_metadata),
-                file_id: self.generation.file_id,
-            };
-            if let Some(key) = unchanged_generation_cache_key(
-                file.inner(),
-                &final_metadata,
-                final_change,
-                cursor,
-                resume,
-            ) {
-                remember_unchanged_generation_if_settled(key);
-            }
+        let resume = JsonlResumeState {
+            generation: self.generation.file_id,
+            file_identity: self.generation.file_identity,
+            fingerprint: offset_digest.fingerprint(self.offset),
+        };
+        let cursor = StoredCursor {
+            position: self.offset,
+            mtime: file_mtime_secs(&final_metadata),
+            file_id: self.generation.file_id,
+        };
+        if let Some(key) = unchanged_generation_cache_key(
+            file.inner(),
+            &final_metadata,
+            final_change,
+            cursor,
+            resume,
+        ) {
+            remember_unchanged_generation_if_settled(
+                path,
+                UnchangedGenerationProof {
+                    key,
+                    physical_identity: self.generation.physical_identity,
+                    digest: offset_digest,
+                },
+            );
         }
         Ok(RawNewJsonl {
             frames: self.frames,
