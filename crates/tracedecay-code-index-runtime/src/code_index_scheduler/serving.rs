@@ -972,26 +972,18 @@ pub(super) fn text_artifact_resident_memory_charges(
 pub(super) fn text_artifact_admitted_build_budget(
     preferred_bytes: u64,
     minimum_bytes: u64,
-    limit_bytes: u64,
-    used_bytes: u64,
-    observed_bytes: u64,
-    watermark_headroom: u64,
+    available_bytes: u64,
 ) -> Result<u64, RetrievalPortError> {
     if minimum_bytes == 0 || preferred_bytes < minimum_bytes {
         return Err(RetrievalPortError::Contract(
             "text-artifact build budget bounds are invalid".to_owned(),
         ));
     }
-    let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
-    let available_for_growth = limit_bytes
-        .saturating_sub(used_bytes)
-        .saturating_sub(unmodeled_live_bytes)
-        .saturating_sub(watermark_headroom);
-    let admitted_bytes = preferred_bytes.min(available_for_growth);
+    let admitted_bytes = preferred_bytes.min(available_bytes);
     if admitted_bytes < minimum_bytes {
         return Err(RetrievalPortError::ResidentMemoryRefused(format!(
             "text-artifact build needs at least {minimum_bytes} bytes; \
-             {available_for_growth} bytes are available below the resident-memory watermark"
+             {available_bytes} bytes are available below the resident-memory watermark"
         )));
     }
     Ok(admitted_bytes)
@@ -1199,22 +1191,19 @@ impl DaemonCodeTextArtifactStoreV1 {
         preferred: NonZeroU64,
         minimum: NonZeroU64,
     ) -> Result<(u64, u64, u64, u64), RetrievalPortError> {
-        let snapshot = self.resident_memory.snapshot();
-        let observed_bytes = self.resident_memory.pressure().measure_admission_bytes();
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
-        let admission_watermark = self
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let headroom = self.resident_memory.headroom_below(admission_watermark);
+        let observed_bytes = headroom.observed_bytes;
+        let unmodeled_live_bytes = observed_bytes.saturating_sub(headroom.used_bytes);
+        let watermark_headroom = self
             .resident_memory
-            .pressure()
-            .high_watermark_bytes()
-            .min(snapshot.limit_bytes);
-        let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+            .snapshot()
+            .limit_bytes
+            .saturating_sub(admission_watermark);
         let admitted_bytes = text_artifact_admitted_build_budget(
             preferred.get(),
             minimum.get(),
-            snapshot.limit_bytes,
-            snapshot.used_bytes,
-            observed_bytes,
-            watermark_headroom,
+            headroom.available_bytes,
         )
         .inspect_err(|_| {
             self.resident_memory

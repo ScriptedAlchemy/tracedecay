@@ -1304,6 +1304,23 @@ pub struct ResidentMemorySnapshotV1 {
     pub process_shared_charges: Vec<ProcessSharedMemoryChargeV1>,
 }
 
+/// One reading of the process's room for new work.
+///
+/// The ledger charges the retained owners and the work in flight; it does not
+/// see the runtime's own allocations or the allocator's retained pages, which
+/// are not yet small and fixed enough to charge as a constant. The measured
+/// process covers them, so new work has to fit beside both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentMemoryHeadroomV1 {
+    /// Bytes the ledger charges.
+    pub used_bytes: u64,
+    /// Bytes measured for the process; zero when it cannot be read.
+    pub observed_bytes: u64,
+    /// What fits below the ceiling beside both; zero while the pressure
+    /// latch holds.
+    pub available_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessSharedMemoryChargeV1 {
     pub component: ResidentMemoryComponentIdV1,
@@ -1550,6 +1567,40 @@ impl ProcessResidentMemoryV1 {
                 })
                 .collect(),
         }
+    }
+
+    /// The process's room for new work below `ceiling`, from a fresh
+    /// measurement: what every admission sizes from. The ledger is held to
+    /// this authority's limit and the measurement to the pressure cell's, as
+    /// [`Self::reserve`] holds them.
+    pub fn headroom_below(&self, ceiling: u64) -> ResidentMemoryHeadroomV1 {
+        let observed_bytes = self.pressure.measure_admission_bytes();
+        let used_bytes = self.lock_state().used_bytes;
+        let available_bytes = if self.pressure.state().is_over_budget() {
+            0
+        } else {
+            let ledger_room = ceiling
+                .min(self.limit_bytes.get())
+                .saturating_sub(used_bytes);
+            let measured_room = ceiling
+                .min(self.pressure.limit_bytes())
+                .saturating_sub(observed_bytes);
+            ledger_room.min(measured_room)
+        };
+        ResidentMemoryHeadroomV1 {
+            used_bytes,
+            observed_bytes,
+            available_bytes,
+        }
+    }
+
+    /// The ceiling decode and artifact builds size below: the pressure high
+    /// watermark, leaving the band above it for work already admitted.
+    #[must_use]
+    pub fn admission_watermark_bytes(&self) -> u64 {
+        self.pressure
+            .high_watermark_bytes()
+            .min(self.limit_bytes.get())
     }
 
     fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
