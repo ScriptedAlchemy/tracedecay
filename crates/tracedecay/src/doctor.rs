@@ -1169,12 +1169,20 @@ fn check_user_config(
             if config.pending_upload > 0 {
                 dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
             }
-            if let Err(error) =
-                github_runtime::check_configured_github_review_sources_v1(profile_root)
-            {
-                dc.fail(&format!(
+            match github_runtime::check_configured_github_review_sources_v1(profile_root) {
+                Ok(findings) => {
+                    for finding in findings {
+                        dc.fail(&format!(
+                            "GitHub review source {finding}, so it is not registered; fix or \
+                             remove its github_review_sources entry in {}",
+                            tracedecay_session_memory::user_config::config_path(profile_root)
+                                .display()
+                        ));
+                    }
+                }
+                Err(error) => dc.fail(&format!(
                     "GitHub review sources are unusable, none is registered: {error}"
-                ));
+                )),
             }
         }
         Err(error) => dc.fail(&format!("Profile config is unusable: {error}")),

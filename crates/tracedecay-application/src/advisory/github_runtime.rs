@@ -54,7 +54,8 @@ pub use anchors::{
 };
 pub use credential_lifecycle::{
     GitHubReadOnlyCredentialLifecycleV1, GitHubReadOnlyCredentialPermissionVerifierV1,
-    GitHubSecretReadErrorV1, GitHubSecretReadPortV1, check_configured_github_review_sources_v1,
+    GitHubReviewSourceFindingV1, GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
+    check_configured_github_review_sources_v1,
 };
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,

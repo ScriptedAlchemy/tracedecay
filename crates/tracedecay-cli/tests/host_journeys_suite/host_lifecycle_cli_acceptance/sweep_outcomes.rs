@@ -533,13 +533,34 @@ fn doctor_fails_a_corrupt_profile_config_with_its_repair() {
         "{doctor_stderr}"
     );
 
-    fs::write(&config, installed).unwrap();
+    fs::write(&config, &installed).unwrap();
     let repaired = cli.run(&["doctor"]);
     let repaired_stderr = stderr(&repaired);
     assert_eq!(repaired.status.code(), Some(0), "{repaired_stderr}");
     assert!(
         !repaired_stderr.contains("Profile config is unusable"),
         "{repaired_stderr}"
+    );
+
+    fs::write(
+        &config,
+        format!(
+            "{installed}\n[[github_review_sources]]\nowner = \"ScriptedAlchemy\"\n\
+             repository = \"keyring-unnamed\"\naccess = \"os_keyring\"\n"
+        ),
+    )
+    .unwrap();
+    let unregistered = cli.run(&["doctor"]);
+    let unregistered_stderr = stderr(&unregistered);
+    assert_eq!(unregistered.status.code(), Some(1), "{unregistered_stderr}");
+    assert!(
+        unregistered_stderr.contains(&format!(
+            "GitHub review source ScriptedAlchemy/keyring-unnamed uses os_keyring access without \
+             keyring_service and keyring_account, so it is not registered; fix or remove its \
+             github_review_sources entry in {}",
+            config.display()
+        )),
+        "{unregistered_stderr}"
     );
 }
 
