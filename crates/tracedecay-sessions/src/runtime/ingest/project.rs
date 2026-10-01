@@ -328,6 +328,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         units_completed: 0,
         units_failed: 0,
         byte_bounds_enforced: true,
+        coverage_advanced: false,
     };
     let initial_budgets = allocate_pass_byte_budgets(plan.admitted_indices.len(), bounds);
     let mut remaining_bytes = initial_budgets
@@ -461,6 +462,8 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
                 .push(TranscriptCatchUpFailure::pass_frontier_unavailable());
         }
     }
+    source_outcome.coverage_advanced =
+        provider_runs.coverage_advanced || source_outcome.scheduling_state_written;
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
     source_outcome.into_transcript_outcome()

@@ -66,6 +66,7 @@ fn claude_provider_run_outcome(
         stats.source_bytes_scanned,
         stats.deferred_sources > 0 || stats.source_bytes_scanned > max_new_bytes,
     );
+    outcome.coverage_advanced = stats.advanced_coverage();
     if let Some(error) = error.filter(|error| !error.is_typed_cancellation()) {
         let failure = claude_catch_up_failure("observation", error);
         tracing::warn!(

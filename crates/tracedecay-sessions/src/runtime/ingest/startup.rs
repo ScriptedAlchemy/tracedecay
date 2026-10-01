@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use tokio::sync::watch;
 
 use super::authority::SessionIngestAuthority;
 use crate::observation::ObservationCancellation;
+use crate::runtime::hosts::codex::CodexDiscoveryHub;
+use crate::runtime::jsonl_observation_admission::shared_jsonl_memory_headroom;
 use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 
@@ -18,6 +23,8 @@ pub struct TranscriptIngestOutcome {
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
     pub scheduling_state_written: bool,
+    /// The pass durably advanced source coverage beyond its upserts.
+    pub coverage_advanced: bool,
 }
 
 impl TranscriptIngestOutcome {
@@ -30,6 +37,7 @@ impl TranscriptIngestOutcome {
             failures,
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
+            coverage_advanced: false,
         }
     }
 
@@ -39,6 +47,7 @@ impl TranscriptIngestOutcome {
             failures: outcome.failures,
             coverage: outcome.coverage,
             scheduling_state_written: outcome.scheduling_state_written,
+            coverage_advanced: outcome.coverage_advanced,
         }
     }
 
@@ -50,8 +59,12 @@ impl TranscriptIngestOutcome {
         !self.coverage.is_complete()
     }
 
+    /// The next pass starts from coverage this one committed, so it can run
+    /// at once instead of waiting for released capacity.
     pub fn made_progress(&self) -> bool {
-        self.stats.sessions_upserted > 0 || self.stats.messages_upserted > 0
+        self.stats.sessions_upserted > 0
+            || self.stats.messages_upserted > 0
+            || self.coverage_advanced
     }
 }
 
@@ -66,6 +79,24 @@ struct StartupUserIngestState {
 static STARTUP_USER_INGESTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, StartupUserIngestState>>,
 > = std::sync::OnceLock::new();
+
+static STARTUP_USER_INGEST_RELEASED: LazyLock<watch::Sender<u64>> =
+    LazyLock::new(|| watch::Sender::new(0));
+
+/// Signals that capacity a backpressured history pass reported waiting on may
+/// be available again: the profile sweep another pass held, the Codex
+/// discovery scanner, or shared JSONL memory headroom. Receivers are
+/// subscribed now, so a release during the pass that follows is not lost.
+pub fn subscribe_history_capacity_release(
+    codex_discovery: &CodexDiscoveryHub,
+) -> Vec<watch::Receiver<u64>> {
+    let mut signals = vec![
+        STARTUP_USER_INGEST_RELEASED.subscribe(),
+        codex_discovery.subscribe_scan_release(),
+    ];
+    signals.extend(shared_jsonl_memory_headroom());
+    signals
+}
 
 pub(super) struct StartupUserIngestGuard {
     profile_root: PathBuf,
@@ -116,6 +147,8 @@ impl Drop for StartupUserIngestGuard {
         if self.completed {
             state.last_completed = Some(std::time::Instant::now());
         }
+        drop(ingests);
+        STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 }
 
@@ -199,6 +232,7 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
                 failures: Vec::new(),
                 coverage: IngestPassCoverage::Partial { deferred_units: 1 },
                 scheduling_state_written: false,
+                coverage_advanced: false,
             };
         }
         StartupUserIngestClaim::RecentlyCompleted => {

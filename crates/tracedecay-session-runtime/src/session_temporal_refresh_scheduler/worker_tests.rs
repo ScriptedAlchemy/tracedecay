@@ -2,20 +2,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_domain::{SessionId, UtcMicros};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
-use tracedecay_session_temporal_store::SessionTemporalStore;
+use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
     SessionRefreshStore, SessionTemporalProjectionBatchV1,
 };
 
 use super::history::{
-    SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
-    SharedSessionHistoricalIngestor,
+    SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
+    SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
 };
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
-    zero_refresh_coverage,
+    SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector, zero_refresh_coverage,
 };
 use super::registry::SessionTemporalRefreshPassReport;
 use super::wake::{SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState};
@@ -64,6 +65,19 @@ async fn durable_recovery_progresses_before_another_discovery_scan() {
     );
 }
 
+/// Never finishes a projection, so every operation outlives its deadline.
+struct StalledProjector;
+
+impl SessionTemporalRefreshProjector for StalledProjector {
+    fn project<'a>(
+        &'a self,
+        _database: &'a RegisteredGlobalDbLeaseV1,
+        _recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(std::future::pending())
+    }
+}
+
 #[tokio::test]
 async fn retryable_recovery_stops_the_pass_and_preserves_unattempted_work() {
     let harness = RegisteredGlobalDbHarness::open("refresh-retry-stops-pass").await;
@@ -74,10 +88,10 @@ async fn retryable_recovery_stops_the_pass_and_preserves_unattempted_work() {
     let report = run_session_temporal_refresh_pass(
         &harness.registered,
         &state,
-        &CanonicalSessionTemporalProjector,
+        &StalledProjector,
         SessionTemporalRefreshPolicy {
             max_operations_per_pass: 2,
-            operation_deadline: Duration::ZERO,
+            operation_deadline: Duration::from_millis(10),
             ..SessionTemporalRefreshPolicy::default()
         },
     )
@@ -168,6 +182,10 @@ impl SessionHistoricalIngestor for GatedHistory {
             self.release.notified().await;
             SessionHistoricalIngestOutcome::Complete
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
     }
 
     fn cancel(&self) {}

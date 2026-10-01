@@ -73,6 +73,18 @@ pub struct ClaudeObservationIngestStats {
 }
 
 impl ClaudeObservationIngestStats {
+    /// Committed coverage a later pass resumes after. Duplicates re-commit
+    /// what an earlier pass already covered, and a deferred source commits
+    /// nothing however many bytes it read.
+    #[must_use]
+    pub fn advanced_coverage(&self) -> bool {
+        self.observations_committed > 0
+            || self.cursor_advances > 0
+            || self.records_rejected > 0
+            || self.records_quarantined > 0
+            || self.projections_completed > 0
+    }
+
     #[must_use]
     fn merge(mut self, other: Self) -> Self {
         self.transcript = self.transcript.merge(other.transcript);
