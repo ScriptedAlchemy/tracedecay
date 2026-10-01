@@ -284,6 +284,7 @@ impl RemoteFenceSummaryV1 {
 pub enum RemoteAuthorityMissingReasonV1 {
     RegistryUnavailable,
     PlacementUnknown,
+    WriterAuthorityUnpublished,
     AuthorityUnreachable,
     AuthorityAuthenticationFailed,
     CallerAuthenticationFailed,
@@ -300,6 +301,9 @@ impl RemoteAuthorityMissingReasonV1 {
         match reason {
             RemoteAuthorityUnavailableReasonV1::RegistryUnavailable => Self::RegistryUnavailable,
             RemoteAuthorityUnavailableReasonV1::PlacementUnknown => Self::PlacementUnknown,
+            RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished => {
+                Self::WriterAuthorityUnpublished
+            }
             RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable => Self::AuthorityUnreachable,
             RemoteAuthorityUnavailableReasonV1::AuthorityAuthenticationFailed => {
                 Self::AuthorityAuthenticationFailed

@@ -14,14 +14,16 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::{
-    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
-    ResolvedScope,
+    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, LegalAction, PolicyDecisionRef,
+    RequestId, ResolvedScope, RetryDirective,
 };
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, ManifestDigest,
     ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
-    RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId, canonical_sha256,
+    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
@@ -378,6 +380,162 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
 
     stop_daemon(&mut first);
     stop_daemon(&mut second);
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn enrolled_remote_failover_without_a_published_writer_is_a_typed_refusal() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    let profile = home.join(".tracedecay");
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname=\"remote-failover-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub const FIXTURE: bool = true;\n",
+    )
+    .unwrap();
+    run(Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project));
+    let certificate = scratch.path().join("localhost.crt.pem");
+    let private_key = scratch.path().join("localhost.key.pem");
+    fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
+    fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let binary = production_binary();
+    let (mut daemon, authority, remote) = spawn_remote_daemon(
+        &binary,
+        &home,
+        &profile,
+        &project,
+        &certificate,
+        &private_key,
+    );
+    let mut init = Command::new(&binary);
+    init.arg("init").current_dir(&project);
+    isolated(&mut init, &home, &profile);
+    run(&mut init);
+    let mut context_command = Command::new(&binary);
+    context_command
+        .args(["projects", "context"])
+        .arg(&project)
+        .arg("--json")
+        .current_dir(&project);
+    isolated(&mut context_command, &home, &profile);
+    let context: Value = serde_json::from_slice(&run(&mut context_command)).unwrap();
+    let project_id = context["project"]["project_id"].as_str().unwrap();
+    let local_base = format!(
+        "http://{}",
+        authority["http_application_endpoint"].as_str().unwrap()
+    );
+    let local_token = authority["auth_token"].as_str().unwrap();
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let brain_id = BrainId::new(authority["brain_id"].as_str().unwrap()).unwrap();
+    let node_id = BrainNodeId::new("node.remote-sdk-production").unwrap();
+    let mut grant = remote_grant(
+        brain_id.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    let provisioned = reqwest::blocking::Client::new()
+        .post(format!("{local_base}/remote-nodes/provision"))
+        .bearer_auth(local_token)
+        .header(reqwest::header::ORIGIN, &local_base)
+        .json(&json!({"grant": grant, "admission": remote_admission(&grant)}))
+        .send()
+        .unwrap();
+    assert_eq!(provisioned.status(), reqwest::StatusCode::NO_CONTENT);
+    let endpoint = format!("https://{remote}/remote/");
+    EnrolledRemoteClient::new_with_root_certificate(
+        &endpoint,
+        grant_credential,
+        Duration::from_secs(5),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap()
+    .enroll(&enrollment_request(&grant), enrollment_credential)
+    .unwrap()
+    .result
+    .expect("the node is enrolled before it asks for failover");
+
+    let believed_writer: RemoteWriterFenceV1 = serde_json::from_value(json!({
+        "brain_id": brain_id.as_str(),
+        "shard_id": "shard.remote-sdk-production",
+        "generation_id": "generation.remote-sdk-production",
+        "placement_revision": 1,
+        "authority_epoch": 1,
+        "authority_node_id": "node.remote-sdk-previous-writer"
+    }))
+    .unwrap();
+    let sent_at = now_micros();
+    let failover = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-sdk-failover").unwrap(),
+        brain_id,
+        node_id,
+        1,
+        Some(believed_writer),
+        sent_at,
+        PromotionConfirmationV1 {
+            preview_id: "promotion.remote-sdk-failover".to_owned(),
+            expected_authority_epoch: 1,
+            expected_placement_revision: 1,
+            expires_at_micros: sent_at.0.saturating_add(60_000_000),
+        },
+    )
+    .unwrap();
+    let response = EnrolledRemoteClient::new_with_root_certificate(
+        &endpoint,
+        enrollment_credential,
+        Duration::from_secs(30),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap()
+    .failover(&failover)
+    .expect("a refused failover is still a canonical protocol response");
+
+    let problem = response
+        .result
+        .as_ref()
+        .expect_err("failover cannot promote over a writer that was never published");
+    assert_eq!(
+        (
+            problem.problem.code.as_str(),
+            problem.problem.retry,
+            problem.problem.legal_actions.as_slice(),
+        ),
+        (
+            "remote.writer_authority_unpublished",
+            RetryDirective::Never,
+            [LegalAction::ContactAdministrator].as_slice(),
+        )
+    );
+    let authority_state = serde_json::to_value(&response.authority).unwrap();
+    assert_eq!(
+        (
+            &authority_state["state"],
+            &authority_state["value"]["reason"]
+        ),
+        (
+            &json!("unavailable"),
+            &json!("writer_authority_unpublished")
+        ),
+        "{authority_state}"
+    );
+
+    stop_daemon(&mut daemon);
 }
 
 fn spawn_remote_daemon(

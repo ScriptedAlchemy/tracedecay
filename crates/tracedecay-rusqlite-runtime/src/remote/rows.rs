@@ -28,6 +28,37 @@ pub(super) fn one_row(
     }
 }
 
+/// Loads the published writer-authority row for `brain_id`. Absence is the
+/// typed `WriterAuthorityUnpublished` state, never corruption.
+pub(super) fn authority_row(
+    handle: &ExactSqlHandle,
+    columns: &str,
+    brain_id: &BrainId,
+) -> Result<crate::exact_sql::ExactSqlRow, RemoteSqliteStorageErrorV1> {
+    let rows = query(
+        handle,
+        &format!("SELECT {columns} FROM remote_authorities WHERE brain_id = ?1"),
+        vec![text(brain_id.as_str())],
+    )?;
+    let mut rows = rows.rows.into_iter();
+    match (rows.next(), rows.next()) {
+        (None, _) => Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished),
+        (Some(row), None) => Ok(row),
+        (Some(_), Some(_)) => Err(RemoteSqliteStorageErrorV1::Corruption),
+    }
+}
+
+pub(super) fn map_authority_persistence_error(
+    error: RemoteSqliteStorageErrorV1,
+) -> RemoteCapturePersistenceErrorV1 {
+    match error {
+        RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+            RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished
+        }
+        error => map_persistence_error(error),
+    }
+}
+
 pub(super) fn row_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,

@@ -4268,7 +4268,7 @@ export type ReleaseWorkPlacementCommand = {
   task_id: TaskId;
 };
 
-export type RemoteAuthorityMissingReasonV1 = "authority_authentication_failed" | "authority_unreachable" | "caller_authentication_failed" | "enrollment_expired" | "enrollment_revoked" | "fence_unverified" | "insufficient_capability" | "placement_unknown" | "protocol_incompatible" | "registry_unavailable" | "scope_mismatch";
+export type RemoteAuthorityMissingReasonV1 = "authority_authentication_failed" | "authority_unreachable" | "caller_authentication_failed" | "enrollment_expired" | "enrollment_revoked" | "fence_unverified" | "insufficient_capability" | "placement_unknown" | "protocol_incompatible" | "registry_unavailable" | "scope_mismatch" | "writer_authority_unpublished";
 
 export type RemoteAuthoritySummaryV1 = 
   | {

@@ -284,6 +284,9 @@ const fn authority_reason(reason: &RemoteAuthorityUnavailableReasonV1) -> &'stat
     match reason {
         RemoteAuthorityUnavailableReasonV1::RegistryUnavailable => "remote_registry_unavailable",
         RemoteAuthorityUnavailableReasonV1::PlacementUnknown => "remote_placement_unknown",
+        RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished => {
+            "remote_writer_authority_unpublished"
+        }
         RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable => "remote_authority_unreachable",
         RemoteAuthorityUnavailableReasonV1::AuthorityAuthenticationFailed => {
             "remote_authority_authentication_failed"

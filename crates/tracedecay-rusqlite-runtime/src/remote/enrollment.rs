@@ -8,13 +8,11 @@ pub(super) fn load_authority_state(
     handle: &ExactSqlHandle,
     brain_id: &BrainId,
 ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
-    let rows = query(
+    let row = authority_row(
         handle,
-        "SELECT authority_state_json, runtime_binding_json
-         FROM remote_authorities WHERE brain_id = ?1",
-        vec![text(brain_id.as_str())],
+        "authority_state_json, runtime_binding_json",
+        brain_id,
     )?;
-    let row = one_row(rows)?;
     let binding_json = match row.values.get(1) {
         Some(ExactSqlValue::Text(value)) => value,
         _ => return Err(RemoteSqliteStorageErrorV1::Corruption),

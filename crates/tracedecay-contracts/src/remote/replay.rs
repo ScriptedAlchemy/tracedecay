@@ -686,6 +686,12 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                     | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
                         state.as_ref().clone()
                     }
+                    RemoteReplayServiceErrorV1::Persistence(
+                        RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished,
+                    ) => CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                        observed_at,
+                    },
                     _ => fallback_authority,
                 };
                 let failure = replay_protocol_failure(error);
@@ -812,6 +818,9 @@ fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolF
         RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(_) => {
             RemoteProtocolFailureV1::StaleAuthorityFence
         }
+        RemoteReplayServiceErrorV1::Persistence(
+            RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished,
+        ) => RemoteProtocolFailureV1::WriterAuthorityUnpublished,
         RemoteReplayServiceErrorV1::AuthorityUnavailable(_)
         | RemoteReplayServiceErrorV1::Persistence(_)
         | RemoteReplayServiceErrorV1::Credential(
