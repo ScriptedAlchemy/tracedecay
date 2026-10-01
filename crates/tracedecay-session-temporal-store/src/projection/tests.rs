@@ -893,7 +893,7 @@ async fn cancellation_at_final_precommit_checkpoint_rolls_back_all_projection_wr
 }
 
 #[tokio::test]
-async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal_receipt() {
+async fn cancellation_at_completion_precommit_rolls_back_and_the_retry_completes() {
     const WORK_LIMIT: usize = 4_096;
     // Sync point, not a performance budget: one less than the successful
     // completion's checkpoint count so cancellation fires on the pre-commit
@@ -926,7 +926,7 @@ async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal
     let operation_id = cancelled_request.operation_id().clone();
     let error = temporal_store(&cancelled_runtime)
         .complete_session_refresh(
-            cancelled_request,
+            cancelled_request.clone(),
             ExecutionControl::default().with_work_limit(COMPLETION_PRECOMMIT_WORK_LIMIT),
         )
         .await
@@ -985,6 +985,34 @@ async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal
             .await
             .unwrap(),
         0
+    );
+
+    // The cancelled attempt already applied the candidate's relation graph,
+    // so the retry must replay that receipt rather than refuse it.
+    let receipt = temporal_store(&cancelled_runtime)
+        .complete_session_refresh(cancelled_request, ExecutionControl::default())
+        .await
+        .unwrap();
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    let transaction = database.begin_write_transaction().await.unwrap();
+    let mut generation_rows = transaction
+        .query(
+            "SELECT generation || ':' || state FROM session_temporal_generations
+             WHERE session_id = ?1 ORDER BY generation",
+            params![session_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let mut generations = Vec::new();
+    while let Some(row) = generation_rows.next().await.unwrap() {
+        generations.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        generations,
+        vec![
+            "1:superseded".to_owned(),
+            format!("{candidate_generation}:active")
+        ]
     );
 }
 
