@@ -287,7 +287,7 @@ impl<'a> ProjectProviderRun<'a> {
                 break;
             }
             let Some(pending) =
-                codex::CodexPendingRollout::observe(self.codex_discovery, path).transpose()
+                codex::PendingTranscript::observe(self.codex_discovery, path).transpose()
             else {
                 continue;
             };
@@ -316,7 +316,9 @@ impl<'a> ProjectProviderRun<'a> {
             };
             match admitted {
                 Ok((progress, pending)) => {
-                    if let Err(error) = pending.admitted(path, &progress) {
+                    if let Err(error) =
+                        pending.admitted(path, progress.source_deferred, progress.covered_through)
+                    {
                         outcome.add_failure(warn_transcript_catch_up_failure(
                             "codex",
                             "convergence",
@@ -469,6 +471,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -530,6 +533,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {

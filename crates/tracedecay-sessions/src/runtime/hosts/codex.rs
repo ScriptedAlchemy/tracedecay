@@ -178,38 +178,38 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
-    /// Rollouts this consumer's scope admitted through end of file, by the
-    /// settled identity they had before that admission read them. A later
-    /// discovery pass that delivers one unchanged is skipped unopened.
+    /// Transcript files, of any host, this consumer's scope admitted through
+    /// end of file or decided are outside it, by the settled identity they
+    /// had before that pass read them. A later pass that finds one unchanged
+    /// skips it unopened.
     ///
-    /// ponytail: a deleted rollout's entry lives until the consumer
-    /// deregisters; prune against the replay index if corpora churn enough
-    /// for that to matter.
-    converged: HashMap<PathBuf, (CodexRolloutWitness, ProcessSharedMemoryReservationV1)>,
+    /// ponytail: a deleted file's entry lives until the consumer deregisters;
+    /// prune against discovery if corpora churn enough for that to matter.
+    converged: HashMap<PathBuf, (SettledFileWitness, ProcessSharedMemoryReservationV1)>,
 }
 
 impl CodexDiscoveryConsumerState {
-    fn holds_converged(&self, path: &Path, witness: CodexRolloutWitness) -> bool {
+    fn holds_converged(&self, path: &Path, witness: SettledFileWitness) -> bool {
         self.converged
             .get(path)
             .is_some_and(|(recorded, _)| *recorded == witness)
     }
 }
 
-/// A rollout's corpus identity, taken only once its change time is settled
-/// so that an equal later identity proves the bytes unchanged.
+/// A transcript file's corpus identity, taken only once its change time is
+/// settled so that an equal later identity proves the bytes unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CodexRolloutWitness {
+struct SettledFileWitness {
     identity: [u8; 32],
     len: u64,
 }
 
-impl CodexRolloutWitness {
-    /// `None` while the rollout's change time is inside the timestamp
-    /// quantum, or where no stat field witnesses a rewrite, or once the
-    /// rollout is gone: admission then reads it as before.
+impl SettledFileWitness {
+    /// `None` while the file's change time is inside the timestamp quantum,
+    /// or where no stat field witnesses a rewrite, or once the file is gone:
+    /// the pass then reads it as before.
     fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
-        let Some(metadata) = stat_if_present(path, "stat Codex rollout for convergence")? else {
+        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
             return Ok(None);
         };
         if !metadata.is_file() || !jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
@@ -222,24 +222,36 @@ impl CodexRolloutWitness {
     }
 }
 
-/// A delivered rollout that its discovery consumer still has to admit.
-pub(crate) struct CodexPendingRollout<'a> {
-    convergence: Option<(&'a CodexDiscoveryHub, &'a str, CodexRolloutWitness)>,
+/// A delivered transcript file its discovery consumer still has to read.
+///
+/// Every host's history pass for a scope runs under that scope's discovery
+/// consumer, so one per-consumer record proves a file unchanged for all of
+/// them.
+pub(crate) struct PendingTranscript<'a> {
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str, SettledFileWitness)>,
 }
 
-impl<'a> CodexPendingRollout<'a> {
-    /// `None` when the consumer already admitted this exact rollout through
-    /// end of file, so the pass skips it without opening it.
+impl<'a> PendingTranscript<'a> {
+    /// `None` when the consumer already finished this exact file, so the
+    /// pass skips it without opening it.
     pub(crate) fn observe(
+        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+        path: &Path,
+    ) -> TranscriptIngestResult<Option<Self>> {
+        run_blocking_transcript_section(|| Self::observe_blocking(discovery, path))
+    }
+
+    /// [`Self::observe`] for a caller already on a blocking thread.
+    pub(crate) fn observe_blocking(
         discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
         path: &Path,
     ) -> TranscriptIngestResult<Option<Self>> {
         let Some((hub, consumer)) = discovery else {
             return Ok(Some(Self { convergence: None }));
         };
-        let witness = run_blocking_transcript_section(|| CodexRolloutWitness::settled(path))?;
+        let witness = SettledFileWitness::settled(path)?;
         if let Some(witness) = witness
-            && hub.rollout_converged(consumer, path, witness)
+            && hub.file_converged(consumer, path, witness)
         {
             return Ok(None);
         }
@@ -249,19 +261,31 @@ impl<'a> CodexPendingRollout<'a> {
     }
 
     /// Records convergence once admission covered every byte the witness
-    /// measured; a deferred or shorter admission reads the rollout again.
+    /// measured; a deferred or shorter admission reads the file again.
     pub(crate) fn admitted(
         self,
         path: &Path,
-        progress: &CodexJsonlAdmissionProgress,
+        source_deferred: bool,
+        covered_through: u64,
     ) -> TranscriptIngestResult<()> {
         match self.convergence {
             Some((hub, consumer, witness))
-                if !progress.source_deferred && progress.covered_through == witness.len =>
+                if !source_deferred && covered_through == witness.len =>
             {
-                hub.record_rollout_converged(consumer, path, witness)
+                hub.record_file_converged(consumer, path, witness)
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Records that the pass read this file and found nothing the
+    /// consumer's scope will ever admit from it unchanged (it is outside the
+    /// scope, or every source it names already converged), so later passes
+    /// do not re-read it to decide again.
+    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
+        match self.convergence {
+            Some((hub, consumer, witness)) => hub.record_file_converged(consumer, path, witness),
+            None => Ok(()),
         }
     }
 }
@@ -983,9 +1007,9 @@ impl CodexDiscoveryHub {
         }
     }
 
-    /// Whether `consumer` already admitted `path` through end of file while it
-    /// had exactly `witness`.
-    fn rollout_converged(&self, consumer: &str, path: &Path, witness: CodexRolloutWitness) -> bool {
+    /// Whether `consumer` already finished `path` while it had exactly
+    /// `witness`.
+    fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let converged = inner
             .consumers
@@ -1006,7 +1030,7 @@ impl CodexDiscoveryHub {
     ) -> TranscriptIngestResult<Vec<PathBuf>> {
         let witnesses = paths
             .iter()
-            .map(|path| CodexRolloutWitness::settled(path))
+            .map(|path| SettledFileWitness::settled(path))
             .collect::<TranscriptIngestResult<Vec<_>>>()?;
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let state = inner.consumers.get(consumer);
@@ -1022,14 +1046,14 @@ impl CodexDiscoveryHub {
             .collect())
     }
 
-    /// Records that `consumer` admitted `path` through end of file while it
-    /// had `witness`. Without capacity to retain the record the rollout is
-    /// simply read again by the next pass that delivers it.
-    fn record_rollout_converged(
+    /// Records that `consumer` finished `path` while it had `witness`.
+    /// Without capacity to retain the record the file is simply read again
+    /// by the next pass that finds it.
+    fn record_file_converged(
         &self,
         consumer: &str,
         path: &Path,
-        witness: CodexRolloutWitness,
+        witness: SettledFileWitness,
     ) -> TranscriptIngestResult<()> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = inner.consumers.get_mut(consumer) else {
@@ -1041,11 +1065,10 @@ impl CodexDiscoveryHub {
         }
         let charge = candidate_charge(
             path,
-            u64::try_from(std::mem::size_of::<(PathBuf, CodexRolloutWitness)>())
-                .unwrap_or(u64::MAX),
+            u64::try_from(std::mem::size_of::<(PathBuf, SettledFileWitness)>()).unwrap_or(u64::MAX),
         )?;
         let Some(reservation) =
-            reserve_shared_jsonl_bytes(charge, "Codex converged rollout index capacity")?
+            reserve_shared_jsonl_bytes(charge, "converged transcript index capacity")?
         else {
             hotpath::gauge!("codex_discovery_converged_unrecorded").inc(1.0);
             return Ok(());

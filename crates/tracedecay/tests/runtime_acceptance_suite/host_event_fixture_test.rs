@@ -702,6 +702,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
                 },
                 None,
                 &ObservationCancellation::default(),
+                None,
             )
             .await
             .unwrap();
