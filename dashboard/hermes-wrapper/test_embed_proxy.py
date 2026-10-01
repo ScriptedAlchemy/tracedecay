@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from embed_proxy import (
@@ -117,9 +119,9 @@ class PluginApiContractTests(unittest.TestCase):
         )
 
     def test_get_dashboard_url_never_returns_loopback(self) -> None:
-        plugin_api = self.plugin
-        plugin_api._upstream_base = lambda: "http://127.0.0.1:59999"  # type: ignore[method-assign]
-        response = plugin_api.get_dashboard_url()
+        external = {"TRACEDECAY_DASHBOARD_URL": "http://127.0.0.1:59999/?token=t"}
+        with unittest.mock.patch.dict(os.environ, external):
+            response = self.plugin.get_dashboard_url()
         payload = json.loads(bytes(response.body).decode("utf-8"))
         self.assertEqual(payload["url"], DASHBOARD_EMBED_PATH)
         self.assertNotIn("127.0.0.1", payload["url"])

@@ -41,6 +41,18 @@ run_integration() {
 
     echo "== dashboard wrapper loads under the Hermes interpreter"
     "$hermes_python" -m unittest discover -s "$REPO_ROOT/dashboard/hermes-wrapper" -p 'test_*.py'
+    (
+        cd "$HERMES_UPSTREAM_DIR" &&
+            PYTHONPATH="$HERMES_UPSTREAM_DIR" "$hermes_python" -c '
+import sys
+from pathlib import Path
+import hermes_cli.web_server
+plugin = sys.modules["hermes_dashboard_plugin_tracedecay"]
+loaded = plugin.dashboard_upstream.__code__.co_filename
+assert loaded == str(Path(plugin.__file__).with_name("embed_proxy.py")), loaded
+'
+    )
+    echo "ok - stock Hermes mounts the deployed dashboard api with its embed helpers"
 
     echo "== hermes plugins list"
     plugins_list="$(cd "$HERMES_UPSTREAM_DIR" && COLUMNS=200 \
