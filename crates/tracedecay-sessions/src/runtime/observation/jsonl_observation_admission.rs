@@ -243,6 +243,9 @@ pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
     /// only evidence a caller has that the source was *already* admitted,
     /// versus never carrying anything: both report zero new frames.
     pub resumed: bool,
+    /// The committed source cursor's position once this pass settled; every
+    /// byte before it is admitted or covered.
+    pub covered_through: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
 }
 
@@ -2924,6 +2927,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         progress.frames_refused,
         progress.frames_persisted,
     );
+    progress.covered_through = expected_cursor
+        .as_ref()
+        .map_or(0, ObservationSourceCursorV1::position);
     Ok(progress)
 }
 

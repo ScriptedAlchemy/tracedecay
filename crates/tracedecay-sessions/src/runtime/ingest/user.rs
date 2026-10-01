@@ -214,6 +214,9 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
+        let Some(pending) = codex::CodexPendingRollout::observe(discovery_state, path)? else {
+            continue;
+        };
         let progress =
             codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
                 path,
@@ -224,6 +227,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 cancellation,
             )
             .await?;
+        pending.admitted(path, &progress)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);

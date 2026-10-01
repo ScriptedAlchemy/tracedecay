@@ -286,6 +286,11 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
+            let Some(pending) =
+                codex::CodexPendingRollout::observe(self.codex_discovery, path).transpose()
+            else {
+                continue;
+            };
             if persisted_day.is_some_and(|day| path.parent() != Some(day))
                 && run_blocking_transcript_section(|| {
                     codex::codex_rollout_project_membership(path, self.project_root)
@@ -296,17 +301,29 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            match codex::try_admit_codex_jsonl_observations_for_project_window(
-                path,
-                self.project_root,
-                self.project_id.clone(),
-                self.facade,
-                remaining,
-                self.cancellation,
-            )
-            .await
-            {
-                Ok(progress) => {
+            let admitted = match pending {
+                Ok(pending) => codex::try_admit_codex_jsonl_observations_for_project_window(
+                    path,
+                    self.project_root,
+                    self.project_id.clone(),
+                    self.facade,
+                    remaining,
+                    self.cancellation,
+                )
+                .await
+                .map(|progress| (progress, pending)),
+                Err(error) => Err(error),
+            };
+            match admitted {
+                Ok((progress, pending)) => {
+                    if let Err(error) = pending.admitted(path, &progress) {
+                        outcome.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "convergence",
+                            &error,
+                            "project Codex rollout convergence record failed",
+                        ));
+                    }
                     if progress.frames_persisted > 0 && !progress.resumed {
                         persisted_day = path.parent();
                     }

@@ -87,7 +87,7 @@ use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptIngestResult, TranscriptSource, jsonl_change_token_settled,
-    jsonl_file_change_token,
+    jsonl_file_change_token, run_blocking_transcript_section,
 };
 
 #[cfg(test)]
@@ -178,6 +178,107 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
+    /// Rollouts this consumer's scope admitted through end of file, by the
+    /// settled identity they had before that admission read them. A later
+    /// discovery pass that delivers one unchanged is skipped unopened.
+    ///
+    /// ponytail: a deleted rollout's entry lives until the consumer
+    /// deregisters; prune against the replay index if corpora churn enough
+    /// for that to matter.
+    converged: HashMap<PathBuf, (CodexRolloutWitness, ProcessSharedMemoryReservationV1)>,
+}
+
+impl CodexDiscoveryConsumerState {
+    fn holds_converged(&self, path: &Path, witness: CodexRolloutWitness) -> bool {
+        self.converged
+            .get(path)
+            .is_some_and(|(recorded, _)| *recorded == witness)
+    }
+}
+
+/// A rollout's corpus identity, taken only once its change time is settled
+/// so that an equal later identity proves the bytes unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CodexRolloutWitness {
+    identity: [u8; 32],
+    len: u64,
+}
+
+impl CodexRolloutWitness {
+    /// `None` while the rollout's change time is inside the timestamp
+    /// quantum, or where no stat field witnesses a rewrite, or once the
+    /// rollout is gone: admission then reads it as before.
+    fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
+        let Some(metadata) = stat_if_present(path, "stat Codex rollout for convergence")? else {
+            return Ok(None);
+        };
+        if !metadata.is_file() || !jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            identity: codex_corpus_identity(path, &metadata)?,
+            len: metadata.len(),
+        }))
+    }
+}
+
+/// A delivered rollout that its discovery consumer still has to admit.
+pub(crate) struct CodexPendingRollout<'a> {
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str, CodexRolloutWitness)>,
+}
+
+impl<'a> CodexPendingRollout<'a> {
+    /// `None` when the consumer already admitted this exact rollout through
+    /// end of file, so the pass skips it without opening it.
+    pub(crate) fn observe(
+        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+        path: &Path,
+    ) -> TranscriptIngestResult<Option<Self>> {
+        let Some((hub, consumer)) = discovery else {
+            return Ok(Some(Self { convergence: None }));
+        };
+        let witness = run_blocking_transcript_section(|| CodexRolloutWitness::settled(path))?;
+        if let Some(witness) = witness
+            && hub.rollout_converged(consumer, path, witness)
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            convergence: witness.map(|witness| (hub, consumer, witness)),
+        }))
+    }
+
+    /// Records convergence once admission covered every byte the witness
+    /// measured; a deferred or shorter admission reads the rollout again.
+    pub(crate) fn admitted(
+        self,
+        path: &Path,
+        progress: &CodexJsonlAdmissionProgress,
+    ) -> TranscriptIngestResult<()> {
+        match self.convergence {
+            Some((hub, consumer, witness))
+                if !progress.source_deferred && progress.covered_through == witness.len =>
+            {
+                hub.record_rollout_converged(consumer, path, witness)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn stat_if_present(
+    path: &Path,
+    operation: &'static str,
+) -> TranscriptIngestResult<Option<std::fs::Metadata>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(TranscriptIngestError::ScanIo {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 enum CodexDiscoveryConsumerMode {
@@ -410,6 +511,7 @@ impl CodexDiscoveryHub {
                 mode,
                 awaiting_ack: None,
                 _memory: None,
+                converged: HashMap::new(),
             },
         );
         hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
@@ -465,8 +567,15 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let delivery = tokio::task::spawn_blocking(move || {
-            hub.discover_blocking(&consumer, &source, bounds, frontier)
+        let (delivery, prefetch) = tokio::task::spawn_blocking(move || {
+            let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
+            let prefetch = match &delivery {
+                CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
+                    hub.unconverged_paths(&consumer, &pass.report.paths)?
+                }
+                _ => Vec::new(),
+            };
+            Ok::<_, TranscriptIngestError>((delivery, prefetch))
         })
         .await
         .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
@@ -475,7 +584,7 @@ impl CodexDiscoveryHub {
         if let CodexDiscoveryDelivery::Ready(pass) = &delivery
             && let Some(pin) = &pass._shared_page_pin
         {
-            pin.start_prefetches(&pass.report.paths);
+            pin.start_prefetches(&prefetch);
         }
         Ok(delivery)
     }
@@ -872,6 +981,79 @@ impl CodexDiscoveryHub {
             }
             return Ok(CodexDiscoveryDelivery::Waiting);
         }
+    }
+
+    /// Whether `consumer` already admitted `path` through end of file while it
+    /// had exactly `witness`.
+    fn rollout_converged(&self, consumer: &str, path: &Path, witness: CodexRolloutWitness) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let converged = inner
+            .consumers
+            .get(consumer)
+            .is_some_and(|state| state.holds_converged(path, witness));
+        if converged {
+            hotpath::gauge!("codex_discovery_converged_skips").inc(1.0);
+        }
+        converged
+    }
+
+    /// The delivered paths `consumer` would still read, in delivery order, so
+    /// speculative page reads never open a rollout admission will skip.
+    fn unconverged_paths(
+        &self,
+        consumer: &str,
+        paths: &[PathBuf],
+    ) -> TranscriptIngestResult<Vec<PathBuf>> {
+        let witnesses = paths
+            .iter()
+            .map(|path| CodexRolloutWitness::settled(path))
+            .collect::<TranscriptIngestResult<Vec<_>>>()?;
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = inner.consumers.get(consumer);
+        Ok(paths
+            .iter()
+            .zip(witnesses)
+            .filter(|(path, witness)| {
+                !witness.is_some_and(|witness| {
+                    state.is_some_and(|state| state.holds_converged(path, witness))
+                })
+            })
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+
+    /// Records that `consumer` admitted `path` through end of file while it
+    /// had `witness`. Without capacity to retain the record the rollout is
+    /// simply read again by the next pass that delivers it.
+    fn record_rollout_converged(
+        &self,
+        consumer: &str,
+        path: &Path,
+        witness: CodexRolloutWitness,
+    ) -> TranscriptIngestResult<()> {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = inner.consumers.get_mut(consumer) else {
+            return Ok(());
+        };
+        if let Some((recorded, _)) = state.converged.get_mut(path) {
+            *recorded = witness;
+            return Ok(());
+        }
+        let charge = candidate_charge(
+            path,
+            u64::try_from(std::mem::size_of::<(PathBuf, CodexRolloutWitness)>())
+                .unwrap_or(u64::MAX),
+        )?;
+        let Some(reservation) =
+            reserve_shared_jsonl_bytes(charge, "Codex converged rollout index capacity")?
+        else {
+            hotpath::gauge!("codex_discovery_converged_unrecorded").inc(1.0);
+            return Ok(());
+        };
+        state
+            .converged
+            .insert(path.to_path_buf(), (witness, reservation));
+        Ok(())
     }
 
     pub(crate) fn acknowledge(&self, consumer: &str) {
@@ -2479,16 +2661,8 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
 }
 
 fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(TranscriptIngestError::ScanIo {
-                operation: "stat Codex transcript directory",
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    let Some(metadata) = stat_if_present(path, "stat Codex transcript directory")? else {
+        return Ok(None);
     };
     if !metadata.is_dir() {
         return Err(TranscriptIngestError::ScanIo {

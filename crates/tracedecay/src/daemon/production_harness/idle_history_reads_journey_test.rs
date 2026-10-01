@@ -13,6 +13,9 @@ const CONVERGENCE_DEADLINE: Duration = Duration::from_secs(90);
 /// One idle discovery recheck (60 s) plus slack for its pass to publish.
 const RECHECK_DEADLINE: Duration = Duration::from_secs(90);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Longer than a scheduler pass, so a window without reads means no pass
+/// is still working through the corpus.
+const QUIET_WINDOW: Duration = Duration::from_secs(5);
 
 fn write_claude(home: &Path, cwd: &Path, session: &str) -> PathBuf {
     let dir = home.join(".claude/projects/idle-history");
@@ -36,6 +39,52 @@ fn write_claude(home: &Path, cwd: &Path, session: &str) -> PathBuf {
     std::fs::write(&path, body).unwrap();
     path
 }
+
+fn codex_record(fixture: &str, stamp: u32) -> Value {
+    let mut record: Value = serde_json::from_str(fixture).unwrap();
+    record["timestamp"] = json!(format!(
+        "2026-09-30T10:{:02}:{:02}.000Z",
+        stamp / 60,
+        stamp % 60
+    ));
+    record
+}
+
+fn append_jsonl(path: &Path, records: &[Value]) {
+    let mut body = String::new();
+    for record in records {
+        body.push_str(&serde_json::to_string(record).unwrap());
+        body.push('\n');
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, body.as_bytes()).unwrap();
+}
+
+fn write_codex(home: &Path, cwd: &Path, index: u32) -> PathBuf {
+    let dir = home.join(".codex/sessions/2026/09/30");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut meta = codex_record(CODEX_META, 2 * index);
+    meta["payload"]["id"] = json!(format!("idle-codex-{index:04}"));
+    meta["payload"]["cwd"] = json!(cwd);
+    let mut message = codex_record(CODEX_MESSAGE, 2 * index + 1);
+    message["payload"]["message"] = json!(format!("codex turn of session {index}"));
+    let path = dir.join(format!(
+        "rollout-2026-09-30T10-00-00-idle-codex-{index:04}.jsonl"
+    ));
+    append_jsonl(&path, &[meta, message]);
+    path
+}
+
+const CODEX_META: &str = include_str!(
+    "../../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+);
+const CODEX_MESSAGE: &str = include_str!(
+    "../../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+);
 
 /// Records every read of the watched files without touching their metadata,
 /// which a transcript's change token would otherwise observe.
@@ -124,6 +173,93 @@ async fn lcm_status(harness: &ProductionProjectCompositionHarnessV1, project: &P
     } else {
         payload
     }
+}
+
+async fn converged_messages(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    expected: u64,
+) -> Value {
+    let deadline = Instant::now() + CONVERGENCE_DEADLINE;
+    loop {
+        let status = lcm_status(harness, project).await;
+        if status["projection"]["convergence"]["state"] == json!("converged")
+            && status["lcm"]["store"]["messages"] == json!(expected)
+        {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "history never converged on {expected} messages: {status}"
+        );
+        tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+    }
+}
+
+/// A message streamed into one Codex rollout used to make every history pass
+/// re-read the head of every other rollout to recover its session identity.
+/// The corpus is larger than every per-process metadata cache, so only a
+/// skip that never opens an unchanged rollout keeps the cost to the one that
+/// changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_codex_message_reads_only_its_rollout() {
+    let isolation = tempfile::TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    git(&project, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(project.join("src/lib.rs"), "pub fn idle() {}\n").unwrap();
+    let cwd = std::fs::canonicalize(&project).unwrap();
+    let home =
+        ProductionProjectCompositionHarnessV1::transcript_source_home(isolation.path()).unwrap();
+    let unchanged =
+        u32::try_from(std::thread::available_parallelism().unwrap().get().max(32) * 2).unwrap();
+    let rollouts = (0..=unchanged)
+        .map(|index| write_codex(&home, &cwd, index))
+        .collect::<Vec<_>>();
+    let live = rollouts.last().unwrap().clone();
+    let reads = TranscriptReads::watch(&rollouts);
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .unwrap();
+    let converged = converged_messages(&harness, &project, u64::from(unchanged) + 1).await;
+    assert_eq!(converged["projection"]["state"], json!("current"));
+    // The profile scope catches up on the same rollouts independently of the
+    // project's convergence, so the corpus is quiet only once a whole window
+    // passes without a read.
+    let mut caught_up = reads.take();
+    let deadline = Instant::now() + CONVERGENCE_DEADLINE;
+    loop {
+        tokio::time::sleep(QUIET_WINDOW).await;
+        let read = reads.take();
+        if read.is_empty() {
+            break;
+        }
+        caught_up.extend(read);
+        assert!(
+            Instant::now() < deadline,
+            "rollouts never stopped being read"
+        );
+    }
+    assert_eq!(
+        caught_up.len(),
+        rollouts.len(),
+        "catch-up reads every rollout"
+    );
+
+    let mut streamed = codex_record(CODEX_MESSAGE, 3_000);
+    streamed["payload"]["message"] = json!("streamed codex turn");
+    append_jsonl(&live, &[streamed]);
+    converged_messages(&harness, &project, u64::from(unchanged) + 2).await;
+    assert_eq!(
+        reads.take(),
+        BTreeSet::from([live.file_name().unwrap().to_string_lossy().into_owned()])
+    );
+
+    harness.shutdown().await;
 }
 
 /// A transcript whose working directory was deleted, inside the project or
