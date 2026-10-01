@@ -143,7 +143,42 @@ async fn assert_invalid_frame_preserves_observation_state(session_id: &str, fram
     assert_eq!(fixture.admission.pending_projection_count(), 0);
 }
 
-async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
+async fn assert_invalid_frame_is_covered(session_id: &str, frame: &[u8]) {
+    let fixture = Fixture::new(session_id);
+    fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
+    let source_adapter = fixture.source(session_id);
+    let source = observation_source(&fixture.transcript);
+
+    let stats = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("a complete invalid frame is covered, not deferred");
+    assert_eq!(stats.observations_committed, 0);
+    assert_eq!(stats.deferred_sources, 0, "{stats:?}");
+    assert!(fixture.admission.observations().is_empty());
+    let cursor = fixture
+        .admission
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("coverage must advance past the invalid frame");
+    assert_eq!(cursor.byte_offset(), u64::try_from(frame.len()).unwrap());
+
+    let replay = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("a covered source converges");
+    assert_eq!(replay.deferred_sources, 0, "{replay:?}");
+    assert_eq!(replay.observations_committed, 0);
+}
+
+/// A complete invalid suffix is covered past; a partial one is deferred at
+/// the valid prefix until its writer finishes the line.
+async fn assert_invalid_suffix_preserves_valid_prefix(
+    session_id: &str,
+    suffix: &[u8],
+    suffix_covered: bool,
+) {
     let fixture = Fixture::new(session_id);
     let marker = format!("valid prefix before {session_id}");
     let record = json!({
@@ -157,6 +192,11 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let mut bytes = format!("{record}\n").into_bytes();
     let suffix_start = u64::try_from(bytes.len()).unwrap();
     bytes.extend_from_slice(suffix);
+    let (expected_deferred, expected_cursor) = if suffix_covered {
+        (0, u64::try_from(bytes.len()).unwrap())
+    } else {
+        (1, suffix_start)
+    };
     fs::write(&fixture.transcript, bytes).expect("write valid prefix and invalid suffix");
 
     let source_adapter = fixture.source(session_id);
@@ -164,11 +204,11 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
         .await
-        .expect("valid prefix must commit before invalid suffix defers");
+        .expect("valid prefix must commit before the invalid suffix");
     assert_eq!(first.observations_committed, 1);
     assert_eq!(first.transcript.messages_upserted, 1);
     assert_eq!(first.projections_completed, 1);
-    assert_eq!(first.deferred_sources, 1);
+    assert_eq!(first.deferred_sources, expected_deferred);
 
     let source_cursor = fixture
         .admission
@@ -176,7 +216,7 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
         .await
         .unwrap()
         .expect("valid prefix source cursor");
-    assert_eq!(source_cursor.byte_offset(), suffix_start);
+    assert_eq!(source_cursor.byte_offset(), expected_cursor);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
     let cursor_path = identity.cursor_key.store_path();
     let transcript_cursor = fixture
@@ -199,8 +239,8 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let retry = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
         .await
-        .expect("invalid suffix retry must remain deferred");
-    assert_eq!(retry.deferred_sources, 1);
+        .expect("invalid suffix retry");
+    assert_eq!(retry.deferred_sources, expected_deferred);
     assert_eq!(retry.transcript, TranscriptIngestStats::default());
     assert_eq!(fixture.admission.observations(), committed);
 }
@@ -219,12 +259,13 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
             .paths,
         vec![fixture.transcript.clone()]
     );
-    let (scheduled, deferred) =
+    let (scheduled, deferred, rotating) =
         scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
             .await
             .unwrap();
     assert_eq!(scheduled, vec![fixture.transcript.clone()]);
     assert_eq!(deferred, 0);
+    assert!(!rotating);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
     let scan = try_scan_claude_source_frames_with_resume(
         identity,
@@ -703,7 +744,16 @@ async fn partial_backlog_and_cancellation_never_advance_observation_state() {
 }
 
 #[tokio::test]
-async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
+async fn partial_frame_preserves_all_observation_state() {
+    assert_invalid_frame_preserves_observation_state(
+        "invalid-partial",
+        br#"{"type":"user""#.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn malformed_and_oversized_frames_are_covered_not_deferred() {
     let oversized = format!(
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
         "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
@@ -715,10 +765,9 @@ async fn malformed_partial_and_oversized_frames_preserve_all_observation_state()
 "#
             .as_slice(),
         ),
-        ("invalid-partial", br#"{"type":"user""#.as_slice()),
         ("invalid-oversized", oversized.as_bytes()),
     ] {
-        assert_invalid_frame_preserves_observation_state(session_id, frame).await;
+        assert_invalid_frame_is_covered(session_id, frame).await;
     }
 }
 
@@ -728,18 +777,71 @@ async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() 
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
         "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
-    for (session_id, suffix) in [
+    for (session_id, suffix, covered) in [
         (
             "prefix-malformed",
             br#"{"type":"user",malformed}
 "#
             .as_slice(),
+            true,
         ),
-        ("prefix-partial", br#"{"type":"user""#.as_slice()),
-        ("prefix-oversized", oversized.as_bytes()),
+        ("prefix-partial", br#"{"type":"user""#.as_slice(), false),
+        ("prefix-oversized", oversized.as_bytes(), true),
     ] {
-        assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
+        assert_invalid_suffix_preserves_valid_prefix(session_id, suffix, covered).await;
     }
+}
+
+#[tokio::test]
+async fn claude_rotation_keeps_advancing_after_one_full_walk() {
+    let fixture = Fixture::new("rotation-anchor");
+    let project = fixture.transcript.parent().unwrap().to_path_buf();
+    let total = MAX_CLAUDE_SOURCES_PER_PASS + 20;
+    for index in 0..total {
+        let session_id = format!("rotation-{index:03}");
+        let record = json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": format!("message-{index:03}"),
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": format!("rotation {index}")}
+        });
+        fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            format!("{record}\n"),
+        )
+        .unwrap();
+    }
+    let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+    let frontier = || async {
+        fixture
+            .admission
+            .get_parse_offset(&ObservationScopeV1::Profile, CLAUDE_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .map(|offset| offset.byte_offset)
+    };
+    let pass = MAX_CLAUDE_SOURCES_PER_PASS as u64;
+    for expected in [pass, 2 * pass, 3 * pass] {
+        fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .expect("rotation pass");
+        assert_eq!(frontier().await, Some(expected));
+    }
+    let (scheduled, deferred, rotating) =
+        scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
+            .await
+            .unwrap();
+    assert!(rotating);
+    assert_eq!(deferred, 0);
+    let start = (3 * MAX_CLAUDE_SOURCES_PER_PASS) % total;
+    assert_eq!(
+        scheduled.first(),
+        Some(&project.join(format!("rotation-{start:03}.jsonl"))),
+        "the window after a full walk starts past the previous one"
+    );
 }
 
 #[test]

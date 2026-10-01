@@ -207,7 +207,6 @@ enum CodexDiscoveryWork {
         source_key: CodexDiscoverySourceKey,
         state: CodexDiscoveryState,
         frontier: CodexDiscoveryFrontier,
-        generation: u128,
     },
 }
 
@@ -640,7 +639,6 @@ impl CodexDiscoveryHub {
                         source_key,
                         state,
                         frontier: index.frontier,
-                        generation: index.generation,
                     }
                 } else {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -691,16 +689,14 @@ impl CodexDiscoveryHub {
                 }
             };
 
-            let (mut discovery, base, replay_generation, replay_source) = match work {
-                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None, None),
+            let (mut discovery, base, replay_source) = match work {
+                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None),
                 CodexDiscoveryWork::Replay {
                     source_key,
                     state,
                     frontier,
-                    generation,
-                } => (state, frontier, Some(generation), Some(source_key)),
+                } => (state, frontier, Some(source_key)),
             };
-            let shared = replay_generation.is_none();
             // Page preparation capacity bounds concurrent JSONL reservations
             // and prefetch workers. It must not shrink this retained scan.
             // Clamping `max_files` to that width spends the structural budget
@@ -715,7 +711,7 @@ impl CodexDiscoveryHub {
             })?;
             self.scan_released
                 .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
-            if shared {
+            let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
                 let mut pass = result?;
@@ -755,16 +751,7 @@ impl CodexDiscoveryHub {
                 }
                 drop(inner);
                 continue;
-            }
-
-            let source_key =
-                replay_source.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay source authority is missing",
-                })?;
-            let generation =
-                replay_generation.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay generation authority is missing",
-                })?;
+            };
             let retire_source = inner
                 .replay_indexes
                 .get(&source_key)
@@ -784,11 +771,9 @@ impl CodexDiscoveryHub {
                     detail: "Codex replay index disappeared while scanning",
                 },
             )?;
-            if index.generation != generation {
-                return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay index generation changed while scanning",
-                });
-            }
+            // Only the scanner holding `scanning` advances the index
+            // generation, and a source deregistered mid-scan is retired above
+            // rather than removed, so the index is still the one it scanned.
             index.scanning = false;
             index.discovery = Some(discovery);
             let pass = result?;
