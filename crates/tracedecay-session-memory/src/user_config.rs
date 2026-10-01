@@ -4,11 +4,10 @@
 //! gracefully. Keys other profile readers own (e.g. GitHub repositories) are
 //! preserved; retired keys are dropped at load and erased by the next write.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::default_true;
@@ -249,39 +248,25 @@ fn parse_error_line(contents: &str, err: &toml::de::Error) -> Option<usize> {
     Some(contents[..end].bytes().filter(|&b| b == b'\n').count() + 1)
 }
 
-/// Paths for which a corrupt-config warning has already been printed this
-/// process, so a hot loader (dashboard handlers, the daemon's per-request
-/// config read) doesn't spam stderr once per call.
-fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
-    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    WARNED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Parses `contents` (read from `path`) as `T`, returning the default and
-/// printing a one-time-per-path warning if the TOML is corrupt.
-///
-/// Shared by [`UserConfig::load`] call sites so silently-defaulting readers
-/// agree on what "corrupt" means and on not spamming stderr.
-pub fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
+/// Reads the profile's `config.toml` as `T`, the view one profile reader
+/// owns. A missing file is `T::default()`; an unreadable or unparseable one
+/// is an error naming the file and its repair, never defaults that would
+/// silently replace what the operator stored.
+pub fn read_profile_config<T>(profile_root: &Path) -> std::result::Result<T, ConfigSaveError>
 where
     T: Default + serde::de::DeserializeOwned,
 {
-    match toml::from_str(contents) {
-        Ok(value) => value,
-        Err(err) => {
-            let warned = warned_corrupt_config_paths();
-            let mut seen = warned
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if seen.insert(path.to_path_buf()) {
-                eprintln!(
-                    "warning: could not parse config '{}' ({err}); using defaults",
-                    path.display()
-                );
-            }
-            T::default()
-        }
-    }
+    let path = config_path(profile_root);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(source) => return Err(ConfigSaveError::ExistingUnreadable { path, source }),
+    };
+    toml::from_str(&contents).map_err(|error| ConfigSaveError::CorruptExisting {
+        line: parse_error_line(&contents, &error),
+        message: error.to_string(),
+        path,
+    })
 }
 
 impl UserConfig {
@@ -295,16 +280,13 @@ impl UserConfig {
             .unwrap_or(true)
     }
 
-    /// Loads the user-level config file.
-    /// Returns defaults if the file is missing or unreadable. A present but
-    /// unparseable file prints a one-time warning to stderr (see
-    /// [`parse_or_warn_default`]) instead of silently defaulting.
-    pub fn load(profile_root: &Path) -> Self {
-        let path = config_path(profile_root);
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            return Self::default();
-        };
-        parse_or_warn_default::<Self>(&path, &contents).without_retired_keys()
+    /// Loads the user-level config file; a missing file means defaults.
+    ///
+    /// An unreadable or malformed file is an error, not defaults: those would
+    /// silently turn a stored opt-out (dashboard, memory injection) back on
+    /// and drop the tracked hosts and pending counts.
+    pub fn load(profile_root: &Path) -> std::result::Result<Self, ConfigSaveError> {
+        read_profile_config::<Self>(profile_root).map(Self::without_retired_keys)
     }
 
     fn without_retired_keys(mut self) -> Self {
@@ -312,30 +294,6 @@ impl UserConfig {
             self.extra.remove(key);
         }
         self
-    }
-
-    /// Loads configuration without substituting defaults for an unreadable or
-    /// malformed persisted file.
-    ///
-    /// Lifecycle callers use this when a missing policy would enable host
-    /// behavior: corruption must stop the operation rather than silently turn
-    /// an opt-out back on. A genuinely missing file still means defaults.
-    pub fn load_strict(profile_root: &Path) -> std::result::Result<Self, ConfigSaveError> {
-        let path = config_path(profile_root);
-        let contents = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(source) => {
-                return Err(ConfigSaveError::ExistingUnreadable { path, source });
-            }
-        };
-        toml::from_str::<Self>(&contents)
-            .map(Self::without_retired_keys)
-            .map_err(|error| ConfigSaveError::CorruptExisting {
-                path,
-                line: parse_error_line(&contents, &error),
-                message: error.to_string(),
-            })
     }
 
     /// Saves the user-level config file atomically.
@@ -365,7 +323,7 @@ impl UserConfig {
         // Checked outside the lock: every writer holds it and renames a whole
         // parseable file into place, so only an outside editor, which no lock
         // excludes, can corrupt the file between this check and the rename.
-        Self::refuse_unparseable_existing(&path)?;
+        read_profile_config::<Self>(profile_root)?;
 
         if let Some(parent) = path.parent() {
             tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).map_err(
@@ -390,26 +348,6 @@ impl UserConfig {
         let result = Self::write_locked(&path, &contents);
         drop(lock_file);
         result
-    }
-
-    fn refuse_unparseable_existing(path: &Path) -> std::result::Result<(), ConfigSaveError> {
-        let existing = match fs::read_to_string(path) {
-            Ok(existing) => existing,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(ConfigSaveError::ExistingUnreadable {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
-        toml::from_str::<Self>(&existing)
-            .map(|_| ())
-            .map_err(|err| ConfigSaveError::CorruptExisting {
-                path: path.to_path_buf(),
-                line: parse_error_line(&existing, &err),
-                message: err.to_string(),
-            })
     }
 
     fn write_locked(path: &Path, contents: &str) -> std::result::Result<(), ConfigSaveError> {
@@ -538,14 +476,13 @@ mod tests {
             path.display()
         );
         assert_eq!(save_error.to_string(), expected);
-        let load_error =
-            UserConfig::load_strict(profile).expect_err("a corrupt config must not load");
+        let load_error = UserConfig::load(profile).expect_err("a corrupt config must not load");
         assert_eq!(load_error.to_string(), expected);
         assert_eq!(entries(), vec!["config.toml".to_owned()]);
 
         std::fs::write(&path, "pending_upload = 0\n").unwrap();
         config.save(profile).expect("a parseable config saves");
-        assert_eq!(UserConfig::load_strict(profile).unwrap().pending_upload, 7);
+        assert_eq!(UserConfig::load(profile).unwrap().pending_upload, 7);
     }
 
     #[test]
@@ -685,7 +622,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = UserConfig::load(profile);
+        let mut config = UserConfig::load(profile).unwrap();
         config.pending_upload = 3;
 
         config
@@ -705,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_load_rejects_corrupt_dashboard_policy_instead_of_enabling_it() {
+    fn load_rejects_corrupt_dashboard_policy_instead_of_enabling_it() {
         let temp = TempDir::new().unwrap();
         let profile = temp.path();
         let path = config_path(profile);
@@ -717,7 +654,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            UserConfig::load_strict(profile),
+            UserConfig::load(profile),
             Err(ConfigSaveError::CorruptExisting { .. })
         ));
     }

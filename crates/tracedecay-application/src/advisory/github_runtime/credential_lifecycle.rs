@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tracedecay_domain::UserProfileId;
+use tracedecay_session_memory::user_config::{ConfigSaveError, read_profile_config};
 use zeroize::Zeroizing;
 
 use super::{
@@ -328,7 +329,17 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
         secrets: Arc<dyn GitHubSecretReadPortV1>,
         verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
     ) {
-        let configured = load_configured_repositories(profile_root);
+        let configured = match read_profile_config::<ConfiguredGitHubRepositoriesV1>(profile_root) {
+            Ok(configured) => configured,
+            Err(error) => {
+                tracing::warn!(
+                    event = "github_review_sources_unreadable",
+                    %error,
+                    "no GitHub review source is registered for this profile"
+                );
+                return;
+            }
+        };
         let mut repositories = BTreeMap::new();
         for repository in configured.github_review_sources {
             let key = (repository.owner.clone(), repository.repository.clone());
@@ -437,12 +448,13 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
     }
 }
 
-fn load_configured_repositories(profile_root: &Path) -> ConfiguredGitHubRepositoriesV1 {
-    let path = profile_root.join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return ConfiguredGitHubRepositoriesV1::default();
-    };
-    tracedecay_session_memory::user_config::parse_or_warn_default(&path, &contents)
+/// Reads the profile's `github_review_sources` the way the daemon registers
+/// them. An error means the daemon registered none; `tracedecay doctor`
+/// reports it with the file to repair.
+pub fn check_configured_github_review_sources_v1(
+    profile_root: &Path,
+) -> Result<(), ConfigSaveError> {
+    read_profile_config::<ConfiguredGitHubRepositoriesV1>(profile_root).map(drop)
 }
 
 fn valid_locator(value: &str) -> bool {

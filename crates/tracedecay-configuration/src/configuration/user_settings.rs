@@ -127,7 +127,7 @@ struct UserMetadata {
 }
 
 fn read_user_metadata(profile_root: &Path) -> Result<UserMetadata, UserSettingsAuthorityError> {
-    let config = UserConfig::load_strict(profile_root)
+    let config = UserConfig::load(profile_root)
         .map_err(|error| unavailable(format!("user configuration metadata: {error}")))?;
     Ok(UserMetadata {
         installed_agents: config.installed_agents,

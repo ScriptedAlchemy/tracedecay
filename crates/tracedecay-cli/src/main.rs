@@ -888,7 +888,34 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists(profile_root);
 
     let is_force_flush = matches!(command, Commands::Sync { .. } | Commands::Status { .. });
-    let mut user_config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
+        Ok(user_config) => {
+            flush_worldwide_counter(profile, command, is_force_flush, user_config).await;
+        }
+        Err(err) => eprintln!("warning: {err}"),
+    }
+
+    if is_first_run && startup_policy.runs_startup_maintenance() {
+        eprintln!(
+            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
+             \x20     Run `tracedecay enable-upload-counter` to opt in."
+        );
+    }
+
+    if startup_policy.runs_agent_install_check()
+        && let Some(home) = profile.home()
+    {
+        tracedecay_agent_hosts::agents::claude::check_install_stale(home);
+    }
+}
+
+async fn flush_worldwide_counter(
+    profile: &ProfileRoot,
+    command: &Commands,
+    is_force_flush: bool,
+    mut user_config: tracedecay_session_memory::user_config::UserConfig,
+) {
+    let profile_root = profile.data_dir();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
     // `tracedecay serve` startup on slow networks, long enough to blow the
@@ -925,19 +952,6 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
         && let Err(err) = user_config.save_if_exists(profile_root)
     {
         eprintln!("warning: could not save tracedecay config: {err}");
-    }
-
-    if is_first_run && startup_policy.runs_startup_maintenance() {
-        eprintln!(
-            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
-             \x20     Run `tracedecay enable-upload-counter` to opt in."
-        );
-    }
-
-    if startup_policy.runs_agent_install_check()
-        && let Some(home) = profile.home()
-    {
-        tracedecay_agent_hosts::agents::claude::check_install_stale(home);
     }
 }
 

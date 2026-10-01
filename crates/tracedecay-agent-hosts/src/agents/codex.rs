@@ -2350,9 +2350,10 @@ fn doctor_check_hooks(
 /// `~/.codex/memories/`, the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
 fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, profile_root: &Path, home: &Path) {
-    if !crate::hooks::memory_inject::memory_injection_enabled(profile_root) {
+    // An unreadable profile config is the User config section's issue.
+    let Ok(true) = crate::hooks::memory_inject::memory_injection_enabled(profile_root) else {
         return;
-    }
+    };
     let config_path = codex_config_path(home);
     let Ok(config) = load_toml_file(&config_path) else {
         return;

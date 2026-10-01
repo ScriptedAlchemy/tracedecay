@@ -314,23 +314,13 @@ impl McpServer {
                                 .to_owned(),
                         ),
                         (Ok(upload_enabled), Some(profile)) => {
-                            let profile_root = profile.data_dir();
-                            let mut config =
-                                tracedecay_session_memory::user_config::UserConfig::load(
-                                    profile_root,
-                                );
-                            config.pending_upload += delta;
-                            if upload_enabled
-                                && let Some(_total) = tracedecay_dashboard_api::cloud::flush_pending(
-                                    config.pending_upload,
-                                )
-                            {
-                                config.pending_upload = 0;
-                                let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-                                config.last_upload_at = now;
-                            }
-                            if let Err(err) = config.save(profile_root) {
-                                tracing::warn!(error = %err, "could not save upload config during shutdown");
+                            if let Err(error) = super::ledger::persist_worldwide_delta(
+                                profile.data_dir(),
+                                delta,
+                                upload_enabled,
+                            ) {
+                                failures
+                                    .push(format!("worldwide counter delta not saved: {error}"));
                             }
                         }
                     }
