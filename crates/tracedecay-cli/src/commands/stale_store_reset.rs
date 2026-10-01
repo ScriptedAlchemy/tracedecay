@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use tracedecay_domain::errors::{ResettableStoreV1, Result, StoreResetRequiredV1, TraceDecayError};
 use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent;
+use tracedecay_hooks::{
+    PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, profile_sharded_data_root, validate_project_id,
@@ -103,8 +106,18 @@ fn resettable_targets(stores: &[StoreResetRequiredV1]) -> Result<Vec<ResettableS
 
 fn reset_stores(profile_root: &Path, targets: &[ResettableStoreV1]) -> Result<()> {
     for target in targets {
-        let (directory, database) = store_location(profile_root, target)?;
-        let removed = remove_store_family(&directory, database)?;
+        let (directory, members) = store_location(profile_root, target)?;
+        let removed = match members {
+            StoreMembers::DatabaseFamily(database) => remove_store_family(&directory, database)?,
+            StoreMembers::Directories(names) => {
+                let mut removed = 0;
+                for name in names {
+                    removed += usize::from(remove_fixed_profile_path(&directory, name)?);
+                    verify_store_path_absent(&directory.join(name))?;
+                }
+                removed
+            }
+        };
         println!(
             "reset {} ({removed} entries removed from {}); the daemon recreates it empty",
             target.label(),
@@ -114,24 +127,42 @@ fn reset_stores(profile_root: &Path, targets: &[ResettableStoreV1]) -> Result<()
     Ok(())
 }
 
+/// What a reset deletes inside a store's directory.
+enum StoreMembers {
+    /// A database and every entry named after it.
+    DatabaseFamily(&'static str),
+    /// These exact directories.
+    Directories(&'static [&'static str]),
+}
+
 fn store_location(
     profile_root: &Path,
     target: &ResettableStoreV1,
-) -> Result<(PathBuf, &'static str)> {
-    match target {
-        ResettableStoreV1::ProfileSessions => {
-            Ok((profile_root.to_path_buf(), USER_SESSIONS_DB_FILENAME))
-        }
-        ResettableStoreV1::ProjectSessions { project_id } => {
-            validate_project_id(project_id).map_err(|message| TraceDecayError::Config {
-                message: format!("daemon reported an invalid project id `{project_id}`: {message}"),
-            })?;
-            Ok((
-                profile_sharded_data_root(profile_root, project_id),
-                SESSIONS_DB_FILENAME,
-            ))
-        }
-    }
+) -> Result<(PathBuf, StoreMembers)> {
+    let project_root = |project_id: &str| {
+        validate_project_id(project_id).map_err(|message| TraceDecayError::Config {
+            message: format!("daemon reported an invalid project id `{project_id}`: {message}"),
+        })?;
+        Ok::<_, TraceDecayError>(profile_sharded_data_root(profile_root, project_id))
+    };
+    Ok(match target {
+        ResettableStoreV1::ProfileSessions => (
+            profile_root.to_path_buf(),
+            StoreMembers::DatabaseFamily(USER_SESSIONS_DB_FILENAME),
+        ),
+        ResettableStoreV1::ProjectSessions { project_id } => (
+            project_root(project_id)?,
+            StoreMembers::DatabaseFamily(SESSIONS_DB_FILENAME),
+        ),
+        ResettableStoreV1::ProfileHookAdmissions => (
+            profile_root.to_path_buf(),
+            StoreMembers::Directories(&[PROFILE_HOOK_ADMISSIONS_DIR]),
+        ),
+        ResettableStoreV1::ProjectHookAdmissions { project_id } => (
+            project_root(project_id)?,
+            StoreMembers::Directories(&[PROJECT_HOOK_ADMISSIONS_DIR, PRE_LEDGER_PENDING_WORK_DIR]),
+        ),
+    })
 }
 
 /// Removes `database` and every entry named after it in `directory`: its
@@ -229,11 +260,20 @@ mod tests {
                     "project sessions proj_a5b3d7e3ebe14ca7",
                     "tracedecay wipe --stale --yes"
                 ),
+                store("profile hook admissions", "tracedecay wipe --stale --yes"),
+                store(
+                    "project hook admissions proj_a5b3d7e3ebe14ca7",
+                    "tracedecay wipe --stale --yes"
+                ),
             ])
             .unwrap(),
             [
                 ResettableStoreV1::ProfileSessions,
                 ResettableStoreV1::ProjectSessions {
+                    project_id: "proj_a5b3d7e3ebe14ca7".to_owned()
+                },
+                ResettableStoreV1::ProfileHookAdmissions,
+                ResettableStoreV1::ProjectHookAdmissions {
                     project_id: "proj_a5b3d7e3ebe14ca7".to_owned()
                 },
             ]

@@ -176,6 +176,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     /// The primary effect committed, but a required post-commit step failed.
     /// The canonical receipt prevents callers from blindly replaying it.
@@ -250,6 +251,8 @@ enum ApplicationProblemWire {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     PartialEffect {
         diagnostic: SafeDiagnostic,
@@ -334,10 +337,12 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Conflict {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblem::PartialEffect {
                 diagnostic,
@@ -483,10 +488,12 @@ impl ApplicationProblem {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             } => Self::Conflict {
                 diagnostic,
                 retry,
                 legal_actions,
+                detail,
             },
             ApplicationProblemWire::PartialEffect {
                 diagnostic,
@@ -786,6 +793,7 @@ impl ApplicationProblem {
             },
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+            detail: None,
         }
     }
 
@@ -895,7 +903,8 @@ impl ApplicationProblem {
     /// A parked code index cannot answer until the operator applies the
     /// park's remedy, so it is never retried and names reconcile. A stale
     /// refresh frontier or compare-and-swap precondition is revalidated from
-    /// the committed value. A lock
+    /// the committed value; a stale placement digest is the same
+    /// compare-and-swap answered as a conflict over the run. A lock
     /// deadline is capacity: the same request may succeed after a delay. A
     /// diagnostics scope no compiler owns is routed to publishing the
     /// project's own check; a pending producer, and a daemon that may be
@@ -915,6 +924,12 @@ impl ApplicationProblem {
             },
             ApplicationProblemDetailV1::StaleRefreshFrontier { .. }
             | ApplicationProblemDetailV1::StalePrecondition { .. } => Self::Stale {
+                diagnostic,
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+                detail: Some(Box::new(detail)),
+            },
+            ApplicationProblemDetailV1::WorkflowPlacementDigestStale { .. } => Self::Conflict {
                 diagnostic,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
@@ -951,14 +966,14 @@ impl ApplicationProblem {
 
     pub fn detail(&self) -> Option<&ApplicationProblemDetailV1> {
         match self {
-            Self::Stale { detail, .. }
+            Self::Conflict { detail, .. }
+            | Self::Stale { detail, .. }
             | Self::Unsupported { detail, .. }
             | Self::Unavailable { detail, .. }
             | Self::ResetRequired { detail, .. }
             | Self::Saturated { detail, .. } => detail.as_deref(),
             Self::InvalidRequest { .. }
             | Self::NotFoundOrNotAuthorized { .. }
-            | Self::Conflict { .. }
             | Self::PartialEffect { .. }
             | Self::ExecutionFailed { .. }
             | Self::Cancelled { .. }

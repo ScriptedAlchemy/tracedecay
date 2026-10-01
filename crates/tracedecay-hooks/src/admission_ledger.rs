@@ -77,12 +77,45 @@ const FRAME_COMPLETED: u8 = 3;
 const COMPACTION_SLACK_BYTES: u64 = 256 * 1024;
 const LOG_FILE: &str = "admissions.v2.log";
 const LOCK_FILE: &str = "admissions.v1.lock";
-const LEGACY_RECORDS_FILE: &str = "admissions.v1.bin";
-const LEGACY_COMPLETIONS_FILE: &str = "admission-work-completions.v1.json";
-const LEGACY_MAGIC: &[u8; 4] = b"TDL1";
-const LEGACY_FORMAT_VERSION: u16 = 1;
-const LEGACY_RECORD_BODY_BYTES: usize = IDENTITY_BYTES + DIGEST_BYTES + 8;
-const LEGACY_RECORD_BYTES: usize = LEGACY_RECORD_BODY_BYTES + CHECKSUM_PREFIX_BYTES;
+/// The directory under a project's hook data root holding one admission
+/// ledger per host.
+pub const PROJECT_HOOK_ADMISSIONS_DIR: &str = "hook-v2-admissions";
+/// The directory under a profile root holding one profile-scoped admission
+/// ledger per host.
+pub const PROFILE_HOOK_ADMISSIONS_DIR: &str = "hook-v2-profile-admissions";
+/// Where producer work lived, per host, before the admission ledger owned it.
+/// A project holding it is refused for reset with its ledgers.
+pub const PRE_LEDGER_PENDING_WORK_DIR: &str = "hook-v2-pending-work";
+/// Members of the pre-log ledger shape, which this binary refuses for reset.
+const PRE_LOG_MEMBERS: [&str; 2] = ["admissions.v1.bin", "admission-work-completions.v1.json"];
+
+/// Ledger roots this process refused for reset and has not opened since. The
+/// daemon's reset census reads them; only a reset removes the old shape.
+static RESET_REQUIRED_ROOTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Records that the admission state at `root` was refused for reset
+/// (`required`), or opened.
+pub fn record_hook_admission_reset(root: &Path, required: bool) {
+    let mut roots = RESET_REQUIRED_ROOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if required {
+        roots.insert(root.to_path_buf());
+    } else {
+        roots.remove(root);
+    }
+}
+
+/// Admission state roots under `under` currently refused for reset.
+pub fn hook_admission_reset_required_roots(under: &Path) -> Vec<PathBuf> {
+    RESET_REQUIRED_ROOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|root| root.starts_with(under))
+        .cloned()
+        .collect()
+}
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
 /// Checked-in ledger bounds. Callers may narrow these but never widen them.
@@ -122,10 +155,6 @@ impl HookAdmissionLedgerLimitsV1 {
             .saturating_add(live.saturating_mul(2))
             .saturating_add(COMPACTION_SLACK_BYTES as usize)
             .saturating_add(MAX_FRAME_BODY_BYTES + FRAME_OVERHEAD_BYTES)
-    }
-
-    fn max_legacy_file_bytes(self) -> usize {
-        HEADER_BYTES.saturating_add(self.max_records as usize * LEGACY_RECORD_BYTES * 2)
     }
 }
 
@@ -167,6 +196,8 @@ pub enum HookAdmissionLedgerError {
     Busy,
     #[error("hook admission ledger holds its bound of pending producer work")]
     WorkCapacityExceeded,
+    #[error("hook admission ledger holds a pre-log shape this binary does not open")]
+    ResetRequired,
 }
 
 /// Bounded recovery report for an opened ledger.
@@ -178,7 +209,6 @@ pub struct HookAdmissionLedgerOpenReportV1 {
     pub dropped_expired_records: u32,
     pub dropped_overflow_records: u32,
     pub truncated_tail_bytes: u64,
-    pub imported_legacy_records: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,8 +326,9 @@ pub struct HookAdmissionLedgerV1 {
 }
 
 impl HookAdmissionLedgerV1 {
-    /// Open (and bounded-recover) the ledger for one host, importing a
-    /// pre-log ledger once.
+    /// Open (and bounded-recover) the ledger for one host. A root still
+    /// holding the pre-log shape is refused with
+    /// [`HookAdmissionLedgerError::ResetRequired`] and left untouched.
     #[hotpath::measure(label = "hooks.admission.open")]
     pub fn open(
         root: impl Into<PathBuf>,
@@ -309,11 +340,16 @@ impl HookAdmissionLedgerV1 {
         let root = root.into();
         ensure_root(&root)?;
         let writer_lock = acquire_writer_lock(&root)?;
+        for member in PRE_LOG_MEMBERS {
+            if validate_member(&root.join(member))? {
+                record_hook_admission_reset(&root, true);
+                return Err(HookAdmissionLedgerError::ResetRequired);
+            }
+        }
         let path = log_path(&root);
         let log_exists = validate_member(&path)?;
-        let legacy_exists = validate_member(&legacy_records_path(&root))?;
         let mut headerless = !log_exists;
-        let (frames, truncated_tail_bytes, imported) = if log_exists {
+        let (frames, truncated_tail_bytes) = if log_exists {
             let bytes = read_bounded(&path, limits.max_log_bytes())?.unwrap_or_default();
             let (frames, valid_end) = scan_log(&bytes)?;
             headerless = valid_end < HEADER_BYTES;
@@ -322,11 +358,9 @@ impl HookAdmissionLedgerV1 {
                 shared_truncate_file(&path, valid_end as u64)
                     .map_err(|_| HookAdmissionLedgerError::Io)?;
             }
-            (frames, torn, false)
-        } else if legacy_exists {
-            (read_legacy_frames(&root, limits)?, 0, true)
+            (frames, torn)
         } else {
-            (Vec::new(), 0, false)
+            (Vec::new(), 0)
         };
         let file = Arc::new(open_log_file(&path, log_exists)?);
         let mut ledger = Self {
@@ -353,14 +387,8 @@ impl HookAdmissionLedgerV1 {
             written: 0,
         };
         let (dropped_expired_records, admitted_frames) = ledger.replay(frames, now)?;
-        let imported_legacy_records = if imported {
-            u32::try_from(admitted_frames).unwrap_or(u32::MAX)
-        } else {
-            0
-        };
         let dropped_overflow_records = ledger.trim_to(limits.max_records as usize);
-        if imported
-            || headerless
+        if headerless
             || dropped_expired_records > 0
             || dropped_overflow_records > 0
             || (ledger.entries.len() as u64) < admitted_frames
@@ -369,17 +397,14 @@ impl HookAdmissionLedgerV1 {
         } else {
             ledger.adopt_log()?;
         }
-        // The log is durable before the pre-log members go, and a crash
-        // between the two leaves both: the log is authoritative then.
-        remove_legacy_members(&ledger.root)?;
         let report = HookAdmissionLedgerOpenReportV1 {
             live_records: ledger.entries.len() as u32,
             pending_work: ledger.pending_work.len() as u32,
             dropped_expired_records,
             dropped_overflow_records,
             truncated_tail_bytes,
-            imported_legacy_records,
         };
+        record_hook_admission_reset(&ledger.root, false);
         hotpath::gauge!("hooks.admission.live_records").set(report.live_records);
         hotpath::gauge!("hooks.admission.pending_work").set(report.pending_work);
         hotpath::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);
@@ -987,85 +1012,8 @@ fn scan_log(bytes: &[u8]) -> Result<(Vec<LogFrame>, usize), HookAdmissionLedgerE
     Ok((frames, offset))
 }
 
-/// The pre-log ledger as frames: its intact records, then a completion for
-/// every identity its completions file names. Records written before that
-/// file existed were already treated as complete, and stay so.
-fn read_legacy_frames(
-    root: &Path,
-    limits: HookAdmissionLedgerLimitsV1,
-) -> Result<Vec<LogFrame>, HookAdmissionLedgerError> {
-    let bytes = read_bounded(&legacy_records_path(root), limits.max_legacy_file_bytes())?
-        .unwrap_or_default();
-    let mut frames = Vec::new();
-    let mut identities = Vec::new();
-    if bytes.len() >= HEADER_BYTES
-        && &bytes[..4] == LEGACY_MAGIC
-        && u16::from_le_bytes([bytes[4], bytes[5]]) == LEGACY_FORMAT_VERSION
-    {
-        for record in bytes[HEADER_BYTES..].chunks_exact(LEGACY_RECORD_BYTES) {
-            if frame_checksum(&record[..LEGACY_RECORD_BODY_BYTES])[..CHECKSUM_PREFIX_BYTES]
-                != record[LEGACY_RECORD_BODY_BYTES..]
-            {
-                break;
-            }
-            let mut digest = [0u8; DIGEST_BYTES];
-            digest.copy_from_slice(&record[IDENTITY_BYTES..IDENTITY_BYTES + DIGEST_BYTES]);
-            let mut admitted = [0u8; 8];
-            admitted
-                .copy_from_slice(&record[IDENTITY_BYTES + DIGEST_BYTES..LEGACY_RECORD_BODY_BYTES]);
-            let identity = identity_at(record);
-            identities.push(identity);
-            frames.push(LogFrame::Admitted {
-                identity,
-                digest,
-                admitted_at: UtcMicros(i64::from_le_bytes(admitted)),
-                work: None,
-            });
-        }
-    }
-    let completions_path = root.join(LEGACY_COMPLETIONS_FILE);
-    let completed = if validate_member(&completions_path)? {
-        let maximum = (limits.max_records as usize)
-            .saturating_mul(IDENTITY_BYTES.saturating_mul(4).saturating_add(8))
-            .saturating_add(2);
-        let bytes = read_bounded(&completions_path, maximum)?.unwrap_or_default();
-        serde_json::from_slice::<Vec<[u8; IDENTITY_BYTES]>>(&bytes)
-            .map_err(|_| HookAdmissionLedgerError::RecordUndecodable)?
-    } else {
-        identities
-    };
-    frames.extend(
-        completed
-            .into_iter()
-            .map(|identity| LogFrame::Completed { identity }),
-    );
-    Ok(frames)
-}
-
-fn remove_legacy_members(root: &Path) -> Result<(), HookAdmissionLedgerError> {
-    let mut removed = false;
-    for path in [
-        legacy_records_path(root),
-        root.join(LEGACY_COMPLETIONS_FILE),
-    ] {
-        match fs::remove_file(&path) {
-            Ok(()) => removed = true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(HookAdmissionLedgerError::Io),
-        }
-    }
-    if removed {
-        shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookAdmissionLedgerError::Io)?;
-    }
-    Ok(())
-}
-
 fn log_path(root: &Path) -> PathBuf {
     root.join(LOG_FILE)
-}
-
-fn legacy_records_path(root: &Path) -> PathBuf {
-    root.join(LEGACY_RECORDS_FILE)
 }
 
 fn log_header() -> [u8; HEADER_BYTES] {
@@ -1660,63 +1608,37 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_log_ledger_is_imported_once_with_its_completions() {
-        let root = TestDir::new("ledger-legacy-import");
-        let mut records = LEGACY_MAGIC.to_vec();
-        records.extend_from_slice(&LEGACY_FORMAT_VERSION.to_le_bytes());
-        for id in [9u8, 10] {
-            let mut body = [id; IDENTITY_BYTES].to_vec();
-            body.extend_from_slice(&hook_admission_digest(&envelope(id, 5)).unwrap());
-            body.extend_from_slice(&2i64.to_le_bytes());
-            let checksum = frame_checksum(&body);
-            records.extend_from_slice(&body);
-            records.extend_from_slice(&checksum[..CHECKSUM_PREFIX_BYTES]);
+    fn a_pre_log_ledger_is_refused_for_reset_not_imported() {
+        let open = |root: &Path| {
+            HookAdmissionLedgerV1::open(
+                root,
+                NativeHostIdentityV1::ClaudeCode,
+                HookAdmissionLedgerLimitsV1::stock(),
+                UtcMicros(3),
+            )
+            .map(|(_, report)| report)
+        };
+        for member in ["admissions.v1.bin", "admission-work-completions.v1.json"] {
+            let root = TestDir::new("ledger-pre-log");
+            // A TDL1 header followed by one record body.
+            let mut pre_log = b"TDL1\x01\x00".to_vec();
+            pre_log.extend_from_slice(&[9u8; 64]);
+            fs::write(root.path().join(member), &pre_log).unwrap();
+
+            assert_eq!(
+                open(root.path()),
+                Err(HookAdmissionLedgerError::ResetRequired)
+            );
+            assert_eq!(fs::read(root.path().join(member)).unwrap(), pre_log);
+            assert!(!root.path().join(LOG_FILE).exists());
+            // The refusal persists until the reset deletes the root.
+            assert_eq!(
+                open(root.path()),
+                Err(HookAdmissionLedgerError::ResetRequired)
+            );
+            fs::remove_file(root.path().join(member)).unwrap();
+            assert_eq!(open(root.path()).unwrap().live_records, 0);
         }
-        fs::write(root.path().join(LEGACY_RECORDS_FILE), &records).unwrap();
-        fs::write(
-            root.path().join(LEGACY_COMPLETIONS_FILE),
-            serde_json::to_vec(&[[9u8; IDENTITY_BYTES]]).unwrap(),
-        )
-        .unwrap();
-
-        let (mut ledger, report) = HookAdmissionLedgerV1::open(
-            root.path(),
-            NativeHostIdentityV1::ClaudeCode,
-            HookAdmissionLedgerLimitsV1::stock(),
-            UtcMicros(3),
-        )
-        .unwrap();
-        assert_eq!(report.imported_legacy_records, 2);
-        assert!(!root.path().join(LEGACY_RECORDS_FILE).exists());
-        assert!(!root.path().join(LEGACY_COMPLETIONS_FILE).exists());
-        let completed = ledger
-            .admit_with_receipt(&envelope(9, 5), UtcMicros(4))
-            .unwrap();
-        let owed = ledger
-            .admit_with_receipt(&envelope(10, 5), UtcMicros(4))
-            .unwrap();
-        assert_eq!(completed.decision, HookAdmissionDecisionV1::ExactDuplicate);
-        assert!(completed.work_completed);
-        assert_eq!(owed.decision, HookAdmissionDecisionV1::ExactDuplicate);
-        assert!(!owed.work_completed);
-        assert_eq!(owed.order, completed.order + 1);
-        drop(ledger);
-
-        let (mut reopened, report) = HookAdmissionLedgerV1::open(
-            root.path(),
-            NativeHostIdentityV1::ClaudeCode,
-            HookAdmissionLedgerLimitsV1::stock(),
-            UtcMicros(5),
-        )
-        .unwrap();
-        assert_eq!(report.imported_legacy_records, 0);
-        assert_eq!(report.live_records, 2);
-        assert!(
-            reopened
-                .admit_with_receipt(&envelope(9, 5), UtcMicros(6))
-                .unwrap()
-                .work_completed
-        );
     }
 
     #[test]

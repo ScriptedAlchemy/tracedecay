@@ -148,15 +148,15 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
 }
 
 #[test]
-fn legacy_pending_work_spool_is_adopted_by_the_ledger_and_retired() {
+fn pre_ledger_pending_work_is_refused_for_reset_not_adopted() {
     let data_root = tempfile::tempdir().unwrap();
     let now = UtcMicros(1_000);
     let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
     let provider = admission_test_envelope(34, 7);
-    let legacy_root = data_root.path().join("hook-v2-pending-work").join("claude");
+    let pre_ledger_root = data_root.path().join("hook-v2-pending-work").join("claude");
     {
         let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
-            &legacy_root,
+            &pre_ledger_root,
             tracedecay_hooks::HookSpoolConfigV1::stock(host),
             now,
         )
@@ -167,13 +167,24 @@ fn legacy_pending_work_spool_is_adopted_by_the_ledger_and_retired() {
         spool.commit().unwrap();
     }
 
-    assert_eq!(pending_work(data_root.path()), vec![provider.clone()]);
-    assert!(!legacy_root.exists());
+    assert_eq!(pending_work(data_root.path()), Vec::new());
+    assert!(record_hook_v2_admission(data_root.path(), &provider, now).is_none());
+    assert!(pre_ledger_root.is_dir());
+    assert_eq!(
+        tracedecay_hooks::hook_admission_reset_required_roots(data_root.path()),
+        vec![pre_ledger_root.clone()]
+    );
 
-    let canonical = daemon_mint_hook_v2_envelope(&provider);
-    assert!(complete_hook_v2_pending_work(data_root.path(), &canonical));
-    restart_ledger(data_root.path());
-    assert!(pending_work(data_root.path()).is_empty());
+    std::fs::remove_dir_all(&pre_ledger_root).unwrap();
+    let admitted = record_hook_v2_admission(data_root.path(), &provider, now).unwrap();
+    assert_eq!(
+        admitted.decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::Admitted
+    );
+    assert_eq!(
+        tracedecay_hooks::hook_admission_reset_required_roots(data_root.path()),
+        Vec::<std::path::PathBuf>::new()
+    );
 }
 
 #[test]

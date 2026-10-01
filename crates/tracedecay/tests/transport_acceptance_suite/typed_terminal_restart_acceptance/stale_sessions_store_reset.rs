@@ -92,7 +92,7 @@ fn seed_pre_unified_observation_rows(db_path: &Path) {
 }
 
 /// SHA-256 of every regular file under `root`, keyed by relative path.
-fn file_digests(root: &Path) -> BTreeMap<PathBuf, String> {
+pub(super) fn file_digests(root: &Path) -> BTreeMap<PathBuf, String> {
     fn walk(root: &Path, directory: &Path, digests: &mut BTreeMap<PathBuf, String>) {
         for entry in std::fs::read_dir(directory).expect("read profile directory") {
             let path = entry.expect("profile directory entry").path();
@@ -164,7 +164,7 @@ fn find_key(value: &Value, key: &str) -> Option<Value> {
     }
 }
 
-fn reset_required_stores(home: &Path, project: &Path) -> Vec<Value> {
+pub(super) fn reset_required_stores(home: &Path, project: &Path) -> Vec<Value> {
     let status = status(home, project);
     let mut stores = find_key(&status, "reset_required_stores")
         .and_then(|stores| stores.as_array().cloned())
@@ -173,7 +173,7 @@ fn reset_required_stores(home: &Path, project: &Path) -> Vec<Value> {
     stores
 }
 
-fn wait_for_reset_required_stores(home: &Path, project: &Path, expected: &[Value]) {
+pub(super) fn wait_for_reset_required_stores(home: &Path, project: &Path, expected: &[Value]) {
     let started = Instant::now();
     loop {
         let stores = reset_required_stores(home, project);
@@ -203,7 +203,7 @@ fn names_symbol(value: &Value, name: &str) -> bool {
     }
 }
 
-fn wait_for_code_index_hit(home: &Path, project: &Path, symbol: &str) {
+pub(super) fn wait_for_code_index_hit(home: &Path, project: &Path, symbol: &str) {
     let started = Instant::now();
     loop {
         let result = super::tool_call(

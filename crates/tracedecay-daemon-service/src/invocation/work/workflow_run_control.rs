@@ -394,6 +394,7 @@ pub(super) fn workflow_final_conflict(
         },
         retry: RetryDirective::Never,
         legal_actions: vec![action],
+        detail: None,
     }
 }
 
@@ -442,6 +443,15 @@ pub(super) fn workflow_run_problem(error: WorkflowRunServiceError) -> Applicatio
         WorkflowRunServiceError::State(WorkflowRunStateError::DuplicateCommand) => {
             workflow_run_command_conflict("command_id already names a different run command")
         }
+        WorkflowRunServiceError::State(WorkflowRunStateError::PlacementDigestStale {
+            expected,
+            found,
+        }) => ApplicationProblem::from_detail(
+            ApplicationProblemDetailV1::WorkflowPlacementDigestStale {
+                expected: expected.as_str().to_owned(),
+                found: found.as_str().to_owned(),
+            },
+        ),
         WorkflowRunServiceError::State(error) => {
             ApplicationProblem::invalid_request("workflow.run.state_refused", error.to_string())
         }
@@ -590,5 +600,44 @@ fn workflow_topology_problem(error: WorkflowTopologyError) -> ApplicationProblem
         WorkflowTopologyError::Cancelled
         | WorkflowTopologyError::BudgetExhausted
         | WorkflowTopologyError::Unavailable(_) => workflow_runtime_unavailable(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_placement_digest_is_a_typed_conflict_carrying_both_digests() {
+        let expected = format!("sha256:{}", "a".repeat(64));
+        let found = format!("sha256:{}", "b".repeat(64));
+        let problem = workflow_run_problem(WorkflowRunServiceError::State(
+            WorkflowRunStateError::PlacementDigestStale {
+                expected: ManifestDigest::new(&expected).unwrap(),
+                found: ManifestDigest::new(&found).unwrap(),
+            },
+        ));
+
+        assert_eq!(
+            serde_json::to_value(&problem).unwrap(),
+            serde_json::json!({
+                "kind": "conflict",
+                "diagnostic": {
+                    "code": "workflow.placement_digest_stale",
+                    "message": format!(
+                        "The step effect names placement digest {found}, but the step's \
+                         current placement is {expected}; reread the run and settle against \
+                         its current placement."
+                    ),
+                },
+                "retry": "after_revalidate",
+                "legal_actions": ["refresh"],
+                "detail": {
+                    "kind": "workflow_placement_digest_stale",
+                    "expected": expected,
+                    "found": found,
+                },
+            })
+        );
     }
 }

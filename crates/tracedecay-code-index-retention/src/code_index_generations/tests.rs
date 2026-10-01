@@ -2538,6 +2538,39 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
 }
 
 #[test]
+fn scope_recovery_deletes_a_retired_binding_cleanup_intent() {
+    let (store, live, stranded) = fixture_scope_store();
+    let intent = store
+        .path()
+        .join(".code-index-scope-binding-cleanup-intent-v1.json");
+    std::fs::write(
+        &intent,
+        format!(
+            r#"{{"schema":"tracedecay.code-index-scope-binding-cleanup-intent.v1","scope_hash":"{stranded}"}}"#
+        ),
+    )
+    .expect("write a binding-cleanup intent from before its authority was retired");
+
+    recover_scope_root_retention(store.path()).expect("recover the scope store");
+
+    let mut entries: Vec<String> = std::fs::read_dir(store.path())
+        .expect("list the scope store")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    let mut expected = vec![
+        ".code-index-scope-retention.lock".to_owned(),
+        live,
+        stranded,
+    ];
+    expected.sort();
+    assert_eq!(
+        entries, expected,
+        "recovery deletes the inert intent and keeps every scope"
+    );
+}
+
+#[test]
 fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     let (store, live, stranded) = fixture_scope_store();
     let proof = fixture_scope_liveness_proof(live.clone());

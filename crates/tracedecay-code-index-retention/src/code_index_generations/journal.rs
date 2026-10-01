@@ -183,7 +183,15 @@ pub(super) fn clear_journal<T>(
     store_root: &Path,
     spec: &BoundedJournalSpec<T>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    match std::fs::remove_file(journal_path(store_root, spec)) {
+    remove_journal_file(store_root, spec.file_name)
+}
+
+/// Durably remove the journal file `file_name` from `store_root`, if present.
+pub(super) fn remove_journal_file(
+    store_root: &Path,
+    file_name: &str,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    match std::fs::remove_file(store_root.join(file_name)) {
         Ok(()) => sync_directory(store_root),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(storage(error)),
