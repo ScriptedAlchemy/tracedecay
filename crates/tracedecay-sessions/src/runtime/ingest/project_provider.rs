@@ -703,6 +703,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {

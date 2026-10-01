@@ -36,7 +36,8 @@ use tracedecay_store::observation::{
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::admission::{
-    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostProjectionDrainOutcome,
+    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostAdmissionStatus,
+    HostProjectionDrainOutcome,
 };
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -45,6 +46,7 @@ use crate::runtime::hosts::codex::{
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission,
 };
+use crate::runtime::ingest::classify_transcript_ingest_failure;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
     JsonlChangeKind, JsonlResumeState, TranscriptIngestError, spin_until_jsonl_change_settled,
@@ -58,6 +60,7 @@ struct SeamSpyAdmission {
     scripted_capture_error: Mutex<Option<HostAdmissionOutcome>>,
     scripted_capture_error_once: Mutex<Option<HostAdmissionOutcome>>,
     scripted_batch_error: Mutex<Option<HostAdmissionOutcome>>,
+    scripted_cursor_refusal: Mutex<Option<HostAdmissionOutcome>>,
     report_no_cursor: AtomicBool,
     capture_calls: AtomicU64,
     capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
@@ -776,6 +779,9 @@ impl HostAdmission for SeamSpyAdmission {
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
+        if let Some(outcome) = self.scripted_cursor_refusal.lock().unwrap().clone() {
+            return Box::pin(async move { Err(outcome) });
+        }
         if self.report_no_cursor.load(Ordering::SeqCst) {
             return Box::pin(async { Ok(None) });
         }
@@ -918,6 +924,44 @@ async fn commit_failures_block_typed_and_never_cover_past() {
             "{reason}: the source frontier must not advance"
         );
     }
+}
+
+/// A refused source cursor names the admission authority's reason instead of
+/// blaming the transcript's frames.
+#[tokio::test]
+async fn refused_source_cursor_reports_its_typed_reason() {
+    let (_temp, path, _len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    *spy.scripted_cursor_refusal.lock().unwrap() = Some(HostAdmissionOutcome {
+        status: HostAdmissionStatus::Unknown,
+        retryable: false,
+        reason_code: Some("unknown_provider"),
+        recovery: None,
+        cause: None,
+    });
+
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("a refused source cursor must fail the source");
+
+    assert!(
+        matches!(
+            error,
+            TranscriptIngestError::HostAdmission {
+                provider: "codex",
+                reason: "unknown_provider",
+                retryable: false,
+                ..
+            }
+        ),
+        "the cursor refusal must keep its admission reason: {error:?}"
+    );
+    let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+    assert_eq!(failure.reason_code, "unknown_provider");
+    assert!(!failure.retryable);
+    assert_eq!(spy.capture_count(), 0);
+    assert!(spy.inner.observations().is_empty());
 }
 
 #[tokio::test]

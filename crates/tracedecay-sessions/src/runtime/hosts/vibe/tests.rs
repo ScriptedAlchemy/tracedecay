@@ -134,6 +134,7 @@ async fn accepted_prefixed_session_and_nonmessage_prefix_share_canonical_cursor_
         ObservationScopeV1::Profile,
         None,
         &ObservationCancellation::default(),
+        None,
     )
     .await
     .unwrap();
@@ -187,6 +188,7 @@ async fn vibe_workflow_lookalike_admits_as_one_ordinary_message() {
         ObservationScopeV1::Profile,
         None,
         &ObservationCancellation::default(),
+        None,
     )
     .await
     .unwrap();
