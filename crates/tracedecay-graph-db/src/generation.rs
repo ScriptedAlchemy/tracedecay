@@ -1649,14 +1649,10 @@ fn append_encoded_manifest_frame<T: Serialize + ?Sized>(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<bool, GraphDbError> {
     check()?;
-    let bytes = match canonical.encode(value, subject) {
+    let bytes = match canonical.encode_bounded(value, subject) {
         Ok(bytes) => bytes,
-        Err(GraphDbError::InvalidRequest { message })
-            if message.contains("canonical graph replay exceeds its payload bound") =>
-        {
-            return Ok(false);
-        }
-        Err(error) => return Err(error),
+        Err(CanonicalEncodeError::PayloadBound) => return Ok(false),
+        Err(CanonicalEncodeError::Graph(error)) => return Err(error),
     };
     let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
     let frame_bytes = tag_len
@@ -2091,12 +2087,38 @@ impl Write for CheckedDigestWriter<'_> {
     }
 }
 
+/// Why a bounded canonical encode stopped before its value was written.
+#[derive(Debug)]
+enum CanonicalEncodeError {
+    /// The encoding passes the writer's payload bound. A caller with a
+    /// smaller-frame route takes it; every other caller refuses the request.
+    PayloadBound,
+    Graph(GraphDbError),
+}
+
+impl From<GraphDbError> for CanonicalEncodeError {
+    fn from(error: GraphDbError) -> Self {
+        Self::Graph(error)
+    }
+}
+
+impl CanonicalEncodeError {
+    fn into_graph_error(self, subject: &str) -> GraphDbError {
+        match self {
+            Self::PayloadBound => GraphDbError::invalid(format!(
+                "failed to encode {subject}: canonical graph replay exceeds its payload bound"
+            )),
+            Self::Graph(error) => error,
+        }
+    }
+}
+
 struct CheckedVecWriter<'a> {
     bytes: Vec<u8>,
     bytes_since_check: u64,
     max_bytes: usize,
     check: &'a dyn Fn() -> Result<(), GraphDbError>,
-    failure: Option<GraphDbError>,
+    failure: Option<CanonicalEncodeError>,
     #[cfg(test)]
     allocation_growths: usize,
 }
@@ -2118,9 +2140,9 @@ impl<'a> CheckedVecWriter<'a> {
         })
     }
 
-    fn finish(mut self) -> Result<Vec<u8>, GraphDbError> {
-        if let Some(error) = self.failure.take() {
-            return Err(error);
+    fn finish(mut self, subject: &str) -> Result<Vec<u8>, GraphDbError> {
+        if let Some(failure) = self.failure.take() {
+            return Err(failure.into_graph_error(subject));
         }
         (self.check)()?;
         Ok(self.bytes)
@@ -2131,6 +2153,15 @@ impl<'a> CheckedVecWriter<'a> {
         value: &T,
         subject: &str,
     ) -> Result<&[u8], GraphDbError> {
+        self.encode_bounded(value, subject)
+            .map_err(|error| error.into_graph_error(subject))
+    }
+
+    fn encode_bounded<T: Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+        subject: &str,
+    ) -> Result<&[u8], CanonicalEncodeError> {
         self.bytes.clear();
         self.bytes_since_check = 0;
         self.failure = None;
@@ -2160,6 +2191,7 @@ impl Write for CheckedVecWriter<'_> {
             .checked_add(bytes.len())
             .ok_or_else(|| io::Error::other("canonical graph replay size overflow"))?;
         if next_len > self.max_bytes {
+            self.failure = Some(CanonicalEncodeError::PayloadBound);
             return Err(io::Error::other(
                 "canonical graph replay exceeds its payload bound",
             ));
@@ -2184,10 +2216,10 @@ impl Write for CheckedVecWriter<'_> {
             if self.bytes.try_reserve_exact(additional).is_err()
                 || self.bytes.capacity() > self.max_bytes
             {
-                self.failure = Some(GraphDbError::budget_exhausted_count(
-                    GraphBudgetKind::Write,
-                    self.max_bytes,
-                ));
+                self.failure = Some(
+                    GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, self.max_bytes)
+                        .into(),
+                );
                 return Err(io::Error::other(
                     "canonical graph replay allocation exceeds its product budget",
                 ));
@@ -2209,7 +2241,7 @@ impl Write for CheckedVecWriter<'_> {
         if self.bytes_since_check >= DIGEST_CHECK_INTERVAL_BYTES {
             self.bytes_since_check = 0;
             if let Err(error) = (self.check)() {
-                self.failure = Some(error);
+                self.failure = Some(error.into());
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "canonical graph replay interrupted",
@@ -2233,7 +2265,7 @@ pub(crate) fn checked_canonical_bytes<T: Serialize + ?Sized>(
 ) -> Result<Vec<u8>, GraphDbError> {
     let mut writer = CheckedVecWriter::new(check, max_bytes)?;
     let encoded = serde_json::to_writer(&mut writer, value);
-    let bytes = writer.finish()?;
+    let bytes = writer.finish(subject)?;
     encoded
         .map_err(|error| GraphDbError::invalid(format!("failed to encode {subject}: {error}")))?;
     Ok(bytes)
@@ -2250,8 +2282,9 @@ mod checked_vec_writer_tests {
     use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
     use super::{
-        CheckedVecWriter, GraphDbError, GraphGenerationManifest, ManifestDigestChunk,
-        ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
+        CanonicalEncodeError, CheckedVecWriter, EncodedManifestDigestChunk, GraphDbError,
+        GraphGenerationManifest, ManifestDigestChunk, ManifestDigestChunkEncoding,
+        ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics, append_encoded_manifest_frame,
         canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_by,
         encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
         recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
@@ -2269,7 +2302,9 @@ mod checked_vec_writer_tests {
 
         serde_json::to_writer(&mut writer, &value).expect("fixture fits the writer bound");
         let allocation_growths = writer.allocation_growths();
-        let actual = writer.finish().expect("bounded writer finishes");
+        let actual = writer
+            .finish("tiny fixture")
+            .expect("bounded writer finishes");
 
         assert_eq!(
             actual,
@@ -2293,11 +2328,60 @@ mod checked_vec_writer_tests {
         let error = checked_canonical_bytes(&value, &|| Ok(()), "bounded fixture", 8_192)
             .expect_err("8,193 encoded bytes must exceed the bound");
 
-        assert!(matches!(
-            error,
-            GraphDbError::InvalidRequest { message }
-                if message.contains("canonical graph replay exceeds its payload bound")
-        ));
+        assert_eq!(
+            error.to_string(),
+            "invalid graph database request: failed to encode bounded fixture: canonical graph \
+             replay exceeds its payload bound"
+        );
+    }
+
+    /// A serializer failure is a refused request even when its text reads
+    /// like the bound; only the writer's own bound refusal falls back.
+    #[test]
+    fn manifest_frames_fall_back_only_for_the_payload_bound() {
+        struct RefusesToSerialize;
+        impl serde::Serialize for RefusesToSerialize {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "canonical graph replay exceeds its payload bound",
+                ))
+            }
+        }
+        let check = || Ok(());
+        let mut canonical = CheckedVecWriter::new(&check, 8_192).expect("bounded writer");
+        let mut encoded = EncodedManifestDigestChunk {
+            bytes: Vec::new(),
+            frame_ends: Vec::new(),
+        };
+
+        let fits = append_encoded_manifest_frame(
+            &mut canonical,
+            &mut encoded,
+            1 << 20,
+            "entity",
+            &vec![0_u8; 4_096],
+            "oversized fixture",
+            &check,
+        )
+        .expect("an oversized row is a fallback, not a failure");
+        assert!(!fits, "an oversized row must take the serial fallback");
+
+        let error = append_encoded_manifest_frame(
+            &mut canonical,
+            &mut encoded,
+            1 << 20,
+            "entity",
+            &RefusesToSerialize,
+            "refusing fixture",
+            &check,
+        )
+        .expect_err("a serializer failure must refuse the chunk");
+        assert_eq!(
+            error.to_string(),
+            "invalid graph database request: failed to encode refusing fixture: canonical graph \
+             replay exceeds its payload bound"
+        );
+        assert_eq!(encoded.frame_ends, Vec::<usize>::new());
     }
 
     #[test]
@@ -2310,7 +2394,14 @@ mod checked_vec_writer_tests {
         let error = serde_json::to_writer(&mut writer, &value)
             .expect_err("the final encoded byte must be refused");
 
-        assert!(error.to_string().contains("canonical graph replay exceeds"));
+        assert_eq!(
+            error.to_string(),
+            "canonical graph replay exceeds its payload bound"
+        );
+        assert!(matches!(
+            writer.failure,
+            Some(CanonicalEncodeError::PayloadBound)
+        ));
         assert!(writer.bytes.len() <= max_bytes);
         assert!(writer.bytes.capacity() <= max_bytes);
     }

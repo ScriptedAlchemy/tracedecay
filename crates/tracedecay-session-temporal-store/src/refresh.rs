@@ -6,7 +6,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Error as EngineError, Row, params};
+use tracedecay_runtime_core::db::engine::{Row, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -227,8 +227,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             next_operation_attempt(&transaction, request.session_id(), &request_digest).await?;
         let operation_id = operation_id_for_digest(&request_digest, attempt)?;
 
-        // Claim one-running ownership before inserting the candidate generation so a failed
-        // begin cannot leave an unbound building generation if transaction boundaries change.
+        // The running-operation and attempt reads above share this writer transaction, so
+        // they already decided one-running ownership and the operation id; a constraint
+        // failure here is a storage fault, never a busy refresh.
         transaction
             .execute(
                 "INSERT INTO session_refresh_operations (
@@ -244,7 +245,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 ],
             )
             .await
-            .map_err(map_begin_conflict)?;
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         transaction
             .execute(
                 "INSERT INTO session_temporal_generations (
@@ -1293,42 +1294,6 @@ async fn next_generation(
         .get(0)
         .map_err(|error| storage(BEGIN_REFRESH, error))?;
     decode_generation_i64(value, BEGIN_REFRESH)
-}
-
-const SQLITE_CONSTRAINT: i32 = 19;
-const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
-const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
-
-fn is_refresh_busy_constraint(error: &EngineError) -> bool {
-    let refresh_related = match error {
-        EngineError::Sqlite { message, .. } => {
-            message.contains("session_refresh_operations")
-                || message.contains("idx_session_refresh_operations_one_running")
-        }
-        _ => false,
-    };
-    let typed_constraint = matches!(
-        error.sqlite_extended_code(),
-        Some(SQLITE_CONSTRAINT_UNIQUE | SQLITE_CONSTRAINT_PRIMARYKEY)
-    ) || error.sqlite_code() == Some(SQLITE_CONSTRAINT);
-    if typed_constraint && refresh_related {
-        return true;
-    }
-    let message = error.to_string();
-    message.contains("idx_session_refresh_operations_one_running")
-        || message.contains("UNIQUE constraint failed: session_refresh_operations.session_id")
-        || message.contains("UNIQUE constraint failed: session_refresh_operations.operation_id")
-        || message.contains("PRIMARY KEY constraint failed: session_refresh_operations")
-}
-
-fn map_begin_conflict(error: EngineError) -> SessionStoreError {
-    if is_refresh_busy_constraint(&error) {
-        SessionStoreError::IdempotencyConflict {
-            context: "session refresh busy",
-        }
-    } else {
-        storage(BEGIN_REFRESH, error)
-    }
 }
 
 fn progress_logically_equal(

@@ -3,6 +3,7 @@ use super::{
     DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
+use crate::db::engine::Result as EngineResult;
 
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
@@ -241,17 +242,8 @@ impl Database {
     #[hotpath::skip]
     pub async fn begin_engine_health_read_snapshot(
         &self,
-        operation: &str,
-    ) -> Result<DatabaseEngineReadSnapshot> {
-        let snapshot = self
-            .inner
-            .conn
-            .health_read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to begin health read snapshot: {error}"),
-                operation: operation.to_owned(),
-            })?;
+    ) -> EngineResult<DatabaseEngineReadSnapshot> {
+        let snapshot = self.inner.conn.health_read_snapshot().await?;
         Ok(DatabaseEngineReadSnapshot {
             snapshot,
             _client_guard: self.client_guard(),

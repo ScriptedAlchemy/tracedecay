@@ -12,7 +12,7 @@ use tracedecay_runtime_core::{
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
         DatabaseOwnerWeakLeaseIssuerErrorV1, DatabaseOwnerWeakLeaseIssuerV1,
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
-        engine::{Executor, IntoParams, QueryExecutor, Rows},
+        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows},
     },
     shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
@@ -501,12 +501,8 @@ impl RegisteredGlobalDb {
 
     /// Opens the reader capacity reserved for health diagnostics.
     #[hotpath::skip]
-    pub async fn health_read_snapshot(
-        &self,
-    ) -> tracedecay_domain::errors::Result<DatabaseEngineReadSnapshot> {
-        self.database
-            .begin_engine_health_read_snapshot("open registered database health read snapshot")
-            .await
+    pub async fn health_read_snapshot(&self) -> EngineResult<DatabaseEngineReadSnapshot> {
+        self.database.begin_engine_health_read_snapshot().await
     }
 
     /// Rebuilds the registered observation projection through this client's

@@ -731,6 +731,75 @@ async fn terminal_receipt_rejects_corrupted_derived_evidence() {
 }
 
 #[tokio::test]
+async fn refresh_begin_reports_busy_only_for_a_running_operation() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let busy_session = fixture_session("session.refresh.busy");
+    let refused_session = fixture_session("session.refresh.refused-row");
+    for ordinal in 0..2 {
+        let (observation, write) = fixture_observation(&busy_session, ordinal, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    let (observation, write) = fixture_observation(&refused_session, 2, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            busy_session.clone(),
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let busy = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            busy_session,
+            SessionRefreshFrontierV1::new(2, 0).unwrap(),
+        ))
+        .await
+        .expect_err("a second target while one refresh runs is busy");
+    assert_eq!(
+        busy.to_string(),
+        "session temporal idempotency conflict in session refresh busy"
+    );
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "CREATE TRIGGER refuse_refresh_operation_row
+             BEFORE INSERT ON session_refresh_operations
+             WHEN NEW.session_id = 'session.refresh.refused-row'
+             BEGIN SELECT RAISE(ABORT, 'session_refresh_operations row refused'); END",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let refused = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            refused_session,
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        ))
+        .await
+        .expect_err("a refused operation row fails the begin");
+    assert!(
+        matches!(
+            refused,
+            SessionStoreError::Storage {
+                operation: "begin or join session refresh",
+                ..
+            }
+        ),
+        "a refused row with no running refresh is a storage fault, got {refused}"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_terminal_persistence_rolls_back_candidate_state() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())

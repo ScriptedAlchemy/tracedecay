@@ -107,7 +107,7 @@ fn store_response_handle_locked(
         expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
         content: content.to_owned(),
     };
-    let rollback_payload = match lookup_record(root, &handle, now) {
+    let rollback_payload = match lookup_record(root, &handle, now)? {
         // The handle is the content digest, so an identical record with at
         // least half its lifetime left already answers this store. Renewing
         // it only once that half has passed keeps every issued handle valid
@@ -139,9 +139,7 @@ fn store_response_handle_locked(
                 .map_err(|error| file_error(&path, "durably delete expired record", error))?;
             None
         }
-        Ok(ResponseHandleLookup::Missing) => None,
-        Err(error) if is_corrupt_record_error(&error) => None,
-        Err(error) => return Err(error),
+        Ok(ResponseHandleLookup::Missing) | Err(CorruptRecord(_)) => None,
     };
     let payload = serde_json::to_vec_pretty(&stored)?;
     if let Err(error) = publish_record_durable(root, &path, &payload) {
@@ -194,27 +192,41 @@ pub fn retrieve_response_handle(
     if !path_exists(root)? {
         return Ok(ResponseHandleLookup::Missing);
     }
-    lookup_record(root, handle, now)
+    lookup_record(root, handle, now)?.map_err(|CorruptRecord(error)| error)
 }
 
-fn lookup_record(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
+/// A record file whose bytes fail decoding or identity validation. Publication
+/// replaces it; every other reader surfaces the wrapped file error.
+struct CorruptRecord(TraceDecayError);
+
+/// The outer error is an I/O or path failure; the inner one a corrupt record.
+fn lookup_record(
+    root: &Path,
+    handle: &str,
+    now: i64,
+) -> Result<std::result::Result<ResponseHandleLookup, CorruptRecord>> {
     let path = response_handle_path(root, handle)?;
-    let Some(stored) = read_record(&path)? else {
-        return Ok(ResponseHandleLookup::Missing);
+    let Some(payload) = read_record(&path)? else {
+        return Ok(Ok(ResponseHandleLookup::Missing));
     };
-    validate_record(handle, &stored, &path)?;
+    let stored = match decode_record(&path, &payload)
+        .and_then(|stored| validate_record(handle, &stored, &path).map(|()| stored))
+    {
+        Ok(stored) => stored,
+        Err(error) => return Ok(Err(CorruptRecord(error))),
+    };
     if stored.expires_at <= now {
-        return Ok(ResponseHandleLookup::Expired {
+        return Ok(Ok(ResponseHandleLookup::Expired {
             created_at: stored.created_at,
             expires_at: stored.expires_at,
-        });
+        }));
     }
-    Ok(ResponseHandleLookup::Found(ResponseHandleRecord {
+    Ok(Ok(ResponseHandleLookup::Found(ResponseHandleRecord {
         handle: handle.to_owned(),
         created_at: stored.created_at,
         expires_at: stored.expires_at,
         content: stored.content,
-    }))
+    })))
 }
 
 pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<ResponseHandleCleanup> {
@@ -302,9 +314,10 @@ fn visit_stored_files(
             .metadata()
             .map_err(|error| file_error(&path, "read metadata", error))?
             .len();
-        let record = read_record(&path)?.ok_or_else(|| {
+        let payload = read_record(&path)?.ok_or_else(|| {
             corrupt_record_error(&path, "record disappeared during directory scan")
         })?;
+        let record = decode_record(&path, &payload)?;
         validate_record(&handle, &record, &path)?;
         visit(StoredFile {
             path,
@@ -384,16 +397,17 @@ fn remove_orphaned_removal_tombstones(root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-fn read_record(path: &Path) -> Result<Option<StoredResponseHandleRecord>> {
+fn read_record(path: &Path) -> Result<Option<Vec<u8>>> {
     validate_response_handle_path(path)?;
-    let payload = match fs::read(path) {
-        Ok(payload) => payload,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(file_error(path, "read response handle", error)),
-    };
-    serde_json::from_slice(&payload)
-        .map(Some)
-        .map_err(|error| corrupt_record_error(path, &error.to_string()))
+    match fs::read(path) {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(file_error(path, "read response handle", error)),
+    }
+}
+
+fn decode_record(path: &Path, payload: &[u8]) -> Result<StoredResponseHandleRecord> {
+    serde_json::from_slice(payload).map_err(|error| corrupt_record_error(path, &error.to_string()))
 }
 
 fn handle_from_record_path(path: &Path) -> Result<Option<String>> {
@@ -538,10 +552,10 @@ fn publish_record_durable(root: &Path, path: &Path, payload: &[u8]) -> Result<()
 }
 
 fn remove_failed_fresh_publish(path: &Path, expected: &StoredResponseHandleRecord) -> Result<()> {
-    let Some(actual) = read_record(path)? else {
+    let Some(payload) = read_record(path)? else {
         return Ok(());
     };
-    if &actual != expected {
+    if &decode_record(path, &payload)? != expected {
         return Err(corrupt_record_error(
             path,
             "refused to remove a failed publication whose record material does not match",
@@ -564,14 +578,6 @@ fn corrupt_record_error(path: &Path, reason: &str) -> TraceDecayError {
         message: format!("corrupt response-handle record: {reason}"),
         path: path.display().to_string(),
     }
-}
-
-fn is_corrupt_record_error(error: &TraceDecayError) -> bool {
-    matches!(
-        error,
-        TraceDecayError::File { message, .. }
-            if message.starts_with("corrupt response-handle record:")
-    )
 }
 
 #[cfg(test)]
