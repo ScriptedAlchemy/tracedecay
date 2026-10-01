@@ -598,6 +598,25 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         })
     }
 
+    /// Drop the index entries whose artifact no generation owns any more. A
+    /// `Weak` keeps its allocation, so a dead entry still pins the artifact's
+    /// header, and it can never be reused.
+    pub fn release_dead_entries(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .artifacts
+            .retain(|_, artifact| artifact.strong_count() > 0);
+        let PhysicalCodeArtifactPoolStateV1 {
+            artifacts,
+            insertion_order,
+            ..
+        } = &mut *state;
+        insertion_order.retain(|key| artifacts.contains_key(key));
+    }
+
     fn record_clone_payloads(&self, reused: u64, computed: u64) {
         let mut state = self
             .state

@@ -393,6 +393,32 @@ async fn an_increment_reports_its_retained_parses_and_the_idle_window_releases_t
     registry.shutdown().await;
 }
 
+/// A pass lets go of the sources it captured once its build is sealed, and
+/// the shared byte pool then frees them instead of keeping each one
+/// allocated behind a dead weak entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_index_keeps_no_captured_source_allocated() {
+    let fixture = GitFixture::new(&[
+        ("src/main.rs", "fn main() { helper(); }\n"),
+        ("src/helper.rs", "pub fn helper() {}\n"),
+        ("src/other.rs", "pub fn other() {}\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _) =
+        mounted_core_query_worktree_in(CodeIndexSchedulerRegistryV1::new(1), &fixture, &store)
+            .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+
+    let stats = registry.byte_pool_stats();
+    assert_eq!(
+        (stats.source_allocations, stats.live_sources),
+        (0, 0),
+        "{stats:?}"
+    );
+
+    registry.shutdown().await;
+}
+
 async fn next_receipt_trigger(
     receipts: &mut tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1>,
 ) -> CodeIndexCadenceTriggerV1 {

@@ -8,10 +8,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
+
+#[cfg(any(test, feature = "hotpath"))]
+use std::sync::atomic::AtomicUsize;
 
 use same_file::Handle;
 use sha2::{Digest, Sha256};
@@ -67,19 +70,23 @@ static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 pub struct CodeIndexBytePoolStatsV1 {
     pub parse_chunk_inserted: u64,
     pub parse_chunk_reused: u64,
+    /// Source allocations the pool keeps, live or not.
+    pub source_allocations: usize,
+    /// Those some capture or generation still holds.
+    pub live_sources: usize,
 }
 
+/// Captured sources by content, shared by every capture in the process.
+///
+/// Entries are weak, and a `Weak<[u8]>` keeps its whole allocation, bytes
+/// included, after the last `Arc` dropped. Each pass therefore drops the
+/// entries its capture let go of, see [`Self::release_dead_entries`].
 pub struct SharedCodeIndexBytePoolV1 {
     bytes: ProfiledStdMutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
     pub(super) physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     /// Decoded generation pages by content, so linked worktrees that sealed
     /// identical trees hold one decode between them.
     pub(super) decoded_content: SharedDecodedContentPoolV1,
-    /// Map length recorded after the last dead-entry prune. Weak entries whose
-    /// `Arc` dropped are never removed by lookups, so `intern` prunes them once
-    /// the map doubles past this baseline, bounding growth over the daemon
-    /// lifetime at amortized O(1) per insert.
-    last_prune_len: AtomicUsize,
 }
 
 impl Default for SharedCodeIndexBytePoolV1 {
@@ -91,7 +98,6 @@ impl Default for SharedCodeIndexBytePoolV1 {
             ),
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
             decoded_content: SharedDecodedContentPoolV1::default(),
-            last_prune_len: AtomicUsize::new(0),
         }
     }
 }
@@ -114,25 +120,36 @@ impl SharedCodeIndexBytePoolV1 {
         }
         let shared: Arc<[u8]> = Arc::from(bytes);
         pool.insert(digest.clone(), Arc::downgrade(&shared));
-        if pool.len()
-            > self
-                .last_prune_len
-                .load(Ordering::Relaxed)
-                .saturating_mul(2)
-        {
-            pool.retain(|_, entry| entry.strong_count() > 0);
-            self.last_prune_len
-                .store(pool.len().max(1), Ordering::Relaxed);
-        }
         (digest, shared)
+    }
+
+    /// Drop the entries no capture or generation holds any more, which frees
+    /// their sources, and the physical artifact pool's likewise. A dead entry
+    /// can never be reused, so this gives up nothing. Runs once a pass let go
+    /// of its capture and build.
+    pub(super) fn release_dead_entries(&self) {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| entry.strong_count() > 0);
+        self.physical_artifacts.release_dead_entries();
     }
 
     #[cfg(test)]
     pub(super) fn stats(&self) -> CodeIndexBytePoolStatsV1 {
         let physical_artifacts = self.physical_artifacts.stats();
+        let bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         CodeIndexBytePoolStatsV1 {
             parse_chunk_inserted: physical_artifacts.inserted,
             parse_chunk_reused: physical_artifacts.reused,
+            source_allocations: bytes.len(),
+            live_sources: bytes
+                .values()
+                .filter(|entry| entry.strong_count() > 0)
+                .count(),
         }
     }
 }

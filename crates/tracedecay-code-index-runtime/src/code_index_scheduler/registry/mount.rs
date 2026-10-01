@@ -641,6 +641,7 @@ impl CodeIndexSchedulerRegistryV1 {
         ));
         let worker_residency = Arc::clone(&residency);
         let worker_resident_owners = Arc::clone(&self.resident_owners);
+        let worker_byte_pool = Arc::clone(&self.byte_pool);
         let mut worker_owner_headroom = self.resident_owners.subscribe_headroom();
         let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         // Boxed at definition on purpose: this worker's state machine is the
@@ -2922,6 +2923,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 drop(reconcile_pass.take());
+                worker_byte_pool.release_dead_entries();
                 let refused_for_memory = matches!(
                     &result,
                     Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
