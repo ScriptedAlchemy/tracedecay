@@ -57,6 +57,7 @@ tracedecay-application = { path = "../tracedecay-application" }
 
 [dev-dependencies]
 hex = "0.4"
+rusqlite = { workspace = true }
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
 tokio = { version = "1", features = ["full", "test-util"] }
