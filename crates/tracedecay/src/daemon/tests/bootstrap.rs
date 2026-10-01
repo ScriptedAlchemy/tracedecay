@@ -103,6 +103,52 @@ fn hook_runtime_missing_malformed_or_unknown_action_waits_for_registration() {
 }
 
 #[test]
+fn tools_that_declare_the_session_stores_wait_for_registered_publication() {
+    let call = |name: &str, arguments: serde_json::Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        })
+        .to_string()
+    };
+    for (name, arguments, requirement) in [
+        (
+            "tracedecay_pr_context",
+            json!({"base_ref": "main"}),
+            ProjectServerRequirement::RegisteredHostIngest,
+        ),
+        (
+            "tracedecay_run_affected_tests",
+            json!({"format": "json"}),
+            ProjectServerRequirement::RegisteredHostIngest,
+        ),
+        (
+            "tracedecay_admin_cli",
+            json!({"action": "sessions_import", "format": "json"}),
+            ProjectServerRequirement::RegisteredHostIngest,
+        ),
+        (
+            "tracedecay_admin_cli",
+            json!({"action": "registry_empty"}),
+            ProjectServerRequirement::Core,
+        ),
+        (
+            "tracedecay_context",
+            json!({"query": "value"}),
+            ProjectServerRequirement::Core,
+        ),
+    ] {
+        assert_eq!(
+            requirement_for(call(name, arguments.clone())),
+            requirement,
+            "{name} {arguments}"
+        );
+    }
+}
+
+#[test]
 fn hook_event_waits_for_registered_project_authority_publication() {
     let hook_event = json!({
         "jsonrpc": "2.0",
