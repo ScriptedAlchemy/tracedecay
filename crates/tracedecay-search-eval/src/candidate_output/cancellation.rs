@@ -5,8 +5,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
-    CodeIndexRepositoryParseIdentityV1,
+    CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, PolicyRevisionId, PrivacyDomainId, ProjectId,
@@ -99,7 +99,10 @@ pub(super) fn prove_cancellation(
             ));
         }
     };
-    if !format!("{error:?}").contains("Cancelled") {
+    if !matches!(
+        error,
+        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+    ) {
         return Err(CandidateOutputError::Contract(format!(
             "expected cancelled interruption, got {error:?}"
         )));

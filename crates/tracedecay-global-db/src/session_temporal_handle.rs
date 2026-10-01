@@ -66,7 +66,7 @@ impl SessionTemporalRegisteredDb for RegisteredGlobalDb {
 
     fn health_read_snapshot(
         &self,
-    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, TraceDecayError>> + Send {
+    ) -> impl Future<Output = Result<DatabaseEngineReadSnapshot, EngineError>> + Send {
         RegisteredGlobalDb::health_read_snapshot(self)
     }
 

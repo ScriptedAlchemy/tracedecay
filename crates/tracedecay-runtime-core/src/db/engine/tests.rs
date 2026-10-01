@@ -441,3 +441,29 @@ fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
         .is_deterministic_refusal()
     );
 }
+
+#[test]
+fn busy_or_locked_is_the_sqlite_lock_codes_not_their_text() {
+    let sqlite = |code: i32, extended_code: i32, message: &str| Error::Sqlite {
+        operation: "prepare query",
+        code: Some(code),
+        extended_code: Some(extended_code),
+        message: message.to_owned(),
+    };
+
+    assert!(sqlite(5, 5, "database is locked").is_busy_or_locked());
+    assert!(sqlite(5, 261, "database is locked").is_busy_or_locked());
+    assert!(sqlite(6, 6, "database table is locked").is_busy_or_locked());
+    assert!(Error::Busy.is_busy_or_locked());
+    assert!(
+        Error::StatementBatch {
+            index: 2,
+            source: Box::new(sqlite(5, 5, "database is locked")),
+        }
+        .is_busy_or_locked()
+    );
+
+    assert!(!sqlite(1, 1, "no such table: main.locked_rows").is_busy_or_locked());
+    assert!(!sqlite(19, 2067, "UNIQUE constraint failed: busy.id").is_busy_or_locked());
+    assert!(!Error::Runtime("exact SQL reader lane is busy".to_owned()).is_busy_or_locked());
+}

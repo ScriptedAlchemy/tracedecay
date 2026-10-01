@@ -164,7 +164,23 @@ impl Error {
             _ => matches!(self.sqlite_code(), Some(SQLITE_CONSTRAINT)),
         }
     }
+
+    /// True when another connection holds the database (`SQLITE_BUSY` or
+    /// `SQLITE_LOCKED`) or the runtime lane itself is saturated: the same
+    /// statement can succeed once the holder releases.
+    #[hotpath::skip]
+    pub const fn is_busy_or_locked(&self) -> bool {
+        match self {
+            Self::Busy => true,
+            Self::StatementBatch { source, .. } => source.is_busy_or_locked(),
+            _ => matches!(self.sqlite_code(), Some(SQLITE_BUSY | SQLITE_LOCKED)),
+        }
+    }
 }
 
+/// `SQLITE_BUSY`: another connection holds a conflicting database lock.
+const SQLITE_BUSY: i32 = 5;
+/// `SQLITE_LOCKED`: a conflicting lock inside the same shared cache.
+const SQLITE_LOCKED: i32 = 6;
 /// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
 const SQLITE_CONSTRAINT: i32 = 19;
