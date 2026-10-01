@@ -515,6 +515,7 @@ fn error_code(error: &LcmError) -> &'static str {
         LcmError::StaleRawProtectionSource { .. } => "stale_raw_protection_source",
         LcmError::StaleSummarySourceRange { .. } => "stale_summary_source_range",
         LcmError::LifecycleStateNotFound => "lifecycle_state_not_found",
+        LcmError::NotASessionStore => "not_a_session_store",
         LcmError::Cancelled => "cancelled",
         LcmError::DeadlineExceeded => "deadline_exceeded",
         LcmError::BudgetExhausted => "budget_exhausted",

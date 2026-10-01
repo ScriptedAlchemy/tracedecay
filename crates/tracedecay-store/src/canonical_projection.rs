@@ -51,6 +51,19 @@ fn rendering_message_semantics(
     }
 }
 
+/// The `(project_key, project_path)` a session row in `scope` carries before
+/// any observation names its working directory. Every writer of a session row
+/// uses this, so the projection's later cwd only refines the path.
+pub fn session_project_fields(scope: &ObservationScopeV1) -> (String, String) {
+    match scope {
+        ObservationScopeV1::Profile => ("user".to_owned(), "user".to_owned()),
+        ObservationScopeV1::Project { project_id } => (
+            project_id.as_str().to_owned(),
+            project_id.as_str().to_owned(),
+        ),
+    }
+}
+
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
@@ -119,13 +132,7 @@ fn derive_canonical_projection_for(
     }
     let provider = envelope.provider().as_str().to_owned();
     let session_id = envelope.relations().session_id().as_str().to_owned();
-    let (project_key, fallback_project_path) = match observation.scope() {
-        ObservationScopeV1::Profile => ("user".to_owned(), "user".to_owned()),
-        ObservationScopeV1::Project { project_id } => (
-            project_id.as_str().to_owned(),
-            project_id.as_str().to_owned(),
-        ),
-    };
+    let (project_key, fallback_project_path) = session_project_fields(observation.scope());
     let timestamp = projected
         .as_ref()
         .and_then(|projected| projected.timestamp)
