@@ -262,6 +262,6 @@ pub use serving::{
 use serving::{
     CodeIndexCommittedProgressSampleV1, CodeTextProjectionSlotV1, map_sealed_page_source_error,
     sha256_private_file_and_size, text_artifact_admitted_build_budget,
-    text_artifact_builder_budget, text_artifact_resident_memory_charges,
+    text_artifact_builder_budget, text_artifact_resident_memory_charge,
     text_artifact_source_batch_limits,
 };
