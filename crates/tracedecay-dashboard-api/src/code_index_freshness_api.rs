@@ -44,15 +44,10 @@ async fn project_code_index_freshness(
         None => Ok(None),
     };
     let read = match read {
-        Err(_) => {
-            return DashboardEnvelopeV1::unavailable(
-                scope_from_state(state),
-                CodeIndexFreshnessPayloadV1 {
-                    worktrees: Vec::new(),
-                    note: "code-index freshness read failed".to_owned(),
-                },
-                "code-index freshness read failed",
-            );
+        Err(failure) => {
+            let payload = CodeIndexFreshnessPayloadV1::from_read_failure(failure);
+            let reason = payload.note.clone();
+            return DashboardEnvelopeV1::unavailable(scope_from_state(state), payload, reason);
         }
         Ok(read) => read,
     };

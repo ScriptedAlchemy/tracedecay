@@ -914,6 +914,10 @@ impl ProjectOpenInputs<'_> {
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&code_index_activation),
         );
+        let dashboard_code_index_freshness_reader = project_dashboard_freshness_reader(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode
@@ -951,9 +955,7 @@ impl ProjectOpenInputs<'_> {
             code_index_activation,
             ports: ProjectRoutePorts {
                 code_index,
-                dashboard_code_index_freshness_reader: project_dashboard_freshness_reader(
-                    self.invocation.code_index_schedulers.clone(),
-                ),
+                dashboard_code_index_freshness_reader,
                 code_index_readiness_waiter: project_readiness_waiter(
                     self.invocation.code_index_schedulers.clone(),
                 ),
@@ -2019,14 +2021,31 @@ fn project_code_index_authorities(
 }
 
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
+/// The route's scheduler freshness; with no scheduler mounted, a failed
+/// mount is reported as such rather than as a route that never mounted.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader {
-    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
-        Arc::new(move |project_root| {
+    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader = Arc::new(
+        move |project_root| {
             let schedulers = schedulers.clone();
-            Box::pin(async move { schedulers.dashboard_freshness_read(&project_root).await })
-        });
+            let activation = Arc::clone(&activation);
+            Box::pin(async move {
+                match schedulers.dashboard_freshness_read(&project_root).await? {
+                    Some(worktree) => Ok(Some(worktree)),
+                    None => match activation.mount_failure() {
+                        Some(error) => Err(
+                            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed {
+                                error,
+                            },
+                        ),
+                        None => Ok(None),
+                    },
+                }
+            })
+        },
+    );
     reader
 }
 

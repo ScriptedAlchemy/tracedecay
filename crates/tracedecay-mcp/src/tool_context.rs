@@ -535,10 +535,7 @@ impl<'a> McpToolContext<'a> {
         let reader = self.request.freshness?;
         Some(match reader(self.project_root().to_path_buf()).await {
             Ok(worktree) => CodeIndexFreshnessPayloadV1::from_scheduler_read(worktree),
-            Err(_) => CodeIndexFreshnessPayloadV1 {
-                worktrees: Vec::new(),
-                note: "code-index freshness read failed".to_owned(),
-            },
+            Err(failure) => CodeIndexFreshnessPayloadV1::from_read_failure(failure),
         })
     }
 

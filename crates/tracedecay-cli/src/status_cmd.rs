@@ -16,6 +16,7 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 use tracedecay_contracts::retrieval::{
     AdminProjectResultV1, AdminProjectStatusAccountingV1, AdminProjectSurfaceRequestV1,
+    StatusCodeIndexFreshnessV1,
 };
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
@@ -459,6 +460,17 @@ async fn handle_status_command_within(
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
+    let code_index_mount_failure = match daemon_status
+        .get("code_index_freshness")
+        .cloned()
+        .map(serde_json::from_value::<StatusCodeIndexFreshnessV1>)
+        .transpose()?
+    {
+        Some(StatusCodeIndexFreshnessV1::MountFailed { error, remediation }) => {
+            Some((error, remediation))
+        }
+        _ => None,
+    };
     // The shorter deadline rides inside the call so the owner can settle a
     // typed terminal; the command deadline is only the response backstop.
     let accounting = await_daemon_tool_result(
@@ -592,6 +604,14 @@ async fn handle_status_command_within(
                 "\nWarning: code-index background convergence is parked: {}\n{}",
                 parked.reason, parked.remediation
             );
+        }
+    }
+
+    if let Some((error, remediation)) = &code_index_mount_failure {
+        if stderr_is_terminal {
+            eprintln!("\n\x1b[33mWarning: code-index mount failed: {error}\n{remediation}\x1b[0m");
+        } else {
+            eprintln!("\nWarning: code-index mount failed: {error}\n{remediation}");
         }
     }
 

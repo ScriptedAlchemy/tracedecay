@@ -580,10 +580,26 @@ pub struct CodeIndexWorktreeFreshnessV1 {
 }
 
 /// A freshness read failed. Distinct from an unmounted route, which is `Ok(None)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexFreshnessReadFailureV1 {
     ReadFailed,
+    /// The route's last code-index mount failed and no later one mounted.
+    MountFailed {
+        error: String,
+    },
 }
+
+/// The route's last code-index mount failed; the route stays idle until the
+/// next demand retries it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CodeIndexMountFailureV1 {
+    pub error: String,
+    pub remediation: String,
+}
+
+/// An operator reconcile is a demand, so it retries the failed mount.
+const CODE_INDEX_MOUNT_FAILED_REMEDIATION: &str =
+    "run `tracedecay sync` to retry the code-index mount";
 
 pub type CodeIndexFreshnessReadFuture = Pin<
     Box<
@@ -747,6 +763,8 @@ pub type CodeIndexReadinessWaiter = Arc<
 pub struct CodeIndexFreshnessPayloadV1 {
     pub worktrees: Vec<CodeIndexWorktreeFreshnessV1>,
     pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_failure: Option<CodeIndexMountFailureV1>,
 }
 
 const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
@@ -754,6 +772,8 @@ const UNMOUNTED_NOTE: &str =
     "the daemon scheduler registry has no mounted scheduler for this project";
 const UNAVAILABLE_NOTE: &str =
     "the dashboard is not attached to a daemon-owned code-index scheduler registry";
+const READ_FAILED_NOTE: &str = "code-index freshness read failed";
+const MOUNT_FAILED_NOTE: &str = "the last code-index mount for this project failed";
 
 impl CodeIndexFreshnessPayloadV1 {
     /// Payload after the daemon scheduler registry answered for this project.
@@ -766,6 +786,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: worktrees.into_iter().collect(),
             note: LIVE_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -774,6 +795,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: Vec::new(),
             note: UNMOUNTED_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -782,6 +804,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: Vec::new(),
             note: UNAVAILABLE_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -790,6 +813,25 @@ impl CodeIndexFreshnessPayloadV1 {
         match worktree {
             Some(worktree) => Self::from_scheduler_observation([worktree]),
             None => Self::from_unmounted_scheduler(),
+        }
+    }
+
+    /// A scheduler read that could not answer with a worktree.
+    pub fn from_read_failure(failure: CodeIndexFreshnessReadFailureV1) -> Self {
+        match failure {
+            CodeIndexFreshnessReadFailureV1::ReadFailed => Self {
+                worktrees: Vec::new(),
+                note: READ_FAILED_NOTE.to_owned(),
+                mount_failure: None,
+            },
+            CodeIndexFreshnessReadFailureV1::MountFailed { error } => Self {
+                worktrees: Vec::new(),
+                note: MOUNT_FAILED_NOTE.to_owned(),
+                mount_failure: Some(CodeIndexMountFailureV1 {
+                    error,
+                    remediation: CODE_INDEX_MOUNT_FAILED_REMEDIATION.to_owned(),
+                }),
+            },
         }
     }
 }

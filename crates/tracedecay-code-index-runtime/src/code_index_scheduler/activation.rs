@@ -137,6 +137,7 @@ pub struct CodeIndexActivationV1 {
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
+    mount_failure: Arc<Mutex<Option<String>>>,
     hint_sink: CodeIndexActivationHintSinkV1,
     retirement: Arc<CodeIndexActivationRetirementV1>,
     #[cfg(test)]
@@ -182,6 +183,7 @@ impl CodeIndexActivationV1 {
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
+            mount_failure: Arc::default(),
             hint_sink,
             retirement: Arc::new(CodeIndexActivationRetirementV1::new()),
             #[cfg(test)]
@@ -204,6 +206,15 @@ impl CodeIndexActivationV1 {
 
     pub fn identity(&self) -> Option<IndexingIdentityV1> {
         self.identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The error of the last mount attempt while no later attempt mounted.
+    /// The route stays idle, so the next demand retries the mount.
+    pub fn mount_failure(&self) -> Option<String> {
+        self.mount_failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -293,6 +304,7 @@ impl CodeIndexActivationV1 {
         let state = Arc::clone(&self.state);
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
+        let mount_failure = Arc::clone(&self.mount_failure);
         let hint_sink = Arc::clone(&self.hint_sink);
         runtime.spawn(hotpath::future!(
             async move {
@@ -305,7 +317,11 @@ impl CodeIndexActivationV1 {
                         .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
-                if let Err(error) = mount().await {
+                let mounted = mount().await;
+                *mount_failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = mounted.clone().err();
+                if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
                     hotpath::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));

@@ -311,6 +311,21 @@ fn code_index_freshness_status(
         );
     };
     let Some(freshness) = payload.worktrees.first() else {
+        if let Some(failure) = &payload.mount_failure {
+            return (
+                StatusCodeIndexFreshnessV1::MountFailed {
+                    error: failure.error.clone(),
+                    remediation: failure.remediation.clone(),
+                },
+                Some(format!(
+                    "code-index mount failed: {}; {}",
+                    failure.error, failure.remediation
+                )),
+                Some(StatusRetrievalServingV1::Unavailable {
+                    reason: "code_index_mount_failed".to_owned(),
+                }),
+            );
+        }
         return (
             StatusCodeIndexFreshnessV1::Unavailable {
                 reason: "code_index_scheduler_not_mounted".to_owned(),
@@ -1312,6 +1327,7 @@ mod tests {
                     },
                 ],
                 note: String::new(),
+                mount_failure: None,
             }
         };
         let staleness = |payload| {

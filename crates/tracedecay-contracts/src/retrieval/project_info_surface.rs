@@ -242,6 +242,12 @@ pub enum StatusCodeIndexFreshnessV1 {
     Parked {
         worktree: Box<CodeIndexWorktreeFreshnessV1>,
     },
+    /// The last code-index mount failed; nothing serves until a demand
+    /// retries it.
+    MountFailed {
+        error: String,
+        remediation: String,
+    },
     Unavailable {
         reason: String,
     },
