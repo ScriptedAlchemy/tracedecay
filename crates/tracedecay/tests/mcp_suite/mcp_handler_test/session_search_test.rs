@@ -897,6 +897,156 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
     harness.shutdown().await;
 }
 
+/// A Cursor assistant record holding text beside a `Task` dispatch is one
+/// searchable message. Its text, its dispatch prompt, and a word both carry
+/// each find that one row; none of the searches refuses.
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
+    const USER: &str =
+        r#"[{"text":"Cursor journey: trace the quartzledger importer","type":"text"}]"#;
+    const ASSISTANT: &str = r#"[{"text":"The quartzledger importer reads CSV rows.","type":"text"},{"input":{"description":"inspect importer","model":"fast","prompt":"Inspect the quartzledger importer","subagent_type":"explore"},"name":"Task","type":"tool_use"}]"#;
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let transcripts = composed_transcript_home(&isolation);
+    let project = isolation.join("project");
+    std::fs::create_dir_all(&project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project);
+    let init = Command::new(common::git_program())
+        .args(["init", "-q"])
+        .current_dir(&project)
+        .status()
+        .expect("git init");
+    assert!(init.success(), "git init must succeed");
+    let slug = tracedecay_sessions::runtime::hosts::cursor::cursor_project_slug(&project)
+        .expect("cursor project slug");
+    let session_dir = transcripts
+        .join(".cursor/projects")
+        .join(slug)
+        .join("agent-transcripts/cursor-journey-session");
+    std::fs::create_dir_all(&session_dir).expect("cursor transcript directory");
+    std::fs::write(
+        session_dir.join("cursor-journey-session.jsonl"),
+        [
+            json!({"role": "user", "message": {"content": [
+                {"type": "text", "text": "Cursor journey: trace the quartzledger importer"},
+            ]}}),
+            json!({"role": "assistant", "message": {"content": [
+                {"type": "text", "text": "The quartzledger importer reads CSV rows."},
+                {"type": "tool_use", "name": "Task", "input": {
+                    "description": "inspect importer",
+                    "prompt": "Inspect the quartzledger importer",
+                    "subagent_type": "explore",
+                    "model": "fast",
+                }},
+            ]}}),
+        ]
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>(),
+    )
+    .expect("write cursor transcript");
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("production composition harness");
+    let accepted = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_admin_cli",
+        json!({"action": "sessions_import", "format": "json"}),
+    )
+    .await;
+    let idempotency_key = accepted["idempotency_key"]
+        .as_str()
+        .expect("session import idempotency key")
+        .to_owned();
+    loop {
+        let status = harness
+            .call_tool(
+                &project,
+                "tracedecay_admin_cli",
+                json!({
+                    "action": "sessions_sync_status",
+                    "idempotency_key": idempotency_key,
+                    "format": "json",
+                }),
+            )
+            .await
+            .expect("session import status");
+        let result = status.result.expect("session import status result");
+        assert_ne!(result["isError"], true, "{result}");
+        if recovered_owner_payload(&harness, &project, result).await["status"] == "complete" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let search = |query: &'static str| {
+        let harness = &harness;
+        let project = &project;
+        async move {
+            loop {
+                let payload = call_production_tool(
+                    harness,
+                    project,
+                    "tracedecay_message_search",
+                    json!({"query": query, "provider": "cursor", "format": "json"}),
+                )
+                .await;
+                if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
+                    || payload["results"]
+                        .as_array()
+                        .is_some_and(|results| !results.is_empty())
+                {
+                    let mut hits = payload["results"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{query} results: {payload}"))
+                        .iter()
+                        .map(|hit| {
+                            (
+                                hit["message"]["role"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                hit["message"]["kind"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                hit["message"]["text"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    hits.sort();
+                    return hits;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    let assistant = (
+        "assistant".to_owned(),
+        "message".to_owned(),
+        ASSISTANT.to_owned(),
+    );
+    assert_eq!(search("Inspect").await, [assistant.clone()]);
+    assert_eq!(search("CSV").await, [assistant.clone()]);
+    assert_eq!(
+        search("quartzledger").await,
+        [
+            assistant,
+            ("user".to_owned(), "message".to_owned(), USER.to_owned()),
+        ]
+    );
+    harness.shutdown().await;
+}
+
 /// `tracedecay_message_search` reads already-admitted messages through MCP
 /// `tools/call`. A query that names a seeded message returns that message's
 /// text, id, session, provider, and role. Those observations carry an unknown

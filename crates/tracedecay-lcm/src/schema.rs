@@ -19,12 +19,14 @@ use super::util;
 /// `lcm_raw_messages` also holds the session message projection, so each
 /// message body is stored once beside the session-only columns (`kind`,
 /// `model`, `tool_names`, `source_path`, `source_offset`), and one FTS index
-/// serves both LCM grep and session message search. There are no LCM summary
+/// serves both LCM grep and session message search. An observation projects at
+/// most one message row, the one occurrence its retrieval anchor resolves to,
+/// so a host record's parts share that row. There are no LCM summary
 /// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
 /// reset.
-pub const LCM_SCHEMA_VERSION: i64 = 13;
+pub const LCM_SCHEMA_VERSION: i64 = 14;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's

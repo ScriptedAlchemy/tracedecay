@@ -48,7 +48,8 @@ pub(crate) async fn verify_native_source_supersession(
         // temporary cache. Resolve retained ownership through the same bounded
         // authority used by the canonical projection audit.
         let outputs = effect
-            .messages()
+            .message()
+            .into_iter()
             .map(|projection| {
                 (
                     projection.message().provider.clone(),
@@ -57,7 +58,7 @@ pub(crate) async fn verify_native_source_supersession(
             })
             .collect::<BTreeSet<_>>();
         let authorities = read_output_authorities(conn, &outputs).await?;
-        for projection in effect.messages() {
+        for projection in effect.message().into_iter() {
             verify_provenance(conn, projection).await?;
             let message = projection.message();
             let authority = authorities

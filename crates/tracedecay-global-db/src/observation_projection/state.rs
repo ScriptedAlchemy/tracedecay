@@ -786,7 +786,8 @@ async fn message_projection(
     message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
     if let Some(projection) = super::apply::derive_projection(observation)?
-        .messages()
+        .message()
+        .into_iter()
         .find(|projection| {
             projection.message().provider == provider
                 && projection.message().message_id == message_id
@@ -797,7 +798,8 @@ async fn message_projection(
     }
     derive_projection_with_alias(conn, observation)
         .await?
-        .messages()
+        .message()
+        .into_iter()
         .find(|projection| {
             projection.message().provider == provider
                 && projection.message().message_id == message_id
@@ -1217,7 +1219,8 @@ pub(in super::super) async fn resolve_output_projection(
     let owner_projection = match derived {
         Some((observation_id, effect)) if observation_id == authority.canonical_observation_id => {
             effect
-                .messages()
+                .message()
+                .into_iter()
                 .find(|candidate| {
                     candidate.message().provider == message.provider
                         && candidate.message().message_id == message.message_id

@@ -1084,10 +1084,9 @@ async fn validate_composite_projection(
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority<'_>,
     message: Option<&SessionMessageProjection>,
-    derived_messages: &[SessionMessageProjection],
     workflow_facts: &[WorkflowFactProjection],
 ) -> tracedecay_domain::errors::Result<()> {
-    if workflow_facts.is_empty() && derived_messages.is_empty() {
+    if workflow_facts.is_empty() {
         return Err(authority_violation(
             "composite projection has no additional output",
         ));
@@ -1104,9 +1103,7 @@ async fn validate_composite_projection(
         let alias = ProjectionAliasRow::load(conn, observation_id).await?;
         validate_alias_binding(&alias, unaliased, projection)?;
     }
-    let expected_message_rows =
-        i64::try_from(usize::from(message.is_some()) + derived_messages.len())
-            .map_err(|_| authority_violation("message projection count overflow"))?;
+    let expected_message_rows = i64::from(message.is_some());
     if state.queued {
         if state.disposition_rows != 0
             || state.workflow_rows != 0
@@ -1118,12 +1115,6 @@ async fn validate_composite_projection(
         }
         let mut validated_rows = 0_i64;
         if let Some(projection) = message {
-            validated_rows += i64::from(
-                validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-                    .await?,
-            );
-        }
-        for projection in derived_messages {
             validated_rows += i64::from(
                 validate_message_projection_row(conn, observation_id, effect, resolved, projection)
                     .await?,
@@ -1146,13 +1137,6 @@ async fn validate_composite_projection(
             .await?
     {
         return Err(authority_violation("projection provenance disappeared"));
-    }
-    for projection in derived_messages {
-        if !validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-            .await?
-        {
-            return Err(authority_violation("projection provenance disappeared"));
-        }
     }
     let expected_workflow_rows = i64::try_from(workflow_facts.len())
         .map_err(|_| authority_violation("workflow projection count overflow"))?;
@@ -1191,11 +1175,9 @@ async fn derive_projection_effect(
 /// cheaper than deciding per row whether its authority will be consulted.
 fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, String)> {
     let mut outputs = BTreeSet::new();
-    for effect in effects {
-        for projection in effect.messages() {
-            let message = projection.message();
-            outputs.insert((message.provider.clone(), message.message_id.clone()));
-        }
+    for projection in effects.iter().filter_map(ObservationProjection::message) {
+        let message = projection.message();
+        outputs.insert((message.provider.clone(), message.message_id.clone()));
     }
     outputs
 }
@@ -1325,7 +1307,6 @@ async fn validate_projection_effect(
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             let unaliased = derive_unaliased_projection(observation)?;
@@ -1337,7 +1318,6 @@ async fn validate_projection_effect(
                 effect,
                 resolved,
                 message.as_deref(),
-                derived_messages,
                 workflow_facts,
             )
             .await

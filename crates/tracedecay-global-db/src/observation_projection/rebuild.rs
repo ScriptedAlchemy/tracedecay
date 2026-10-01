@@ -1817,13 +1817,9 @@ async fn stage_rebuild_effect(
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                stage_rebuild_message(conn, generation, sequence, observation, message).await?;
-            }
-            for message in derived_messages {
                 stage_rebuild_message(conn, generation, sequence, observation, message).await?;
             }
             for fact in workflow_facts {
