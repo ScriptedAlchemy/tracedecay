@@ -124,25 +124,23 @@ fn eager_message_digest(
 }
 
 #[test]
-fn memoized_digests_match_eager_derivation_for_every_output_ordinal() {
+fn memoized_digest_matches_eager_derivation() {
     let observation = observation("beta");
-    let outputs: Vec<_> = ["one", "two", "three"]
-        .into_iter()
-        .map(|seed| (session_record(seed), message_record(seed)))
-        .collect();
-    let expected: Vec<PayloadDigestV1> = outputs
-        .iter()
-        .enumerate()
-        .map(|(ordinal, (session, message))| {
-            eager_message_digest(session, message, u32::try_from(ordinal).unwrap())
-        })
-        .collect();
+    let (session, message) = (session_record("one"), message_record("one"));
+    let expected = eager_message_digest(&session, &message, 0);
 
-    let projection = ObservationProjection::for_outputs(&observation, outputs, Vec::new()).unwrap();
-    let actual: Vec<PayloadDigestV1> = projection
-        .messages()
-        .map(|output| output.output_digest().unwrap().clone())
-        .collect();
+    let projection = ObservationProjection::for_outputs(
+        &observation,
+        Some((session, message)),
+        vec![(session_record("beta"), workflow_fact_record())],
+    )
+    .unwrap();
+    let actual: PayloadDigestV1 = projection
+        .message()
+        .unwrap()
+        .output_digest()
+        .unwrap()
+        .clone();
 
     assert_eq!(actual, expected);
 }
@@ -176,21 +174,19 @@ fn equality_ignores_whether_the_digest_memo_is_materialized() {
 #[test]
 fn provenance_is_shared_across_every_output_of_one_observation() {
     let observation = observation("zeta");
-    let outputs: Vec<_> = ["one", "two"]
-        .into_iter()
-        .map(|seed| (session_record(seed), message_record(seed)))
-        .collect();
     let projection = ObservationProjection::for_outputs(
         &observation,
-        outputs,
-        vec![(session_record("zeta"), workflow_fact_record())],
+        Some((session_record("one"), message_record("one"))),
+        vec![
+            (session_record("zeta"), workflow_fact_record()),
+            (session_record("zeta"), workflow_fact_record()),
+        ],
     )
     .unwrap();
 
     let expected = ProjectionProvenance::for_observation(&observation).unwrap();
-    for output in projection.messages() {
-        assert_eq!(output.provenance(), &expected);
-    }
+    assert_eq!(projection.message().unwrap().provenance(), &expected);
+    assert_eq!(projection.workflow_facts().len(), 2);
     for fact in projection.workflow_facts() {
         assert_eq!(fact.provenance(), &expected);
     }

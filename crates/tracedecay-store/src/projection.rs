@@ -115,12 +115,14 @@ impl ProjectionSkipReason {
 }
 
 /// Deterministic effect derived from one receipt-bound observation.
+///
+/// An observation projects at most one message: retrieval resolves each
+/// observation's single retrieval anchor to exactly one searchable occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObservationProjection {
     Message(Box<SessionMessageProjection>),
     Composite {
         message: Option<Box<SessionMessageProjection>>,
-        derived_messages: Vec<SessionMessageProjection>,
         workflow_facts: Vec<WorkflowFactProjection>,
     },
     Skipped(ProjectionSkipReason),
@@ -142,18 +144,8 @@ impl ObservationProjection {
         }
     }
 
-    pub fn messages(&self) -> impl Iterator<Item = &SessionMessageProjection> {
-        let derived_messages: &[SessionMessageProjection] = match self {
-            Self::Composite {
-                derived_messages, ..
-            } => derived_messages,
-            Self::Message(_) | Self::Skipped(_) => &[],
-        };
-        self.message().into_iter().chain(derived_messages)
-    }
-
     pub fn output_count(&self) -> usize {
-        self.messages().count() + self.workflow_facts().len()
+        usize::from(self.message().is_some()) + self.workflow_facts().len()
     }
 
     pub fn skip_reason(&self) -> Option<ProjectionSkipReason> {
@@ -201,10 +193,10 @@ impl ObservationProjection {
 
     pub fn for_outputs(
         observation: &DurableObservationV1,
-        messages: Vec<(SessionRecord, SessionMessageRecord)>,
+        message: Option<(SessionRecord, SessionMessageRecord)>,
         workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)>,
     ) -> ProjectionStoreResult<Self> {
-        if messages.is_empty() && workflow_facts.is_empty() {
+        if message.is_none() && workflow_facts.is_empty() {
             return Err(ProjectionStoreError::Contract(
                 ObservationContractError::InvalidCanonicalPayload,
             ));
@@ -213,36 +205,25 @@ impl ObservationProjection {
         // derivation runs once per observation and is cloned across outputs
         // instead of once per output row.
         let provenance = ProjectionProvenance::for_observation(observation)?;
-        let mut messages = messages
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, (session, message))| {
-                let ordinal = u32::try_from(ordinal).map_err(|_| {
-                    ProjectionStoreError::Contract(
-                        ObservationContractError::InvalidCanonicalPayload,
-                    )
-                })?;
-                Ok(Self::message_projection(
-                    provenance.clone(),
-                    session,
-                    message,
-                    ordinal,
-                ))
-            })
-            .collect::<ProjectionStoreResult<Vec<_>>>()?;
+        let message = message.map(|(session, message)| {
+            Box::new(Self::message_projection(
+                provenance.clone(),
+                session,
+                message,
+                0,
+            ))
+        });
         let workflow_facts = workflow_facts
             .into_iter()
             .map(|(session, fact)| WorkflowFactProjection::new(provenance.clone(), session, fact))
             .collect::<Vec<_>>();
-        if workflow_facts.is_empty() && messages.len() == 1 {
-            return Ok(Self::Message(Box::new(messages.remove(0))));
+        match message {
+            Some(message) if workflow_facts.is_empty() => Ok(Self::Message(message)),
+            message => Ok(Self::Composite {
+                message,
+                workflow_facts,
+            }),
         }
-        let message = (!messages.is_empty()).then(|| Box::new(messages.remove(0)));
-        Ok(Self::Composite {
-            message,
-            derived_messages: messages,
-            workflow_facts,
-        })
     }
 
     pub fn for_skip(

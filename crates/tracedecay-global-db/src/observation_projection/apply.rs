@@ -243,13 +243,12 @@ async fn derive_projection_with_alias_from_generation(
     let Some(alias) = alias else {
         return Ok(projection);
     };
-    let (projection, derived_messages, workflow_facts) = match projection {
-        ObservationProjection::Message(projection) => (projection, Vec::new(), Vec::new()),
+    let (projection, workflow_facts) = match projection {
+        ObservationProjection::Message(projection) => (projection, Vec::new()),
         ObservationProjection::Composite {
             message: Some(projection),
-            derived_messages,
             workflow_facts,
-        } => (projection, derived_messages, workflow_facts),
+        } => (projection, workflow_facts),
         ObservationProjection::Composite { message: None, .. }
         | ObservationProjection::Skipped(_) => {
             return Err(ProjectionStoreError::ProvenanceCollision);
@@ -260,15 +259,9 @@ async fn derive_projection_with_alias_from_generation(
     session.provider.clone_from(&alias.provider);
     message.provider = alias.provider;
     message.message_id = alias.message_id;
-    let mut messages = vec![(session, message)];
-    messages.extend(
-        derived_messages
-            .into_iter()
-            .map(|projection| (projection.session().clone(), projection.message().clone())),
-    );
     ObservationProjection::for_outputs(
         observation,
-        messages,
+        Some((session, message)),
         workflow_facts
             .into_iter()
             .map(|projection| (projection.session().clone(), projection.fact().clone()))
@@ -397,7 +390,6 @@ async fn collapse_consecutive_goal_ticks(
 
     let ObservationProjection::Composite {
         message,
-        derived_messages,
         workflow_facts,
     } = projection
     else {
@@ -406,7 +398,6 @@ async fn collapse_consecutive_goal_ticks(
     if workflow_facts.is_empty() {
         return Ok(ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         });
     }
@@ -470,7 +461,6 @@ async fn collapse_consecutive_goal_ticks(
     }
     Ok(ObservationProjection::Composite {
         message,
-        derived_messages,
         workflow_facts: retained,
     })
 }
@@ -1899,13 +1889,9 @@ pub async fn verify_effect(
         ObservationProjection::Message(projection) => verify_message_effect(conn, projection).await,
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                verify_message_effect(conn, message).await?;
-            }
-            for message in derived_messages {
                 verify_message_effect(conn, message).await?;
             }
             verify_workflow_effects(conn, workflow_facts).await?;
@@ -1963,13 +1949,9 @@ pub(super) async fn apply_effect(
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
-            }
-            for message in derived_messages {
                 Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
             }
             for projection in workflow_facts {

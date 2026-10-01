@@ -67,7 +67,7 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
 }
 
 #[tokio::test]
-async fn v3_projection_persists_stable_multi_output_ordinals() {
+async fn composer_bubble_projects_one_row_carrying_every_part() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -152,7 +152,7 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
     let ProjectionPersistOutcome::Projected(projected) = outcome else {
         panic!("observation should project");
     };
-    assert_eq!(projected.output_count(), 4);
+    assert_eq!(projected.output_count(), 1);
     drop(runtime);
 
     let conn = rusqlite::Connection::open(database_path).unwrap();
@@ -172,14 +172,28 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
+    assert_eq!(actual, vec![(0, message_id.as_str().to_owned())]);
+    let row = conn
+        .query_row(
+            "SELECT kind, tool_names, content FROM lcm_raw_messages WHERE message_id = ?1",
+            rusqlite::params![message_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
     assert_eq!(
-        actual,
-        vec![
-            (0, message_id.as_str().to_owned()),
-            (1, format!("{}:thinking", message_id.as_str())),
-            (2, format!("{}:tool", message_id.as_str())),
-            (3, format!("{}:pr:0", message_id.as_str())),
-        ]
+        row,
+        (
+            "message".to_owned(),
+            "edit_file".to_owned(),
+            "authored\n\nreasoning\n\n{\"path\":\"src/lib.rs\"}\n\nhttps://example.invalid/pr/1"
+                .to_owned(),
+        )
     );
 }
 

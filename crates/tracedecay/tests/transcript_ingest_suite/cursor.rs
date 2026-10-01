@@ -502,10 +502,13 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     let project = init_project(&tmp);
     init_git_repo(&project);
 
+    // A record that is one dispatch renders as that dispatch, model and all; a
+    // record holding text beside dispatches stays one message carrying them.
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
-        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Launching model-specific reviewers."},{"type":"tool_use","id":"call-a","name":"Subagent","input":{"model":"gpt-5.5-high","prompt":"Review the storage routing."}},{"type":"tool_use","id":"call-b","name":"Subagent","input":{"model":"claude-opus-4-8-thinking-max","prompt":"Review the memory routing."}}]}}
+        r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"call-a","name":"Subagent","input":{"model":"gpt-5.5-high","prompt":"Review the storage routing."}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Launching the memory reviewer."},{"type":"tool_use","id":"call-b","name":"Subagent","input":{"model":"claude-opus-4-8-thinking-max","prompt":"Review the memory routing."}}]}}
 "#,
     )
     .unwrap();
@@ -519,29 +522,36 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     });
 
     let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(stats.messages_upserted, 3);
+    assert_eq!(stats.messages_upserted, 2);
 
     let results = db
         .search_session_messages("cursor", None, "routing", 10)
         .await;
-    let dispatch_models: std::collections::BTreeMap<_, _> = results
+    let rows: std::collections::BTreeMap<_, _> = results
         .iter()
-        .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
         .map(|hit| {
             (
-                hit.message.message_id.clone(),
-                hit.message.model.clone().unwrap_or_default(),
+                hit.message.kind.clone().unwrap_or_default(),
+                (hit.message.model.clone(), hit.message.tool_names.clone()),
             )
         })
         .collect();
-    assert_eq!(dispatch_models.len(), 2);
     assert_eq!(
-        dispatch_models.get("cursor-session:tool_dispatch:call-a"),
-        Some(&"gpt-5.5-high".to_string())
+        rows,
+        std::collections::BTreeMap::from([
+            ("message".to_owned(), (None, Some("Subagent".to_owned()))),
+            (
+                "tool_dispatch".to_owned(),
+                (Some("gpt-5.5-high".to_owned()), Some("Subagent".to_owned()))
+            ),
+        ])
     );
     assert_eq!(
-        dispatch_models.get("cursor-session:tool_dispatch:call-b"),
-        Some(&"claude-opus-4-8-thinking-max".to_string())
+        results
+            .iter()
+            .find(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
+            .map(|hit| hit.message.message_id.as_str()),
+        Some("cursor-session:tool_dispatch:call-a")
     );
     for hit in results
         .iter()
