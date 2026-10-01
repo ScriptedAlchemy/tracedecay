@@ -115,6 +115,45 @@ fn status_anchors_an_explicit_dot_to_the_cli_working_directory() {
     );
 }
 
+/// A profile registry whose `code_projects` table this binary refuses is
+/// served in its typed reset-required state. `status` and `list --all` render
+/// that state, its authority, reason and reset command, rather than a missing
+/// status field or an untyped execution failure.
+#[test]
+fn status_and_list_render_a_reset_required_project_registry() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn reset_marker() {}\n");
+    drop(common::spawn_tracedecay_daemon(&home_path));
+    rusqlite::Connection::open(home_path.join(".tracedecay/global.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE code_projects DROP COLUMN default_branch")
+        .unwrap();
+    common::ensure_tracedecay_daemon(&home_path);
+
+    let expected = "Error: project route error (application.reset-required)\n\
+         Reset authority: project registry\n\
+         Reset reason: database error: table 'code_projects' has an incompatible number \
+         of columns (operation: validate global database authority schema)\n\
+         Reset remedy: tracedecay wipe --all --yes\n";
+    for args in [&["status"][..], &["list", "--all"][..]] {
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .args(args)
+            .output()
+            .expect("tracedecay should run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error = stderr
+            .find("Error: ")
+            .map_or(stderr.as_ref(), |at| &stderr[at..]);
+        assert_eq!(
+            (output.status.code(), error),
+            (Some(1), expected),
+            "{args:?} stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
 /// `--project-path .` names the registered project the operator stands in,
 /// exactly as its absolute path does; the registry never sees the bare `.`.
 #[test]

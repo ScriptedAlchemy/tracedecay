@@ -224,6 +224,23 @@ pub(crate) async fn daemon_tool_json_until(
     .await
 }
 
+/// A reply that is an [`ApplicationProblemEnvelope`] is the owner's typed
+/// refusal: it returns as that problem's error, typed detail included, so a
+/// caller never reads the refusal as its success shape.
+pub(crate) fn reject_problem_envelope(
+    reply: &Value,
+    tool_name: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    if reply.get("problem").is_none() {
+        return Ok(());
+    }
+    let envelope: ApplicationProblemEnvelope =
+        serde_json::from_value(reply.clone()).map_err(|error| {
+            retained_decode_error(tool_name, "an undecodable problem envelope", error)
+        })?;
+    Err(tracedecay_mcp::application_output::tool_result::problem_error(envelope))
+}
+
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,

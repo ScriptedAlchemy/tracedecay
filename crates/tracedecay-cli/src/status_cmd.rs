@@ -21,7 +21,7 @@ use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
 
-use crate::commands::reject_truncation_envelope;
+use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
@@ -406,7 +406,9 @@ async fn handle_status_command_within(
         .await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
         } else {
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
             let snapshot: tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
@@ -428,8 +430,9 @@ async fn handle_status_command_within(
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
-        return Ok(());
+        return reject_problem_envelope(&daemon_status, "tracedecay_status");
     }
+    reject_problem_envelope(&daemon_status, "tracedecay_status")?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()

@@ -246,11 +246,7 @@ pub(super) fn tool_call_open_refusal_response(
     if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
         return None;
     }
-    let (authority, _) = tracedecay_mcp::reset_required_context(error)?;
-    let detail = tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
-        error,
-        tracedecay_mcp::reset_required_command(&authority, None),
-    )?;
+    let detail = tracedecay_mcp::reset_required_detail(error)?;
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =

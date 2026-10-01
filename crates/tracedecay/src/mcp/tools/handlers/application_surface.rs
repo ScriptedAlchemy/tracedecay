@@ -576,14 +576,18 @@ fn unbound_refusal(
 }
 
 /// The graph-tool owner reports handler argument errors as invalid requests,
-/// a typed route detail or a lock that missed its deadline as that detail, a
-/// route refusal as unavailable under its own reason code, and any other
-/// handler failure as an internal execution failure.
+/// a typed route detail, a persisted-shape refusal, or a lock that missed its
+/// deadline as that detail, a route refusal as unavailable under its own
+/// reason code, and any other handler failure as an internal execution
+/// failure.
 pub(crate) fn graph_tool_error_problem(
     error: &TraceDecayError,
 ) -> tracedecay_contracts::ApplicationProblem {
     if let Some(detail) = error.project_route_typed_detail() {
         return tracedecay_contracts::ApplicationProblem::from_detail(detail.clone());
+    }
+    if let Some(detail) = tracedecay_mcp::reset_required_detail(error) {
+        return tracedecay_contracts::ApplicationProblem::from_detail(detail);
     }
     if let Some(detail) =
         tracedecay_contracts::ApplicationProblemDetailV1::from_lock_deadline(error)
@@ -971,6 +975,16 @@ mod tests {
                 "code-graph-unavailable",
                 "after_delay",
                 json!(["retry"]),
+            ),
+            (
+                TraceDecayError::reset_required(
+                    "project registry",
+                    "table 'code_projects' has an incompatible number of columns",
+                ),
+                "reset_required",
+                "application.reset-required",
+                "never",
+                json!(["reset"]),
             ),
             (
                 TraceDecayError::Io(std::io::Error::other("generation file vanished")),

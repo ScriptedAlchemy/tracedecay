@@ -1,7 +1,9 @@
 //! Semantic tool-failure classification and JSON-RPC error-response mapping.
 
 use serde_json::{Value, json};
-use tracedecay_contracts::{ApplicationProblem, ApplicationProblemRecord};
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemDetailV1, ApplicationProblemRecord,
+};
 use tracedecay_domain::errors::{
     PROFILE_RESET_COMMAND, STALE_STORE_RESET_COMMAND, TraceDecayError,
 };
@@ -492,6 +494,13 @@ pub fn reset_required_context(error: &TraceDecayError) -> Option<(String, String
         }
         _ => None,
     }
+}
+
+/// The typed reset-required detail of either reset state, naming the command
+/// that resets its authority.
+pub fn reset_required_detail(error: &TraceDecayError) -> Option<ApplicationProblemDetailV1> {
+    let (authority, _) = reset_required_context(error)?;
+    ApplicationProblemDetailV1::from_reset_required(error, reset_required_command(&authority, None))
 }
 
 fn hardcoded_internal_error_response(id: &Value, detail: &str) -> String {
