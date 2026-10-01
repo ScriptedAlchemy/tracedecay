@@ -36,6 +36,15 @@ impl CodexContextState {
         let Ok(mut file) = std::fs::File::open(path) else {
             return Self::from_meta(meta);
         };
+        #[cfg(test)]
+        {
+            *PRIOR_CONTEXT_SCANS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(path.to_path_buf())
+                .or_default() += 1;
+        }
         let generation = prior_context_generation(&file);
         let (mut state, mut offset) = match generation
             .and_then(|generation| cached_prior_context(path, generation, before_offset))
@@ -140,6 +149,34 @@ struct PriorContextCache {
 }
 
 static PRIOR_CONTEXT_CACHE: OnceLock<Mutex<PriorContextCache>> = OnceLock::new();
+
+#[cfg(test)]
+static PRIOR_CONTEXT_SCANS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+/// Rollout opens that rebuilt `path`'s prior context.
+#[cfg(test)]
+pub(crate) fn prior_context_scan_count_for_test(path: &Path) -> usize {
+    PRIOR_CONTEXT_SCANS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Evicts `path`'s resumable context, as a full cache does for every rollout
+/// past its capacity.
+#[cfg(test)]
+pub(crate) fn evict_prior_context_for_test(path: &Path) {
+    if let Some(cache) = PRIOR_CONTEXT_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .remove(path);
+    }
+}
 
 fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
     use std::hash::{Hash, Hasher};
