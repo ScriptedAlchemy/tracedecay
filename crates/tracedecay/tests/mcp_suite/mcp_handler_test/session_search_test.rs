@@ -1035,8 +1035,8 @@ async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
         "message".to_owned(),
         ASSISTANT.to_owned(),
     );
-    assert_eq!(search("Inspect").await, [assistant.clone()]);
-    assert_eq!(search("CSV").await, [assistant.clone()]);
+    assert_eq!(search("Inspect").await, std::slice::from_ref(&assistant));
+    assert_eq!(search("CSV").await, std::slice::from_ref(&assistant));
     assert_eq!(
         search("quartzledger").await,
         [
