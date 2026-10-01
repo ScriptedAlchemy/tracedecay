@@ -44,10 +44,10 @@ pub use sources::{
     RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
     ResidentMemoryHolderReadV1, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding, github_source_finding,
-    host_integration_finding, ingest_refusal_finding, language_server_finding,
-    observability_finding, operational_audit_findings, resident_memory_findings,
-    runtime_health_finding,
+    UnappliedConfigurationSettingV1, advisory_feedback_findings, code_index_finding,
+    configuration_finding, github_source_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    resident_memory_findings, runtime_health_finding,
 };
 pub use types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,

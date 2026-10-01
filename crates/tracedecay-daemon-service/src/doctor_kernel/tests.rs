@@ -27,6 +27,88 @@ fn configuration_read_from_pin_absent_on_cold_cache() {
     );
 }
 
+fn pinned_index_exclude(
+    patterns: &[&str],
+) -> tracedecay_configuration::config::PinnedRuntimeConfiguration {
+    use tracedecay_configuration::config::registry::ConfigurationRegistry;
+    use tracedecay_configuration::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use tracedecay_domain::configuration::{
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
+        INDEX_EXCLUDE_SETTING_KEY, SettingKey,
+    };
+
+    let project_id = tracedecay_domain::ProjectId::new("project.doctor-unapplied-exclude").unwrap();
+    let revision = ConfigurationRevisionId::new("configuration.revision.doctor-exclude").unwrap();
+    let snapshot = resolve_configuration(
+        &ConfigurationRegistry::core().unwrap(),
+        &[ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::StringList(
+                    patterns
+                        .iter()
+                        .map(|pattern| (*pattern).to_owned())
+                        .collect(),
+                ),
+            )]),
+        }],
+    )
+    .expect("read-time validation admits a stored pattern")
+    .snapshot;
+    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: std::path::PathBuf::from("/profile"),
+            project_id,
+            project_root: std::path::PathBuf::from("/project"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("an unapplied pattern must not refuse the pin")
+}
+
+/// A stored exclude pattern the pin skips is configuration out of sync with
+/// what the operator stored, never "matches the resolved authority".
+#[test]
+fn configuration_finding_reports_a_stored_pattern_the_pin_leaves_unapplied() {
+    use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, configuration_finding};
+
+    let finding = |patterns: &[&str]| {
+        let read = configuration_read_from_pin::<&str>(&Ok(pinned_index_exclude(patterns)));
+        let finding = configuration_finding(&read).expect("configuration finding");
+        (
+            finding.state(),
+            finding.evidence()[0].reference().as_str().to_owned(),
+            finding.coverage().statement().to_owned(),
+        )
+    };
+
+    assert_eq!(
+        finding(&["src/[abc", "docs/**"]),
+        (
+            DoctorEvidenceStateV1::Degraded,
+            "configuration.resolved.unapplied".to_owned(),
+            "index.exclude.v1 stores pattern \"src/[abc\" that does not compile (unclosed \
+             character class; missing ']'); indexing runs without it. Set index.exclude.v1 to \
+             patterns that compile or unset it (tracedecay_configuration_set / \
+             tracedecay_configuration_unset)"
+                .to_owned(),
+        )
+    );
+    assert_eq!(
+        finding(&["docs/**"]),
+        (
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "configuration.resolved.in-sync".to_owned(),
+            "effective configuration matches the resolved authority".to_owned(),
+        )
+    );
+}
+
 /// The daemon-side Doctor reader must observe the exhaustive
 /// observation-authority invariant pass itself. Without a producer the signal
 /// is permanently not-run, which downgrades every `StorageRuntime` finding to

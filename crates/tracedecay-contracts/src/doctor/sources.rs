@@ -36,6 +36,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::configuration::SettingKey;
 use tracedecay_domain::{
     CodeGenerationId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
     FeedbackFindingLifecycleV1, FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
@@ -43,6 +44,7 @@ use tracedecay_domain::{
 };
 
 use crate::RequestContext;
+use crate::configuration::ConfigurationSettingFindingV1;
 use crate::error::ApplicationContractError;
 use crate::storage::findings::truncate_at_char_boundary;
 
@@ -123,7 +125,7 @@ fn clean_finding(
 }
 
 /// The observed drift between desired and effective configuration.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationDriftV1 {
     /// Desired and effective configuration agree.
@@ -132,6 +134,32 @@ pub enum ConfigurationDriftV1 {
     Drifted,
     /// A requested pin could not be honored by the authority.
     PinUnavailable,
+    /// The resolved configuration stores values the effective configuration
+    /// leaves unapplied.
+    Unapplied(Vec<UnappliedConfigurationSettingV1>),
+}
+
+/// One stored setting value the effective configuration does not apply.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnappliedConfigurationSettingV1 {
+    pub key: SettingKey,
+    pub finding: ConfigurationSettingFindingV1,
+}
+
+fn unapplied_statement(settings: &[UnappliedConfigurationSettingV1]) -> String {
+    let statements = settings.iter().map(|setting| {
+        let key = setting.key.as_str();
+        match &setting.finding {
+            ConfigurationSettingFindingV1::InvalidIndexPathPattern {
+                pattern, message, ..
+            } => format!(
+                "{key} stores pattern {pattern:?} that does not compile ({message}); indexing \
+                 runs without it. Set {key} to patterns that compile or unset it \
+                 (tracedecay_configuration_set / tracedecay_configuration_unset)"
+            ),
+        }
+    });
+    bounded_statement(&statements.collect::<Vec<_>>().join("; "))
 }
 
 /// One configuration-authority resolve/pin health read.
@@ -160,28 +188,32 @@ pub fn configuration_finding(
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::Configuration;
     match read {
-        ConfigurationAuthorityReadV1::Resolved { drift, coverage } => match drift {
-            ConfigurationDriftV1::InSync => clean_finding(
-                family,
-                "configuration.resolved.in-sync",
-                *coverage,
-                "effective configuration matches the resolved authority",
-            ),
-            ConfigurationDriftV1::Drifted => source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "configuration.resolved.drifted",
-                *coverage,
-                "effective configuration diverges from the desired authority",
-            ),
-            ConfigurationDriftV1::PinUnavailable => source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "configuration.resolved.pin-unavailable",
-                *coverage,
-                "a requested configuration pin could not be honored",
-            ),
-        },
+        ConfigurationAuthorityReadV1::Resolved { drift, coverage } => {
+            let (reference, statement) = match drift {
+                ConfigurationDriftV1::InSync => {
+                    return clean_finding(
+                        family,
+                        "configuration.resolved.in-sync",
+                        *coverage,
+                        "effective configuration matches the resolved authority",
+                    );
+                }
+                ConfigurationDriftV1::Drifted => (
+                    "configuration.resolved.drifted",
+                    Cow::Borrowed("effective configuration diverges from the desired authority"),
+                ),
+                ConfigurationDriftV1::PinUnavailable => (
+                    "configuration.resolved.pin-unavailable",
+                    Cow::Borrowed("a requested configuration pin could not be honored"),
+                ),
+                ConfigurationDriftV1::Unapplied(settings) => (
+                    "configuration.resolved.unapplied",
+                    Cow::Owned(unapplied_statement(settings)),
+                ),
+            };
+            let state = DoctorEvidenceStateV1::Degraded;
+            source_finding(family, state, reference, *coverage, &statement)
+        }
         ConfigurationAuthorityReadV1::Unsupported => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Unsupported,
