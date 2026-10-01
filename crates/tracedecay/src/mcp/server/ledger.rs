@@ -359,6 +359,8 @@ impl McpServer {
             };
             let saved = tokio::task::spawn_blocking(move || {
                 persist_worldwide_delta(&profile_root, delta, upload_enabled)
+                    .inspect_err(|error| tracing::warn!(%error, "could not save upload config"))
+                    .is_ok()
             })
             .await
             .unwrap_or_else(|error| {
@@ -591,8 +593,14 @@ impl McpServer {
     }
 }
 
-fn persist_worldwide_delta(profile_root: &Path, delta: u64, upload_enabled: bool) -> bool {
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
+/// Adds `delta` to the profile's pending worldwide-counter count, uploading it
+/// when enabled, and saves the profile config.
+pub(super) fn persist_worldwide_delta(
+    profile_root: &Path,
+    delta: u64,
+    upload_enabled: bool,
+) -> std::result::Result<(), tracedecay_session_memory::user_config::ConfigSaveError> {
+    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile_root)?;
     config.pending_upload = config.pending_upload.saturating_add(delta);
     if upload_enabled
         && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
@@ -600,13 +608,7 @@ fn persist_worldwide_delta(profile_root: &Path, delta: u64, upload_enabled: bool
         config.pending_upload = 0;
         config.last_upload_at = tracedecay_runtime_core::tracedecay::current_timestamp();
     }
-    match config.save(profile_root) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(error = %error, "could not save upload config");
-            false
-        }
-    }
+    config.save(profile_root)
 }
 
 fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> bool {
@@ -651,7 +653,7 @@ mod tests {
     fn disabled_upload_records_each_delta_once_after_durable_save() {
         let profile = tempfile::tempdir().expect("profile");
         let profile = profile.path();
-        let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile);
+        let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile).unwrap();
         config.pending_upload = 0;
         config
             .save(profile)
@@ -661,15 +663,14 @@ mod tests {
 
         for _ in 0..2 {
             let previous = last_flushed.load(Ordering::Acquire);
-            if current > previous {
-                let saved = persist_worldwide_delta(profile, current - previous, false);
-                if saved {
-                    last_flushed.store(current, Ordering::Release);
-                }
+            if current > previous
+                && persist_worldwide_delta(profile, current - previous, false).is_ok()
+            {
+                last_flushed.store(current, Ordering::Release);
             }
         }
 
-        let persisted = tracedecay_session_memory::user_config::UserConfig::load(profile);
+        let persisted = tracedecay_session_memory::user_config::UserConfig::load(profile).unwrap();
         assert_eq!(persisted.pending_upload, current);
         assert_eq!(last_flushed.load(Ordering::Acquire), current);
     }

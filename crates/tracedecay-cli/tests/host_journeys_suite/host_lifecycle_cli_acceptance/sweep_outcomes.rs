@@ -508,6 +508,62 @@ fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registratio
     );
 }
 
+/// A torn profile `config.toml` is an issue naming the file, the parse error
+/// and its repair, not a warning while every stored entry reads as default.
+#[cfg(unix)]
+#[test]
+fn doctor_fails_a_corrupt_profile_config_with_its_repair() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    let _daemon = ProfileDaemon::start(&cli);
+    let config = cli.profile.join("config.toml");
+    let installed = fs::read_to_string(&config).unwrap();
+    fs::write(&config, "pending_upload = 0\n true").unwrap();
+
+    let doctor = cli.run(&["doctor"]);
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(1), "{doctor_stderr}");
+    assert!(
+        doctor_stderr.contains(&format!(
+            "Profile config is unusable: config file {} is corrupt at line 2: TOML parse error \
+             at line 2, column 6\n  |\n2 |  true\n  |      ^\nkey with no value, expected `=`\n. \
+             Fix it, or delete it to regenerate defaults",
+            config.display()
+        )),
+        "{doctor_stderr}"
+    );
+
+    fs::write(&config, &installed).unwrap();
+    let repaired = cli.run(&["doctor"]);
+    let repaired_stderr = stderr(&repaired);
+    assert_eq!(repaired.status.code(), Some(0), "{repaired_stderr}");
+    assert!(
+        !repaired_stderr.contains("Profile config is unusable"),
+        "{repaired_stderr}"
+    );
+
+    fs::write(
+        &config,
+        format!(
+            "{installed}\n[[github_review_sources]]\nowner = \"ScriptedAlchemy\"\n\
+             repository = \"keyring-unnamed\"\naccess = \"os_keyring\"\n"
+        ),
+    )
+    .unwrap();
+    let unregistered = cli.run(&["doctor"]);
+    let unregistered_stderr = stderr(&unregistered);
+    assert_eq!(unregistered.status.code(), Some(1), "{unregistered_stderr}");
+    assert!(
+        unregistered_stderr.contains(&format!(
+            "GitHub review source ScriptedAlchemy/keyring-unnamed uses os_keyring access without \
+             keyring_service and keyring_account, so it is not registered; fix or remove its \
+             github_review_sources entry in {}",
+            config.display()
+        )),
+        "{unregistered_stderr}"
+    );
+}
+
 #[test]
 fn update_plugin_exits_nonzero_when_an_attempted_host_fails() {
     let cli = IsolatedCli::new();

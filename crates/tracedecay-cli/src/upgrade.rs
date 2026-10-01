@@ -906,12 +906,14 @@ fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload
 /// tools or hook changes; patch bumps just update the field).
 fn record_previous_version(profile: &ProfileRoot) {
     let current = env!("CARGO_PKG_VERSION");
-    let mut cfg = UserConfig::load(profile.data_dir());
-    if cfg.previous_version == current {
-        return;
-    }
-    cfg.previous_version = current.to_string();
-    if let Err(err) = cfg.save(profile.data_dir()) {
+    let recorded = UserConfig::load(profile.data_dir()).and_then(|mut cfg| {
+        if cfg.previous_version == current {
+            return Ok(());
+        }
+        cfg.previous_version = current.to_string();
+        cfg.save(profile.data_dir())
+    });
+    if let Err(err) = recorded {
         eprintln!(
             "  \x1b[33mwarning:\x1b[0m could not record previous version ({err}); \
              run `tracedecay reinstall` manually if new tools aren't registered"

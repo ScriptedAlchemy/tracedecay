@@ -18,6 +18,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
+use tracedecay_application::advisory::github_runtime;
 use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
@@ -1163,11 +1164,28 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if tracedecay_session_memory::user_config::config_path(profile_root).exists() {
-        let config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
-        if config.pending_upload > 0 {
-            dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
+        Ok(config) => {
+            if config.pending_upload > 0 {
+                dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+            }
+            match github_runtime::check_configured_github_review_sources_v1(profile_root) {
+                Ok(findings) => {
+                    for finding in findings {
+                        dc.fail(&format!(
+                            "GitHub review source {finding}, so it is not registered; fix or \
+                             remove its github_review_sources entry in {}",
+                            tracedecay_session_memory::user_config::config_path(profile_root)
+                                .display()
+                        ));
+                    }
+                }
+                Err(error) => dc.fail(&format!(
+                    "GitHub review sources are unusable, none is registered: {error}"
+                )),
+            }
         }
+        Err(error) => dc.fail(&format!("Profile config is unusable: {error}")),
     }
 }
 
@@ -1253,7 +1271,7 @@ fn warn_detected_unintegrated_host(
 /// The hosts the profile tracks; an unreadable profile config is a warning,
 /// with no host treated as tracked.
 fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
-    match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root) {
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
         Ok(config) => config.installed_agents,
         Err(error) => {
             dc.warn(&format!("Tracked hosts are unknown: {error}"));

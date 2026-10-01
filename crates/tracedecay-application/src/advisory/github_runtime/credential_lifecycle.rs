@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tracedecay_domain::UserProfileId;
+use tracedecay_session_memory::user_config::{ConfigSaveError, read_profile_config};
 use zeroize::Zeroizing;
 
 use super::{
@@ -328,33 +329,24 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
         secrets: Arc<dyn GitHubSecretReadPortV1>,
         verifier: Arc<dyn GitHubReadOnlyCredentialPermissionVerifierV1>,
     ) {
-        let configured = load_configured_repositories(profile_root);
-        let mut repositories = BTreeMap::new();
-        for repository in configured.github_review_sources {
-            let key = (repository.owner.clone(), repository.repository.clone());
-            match repositories.entry(key) {
-                Entry::Vacant(entry) => {
-                    entry.insert(Some(repository));
-                }
-                Entry::Occupied(mut entry) => {
-                    entry.insert(None);
-                }
+        let sources = match read_profile_config::<ConfiguredGitHubRepositoriesV1>(profile_root) {
+            Ok(configured) => review_sources(configured).0,
+            Err(error) => {
+                tracing::warn!(
+                    event = "github_review_sources_unreadable",
+                    %error,
+                    "no GitHub review source is registered for this profile"
+                );
+                return;
             }
-        }
+        };
         let Ok(mut registrations) = self.registrations.lock() else {
             return;
         };
-        for repository in repositories.into_values().flatten() {
-            let key = (
-                profile_id.clone(),
-                repository.owner.clone(),
-                repository.repository.clone(),
-            );
-            match repository.access {
-                ConfiguredGitHubAccessV1::Public
-                    if repository.keyring_service.is_none()
-                        && repository.keyring_account.is_none() =>
-                {
+        for source in sources {
+            match source {
+                RegistrableGitHubReviewSourceV1::Public { owner, repository } => {
+                    let key = (profile_id.clone(), owner, repository);
                     if register_profile_github_public_repository_v1(
                         key.0.clone(),
                         key.1.clone(),
@@ -363,15 +355,13 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
                         registrations.push(ProfileRepositoryCredentialRegistrationV1::Public(key));
                     }
                 }
-                ConfiguredGitHubAccessV1::OsKeyring => {
-                    let (Some(keyring_service), Some(keyring_account)) =
-                        (repository.keyring_service, repository.keyring_account)
-                    else {
-                        continue;
-                    };
-                    if !valid_locator(&keyring_service) || !valid_locator(&keyring_account) {
-                        continue;
-                    }
+                RegistrableGitHubReviewSourceV1::OsKeyring {
+                    owner,
+                    repository,
+                    keyring_service,
+                    keyring_account,
+                } => {
+                    let key = (profile_id.clone(), owner, repository);
                     let authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1> =
                         Arc::new(OsKeyringGitHubReadOnlyCredentialAuthorityV1 {
                             repository_owner: key.1.clone(),
@@ -393,7 +383,6 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
                         });
                     }
                 }
-                ConfiguredGitHubAccessV1::Public => {}
             }
         }
     }
@@ -437,12 +426,135 @@ impl GitHubReadOnlyCredentialLifecycleV1 {
     }
 }
 
-fn load_configured_repositories(profile_root: &Path) -> ConfiguredGitHubRepositoriesV1 {
-    let path = profile_root.join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return ConfiguredGitHubRepositoriesV1::default();
-    };
-    tracedecay_session_memory::user_config::parse_or_warn_default(&path, &contents)
+/// A configured `github_review_sources` entry the daemon does not register.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitHubReviewSourceFindingV1 {
+    /// Listed more than once, so none of its entries registers.
+    Duplicate { owner: String, repository: String },
+    /// `os_keyring` access without both `keyring_service` and `keyring_account`.
+    MissingKeyringLocator { owner: String, repository: String },
+    /// A keyring locator that is empty, padded, over 512 bytes, or carries a
+    /// control character.
+    InvalidKeyringLocator { owner: String, repository: String },
+    /// `public` access that also names a keyring locator.
+    PublicWithKeyringLocator { owner: String, repository: String },
+}
+
+impl std::fmt::Display for GitHubReviewSourceFindingV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duplicate { owner, repository } => {
+                write!(formatter, "{owner}/{repository} is listed more than once")
+            }
+            Self::MissingKeyringLocator { owner, repository } => write!(
+                formatter,
+                "{owner}/{repository} uses os_keyring access without keyring_service and \
+                 keyring_account"
+            ),
+            Self::InvalidKeyringLocator { owner, repository } => write!(
+                formatter,
+                "{owner}/{repository} names a keyring locator that is empty, padded, over 512 \
+                 bytes or carries a control character"
+            ),
+            Self::PublicWithKeyringLocator { owner, repository } => write!(
+                formatter,
+                "{owner}/{repository} uses public access but names a keyring locator"
+            ),
+        }
+    }
+}
+
+enum RegistrableGitHubReviewSourceV1 {
+    Public {
+        owner: String,
+        repository: String,
+    },
+    OsKeyring {
+        owner: String,
+        repository: String,
+        keyring_service: String,
+        keyring_account: String,
+    },
+}
+
+/// Splits the configured review sources into the ones the daemon registers
+/// and a finding for each entry it does not.
+fn review_sources(
+    configured: ConfiguredGitHubRepositoriesV1,
+) -> (
+    Vec<RegistrableGitHubReviewSourceV1>,
+    Vec<GitHubReviewSourceFindingV1>,
+) {
+    let mut findings = Vec::new();
+    let mut repositories = BTreeMap::new();
+    for repository in configured.github_review_sources {
+        match repositories.entry((repository.owner.clone(), repository.repository.clone())) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(repository));
+            }
+            Entry::Occupied(mut entry) => {
+                if entry.insert(None).is_some() {
+                    findings.push(GitHubReviewSourceFindingV1::Duplicate {
+                        owner: repository.owner,
+                        repository: repository.repository,
+                    });
+                }
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    for repository in repositories.into_values().flatten() {
+        match registrable_review_source(repository) {
+            Ok(source) => sources.push(source),
+            Err(finding) => findings.push(finding),
+        }
+    }
+    (sources, findings)
+}
+
+fn registrable_review_source(
+    configured: ConfiguredGitHubRepositoryV1,
+) -> Result<RegistrableGitHubReviewSourceV1, GitHubReviewSourceFindingV1> {
+    let ConfiguredGitHubRepositoryV1 {
+        owner,
+        repository,
+        access,
+        keyring_service,
+        keyring_account,
+    } = configured;
+    match (access, keyring_service, keyring_account) {
+        (ConfiguredGitHubAccessV1::Public, None, None) => {
+            Ok(RegistrableGitHubReviewSourceV1::Public { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::Public, _, _) => {
+            Err(GitHubReviewSourceFindingV1::PublicWithKeyringLocator { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, Some(keyring_service), Some(keyring_account))
+            if valid_locator(&keyring_service) && valid_locator(&keyring_account) =>
+        {
+            Ok(RegistrableGitHubReviewSourceV1::OsKeyring {
+                owner,
+                repository,
+                keyring_service,
+                keyring_account,
+            })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, Some(_), Some(_)) => {
+            Err(GitHubReviewSourceFindingV1::InvalidKeyringLocator { owner, repository })
+        }
+        (ConfiguredGitHubAccessV1::OsKeyring, _, _) => {
+            Err(GitHubReviewSourceFindingV1::MissingKeyringLocator { owner, repository })
+        }
+    }
+}
+
+/// The configured review sources the daemon does not register, read the way
+/// it registers them. An error means it registered none.
+pub fn check_configured_github_review_sources_v1(
+    profile_root: &Path,
+) -> Result<Vec<GitHubReviewSourceFindingV1>, ConfigSaveError> {
+    read_profile_config::<ConfiguredGitHubRepositoriesV1>(profile_root)
+        .map(|configured| review_sources(configured).1)
 }
 
 fn valid_locator(value: &str) -> bool {
@@ -464,7 +576,8 @@ mod tests {
 
     use super::{
         GitHubProviderPermissionVerifierV1, GitHubReadOnlyCredentialLifecycleV1,
-        GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
+        GitHubReviewSourceFindingV1, GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
+        check_configured_github_review_sources_v1,
     };
     use crate::advisory::github_runtime::{
         GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
@@ -546,6 +659,24 @@ owner = "ScriptedAlchemy"
 repository = "duplicate"
 access = "os_keyring"
 keyring_service = "tracedecay.github"
+keyring_account = "read"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "public-with-locator"
+access = "public"
+keyring_service = "tracedecay.github"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "keyring-unnamed"
+access = "os_keyring"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "keyring-padded"
+access = "os_keyring"
+keyring_service = " tracedecay.github"
 keyring_account = "read"
 "#,
         )
@@ -671,6 +802,40 @@ keyring_account = "read"
                 "duplicate",
             ),
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
+        );
+        for repository in ["public-with-locator", "keyring-unnamed", "keyring-padded"] {
+            assert_eq!(
+                mount_profile_github_read_only_credential_authority_v1(
+                    &profile_id,
+                    "ScriptedAlchemy",
+                    repository,
+                ),
+                ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured,
+                "{repository}"
+            );
+        }
+        let owner = || "ScriptedAlchemy".to_owned();
+        assert_eq!(
+            check_configured_github_review_sources_v1(&profile_root)
+                .expect("the profile configuration parses"),
+            [
+                GitHubReviewSourceFindingV1::Duplicate {
+                    owner: owner(),
+                    repository: "duplicate".to_owned(),
+                },
+                GitHubReviewSourceFindingV1::InvalidKeyringLocator {
+                    owner: owner(),
+                    repository: "keyring-padded".to_owned(),
+                },
+                GitHubReviewSourceFindingV1::MissingKeyringLocator {
+                    owner: owner(),
+                    repository: "keyring-unnamed".to_owned(),
+                },
+                GitHubReviewSourceFindingV1::PublicWithKeyringLocator {
+                    owner: owner(),
+                    repository: "public-with-locator".to_owned(),
+                },
+            ]
         );
         server.join().expect("permission verifier server");
 

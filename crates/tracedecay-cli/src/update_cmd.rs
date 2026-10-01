@@ -10,7 +10,9 @@
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use crate::agent_cmd::{HostLifecycleCompletion, HostLifecycleSummary};
+use crate::agent_cmd::{
+    HostLifecycleCompletion, HostLifecycleSummary, load_host_lifecycle_user_config,
+};
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_domain::errors::StoreResetRequiredV1;
@@ -711,7 +713,7 @@ async fn run_post_update_mutations(
         // `--no-reinstall` is a durable opt-out for THIS version, not a
         // one-command deferral: advance the version markers so the explicit
         // lifecycle decision remains durable for this version.
-        let mut config = UserConfig::load(profile.data_dir());
+        let mut config = load_host_lifecycle_user_config(profile)?;
         if let Err(err) = record_completed_reinstall_pass(profile, &mut config) {
             eprintln!("warning: {err}");
         }
@@ -722,7 +724,7 @@ async fn run_post_update_mutations(
     // MCP config. Run the full tracked-agent pass, then advance the version
     // markers. On failure the markers stay put so the incomplete explicit
     // lifecycle remains observable.
-    let mut config = UserConfig::load(profile.data_dir());
+    let mut config = load_host_lifecycle_user_config(profile)?;
     // Prune tracked ids that no longer resolve to an integration (a release
     // renamed/removed one, or a typo landed in `installed_agents`).
     // The reinstall pass skips such ids, but dropping them here stops the
