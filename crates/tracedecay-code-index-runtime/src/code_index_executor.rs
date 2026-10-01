@@ -749,16 +749,16 @@ where
                                 return None;
                             }
                             match serving {
-                                code_index_scheduler::CodeIndexRetainedTextServingWaitV1::Serving
-                                | code_index_scheduler::CodeIndexRetainedTextServingWaitV1::Warming => {
+                                code_index_scheduler::CodeIndexSeatWaitV1::Seated(())
+                                | code_index_scheduler::CodeIndexSeatWaitV1::Deadline => {
                                     Some(code_index_search_unavailable(
                                         code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming,
                                         code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming
                                             .as_str(),
                                     ))
                                 }
-                                code_index_scheduler::CodeIndexRetainedTextServingWaitV1::Unpublished
-                                | code_index_scheduler::CodeIndexRetainedTextServingWaitV1::Unreachable => {
+                                code_index_scheduler::CodeIndexSeatWaitV1::Parked(_)
+                                | code_index_scheduler::CodeIndexSeatWaitV1::Cancelled => {
                                     Some(code_index_search_unavailable(
                                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                                         "query_authority_unavailable",

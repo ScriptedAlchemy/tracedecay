@@ -335,6 +335,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -353,7 +354,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // longer held, so no later retry can serve it either.
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope())
+                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope(), deadline)
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else {
@@ -363,7 +364,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
-        let latest = tokio::time::timeout(wait, resolution)
+        let latest = tokio::time::timeout_at(deadline, resolution)
             .await
             .map_err(|_| CallableCodeCursorError::Unavailable)??;
         if !matches!(
@@ -455,6 +456,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCodeTextGenerationV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -489,7 +491,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.current_text_owner_for_scope(request.scope())
+                self.current_text_owner_for_scope(request.scope(), deadline)
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self

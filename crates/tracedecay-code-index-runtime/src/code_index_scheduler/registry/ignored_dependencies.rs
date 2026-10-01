@@ -1,6 +1,7 @@
 //! Single-flight activation and serving publication for ignored dependencies.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{
     Arc, Mutex,
@@ -12,7 +13,8 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexPr
 use tracedecay_domain::canonical_sha256;
 
 use super::{
-    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, PendingWakeV1, ServingGenerationSlot,
+    CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1, PendingWakeV1,
+    ServingGenerationSlot,
 };
 use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::code_index_scheduler::{
@@ -396,11 +398,14 @@ impl CodeIndexExecutionControlV1 for AdmissionControlBridgeV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// `deadline` is the request deadline `control` also reports, as the
+    /// instant a wait for the decoded seat ends at.
     pub async fn index_verified_ignored_dependency(
         &self,
         project_root: &Path,
         request: CodeIndexIgnoredDependencyRequestV1,
         control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync + '_>,
+        deadline: tokio::time::Instant,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         let flight_key = AdmissionFlightKeyV1::for_request(&request)?;
@@ -440,7 +445,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         if graph_activation_enabled {
-            self.await_decoded_seat(&project_root, control.as_ref())
+            self.await_decoded_seat(&project_root, control.as_ref(), deadline)
                 .await?;
         }
         let (flight, owns_flight) = {
@@ -495,79 +500,65 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Admission builds on the decoded generation, but a ready generation
     /// serves from its text owner before the worker's graph tail seats it (a
     /// first publication), or with no seat at all until one is demanded.
-    /// Demand the seat and wait for it on the owner's signals, within the
-    /// request's budget: an unexpired request never refuses for a seat that
-    /// is still being installed, and an expired one reports its deadline.
-    ///
-    /// A worker parked on a failure installs no seat, so the park is the
-    /// answer. A park the worker re-checks on every wake answers only once a
-    /// pass after this demand has observed it again (each observation
-    /// rewrites it); any other park answers once the worker is back at a
-    /// wait, since only changed input or an operator remedy lifts it.
+    /// Demand the seat and wait for it until `deadline`: an unexpired request
+    /// never refuses for a seat that is still being installed, an expired one
+    /// reports its deadline, and a parked worker answers with its park.
     async fn await_decoded_seat(
         &self,
         project_root: &Path,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+        deadline: tokio::time::Instant,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
-        let Some(activity) = self.subscribe_owner_activity(project_root).await else {
-            return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
-        };
-        let (serving_generation, convergence_park, shutting_down, pending_wake, wake) = {
-            let mounted = self.mounted.lock().await;
-            let Some(worktree) = mounted.get(project_root) else {
-                return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
-            };
-            (
-                Arc::clone(&worktree.serving_generation),
-                Arc::clone(&worktree.convergence_park),
-                Arc::clone(&worktree.shutting_down),
-                Arc::clone(&worktree.pending_wake),
-                Arc::clone(&worktree.wake),
-            )
-        };
-        let seated = || {
-            serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
-        };
-        let park = || {
-            convergence_park
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
-        if seated() {
-            return Ok(());
-        }
-        let park_at_demand = park();
-        self.request_complete_generation(project_root).await;
-        // The demand flag flips once per mount, so this demand posts its own
-        // wake: a park the worker re-checks answers only after that re-check.
-        Self::note_wake(
-            &pending_wake,
-            &wake,
-            CodeIndexCadenceTriggerV1::QueryAdmission,
-        );
-        loop {
-            if seated() {
-                return Ok(());
-            }
-            if let Some(parked) = park()
-                && activity.pass_finished()
-                && (!parked.retries_on_wake || park_at_demand.as_ref() != Some(&parked))
-            {
-                return Err(CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked).into());
-            }
-            refuse_if_interrupted(control, &shutting_down)?;
-            tokio::select! {
-                changed = signals.changed() => {
-                    if changed.is_err() {
-                        return Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
-                    }
+        let demanded = &AtomicBool::new(false);
+        let Ok(waited) = self
+            .wait_for_seat(project_root, deadline, |_| async move {
+                let mounted = self.mounted.lock().await;
+                let Some(worktree) = mounted.get(project_root) else {
+                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                };
+                if worktree
+                    .serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    return Ok(Some(CodeIndexSeatWaitV1::Seated(())));
                 }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+                if control.is_cancelled() {
+                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                }
+                if control.is_deadline_exceeded() {
+                    return Ok(Some(CodeIndexSeatWaitV1::Deadline));
+                }
+                if !demanded.swap(true, Ordering::AcqRel) {
+                    let (pending_wake, wake) = (
+                        Arc::clone(&worktree.pending_wake),
+                        Arc::clone(&worktree.wake),
+                    );
+                    drop(mounted);
+                    self.request_complete_generation(project_root).await;
+                    // The demand flag flips once per mount, so this demand
+                    // posts its own wake: a park the worker re-checks answers
+                    // only after that re-check.
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
+                    );
+                }
+                Ok::<_, Infallible>(None)
+            })
+            .await;
+        match waited {
+            CodeIndexSeatWaitV1::Seated(()) => Ok(()),
+            CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(parked)) => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(parked).into())
+            }
+            CodeIndexSeatWaitV1::Parked(_) | CodeIndexSeatWaitV1::Cancelled => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
+            }
+            CodeIndexSeatWaitV1::Deadline => {
+                Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
             }
         }
     }

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionFutureV1,
@@ -96,9 +97,22 @@ impl CodeIndexIgnoredDependencyAdmissionPortV1
             if control.is_deadline_exceeded() {
                 return Err(CodeIndexIgnoredDependencyAdmissionErrorV1::TimedOut);
             }
+            let remaining_micros = request
+                .context()
+                .deadline()
+                .expires_at
+                .0
+                .saturating_sub(now_micros().0);
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_micros(u64::try_from(remaining_micros).unwrap_or(0));
             match self
                 .schedulers
-                .index_verified_ignored_dependency(&project_root, scheduler_request, control)
+                .index_verified_ignored_dependency(
+                    &project_root,
+                    scheduler_request,
+                    control,
+                    deadline,
+                )
                 .await
             {
                 Ok(outcome) => Ok(outcome.generation_id),

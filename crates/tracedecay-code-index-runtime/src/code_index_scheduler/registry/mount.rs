@@ -2450,7 +2450,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // A configuration refusal never re-attempts, so an
                             // unparked refusal read as an indefinite `indexing`.
                             // A memory refusal parks typed until memory is
-                            // given back or its retry delay elapses.
+                            // given back.
                             if error.is_resident_memory_graph_refusal() {
                                 park_convergence(
                                     &worker_convergence_park,
