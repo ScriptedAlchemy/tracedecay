@@ -49,7 +49,8 @@ use crate::runtime::hosts::codex::{
 use crate::runtime::ingest::classify_transcript_ingest_failure;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
-    JsonlChangeKind, JsonlResumeState, TranscriptIngestError, spin_until_jsonl_change_settled,
+    HoldUnchangedGenerationCache, JsonlChangeKind, JsonlIoAccounting, JsonlResumeState,
+    TranscriptIngestError, spin_until_jsonl_change_settled,
 };
 
 /// Wraps [`MemoryHostAdmission`] so a test can script the capture verdict and
@@ -1431,6 +1432,126 @@ async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
         1
     );
     assert_eq!(resumed.frames_persisted, 1);
+}
+
+const CATCH_UP_RECORD_BYTES: usize = 256;
+const CATCH_UP_TURN_RECORDS: usize = 16;
+const CATCH_UP_WINDOW_BYTES: u64 = 16 * 1024;
+
+/// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta,
+/// then a turn context opening every [`CATCH_UP_TURN_RECORDS`] records with
+/// user messages between them.
+fn catch_up_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
+    let record = |pad: &str| match index {
+        0 => json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION_ID, "cwd": cwd, "pad": pad}
+        }),
+        _ if index % CATCH_UP_TURN_RECORDS == 1 => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "turn_context",
+            "payload": {"turn_id": format!("turn-{index:05}"), "cwd": cwd, "pad": pad}
+        }),
+        _ => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+        }),
+    };
+    let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
+    let line = record(&"x".repeat(pad)).to_string() + "\n";
+    assert_eq!(line.len(), CATCH_UP_RECORD_BYTES);
+    line
+}
+
+/// Admit `path` window by window until the rollout stops deferring, returning
+/// the summed scan accounting, prior-context rereads, and window count.
+async fn catch_up_codex_rollout(
+    path: &Path,
+    admission: &MemoryHostAdmission,
+    max_new_bytes: Option<u64>,
+) -> (JsonlIoAccounting, u64, u64) {
+    let mut io = JsonlIoAccounting::default();
+    let mut prior_context_bytes = 0;
+    for windows in 1..=4_096 {
+        let pass = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            path,
+            None,
+            &[],
+            admission,
+            max_new_bytes,
+        )
+        .await
+        .expect("catch-up window");
+        io = io.followed_by(pass.io);
+        prior_context_bytes += pass.prior_context_bytes;
+        if !pass.source_deferred {
+            return (io, prior_context_bytes, windows);
+        }
+    }
+    panic!("catch-up never stopped deferring");
+}
+
+/// Catching up an in-place edit of a large rollout window by window reads its
+/// prefix a fixed number of times: once to find the edit and once to the first
+/// changed record. Neither each window's resume proof nor its prior context
+/// rereads the prefix, so the bytes do not grow with the file or the windows.
+#[tokio::test]
+async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
+    for records in [1_024_usize, 4_096] {
+        super::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path = temp.path().join("rollout.jsonl");
+        let _warm = HoldUnchangedGenerationCache::enter(&path);
+        let original = (0..records)
+            .map(|index| catch_up_rollout_line(index, &cwd, "original"))
+            .collect::<String>();
+        std::fs::write(&path, &original).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let admission = MemoryHostAdmission::default();
+        catch_up_codex_rollout(&path, &admission, None).await;
+
+        let len = u64::try_from(original.len()).unwrap();
+        let edited_index = records / 2;
+        let edit_offset = u64::try_from(edited_index * CATCH_UP_RECORD_BYTES).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(edit_offset)).unwrap();
+        file.write_all(catch_up_rollout_line(edited_index, &cwd, "edited").as_bytes())
+            .unwrap();
+        drop(file);
+        spin_until_jsonl_change_settled(&path);
+
+        let (io, prior_context_bytes, windows) =
+            catch_up_codex_rollout(&path, &admission, Some(CATCH_UP_WINDOW_BYTES)).await;
+        assert_eq!(windows, (len - edit_offset) / CATCH_UP_WINDOW_BYTES);
+        assert_eq!(io.content_bytes, len - edit_offset, "{records} records");
+        assert_eq!(io.snapshot_hash_bytes, 0, "{records} records");
+        assert_eq!(
+            io.prefix_validation_bytes,
+            len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
+            "{records} records: only the divergence walks hash the prefix, never a later window"
+        );
+        assert!(
+            prior_context_bytes <= windows * CATCH_UP_WINDOW_BYTES,
+            "{records} records over {windows} windows reread {prior_context_bytes} prefix bytes \
+             for their prior context"
+        );
+        let edited = admission
+            .observations()
+            .iter()
+            .filter(|stored| {
+                stored
+                    .observation()
+                    .payload()
+                    .to_string()
+                    .contains(&format!("edited-{edited_index:05}"))
+            })
+            .count();
+        assert_eq!(edited, 1, "{records} records");
+    }
 }
 
 #[tokio::test]

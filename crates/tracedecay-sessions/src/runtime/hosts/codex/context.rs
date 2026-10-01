@@ -29,12 +29,12 @@ impl CodexContextState {
     }
 
     #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
-    pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> Self {
+    pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> (Self, u64) {
         if before_offset == 0 {
-            return Self::from_meta(meta);
+            return (Self::from_meta(meta), 0);
         }
         let Ok(mut file) = std::fs::File::open(path) else {
-            return Self::from_meta(meta);
+            return (Self::from_meta(meta), 0);
         };
         #[cfg(test)]
         {
@@ -56,9 +56,10 @@ impl CodexContextState {
             state = Self::from_meta(meta);
             offset = 0;
             if file.seek(SeekFrom::Start(0)).is_err() {
-                return state;
+                return (state, 0);
             }
         }
+        let start = offset;
         let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
         while let Ok(frame) = frames.next_frame() {
             if matches!(frame, RawJsonlFrame::Eof) || offset >= before_offset {
@@ -87,7 +88,7 @@ impl CodexContextState {
         if let Some(generation) = generation {
             store_prior_context(path, generation, before_offset, state.clone());
         }
-        state
+        (state, offset - start)
     }
 
     pub(super) fn observe_context_record(

@@ -306,17 +306,19 @@ fn reset_unchanged_generation_cache_for_test() {
     *cache = BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP);
 }
 
+/// The one transcript whose scans keep the process-global cache warm.
+///
+/// Keyed by path rather than by thread: admission scans run on blocking-pool
+/// threads, not on the test thread that holds the cache.
 #[cfg(test)]
-thread_local! {
-    static HOLD_UNCHANGED_GENERATION_CACHE: Cell<bool> = const { Cell::new(false) };
-}
+static HELD_UNCHANGED_GENERATION_PATH: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 /// Serializes the process-global cache against the tests that need it warm.
 ///
-/// The reset below is process-global but the hold flag is thread-local, so a
-/// concurrent scan on another test thread used to wipe a holder's warm entry
-/// between its two polls. Every non-holding scan takes this lock for the
-/// duration of its reset, and a holder keeps it for the whole test.
+/// The reset below is process-global, so a concurrent scan from another test
+/// used to wipe a holder's warm entry between its two polls. Every scan of
+/// another path takes this lock for the duration of its reset, and a holder
+/// keeps it for the whole test.
 #[cfg(test)]
 fn unchanged_generation_cache_isolation() -> &'static Mutex<()> {
     static ISOLATION: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
@@ -324,8 +326,13 @@ fn unchanged_generation_cache_isolation() -> &'static Mutex<()> {
 }
 
 #[cfg(test)]
-fn isolate_unchanged_generation_cache_unless_held() {
-    if HOLD_UNCHANGED_GENERATION_CACHE.with(Cell::get) {
+fn isolate_unchanged_generation_cache_unless_held(path: &Path) {
+    if HELD_UNCHANGED_GENERATION_PATH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
+        == Some(path)
+    {
         return;
     }
     let _serialized = unchanged_generation_cache_isolation()
@@ -335,18 +342,20 @@ fn isolate_unchanged_generation_cache_unless_held() {
 }
 
 #[cfg(test)]
-pub(super) struct HoldUnchangedGenerationCache {
+pub(in crate::runtime) struct HoldUnchangedGenerationCache {
     _serialized: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 impl HoldUnchangedGenerationCache {
-    pub(super) fn enter() -> Self {
+    pub(in crate::runtime) fn enter(path: &Path) -> Self {
         let serialized = unchanged_generation_cache_isolation()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_unchanged_generation_cache_for_test();
-        HOLD_UNCHANGED_GENERATION_CACHE.with(|held| held.set(true));
+        *HELD_UNCHANGED_GENERATION_PATH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
         Self {
             _serialized: serialized,
         }
@@ -380,7 +389,9 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
 #[cfg(test)]
 impl Drop for HoldUnchangedGenerationCache {
     fn drop(&mut self) {
-        HOLD_UNCHANGED_GENERATION_CACHE.with(|held| held.set(false));
+        *HELD_UNCHANGED_GENERATION_PATH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         reset_unchanged_generation_cache_for_test();
     }
 }
@@ -1150,7 +1161,7 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
     max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
     #[cfg(test)]
-    isolate_unchanged_generation_cache_unless_held();
+    isolate_unchanged_generation_cache_unless_held(path);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
@@ -2214,9 +2225,9 @@ mod tests {
 
     #[test]
     fn cached_unchanged_generation_revalidates_an_in_place_tail_rewrite() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memo-rewrite.jsonl");
+        let _hold = HoldUnchangedGenerationCache::enter(&path);
         let original = b"{\"v\":0}\n".repeat(3_000);
         std::fs::write(&path, &original).unwrap();
         let first = try_stream_new_jsonl_raw_strict_with_resume(
@@ -2265,9 +2276,9 @@ mod tests {
 
     #[test]
     fn same_quantum_rewrite_is_visible_after_the_change_time_settles() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("quantum.jsonl");
+        let _hold = HoldUnchangedGenerationCache::enter(&path);
         let original = b"{\"v\":0}\n";
         let replacement = b"{\"v\":1}\n";
         assert_eq!(original.len(), replacement.len());
@@ -2304,9 +2315,9 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn cached_unchanged_generation_rejects_inode_replacement() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("active.jsonl");
+        let _hold = HoldUnchangedGenerationCache::enter(&path);
         let old = dir.path().join("old.jsonl");
         let replacement = dir.path().join("replacement.jsonl");
         let contents = b"{\"v\":0}\n";
@@ -2344,9 +2355,9 @@ mod tests {
 
     #[test]
     fn cached_unchanged_generation_rejects_concurrent_same_handle_mutation() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("concurrent.jsonl");
+        let _hold = HoldUnchangedGenerationCache::enter(&path);
         let original = b"{\"v\":0}\n";
         let replacement = b"{\"v\":1}\n";
         std::fs::write(&path, original).unwrap();
