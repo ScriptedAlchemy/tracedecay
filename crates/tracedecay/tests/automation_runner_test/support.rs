@@ -756,7 +756,11 @@ impl AgentTaskBackend for FailingBackend {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
-        Err(tracedecay_automation::backend::AgentTaskError::from_backend_message(self.message))
+        Err(
+            tracedecay_automation::backend::AgentTaskError::Unavailable {
+                reason: self.message.to_owned(),
+            },
+        )
     }
 
     fn executable(&self) -> Option<&std::path::Path> {

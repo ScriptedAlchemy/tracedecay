@@ -182,8 +182,9 @@ impl ContextScoutModelAssistantV1 for UnavailableContextScoutModelAssistantV1 {
 
 /// Maps each typed backend failure onto its truthful Scout model state.
 /// Denial, disconnect, and unavailability stay distinct outcomes end to end;
-/// only the residual untyped `Failed` state collapses to `Unavailable`
-/// because the Scout taxonomy has no generic-failure outcome.
+/// an oversized input exceeds the route's token budget, and the transient
+/// `Retryable` and residual `Failed` states collapse to `Unavailable` because
+/// the Scout taxonomy has no retry or generic-failure outcome.
 fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModelErrorV1 {
     match error {
         AgentTaskError::Denied { .. } => ContextScoutModelErrorV1::Denied,
@@ -191,7 +192,10 @@ fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModel
         AgentTaskError::Unavailable { .. } => ContextScoutModelErrorV1::Unavailable,
         AgentTaskError::Timeout { .. } => ContextScoutModelErrorV1::DeadlineExceeded,
         AgentTaskError::MalformedOutput { .. } => ContextScoutModelErrorV1::InvalidOutput,
-        AgentTaskError::Failed { .. } => ContextScoutModelErrorV1::Unavailable,
+        AgentTaskError::InputTooLarge { .. } => ContextScoutModelErrorV1::TokenBudgetExceeded,
+        AgentTaskError::Retryable { .. } | AgentTaskError::Failed { .. } => {
+            ContextScoutModelErrorV1::Unavailable
+        }
     }
 }
 
@@ -439,6 +443,28 @@ mod tests {
                 ..AutomationConfig::default()
             }),
             ContextScoutModelBackendV1::Disabled
+        );
+    }
+
+    #[test]
+    fn oversized_input_is_a_token_budget_and_a_retry_stays_unavailable() {
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::InputTooLarge {
+                reason: "context window exceeded".to_string(),
+            }),
+            ContextScoutModelErrorV1::TokenBudgetExceeded
+        );
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::Retryable {
+                reason: "rate limit exceeded".to_string(),
+            }),
+            ContextScoutModelErrorV1::Unavailable
+        );
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::Failed {
+                reason: "model rejected the prompt".to_string(),
+            }),
+            ContextScoutModelErrorV1::Unavailable
         );
     }
 

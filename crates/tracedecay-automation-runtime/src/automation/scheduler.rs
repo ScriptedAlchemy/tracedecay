@@ -525,11 +525,8 @@ fn schedule_decision_for_trigger(
     });
     if let Some((record, completed_at)) = latest_cadence {
         if record.status == AutomationRunStatus::Failed {
-            let failure = agent_task_failure_disposition(
-                record.error_classification,
-                record.error_retryable,
-                record.error.as_deref(),
-            );
+            let failure =
+                agent_task_failure_disposition(record.error_classification, record.error_retryable);
             // Identity-stand first: a deterministic failure stamped under the
             // current backend stays suppressed until that identity changes.
             match deterministic_backend_failure_standing(record, config, executable) {

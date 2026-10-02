@@ -231,16 +231,25 @@
       "type": "string"
     },
     "AgentTaskFailureClass": {
-      "enum": [
-        "retryable",
-        "permanent",
-        "timeout",
-        "unavailable",
-        "denied",
-        "disconnected",
-        "malformed_output"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "retryable",
+            "permanent",
+            "timeout",
+            "unavailable",
+            "denied",
+            "disconnected",
+            "malformed_output"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "input_too_large",
+          "description": "The backend refused the request because it exceeds its input or\ncontext-window limit.",
+          "type": "string"
+        }
+      ]
     },
     "AgentTaskKind": {
       "enum": [
