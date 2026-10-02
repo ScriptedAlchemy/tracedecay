@@ -1463,6 +1463,10 @@ mod work_evidence_mount_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod lcm_claude_recall_tests;
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod graph_tool_owner_mounting_tests;
+
 /// Staleness-banner, startup catch-up, and sync-on-read behavioural tests.
 /// The pure-logic banner tests need no server; the server tests build
 /// a real indexed `TraceDecay` over a temp git repo, mirroring the

@@ -288,5 +288,22 @@ mod tests {
             "config error: profile authority requires reset (rows predate the unified identity) \
              and is not reset on its own; run `tracedecay wipe --all --yes`. Nothing was wiped."
         );
+        assert_eq!(
+            resettable_targets(&[StoreResetRequiredV1 {
+                store: "profile authority".to_owned(),
+                authority: "LCM".to_owned(),
+                found_version: Some(13),
+                required_version: Some(14),
+                reason: "LCM profile schema 13 is incompatible with required schema 14; reset \
+                          the profile"
+                    .to_owned(),
+                remedy: "tracedecay wipe --all --yes".to_owned(),
+            }])
+            .unwrap_err()
+            .to_string(),
+            "config error: profile authority requires reset (LCM profile schema 13 is \
+             incompatible with required schema 14; reset the profile) and is not reset on its \
+             own; run `tracedecay wipe --all --yes`. Nothing was wiped."
+        );
     }
 }
