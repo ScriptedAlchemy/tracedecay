@@ -551,6 +551,23 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         .find(|(_, kind, _)| *kind == Some("tool_dispatch"))
         .expect("the dispatch-only observation is searchable");
     assert_eq!(dispatch.0, "cursor-session:tool_dispatch:call-a");
+    let mixed = results
+        .iter()
+        .find(|hit| hit.message.kind.as_deref() == Some("message"))
+        .expect("the mixed observation remains one searchable message");
+    assert_eq!(mixed.message.tool_names.as_deref(), Some("Subagent"));
+    assert!(
+        mixed
+            .message
+            .text
+            .contains("Launching the memory reviewer.")
+    );
+    assert!(mixed.message.text.contains("Review the memory routing."));
+    assert!(
+        results
+            .iter()
+            .all(|hit| { hit.message.message_id != "cursor-session:tool_dispatch:call-b" })
+    );
     for hit in results
         .iter()
         .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))

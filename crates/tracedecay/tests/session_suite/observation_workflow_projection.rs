@@ -829,7 +829,7 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
     );
     persist_and_project(&store, follow_up, Some(cursor)).await;
 
-    let mut hits = runtime
+    let hits = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database")
         .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 2)
@@ -838,18 +838,28 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
         .into_iter()
         .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
         .collect::<Vec<_>>();
-    hits.sort();
     assert_eq!(
         hits,
         [
+            ("task", "release follow-up"),
             (
                 "message",
                 "release summary repeats release task alpha\n\nrelease task beta",
             ),
-            ("task", "release follow-up"),
         ]
         .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
     );
+    let top_hit = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 1)
+        .await
+        .expect("limit the ordered observation search");
+    let [top_hit] = top_hit.as_slice() else {
+        panic!("limit one must return exactly the first observation");
+    };
+    assert_eq!(top_hit.message.kind.as_deref(), Some("task"));
+    assert_eq!(top_hit.message.text, "release follow-up");
 
     let spanning_hit = runtime
         .registered_database(HostAdmissionScope::Profile)
