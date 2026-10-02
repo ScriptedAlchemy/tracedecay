@@ -100,6 +100,7 @@ struct PageBuildCostV1 {
     identities: u64,
     entities: u64,
     relations: u64,
+    external_endpoints: u64,
     max_entity_buffered: u64,
     max_entity_resident: u64,
 }
@@ -124,6 +125,7 @@ impl PageBuildCostV1 {
             identities: footprint.identity_bytes,
             entities: footprint.entity_count,
             relations: footprint.relation_count,
+            external_endpoints: footprint.external_endpoint_count,
             max_entity_buffered: footprint.max_entity_spill_buffered,
             max_entity_resident: footprint.max_entity_spill_resident,
         }
@@ -223,7 +225,7 @@ pub(crate) fn layered_page_graph_build_bound<'a>(
                     .saturating_add(hidden_bytes)
                     .saturating_add(page_window),
             );
-            endpoint_slots = endpoint_slots.saturating_add(child.relations.saturating_mul(2));
+            endpoint_slots = endpoint_slots.saturating_add(child.external_endpoints);
             delta_entities = delta_entities.saturating_add(child.entities);
             delta_relations = delta_relations.saturating_add(child.relations);
         }
@@ -575,7 +577,80 @@ fn spill_finish_bytes(entity_rows: usize, relation_rows: usize, identity_bytes: 
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_domain::{FileOccurrenceId, ManifestDigest};
+
+    use super::super::CodeGraphPageBuildFootprintV1;
     use super::*;
+
+    fn page(
+        file_key: u32,
+        build_footprint: CodeGraphPageBuildFootprintV1,
+    ) -> CodeGraphPageDescriptorV1 {
+        CodeGraphPageDescriptorV1 {
+            file_key,
+            file_occurrence_id: FileOccurrenceId::new(format!("file.fixture.{file_key}"))
+                .expect("file occurrence"),
+            logical_path: format!("src/file-{file_key}.rs"),
+            page_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("page digest"),
+            size_bytes: 1,
+            build_footprint,
+        }
+    }
+
+    fn refresh_bound(
+        child_external_endpoints: u64,
+        unrelated_base_entity_bytes: u64,
+    ) -> CodeGraphBuildBoundV1 {
+        let changed_footprint = CodeGraphPageBuildFootprintV1 {
+            decode_bytes: 2,
+            entity_spill_buffered: 1_000,
+            entity_spill_resident: 1_200,
+            relation_spill_buffered: 100_000,
+            relation_spill_resident: 120_000,
+            identity_bytes: 4_000,
+            entity_count: 10,
+            relation_count: 1_000,
+            external_endpoint_count: child_external_endpoints,
+            max_entity_spill_buffered: 100,
+            max_entity_spill_resident: 120,
+        };
+        let base_changed = page(0, changed_footprint.clone());
+        let child_changed = page(0, changed_footprint);
+        let unrelated = page(
+            1,
+            CodeGraphPageBuildFootprintV1 {
+                decode_bytes: 2,
+                identity_bytes: 400,
+                entity_count: 1,
+                max_entity_spill_buffered: unrelated_base_entity_bytes,
+                max_entity_spill_resident: unrelated_base_entity_bytes,
+                ..CodeGraphPageBuildFootprintV1::default()
+            },
+        );
+        layered_page_graph_build_bound(
+            [(Some(&child_changed), Some(&base_changed))],
+            &[base_changed.clone(), unrelated],
+            "fixture".len(),
+        )
+    }
+
+    #[test]
+    fn local_relations_charge_no_copies_of_an_unrelated_large_base_entity() {
+        let small_unrelated = refresh_bound(0, 120);
+        let large_unrelated = refresh_bound(0, 100 * 1024);
+
+        assert_eq!(large_unrelated.peak_bytes(), small_unrelated.peak_bytes());
+    }
+
+    #[test]
+    fn each_external_endpoint_charges_one_copy_of_the_largest_base_entity() {
+        let local = refresh_bound(0, 100 * 1024);
+        let three_external = refresh_bound(3, 100 * 1024);
+
+        assert!(three_external.emit_spill_bytes >= 3 * (100 * 1024 + 400));
+        assert!(three_external.peak_bytes() > local.peak_bytes());
+    }
 
     #[test]
     fn spill_buffers_write_a_run_once_a_kind_reaches_the_run_size() {

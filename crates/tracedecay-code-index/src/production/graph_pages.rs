@@ -1,6 +1,6 @@
 //! Per-file graph projection outputs sealed after canonical resolution.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -83,6 +83,17 @@ fn page_build_footprint(
         relation_spill.buffered = relation_spill.buffered.saturating_add(footprint.buffered);
         relation_spill.resident = relation_spill.resident.saturating_add(footprint.resident);
     }
+    let own_entities = rows
+        .entities
+        .iter()
+        .map(|entity| &entity.identity)
+        .collect::<HashSet<_>>();
+    let external_endpoints = rows
+        .relations
+        .iter()
+        .flat_map(|relation| [&relation.from.identity, &relation.to.identity])
+        .filter(|endpoint| !own_entities.contains(endpoint))
+        .collect::<HashSet<_>>();
     let encoded_bytes = u64::try_from(encoded_bytes).unwrap_or(u64::MAX);
     let number = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     Ok(CodeGraphPageBuildFootprintV1 {
@@ -100,6 +111,7 @@ fn page_build_footprint(
         identity_bytes: number(identity_bytes),
         entity_count: number(rows.entities.len()),
         relation_count: number(rows.relations.len()),
+        external_endpoint_count: number(external_endpoints.len()),
         max_entity_spill_buffered: number(max_entity_spill.buffered),
         max_entity_spill_resident: number(max_entity_spill.resident),
     })
