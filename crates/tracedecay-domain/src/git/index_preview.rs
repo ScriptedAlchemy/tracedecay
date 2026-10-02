@@ -100,6 +100,9 @@ struct GitIndexPreviewInputDigestMaterial<'a> {
     repository_snapshot_id: &'a RepositoryStateSnapshotId,
     repository_snapshot_digest: &'a ManifestDigest,
     hunk_digests: &'a [ManifestDigest],
+    // Always null. Records stored before commit_index was removed digest
+    // this key, so dropping it would break every stored digest.
+    commit_intent_digest: Option<()>,
     created_at: UtcMicros,
     expires_at: UtcMicros,
 }
@@ -144,6 +147,7 @@ impl GitIndexPreviewInputV1 {
             repository_snapshot_id: self.repository_snapshot.snapshot_id(),
             repository_snapshot_digest: &self.repository_snapshot_digest,
             hunk_digests: &hunk_digests,
+            commit_intent_digest: None,
             created_at: self.created_at,
             expires_at: self.expires_at,
         })
@@ -220,12 +224,19 @@ impl<'de> Deserialize<'de> for GitIndexPreviewInputV1 {
             repository_snapshot: RepositoryStateSnapshotV1,
             repository_snapshot_digest: ManifestDigest,
             hunks: Vec<HunkRefV1>,
+            #[serde(default)]
+            commit_intent: Option<serde::de::IgnoredAny>,
             created_at: UtcMicros,
             expires_at: UtcMicros,
             input_digest: ManifestDigest,
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        if wire.commit_intent.is_some() {
+            return Err(serde::de::Error::custom(
+                "git index preview input carries a commit intent, which no operation accepts",
+            ));
+        }
         let input = Self::new_hunk_selection(
             wire.preview_id,
             wire.operation,
@@ -275,6 +286,9 @@ struct GitIndexPreviewDigestMaterial<'a> {
     selected_hunk_digests: &'a [ManifestDigest],
     candidate_index_tree: Option<&'a GitOidV1>,
     disposition: &'a GitIndexPreviewDispositionV1,
+    // Always null. Records stored before commit_index was removed digest
+    // this key, so dropping it would break every stored digest.
+    commit_intent_digest: Option<()>,
     created_at: UtcMicros,
     expires_at: UtcMicros,
 }
@@ -339,6 +353,7 @@ impl GitIndexPreviewV1 {
             selected_hunk_digests: &hunk_digests,
             candidate_index_tree: self.candidate_index_tree.as_ref(),
             disposition: &self.disposition,
+            commit_intent_digest: None,
             created_at: self.created_at,
             expires_at: self.expires_at,
         })
@@ -440,12 +455,19 @@ impl<'de> Deserialize<'de> for GitIndexPreviewV1 {
             selected_hunks: Vec<HunkRefV1>,
             candidate_index_tree: Option<GitOidV1>,
             disposition: GitIndexPreviewDispositionV1,
+            #[serde(default)]
+            commit_intent_digest: Option<serde::de::IgnoredAny>,
             created_at: UtcMicros,
             expires_at: UtcMicros,
             preview_digest: ManifestDigest,
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        if wire.commit_intent_digest.is_some() {
+            return Err(serde::de::Error::custom(
+                "git index preview carries a commit intent digest, which no operation accepts",
+            ));
+        }
         let preview = Self::new(
             wire.preview_id,
             wire.operation,

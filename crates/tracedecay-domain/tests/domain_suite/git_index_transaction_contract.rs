@@ -400,3 +400,53 @@ fn snapshot_without_complete_native_identity_is_read_only() {
     .expect("read-only snapshot");
     assert!(!state.is_mutation_eligible());
 }
+
+fn legacy_fixture(name: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/tests/fixtures/git_index_legacy/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).expect("legacy fixture"))
+        .expect("legacy fixture is JSON")
+}
+
+#[test]
+fn records_stored_before_commit_index_removal_still_decode() {
+    let mut input = legacy_fixture("stage_preview_input");
+    let mut preview = legacy_fixture("stage_preview");
+    let mut receipt = legacy_fixture("stage_receipt");
+
+    let decoded_input: GitIndexPreviewInputV1 =
+        serde_json::from_value(input.clone()).expect("legacy input decodes");
+    let decoded_preview: GitIndexPreviewV1 =
+        serde_json::from_value(preview.clone()).expect("legacy preview decodes");
+    let decoded_receipt: GitIndexTransactionReceiptV1 =
+        serde_json::from_value(receipt.clone()).expect("legacy receipt decodes");
+    assert_eq!(
+        serde_json::json!(decoded_input.compute_input_digest().expect("input digest")),
+        input["input_digest"]
+    );
+    assert_eq!(
+        serde_json::json!(
+            decoded_preview
+                .compute_preview_digest()
+                .expect("preview digest")
+        ),
+        preview["preview_digest"]
+    );
+    assert_eq!(
+        serde_json::json!(
+            decoded_receipt
+                .compute_receipt_digest()
+                .expect("receipt digest")
+        ),
+        receipt["receipt_digest"]
+    );
+
+    input["commit_intent"] = serde_json::json!({ "message": "legacy" });
+    preview["commit_intent_digest"] = serde_json::json!(digest('9'));
+    receipt["created_commit"] = serde_json::json!(oid('9'));
+    assert!(serde_json::from_value::<GitIndexPreviewInputV1>(input).is_err());
+    assert!(serde_json::from_value::<GitIndexPreviewV1>(preview).is_err());
+    assert!(serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt).is_err());
+}
