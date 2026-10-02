@@ -719,6 +719,19 @@ impl CodeIndexWorktreeSchedulerV1 {
             .sealed_replay_binding(generation_id)
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
+
+    /// Whether the durable publication pointer names `generation_id`. Graph heads
+    /// only follow the pointer, so a head on any other generation is older than it.
+    pub fn names_active_publication(
+        &self,
+        generation_id: &tracedecay_domain::CodeGenerationId,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        Ok(self
+            .publication
+            .read_publication_pointer()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+            .is_some_and(|pointer| pointer.generation_id == generation_id.as_str()))
+    }
 }
 
 struct SchedulerGraphCancellation(Arc<AtomicBool>);

@@ -930,3 +930,165 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         "restarted daemon did not stop cleanly: {exit}"
     );
 }
+
+#[tokio::test]
+async fn sigterm_after_successor_publication_resumes_its_unfinished_text_and_graph() {
+    let (environment, project) = IsolatedHome::new();
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
+    let (main_revision, _) = initialize_repository(&project);
+    let socket = daemon_socket_path(environment.home());
+    let log_path = environment
+        .scratch()
+        .join("interrupted-graph-publication-daemon.log");
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env(
+            "RUST_LOG",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
+        );
+    });
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(project.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("production daemon handshake");
+    let initial = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        Some(&main_revision),
+        None,
+        "lifecycle_main_symbol",
+        Some("src/lib.rs"),
+    )
+    .await;
+
+    write_cancellation_batch(&project, environment.scratch());
+    inject_overflow(&socket, &handshake).await;
+    let mut last = Value::Null;
+    let (successor_generation, pre_kill_completed_files, pre_kill_total_files) =
+        tokio::time::timeout(RECEIPT_TIMEOUT, async {
+            loop {
+                last = status(&socket, &handshake).await;
+                let worktree = &last["code_index_freshness"]["worktree"];
+                let progress = &worktree["progress"];
+                if let (Some(latest), Some(completed), Some(total)) = (
+                    worktree["latest_generation_id"].as_str(),
+                    progress["completed_files"].as_u64(),
+                    progress["total_files"].as_u64(),
+                ) && latest != initial.generation_id.as_str()
+                    && progress["generation_id"].as_str() == Some(latest)
+                    && completed > 0
+                    && completed < total
+                {
+                    return (latest.to_owned(), completed, total);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("successor never exposed partially applied text progress: {last}")
+        });
+
+    let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send SIGTERM to interrupted daemon");
+    let exit = daemon
+        .wait_for_exit(RECEIPT_TIMEOUT)
+        .expect("wait for interrupted daemon")
+        .expect("daemon must exit after SIGTERM");
+    assert!(
+        exit.success(),
+        "daemon cancellation was not graceful: {exit}"
+    );
+
+    daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env(
+            "RUST_LOG",
+            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
+        );
+    });
+
+    let mut last = Value::Null;
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last = status(&socket, &handshake).await;
+            let worktree = &last["code_index_freshness"]["worktree"];
+            let progress = &worktree["progress"];
+            if progress["generation_id"].as_str() == Some(&successor_generation)
+                && progress["total_files"].as_u64() == Some(pre_kill_total_files)
+                && let Some(completed) = progress["completed_files"].as_u64()
+            {
+                assert!(
+                    completed >= pre_kill_completed_files,
+                    "restart redid completed text files for {successor_generation}: \
+                     before SIGTERM {pre_kill_completed_files}/{pre_kill_total_files}, \
+                     after restart {completed}/{}; status={last}",
+                    progress["total_files"]
+                );
+            }
+            if last["code_index_freshness"]["status"] == "current"
+                && worktree["latest_generation_id"].as_str() == Some(&successor_generation)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "restart did not make the retained successor current: \
+             generation={successor_generation}, status={last}; \
+             daemon_log={}",
+            daemon_log_for_failure()
+        )
+    });
+
+    let restarted = wait_for_terminal_generation(
+        &socket,
+        &handshake,
+        &project,
+        &identity,
+        "refs/heads/main",
+        None,
+        Some(&initial.generation_id),
+        "cancellation_probe_0095_127",
+        Some("src/cancelled_batch/file_0095.rs"),
+    )
+    .await;
+    assert_eq!(
+        restarted.generation_id, successor_generation,
+        "restart sealed a new generation instead of resuming the published successor"
+    );
+    assert_eq!(
+        restarted.status["code_index_freshness"]["status"], "current",
+        "successor did not reach current status"
+    );
+    assert_eq!(
+        restarted.status["code_index_freshness"]["worktree"]["code_graph_serving"]["state"],
+        "ready",
+        "successor graph serving is not ready: {}",
+        restarted.status
+    );
+
+    let main = search(&socket, &handshake, "lifecycle_main_symbol").await;
+    assert_eq!(
+        main["code_generation"].as_str(),
+        Some(successor_generation.as_str()),
+        "original main symbol no longer resolves from the resumed generation: {main}"
+    );
+    assert!(
+        result_paths(&main).contains(&"src/lib.rs"),
+        "original main symbol lost its source path after graph recovery: {main}"
+    );
+
+    stop_daemon_gracefully(&mut daemon);
+}

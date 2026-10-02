@@ -1924,17 +1924,20 @@ impl CodeIndexSchedulerRegistryV1 {
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let replay_passes = Arc::clone(&worker_reconcile_in_progress);
                     let replay_binding = tokio::task::spawn_blocking(move || {
-                        Self::lock_scheduler_for_graph_step(
+                        let scheduler = Self::lock_scheduler_for_graph_step(
                             &replay_scheduler,
                             &shutting_down,
                             &replay_passes,
                         )?
-                        .1
-                        .code_graph_replay_binding(&generation_id)
+                        .1;
+                        Ok::<_, CodeIndexSchedulerErrorV1>((
+                            scheduler.code_graph_replay_binding(&generation_id)?,
+                            scheduler.names_active_publication(&generation_id)?,
+                        ))
                     })
                     .await;
                     match replay_binding {
-                        Ok(Ok(replay_binding)) => {
+                        Ok(Ok((replay_binding, retained_names_active_publication))) => {
                             match worker_graph_activation
                                 .recover_verified_head(
                                     &worker_project_id,
@@ -1971,12 +1974,24 @@ impl CodeIndexSchedulerRegistryV1 {
                                     );
                                 }
                                 Ok(false) => {}
+                                Err(error)
+                                    if graph_head_belongs_to_another_generation(&error)
+                                        && retained_names_active_publication =>
+                                {
+                                    // The durable pointer names this manifest, so the head is
+                                    // older and this generation's graph publication stopped
+                                    // before seating; resume it from its sealed segments.
+                                    tracing::info!(
+                                        event = "code_index_graph_head_recovery_resumes_publication",
+                                        error = %error,
+                                        "durable publication names the retained manifest; resume \
+                                         its interrupted graph publication"
+                                    );
+                                }
                                 Err(error) if graph_head_belongs_to_another_generation(&error) => {
-                                    // The head is a different generation. Falling
-                                    // through into a cold replay discards the
-                                    // in-flight successor that owns it. Leave
-                                    // that generation's own publish to seat its
-                                    // graph, and do not retry this manifest.
+                                    // A newer generation owns the durable pointer. Falling
+                                    // through into a cold replay discards the in-flight successor
+                                    // that owns the head; do not retry this manifest.
                                     prepare_graph = false;
                                     graph_head_conflict_generation = Some(recovered_generation);
                                     pass_waits_for_store_release = true;
