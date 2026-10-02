@@ -1,4 +1,4 @@
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -34,7 +34,8 @@ use crate::runtime::source::{
 
 mod discovery;
 use discovery::{
-    KimiDiscoveryFailureKind, KimiDiscoveryReport, KimiSessionState, charge_discovered_path,
+    KimiDiscoveryFailureKind, KimiDiscoveryReport, KimiSessionState, KimiStateGate,
+    charge_discovered_path,
 };
 
 const PROVIDER: &str = "kimi";
@@ -109,6 +110,7 @@ impl KimiSource {
                 failure_count: 0,
                 scan_complete: true,
                 reached_end: true,
+                state_gates: Vec::new(),
             };
             let matcher = TranscriptScopeMatcher::for_scope(
                 project_root,
@@ -185,11 +187,13 @@ impl KimiSource {
                         }
                         continue;
                     }
-                    // The session's state is finished only when every agent
-                    // it names already converged: their transcripts are then
-                    // in the discovery queue and nothing here is new.
+                    // Finish state.json in this pass once every agent it
+                    // names is already converged or gets admitted below.
+                    // Waiting for a later wake re-opens the file under load,
+                    // after the transcripts themselves are already skipped.
                     let agents = state.agents.len();
                     let mut converged_agents = 0_usize;
+                    let mut queued_wires = Vec::new();
                     let agents_dir = session_dir.join("agents");
                     if !validate_real_directory(
                         &agents_dir,
@@ -241,10 +245,26 @@ impl KimiSource {
                                 continue;
                             }
                         }
+                        // A wire behind the discovery frontier is already
+                        // queued. It still counts once it has converged, so a
+                        // partial sweep can finish state.json instead of
+                        // re-reading it on every later pass.
                         if frontier_path
                             .as_ref()
                             .is_some_and(|frontier| candidate <= *frontier)
                         {
+                            match converging_candidate(
+                                convergence,
+                                &candidate,
+                                &mut discovery,
+                                &mut budget,
+                            )? {
+                                CandidateConvergence::Finished => converged_agents += 1,
+                                CandidateConvergence::Pending(_) => {
+                                    queued_wires.push(candidate);
+                                }
+                                CandidateConvergence::Unreadable => {}
+                            }
                             continue;
                         }
                         match converging_candidate(
@@ -260,6 +280,7 @@ impl KimiSource {
                             }
                             CandidateConvergence::Unreadable => continue,
                         }
+                        queued_wires.push(candidate.clone());
                         if !charge_discovered_path(&mut budget, &candidate)? {
                             discovery.scan_complete = false;
                             discovery.reached_end = false;
@@ -277,6 +298,15 @@ impl KimiSource {
                     }
                     if agents > 0 && converged_agents == agents {
                         state_pending.finished(&state_path)?;
+                    } else if agents > 0
+                        && converged_agents.saturating_add(queued_wires.len()) == agents
+                        && let Some(settled) = state_pending.settled()
+                    {
+                        discovery.state_gates.push(KimiStateGate {
+                            path: state_path,
+                            settled,
+                            pending_wires: queued_wires,
+                        });
                     }
                 }
             }
@@ -457,6 +487,8 @@ fn read_session_state(
     else {
         return Ok(None);
     };
+    #[cfg(test)]
+    note_kimi_state_read(&path);
     match serde_json::from_str::<KimiSessionState>(&text) {
         Ok(state) if state.working_directory().is_some() => Ok(Some(state)),
         Ok(_) | Err(_) => {
@@ -531,7 +563,8 @@ pub async fn capture_kimi_observations(
             )
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-            let (discovery, scan_budget) = discovered;
+            let (mut discovery, scan_budget) = discovered;
+            let state_gates = std::mem::take(&mut discovery.state_gates);
             for failure in &discovery.failures {
                 // A malformed state file fails identically on every capture
                 // pass until it changes on disk; log the condition when it
@@ -624,6 +657,7 @@ pub async fn capture_kimi_observations(
             };
             let mut remaining = max_new_bytes.unwrap_or(u64::MAX);
             let mut processed_sequence = None;
+            let mut covered_wires = BTreeSet::new();
             for HostDiscoveryQueueEntry { sequence, path } in scheduled_paths {
                 if cancellation.is_cancelled() || remaining == 0 {
                     outcome.deferred = true;
@@ -632,6 +666,7 @@ pub async fn capture_kimi_observations(
                 let pending = match PendingTranscript::observe(convergence, &path) {
                     Ok(Some(pending)) => pending,
                     Ok(None) => {
+                        covered_wires.insert(path);
                         processed_sequence = Some(sequence);
                         continue;
                     }
@@ -747,13 +782,29 @@ pub async fn capture_kimi_observations(
                     }
                     Err(error) => return Err(error),
                 };
+                let settles =
+                    pending.admission_settles(progress.source_deferred, progress.covered_through);
                 pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
+                if settles {
+                    covered_wires.insert(path);
+                }
                 outcome.bytes_consumed = outcome
                     .bytes_consumed
                     .saturating_add(progress.bytes_consumed);
                 outcome.deferred |= progress.source_deferred;
                 remaining = remaining.saturating_sub(progress.bytes_consumed);
                 processed_sequence = Some(sequence);
+            }
+            if !cancellation.is_cancelled() {
+                for gate in state_gates {
+                    if gate
+                        .pending_wires
+                        .iter()
+                        .all(|wire| covered_wires.contains(wire))
+                    {
+                        gate.settled.finished(&gate.path)?;
+                    }
+                }
             }
             if let Some(sequence) = processed_sequence
                 && !cancellation.is_cancelled()
@@ -881,6 +932,8 @@ fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)
             provider: PROVIDER,
             path: path.to_path_buf(),
         })?;
+    #[cfg(test)]
+    note_kimi_state_read(&state_path);
     let state: KimiSessionState =
         serde_json::from_str(&state).map_err(|_| TranscriptIngestError::InvalidSourceIdentity {
             provider: PROVIDER,
@@ -912,6 +965,34 @@ fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)
 
 const fn invalid_frame() -> TranscriptIngestError {
     TranscriptIngestError::InvalidFrameState { provider: PROVIDER }
+}
+
+#[cfg(test)]
+static KIMI_STATE_READS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn note_kimi_state_read(path: &Path) {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let reads =
+        KIMI_STATE_READS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut reads = reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *reads.entry(key).or_default() += 1;
+}
+
+#[cfg(test)]
+fn kimi_state_read_count_for_test(path: &Path) -> usize {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    KIMI_STATE_READS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1373,5 +1454,77 @@ mod tests {
         assert!(outcome.deferred);
         assert_eq!(outcome.discovery_failures, 1);
         assert!(admission.observations().is_empty());
+    }
+
+    fn wait_until_change_settled(path: &std::path::Path) {
+        for _ in 0..100_000 {
+            let metadata = std::fs::metadata(path).unwrap();
+            if crate::runtime::source::jsonl_change_token_settled(
+                crate::runtime::source::jsonl_file_change_token(&metadata),
+            ) {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("change time did not settle: {}", path.display());
+    }
+
+    /// The pass that admits a session's transcripts finishes `state.json` in
+    /// that same pass. A following pass must not open it to rediscover agents
+    /// whose wires it can already skip.
+    #[tokio::test]
+    async fn settled_session_state_is_not_reread_on_the_next_pass() {
+        let (_temp, project, path, source) = fixture();
+        std::fs::write(&path, wire_message("user", "visible", 1)).unwrap();
+        let state = path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .join("state.json");
+        wait_until_change_settled(&state);
+        wait_until_change_settled(&path);
+
+        let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
+        hub.register("kimi-project", None);
+        let admission = MemoryHostAdmission::default();
+
+        let before = super::kimi_state_read_count_for_test(&state);
+        let first = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+            Some((&hub, "kimi-project")),
+        )
+        .await
+        .unwrap();
+        assert!(!first.deferred);
+        let admitted = super::kimi_state_read_count_for_test(&state);
+        assert!(
+            admitted > before,
+            "the admitting pass reads session state to find its agents"
+        );
+
+        let second = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+            Some((&hub, "kimi-project")),
+        )
+        .await
+        .unwrap();
+        assert!(!second.deferred);
+        assert_eq!(
+            super::kimi_state_read_count_for_test(&state),
+            admitted,
+            "a later pass must not open state.json once its agents are settled"
+        );
+        assert_eq!(admission.observations().len(), 1);
     }
 }
