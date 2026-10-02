@@ -138,15 +138,19 @@ impl SealedGraph {
 }
 
 fn sealed_graph() -> SealedGraph {
-    let root = tempfile::tempdir().expect("fixture root");
-    for (path, source) in [
+    sealed_graph_of(&[
         ("ts/src/events.ts", EVENTS_TS),
         ("ts/src/main.ts", MAIN_TS),
         ("py/pkg/__init__.py", ""),
         ("py/pkg/scoring.py", SCORING_PY),
         ("py/pkg/app.py", APP_PY),
         ("rs/src/lib.rs", LIB_RS),
-    ] {
+    ])
+}
+
+fn sealed_graph_of(files: &[(&str, &str)]) -> SealedGraph {
+    let root = tempfile::tempdir().expect("fixture root");
+    for (path, source) in files {
         let path = root.path().join(path);
         std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
         std::fs::write(path, source).expect("fixture source");
@@ -196,4 +200,86 @@ fn unbound_receiver_calls_make_callers_and_callees_partial() {
     // `s.score(5)` leaves `main_entry` with a callee the graph cannot list.
     assert!(graph.callees_partial("py/pkg/app.py::main_entry"));
     assert!(!graph.callees_partial("py/pkg/scoring.py::Scorer::score"));
+}
+
+const NAMESPACES_TS: &str = r#"export function formatEvent(e: string): string {
+  return e.trim();
+}
+
+namespace Plain {
+  export function plainHelper(): string {
+    return formatEvent("plain");
+  }
+}
+
+export namespace Outer {
+  export namespace Inner {
+    export function deepHelper(x: number): string {
+      return formatEvent(String(x));
+    }
+  }
+}
+
+module Legacy {
+  export function legacyHelper(): string {
+    return formatEvent("legacy");
+  }
+}
+
+namespace Dotted.Path {
+  export function dottedHelper(): string {
+    return formatEvent("dotted");
+  }
+}
+"#;
+
+#[test]
+fn typescript_namespace_members_are_symbols_and_bound_callers() {
+    let graph = sealed_graph_of(&[("ts/src/events.ts", NAMESPACES_TS)]);
+
+    assert_eq!(
+        graph.callers("ts/src/events.ts::formatEvent"),
+        [
+            "ts/src/events.ts::Dotted::Path::dottedHelper",
+            "ts/src/events.ts::Legacy::legacyHelper",
+            "ts/src/events.ts::Outer::Inner::deepHelper",
+            "ts/src/events.ts::Plain::plainHelper",
+        ]
+    );
+    assert!(!graph.callers_partial("ts/src/events.ts::formatEvent"));
+}
+
+const COMPUTED_RECEIVERS_TS: &str = r#"export class Box {
+  map(n: number): number {
+    return n;
+  }
+  handle(): void {}
+  save(): void {}
+}
+
+export function makeBox(): Box {
+  return new Box();
+}
+
+export function run(rows: Box[]): number[] {
+  makeBox().handle();
+  rows[0].save();
+  return [1, 2].map((n) => n + 1);
+}
+"#;
+
+#[test]
+fn typescript_calls_on_computed_receivers_make_callers_partial() {
+    let graph = sealed_graph_of(&[("ts/src/box.ts", COMPUTED_RECEIVERS_TS)]);
+
+    for method in ["map", "handle", "save"] {
+        let target = format!("ts/src/box.ts::Box::{method}");
+        assert_eq!(graph.callers(&target), Vec::<String>::new(), "{target}");
+        assert!(graph.callers_partial(&target), "{target} callers partial");
+    }
+    assert_eq!(
+        graph.callers("ts/src/box.ts::makeBox"),
+        ["ts/src/box.ts::run"]
+    );
+    assert!(graph.callees_partial("ts/src/box.ts::run"));
 }
