@@ -341,3 +341,56 @@ Current shutdown observations are historical `n=1` regression samples:
 The abort values are offsets from trace start, not total durations and not time
 remaining after abort. These four observations are evidence for targeted
 regression checks only; they are not percentiles, baselines, SLOs, or gates.
+
+## Real-repository hot-path observation
+
+`scripts/bench-hot-paths.py` measures a prebuilt binary against a real
+repository. The paired harness uses fixtures, so it cannot show indexing,
+edit-reconcile, or graph memory cost at production scale. This script records
+those observations. It does not gate anything.
+
+```sh
+cargo build --package tracedecay-cli --bin tracedecay --release \
+  --no-default-features --features production --locked
+scripts/bench-hot-paths.py --bin target/release/tracedecay --out target/bench-hot-paths/base
+```
+
+The script never builds. It clones `--target-repo` (by default, this checkout)
+into a run directory that is private to the current user. It points HOME, XDG,
+the profile, and the daemon socket into that directory, starts a private
+daemon, and deletes the directory on exit. The edit lane appends one line to the
+disposable clone only. The target must be clean before output is created; the
+harness records its `HEAD` and verifies the clone has the same revision.
+
+`--seed-symbol NAME` is repeatable and defaults to `DaemonHandshake`,
+`default_socket_path`, `call_default_tool`, and `TraceDecay`. All supplied seeds
+are tried for callers-node discovery. The first seed drives `search_symbol`;
+the second drives `search_identifier` and `grep`, or the first is reused when
+only one seed is supplied.
+
+| Lane | What is measured |
+| --- | --- |
+| `cli_startup` | `--version` and `--help`: wall time, client CPU, and client max RSS from `wait4` |
+| `daemon_start` | Spawn until the socket binds, and until the daemon answers a status request. Before enrollment, the answer is a typed refusal. |
+| `index` | `init` until the status reports a current generation with a `ready` graph. A fast return from `init` does not mean the index is done. |
+| `request` | Sequential warm `status`, `search`, `grep`, `callers`, `context`, and plan `context` requests. Each sample records wall time and the daemon's CPU delta from `/proc`. |
+| `memory` | Daemon RSS split into anonymous and file memory, the thread count, profile size on disk, and the graph-engine owner bytes that `status` reports |
+| `edit_reconcile` | One appended line and `sync`, until a new generation is current and ready. A background sampler polls daemon RSS every ~100 ms from just before `sync` through readiness; RSS is typed unsupported where `/proc` is unavailable. |
+
+Session capture and read keep their fixture-backed harness,
+`scripts/run-session-temporal-benchmark.sh --run`. This script records that lane
+as delegated.
+
+The script writes three files to `--out`: `samples.jsonl` (raw samples, the
+measurement authority), `summary.json`, and `summary.md`. A p90 needs at least
+20 samples. With fewer samples it stays null. Daemon counters come from
+`/proc`; on other systems they are recorded as `unsupported`, not zero. A failed
+request records its typed problem code. The exit status is 0 when the run
+finishes, whatever the numbers. It is 2 for a preflight or harness error,
+including a daemon that died during the run.
+
+To compare two builds, run each binary against the same `--target-repo`
+revision on the same machine. Compare the `samples.jsonl` files, not single
+runs. For CPU attribution of a lane, attach `perf record -g -p <daemon pid>`
+while the lane runs. For OS-level counters, use
+`scripts/profile-hotpath-os-counters.sh`.
