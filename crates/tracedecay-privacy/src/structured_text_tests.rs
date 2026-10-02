@@ -419,6 +419,20 @@ fn json_escaped_credential_under_an_ordinary_key_is_redacted_at_its_token() {
 }
 
 #[test]
+fn json_root_array_escaped_credential_is_redacted_at_its_token() {
+    let raw = "[\"sk-test-\\u0031234567890abcdef\", \"us-east\"]";
+
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!(["TraceDecay-redacted-sensitive-field", "us-east",]),
+    );
+    assert_eq!(
+        scanned.sanitized_text(),
+        "[\"TraceDecay-redacted-sensitive-field\", \"us-east\"]",
+    );
+}
+
+#[test]
 fn toml_inline_table_value_is_replaced_at_its_own_token() {
     // The sensitive key sits inside an inline table, not at the start of a
     // line, and `1e3` is not how the decoder spells the value, so only the
