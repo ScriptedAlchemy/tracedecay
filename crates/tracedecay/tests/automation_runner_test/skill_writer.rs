@@ -913,6 +913,243 @@ async fn skill_writer_scheduled_retry_deploys_previously_committed_skill() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn skill_writer_dashboard_retry_deploys_previously_committed_skill() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let host_home = fixture_host_home(cg.project_root());
+    let profile_root = host_home.join(".tracedecay");
+    seed_session_evidence(&cg).await;
+    let backend = SkillJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [{
+            "id": "dashboard-review",
+            "title": "Dashboard review",
+            "summary": "Review dashboard automation runs before enabling automation.",
+            "routing_description": "Review dashboard automation runs before enabling automation.",
+            "routing_validation": skill_routing_validation("dashboard-review"),
+            "category": "workflow",
+            "body_markdown": "Check run ledgers and deployment receipts before rerunning automation.",
+            "reason": "Session evidence repeats dashboard review."
+        }]
+    }));
+    let config = enabled_skill_writer_config();
+
+    let homeless_context = cg.automation_project_context(None).unwrap();
+    let failed = match run_skill_writer_with_backend_and_retrieval(
+        &homeless_context,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        manual_skill_writer_options(&profile_root),
+    )
+    .await
+    {
+        Err(AutomationRunError::PartialEffect {
+            ledger_record: Some(record),
+            ..
+        }) => *record,
+        other => panic!("expected a recorded partial effect, got {other:?}"),
+    };
+    assert_eq!(failed.error_retryable, Some(true));
+    assert_eq!(
+        failed.applied_ops.as_ref().unwrap()["deployment"]["retry_required"],
+        json!(true)
+    );
+
+    std::fs::create_dir_all(host_home.join(".claude")).unwrap();
+    let deployed_skill = host_home.join(".claude/skills/dashboard-review/SKILL.md");
+    assert!(!deployed_skill.exists());
+
+    // An on-demand run must settle the owed deployment instead of asking the
+    // backend for new work and hiding the pending deployment behind a later
+    // no-mutation terminal.
+    let retry = run_skill_writer_with_backend_and_retrieval(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Dashboard,
+            provider: "cursor".to_string(),
+            query: "automation".to_string(),
+            evidence_limit: 5,
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(retry.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(retry.ledger_record.trigger, AutomationTrigger::Dashboard);
+    assert_eq!(retry.report["status"], json!("deployment_reconciled"));
+    assert_eq!(retry.report["reconciled_run_id"], json!(failed.run_id));
+    assert!(
+        deployed_skill.is_file(),
+        "the manual retry must deploy the committed skill to {}",
+        deployed_skill.display()
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn skill_writer_retry_preserves_apply_time_rejected_proposals() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let host_home = fixture_host_home(cg.project_root());
+    let profile_root = host_home.join(".tracedecay");
+    seed_session_evidence(&cg).await;
+    let active = create_managed_skill(
+        &profile_root,
+        ManagedSkillDraft {
+            id: "automation-run-review".to_string(),
+            title: "Automation run review".to_string(),
+            summary: "Review self-improvement automation runs.".to_string(),
+            routing_description: "Review self-improvement automation runs.".to_string(),
+            category: "workflow".to_string(),
+            targets:
+                tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Check the run ledger before applying changes.".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::AutomationRun,
+                actor: "tracedecay".to_string(),
+                run_id: Some("seed-run".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let backend = SkillJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [
+            {
+                "id": "scheduler-review",
+                "title": "Scheduler review",
+                "summary": "Review scheduler decisions before enabling automation.",
+                "routing_description": "Review scheduler decisions before enabling automation.",
+                "routing_validation": skill_routing_validation("scheduler-review"),
+                "category": "workflow",
+                "body_markdown": "Check interval gates, cooldowns, locks, and run ledgers before changing schedules.",
+                "reason": "Session evidence repeats scheduler review."
+            },
+            {
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": active.metadata.checksum.clone(),
+                "summary": "Review automation run ledgers and retry receipts.",
+                "reason": "The first update validates and applies cleanly."
+            },
+            {
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": active.metadata.checksum.clone(),
+                "summary": "Review automation run ledgers, retry receipts, and quarantines.",
+                "reason": "The second update validates against the same revision but applies stale."
+            }
+        ]
+    }));
+    let mut config = enabled_skill_writer_config();
+    config.tasks.skill_writer.schedule = Some("interval".to_string());
+    config.tasks.skill_writer.interval_secs = Some(1);
+    config.tasks.skill_writer.cooldown_secs = Some(0);
+    let scheduled_options = || SkillWriterAutomationOptions {
+        trigger: AutomationTrigger::Scheduler,
+        provider: "cursor".to_string(),
+        query: "automation".to_string(),
+        evidence_limit: 5,
+        profile_root: Some(profile_root.clone()),
+        ..SkillWriterAutomationOptions::default()
+    };
+
+    let homeless_context = cg.automation_project_context(None).unwrap();
+    let failed = match run_skill_writer_with_backend_and_retrieval(
+        &homeless_context,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_options(),
+    )
+    .await
+    {
+        Err(AutomationRunError::PartialEffect {
+            ledger_record: Some(record),
+            ..
+        }) => *record,
+        other => panic!("expected a recorded partial effect, got {other:?}"),
+    };
+    assert_eq!(failed.error_retryable, Some(true));
+    assert_eq!(failed.rejected_count, 1);
+    assert_eq!(
+        failed.rejected_ops.as_ref().unwrap()[0]["proposal"]["id"],
+        json!("automation-run-review")
+    );
+    assert_eq!(
+        failed.applied_ops.as_ref().unwrap()["deployment"]["retry_required"],
+        json!(true)
+    );
+
+    std::fs::create_dir_all(host_home.join(".claude")).unwrap();
+    let deployed_skill = host_home.join(".claude/skills/scheduler-review/SKILL.md");
+
+    // The retry deploys the committed skills, but the earlier apply-time
+    // rejection must survive as a failed terminal rather than a clean success.
+    let retry = run_skill_writer_with_backend_and_retrieval(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_options(),
+    )
+    .await;
+    let record = match retry {
+        Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record,
+        }) => {
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not apply every validated proposal"),
+                "unexpected reconciliation error: {error}"
+            );
+            *ledger_record
+        }
+        other => panic!("expected a recorded reconciliation failure, got {other:?}"),
+    };
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(record.status, AutomationRunStatus::Failed);
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Permanent)
+    );
+    assert_eq!(record.error_retryable, Some(false));
+    assert_eq!(record.rejected_count, 1);
+    assert_eq!(
+        record.rejected_ops.as_ref().unwrap()[0]["proposal"]["id"],
+        json!("automation-run-review")
+    );
+    assert_eq!(
+        record.applied_ops.as_ref().unwrap()["deployment"]["retry_required"],
+        json!(false)
+    );
+    assert!(
+        deployed_skill.is_file(),
+        "the retry must still deploy the committed skill to {}",
+        deployed_skill.display()
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");

@@ -14,7 +14,9 @@ use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
-use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
+use crate::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
+};
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -312,8 +314,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             .as_ref()
             .map(|bundle| bundle.profile_root.clone())
             .or_else(|| options.profile_root.clone());
-        if options.trigger == AutomationTrigger::Scheduler
-            && let Some(profile_root) = owning_profile_root.as_deref()
+        if let Some(profile_root) = owning_profile_root.as_deref()
             && let Some(reconciled) = reconcile_pending_skill_deployment(
                 &run,
                 &host_io,
@@ -575,17 +576,23 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
     })
 }
 
-/// A failed terminal whose committed skill mutations never reached the hosts.
-fn skill_deployment_pending(record: &AutomationRunLedgerRecord) -> bool {
-    record.status == crate::automation::run_ledger::AutomationRunStatus::Failed
-        && record.error_retryable == Some(true)
-        && record
-            .applied_ops
-            .as_ref()
-            .and_then(|ops| ops.get("deployment"))
-            .and_then(|deployment| deployment.get("retry_required"))
-            .and_then(Value::as_bool)
-            == Some(true)
+/// The latest skill-writer terminal when it committed skill mutations that
+/// never reached the hosts. Every skill-writer run settles this before it asks
+/// the backend for new work, so no later terminal can hide it.
+pub(super) fn pending_skill_deployment(
+    summary: &AutomationRunLedgerTaskSummary,
+) -> Option<&AutomationRunLedgerRecord> {
+    summary.latest_effectful_any_trigger().filter(|record| {
+        record.status == crate::automation::run_ledger::AutomationRunStatus::Failed
+            && record.error_retryable == Some(true)
+            && record
+                .applied_ops
+                .as_ref()
+                .and_then(|ops| ops.get("deployment"))
+                .and_then(|deployment| deployment.get("retry_required"))
+                .and_then(Value::as_bool)
+                == Some(true)
+    })
 }
 
 /// Redeploys the committed managed-skill store when the latest terminal left
@@ -599,13 +606,13 @@ async fn reconcile_pending_skill_deployment(
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
 ) -> AutomationRunResult<Option<SkillWriterAutomationRun>> {
-    let Some(pending) = run
-        .latest_effectful_record()
-        .filter(|record| skill_deployment_pending(record))
-    else {
+    let summary = run.ledger_summary().await?;
+    let Some(pending) = pending_skill_deployment(&summary) else {
         return Ok(None);
     };
     let reconciled_run_id = pending.run_id.clone();
+    let rejected_ops = pending.rejected_ops.clone();
+    let rejected_count = pending.rejected_count;
     let deployment = crate::automation::skill_writer::deploy_managed_skills(
         host_io,
         host_home,
@@ -643,6 +650,30 @@ async fn reconcile_pending_skill_deployment(
                 Some(report),
                 0,
                 0,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    if rejected_count > 0 {
+        let error = TraceDecayError::Config {
+            message: "skill curation could not apply every validated proposal".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Permanent,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                rejected_ops,
+                Some(report),
+                0,
+                rejected_count,
             )
             .await?;
         return Err(AutomationRunError::RecordedFailure {

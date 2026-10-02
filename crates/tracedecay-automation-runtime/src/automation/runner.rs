@@ -20,7 +20,9 @@ use super::lifecycle::{
     failed_backend_fallback_report, generated_run_id, task_run_gate,
     task_run_gate_for_retained_settlement,
 };
-use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
+use super::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
+};
 use super::scheduler::AutomationTaskLock;
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
@@ -52,7 +54,7 @@ use session_reflector::{
 };
 use skill_writer::{
     ProposedSkillOutput, SkillWriterFinalization, build_skill_writer_prompt,
-    finalize_skill_writer_success,
+    finalize_skill_writer_success, pending_skill_deployment,
 };
 
 pub use super::lifecycle::{
@@ -375,9 +377,9 @@ pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlem
     RetainedCombinedReviewRun::new(result, reflector_guard, skill_guard)
 }
 
-/// Gate one combined-review sub-task and hand its scheduler lock back to the
-/// caller, so the lock lives for the caller's whole run rather than this
-/// helper's frame.
+/// Gate one combined-review sub-task and hand its scheduler lock and ledger
+/// summary back to the caller, so the lock lives for the caller's whole run
+/// rather than this helper's frame.
 ///
 /// `Ok(Err(dispatch))` is the not-due answer the caller returns verbatim.
 async fn acquire_combined_task_lock(
@@ -389,8 +391,16 @@ async fn acquire_combined_task_lock(
     trigger: AutomationTrigger,
     not_due_reason: &'static str,
     settlement_guard: Option<&AutomationRunSettlementGuard>,
-) -> Result<std::result::Result<Option<AutomationTaskLock>, CombinedReviewDispatch>> {
-    let (gate, _) = match settlement_guard {
+) -> Result<
+    std::result::Result<
+        (
+            Option<AutomationTaskLock>,
+            Option<AutomationRunLedgerTaskSummary>,
+        ),
+        CombinedReviewDispatch,
+    >,
+> {
+    let (gate, summary) = match settlement_guard {
         Some(guard) => {
             task_run_gate_for_retained_settlement(
                 config,
@@ -416,7 +426,7 @@ async fn acquire_combined_task_lock(
         }
     };
     Ok(match gate {
-        SchedulerGate::Proceed(lock) => Ok(lock),
+        SchedulerGate::Proceed(lock) => Ok((lock, summary)),
         SchedulerGate::Skip(_) => Err(CombinedReviewDispatch::NotCombined {
             reason: not_due_reason,
         }),
@@ -516,7 +526,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         )
         .await?
         {
-            Ok(lock) => lock,
+            Ok((lock, _)) => lock,
             Err(dispatch) => return Ok(dispatch),
         };
         let _skill_lock = match acquire_combined_task_lock(
@@ -531,7 +541,18 @@ fn run_combined_review_for_retrieval_inner<'a>(
         )
         .await?
         {
-            Ok(lock) => lock,
+            Ok((lock, summary)) => {
+                if summary
+                    .as_ref()
+                    .and_then(pending_skill_deployment)
+                    .is_some()
+                {
+                    return Ok(CombinedReviewDispatch::NotCombined {
+                        reason: "skill_deployment_pending",
+                    });
+                }
+                lock
+            }
             Err(dispatch) => return Ok(dispatch),
         };
         let memory = MemoryApplication::new(

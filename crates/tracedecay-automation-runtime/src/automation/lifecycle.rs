@@ -400,12 +400,16 @@ impl<'a> AgentTaskRunContext<'a> {
         Ok(gate)
     }
 
-    /// Latest succeeded or failed terminal from the summary loaded by
-    /// [`Self::gate`]; `None` before the gate runs or off the scheduler path.
-    pub(crate) fn latest_effectful_record(&self) -> Option<&AutomationRunLedgerRecord> {
-        self.ledger_summary
-            .as_ref()
-            .and_then(AutomationRunLedgerTaskSummary::latest_effectful_any_trigger)
+    /// The task summary [`Self::gate`] loaded, or a fresh load for on-demand
+    /// triggers, whose gate does not consult the ledger.
+    pub(crate) async fn ledger_summary(&self) -> Result<AutomationRunLedgerTaskSummary> {
+        match &self.ledger_summary {
+            Some(summary) => Ok(summary.clone()),
+            None => {
+                load_run_ledger_task_summary(&self.dashboard_root, self.task, task_key(self.task))
+                    .await
+            }
+        }
     }
 
     pub(crate) async fn skipped_parts(
