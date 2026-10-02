@@ -3999,8 +3999,8 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         .expect("delta child generation");
 
     let mut published_files = Vec::new();
-    let mut published_evidence_pages = 0_usize;
-    let mut evidence_commits = 0_usize;
+    let mut published_evidence_pages = BTreeSet::new();
+    let mut committed_evidence_pages = None;
     let child_manifest = child
         .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
             match publication {
@@ -4008,11 +4008,20 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { .. } => {
-                    published_evidence_pages += 1;
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                    page_ordinal,
+                    ..
+                } => {
+                    published_evidence_pages.insert(page_ordinal);
                 }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
-                    evidence_commits += 1;
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    page_count,
+                    ..
+                } => {
+                    assert!(
+                        committed_evidence_pages.replace(page_count).is_none(),
+                        "generation evidence must commit exactly once"
+                    );
                 }
             }
             Ok(())
@@ -4055,10 +4064,13 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         "the encoder must publish exactly the replaced file segments"
     );
     assert_eq!(
-        published_evidence_pages, 1,
-        "the small fixture fits one generation-evidence page"
+        committed_evidence_pages,
+        Some(
+            u32::try_from(published_evidence_pages.len())
+                .expect("published evidence page count fits u32")
+        ),
+        "the commit must cover every published evidence page"
     );
-    assert_eq!(evidence_commits, 1, "all evidence pages commit as one pack");
 
     assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
 }
