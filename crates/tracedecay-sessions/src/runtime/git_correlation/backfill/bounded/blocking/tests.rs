@@ -168,7 +168,12 @@ async fn deadline_detaches_without_leaking_the_permit() {
         assert_eq!(permits.available_permits(), 0);
 
         release_tx.send(()).unwrap();
-        drop(Arc::clone(&permits).acquire_owned().await.unwrap());
+        let permit =
+            tokio::time::timeout(Duration::from_secs(5), Arc::clone(&permits).acquire_owned())
+                .await
+                .expect("the detached closure releases its permit")
+                .unwrap();
+        drop(permit);
         assert_eq!(permits.available_permits(), 1);
         return;
     }
