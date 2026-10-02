@@ -5,7 +5,7 @@ use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
     ProviderUsageContractDimensionV1, SessionId,
 };
 
@@ -91,7 +91,7 @@ fn normalize_opencode_record(
         "message",
         "message.tokens",
     );
-    append_parts(&mut facts, parts, &message_id)?;
+    append_parts(&mut facts, parts)?;
     if facts.is_empty() {
         return Err(ObservationRecordParseErrorV1::Empty);
     }
@@ -129,7 +129,6 @@ fn normalize_opencode_record(
 fn append_parts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     parts: &[Value],
-    message_id: &ObservationId,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     for part in parts {
         match part.get("type").and_then(Value::as_str) {
@@ -151,7 +150,7 @@ fn append_parts(
                     boundary_kind: CanonicalBoundaryKindV1::CompactionBoundary,
                 });
             }
-            Some("tool") => append_tool_fact(facts, part, message_id)?,
+            Some("tool") => append_tool_fact(facts, part),
             Some("step-finish") => {
                 append_usage(facts, part.get("tokens"), "step-finish", "part.tokens")
             }
@@ -217,11 +216,7 @@ fn append_usage(
     }
 }
 
-fn append_tool_fact(
-    facts: &mut Vec<CanonicalObservationFactV1>,
-    part: &Value,
-    message_id: &ObservationId,
-) -> Result<(), ObservationRecordParseErrorV1> {
+fn append_tool_fact(facts: &mut Vec<CanonicalObservationFactV1>, part: &Value) {
     let name = part
         .get("tool")
         .or_else(|| part.get("name"))
@@ -233,7 +228,7 @@ fn append_tool_fact(
         .or_else(|| part.get("input"))
         .cloned()
         .unwrap_or(Value::Null);
-    let tool_id = stable_tool_id(message_id, part)?;
+    let tool_id = native_tool_id(part);
     if let Some(name) = name {
         facts.push(CanonicalObservationFactV1::ToolInvocation {
             invocation_id: tool_id.clone(),
@@ -248,7 +243,7 @@ fn append_tool_fact(
         .or_else(|| part.get("error"))
     {
         facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: Some(tool_id),
+            invocation_id: tool_id,
             content: output.clone(),
             success: state
                 .get("status")
@@ -283,25 +278,14 @@ fn append_tool_fact(
             content: Some(Value::Object(content)),
         });
     }
-    Ok(())
 }
 
-fn stable_tool_id(
-    message_id: &ObservationId,
-    part: &Value,
-) -> Result<ObservationId, ObservationRecordParseErrorV1> {
-    if let Some(id) = part
-        .get("callID")
+fn native_tool_id(part: &Value) -> Option<ObservationId> {
+    part.get("callID")
         .or_else(|| part.get("call_id"))
         .or_else(|| part.get("id"))
         .and_then(Value::as_str)
         .and_then(|id| ObservationId::new(id).ok())
-    {
-        return Ok(id);
-    }
-    let evidence = serde_json::json!({"message_id": message_id.as_str(), "part": part});
-    let digest = PayloadReferenceV1::for_payload(&evidence).map_err(|_| invalid())?;
-    ObservationId::new(format!("opencode.tool.{}", digest.digest().as_str())).map_err(|_| invalid())
 }
 
 fn message_content(parts: &[Value]) -> Option<Value> {

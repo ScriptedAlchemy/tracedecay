@@ -238,7 +238,7 @@ pub fn canonical_snapshot_envelope(
             timestamp,
         });
     }
-    append_tool_invocation_facts(&mut facts, native, message_id)?;
+    append_tool_invocation_facts(&mut facts, native)?;
     if let Some(result) = native.get("tool_result").filter(|value| value.is_object()) {
         facts.push(CanonicalObservationFactV1::ToolResult {
             invocation_id: optional_observation_id(result, "invocation_id")?,
@@ -359,14 +359,13 @@ fn apply_optional_relation(
 fn append_tool_invocation_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
-    message_id: &str,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     if let Some(calls) = native
         .get("tool_calls")
         .or_else(|| native.get("tool_invocations"))
         .and_then(Value::as_array)
     {
-        for (index, call) in calls.iter().enumerate() {
+        for call in calls {
             let Some(name) = call
                 .pointer("/function/name")
                 .or_else(|| call.get("name"))
@@ -389,10 +388,11 @@ fn append_tool_invocation_facts(
                 .or_else(|| call.get("invocation_id"))
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
-                .map_or_else(|| format!("{message_id}:tool:{index}"), str::to_owned);
+                .map(ObservationId::new)
+                .transpose()
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
             facts.push(CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new(invocation_id)
-                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+                invocation_id,
                 name: name.to_string(),
                 arguments,
             });
@@ -408,11 +408,9 @@ fn append_tool_invocation_facts(
         .and_then(Value::as_str)
         .into_iter()
         .flat_map(|names| names.split(',').filter(|name| !name.is_empty()))
-        .enumerate()
     {
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new(format!("{message_id}:tool:{index}"))
-                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+            invocation_id: None,
             name: name.to_string(),
             arguments: Value::Null,
         });
@@ -712,7 +710,7 @@ mod tests {
                 invocation_id,
                 name,
                 arguments,
-            } if invocation_id.as_str() == "call-1"
+            } if invocation_id.as_ref().map(ObservationId::as_str) == Some("call-1")
                 && name == "read_file"
                 && arguments.get("path") == Some(&json!("src/main.rs"))
         )));
@@ -741,19 +739,25 @@ mod tests {
             "text": "hello",
             "tool_names": "read_file,write_file",
         }));
-        let tools: Vec<_> = canonical
+        let tools = canonical
             .facts()
             .iter()
-            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ToolInvocation { .. }))
-            .collect();
-        assert_eq!(tools.len(), 2);
-        assert!(tools.iter().all(|fact| matches!(
-            fact,
-            CanonicalObservationFactV1::ToolInvocation {
-                arguments: Value::Null,
-                ..
-            }
-        )));
+            .filter_map(|fact| match fact {
+                CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name,
+                    arguments,
+                } => Some((invocation_id.as_ref(), name.as_str(), arguments)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tools,
+            vec![
+                (None, "read_file", &Value::Null),
+                (None, "write_file", &Value::Null),
+            ]
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError, ObservationId,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
     ObservationScopeV1,
 };
 
@@ -429,22 +429,6 @@ fn canonical_spawned_sessions(envelope: &CanonicalObservationEnvelopeV1) -> Vec<
         .collect()
 }
 
-/// Whether `invocation_id` is the host's own identifier. Every capture falls
-/// back to the record's stable id (or `{stable_id}:tool:{index}`) when the
-/// host wrote none, so an invocation id rooted in the stable id is the
-/// capture's, not the host's, and is never served.
-fn is_host_invocation_id(
-    envelope: &CanonicalObservationEnvelopeV1,
-    invocation_id: &ObservationId,
-) -> bool {
-    let stable_record_id = envelope.stable_record_id().as_str();
-    let invocation_id = invocation_id.as_str();
-    invocation_id != stable_record_id
-        && !invocation_id
-            .strip_prefix(stable_record_id)
-            .is_some_and(|suffix| suffix.starts_with(":tool:"))
-}
-
 /// The host's own identifier of the record's tool invocation, for a fork or
 /// tool result to bind to. A subagent dispatch wins over other invocations on
 /// the same record because that is the call a child session's
@@ -452,12 +436,10 @@ fn is_host_invocation_id(
 fn host_tool_use_id(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
     let mut invocations = envelope.facts().iter().filter_map(|fact| match fact {
         CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
+            invocation_id: Some(invocation_id),
             name,
             ..
-        } if is_host_invocation_id(envelope, invocation_id) => {
-            Some((invocation_id.as_str(), name.as_str()))
-        }
+        } => Some((invocation_id.as_str(), name.as_str())),
         _ => None,
     });
     let first = invocations.next()?;
@@ -528,15 +510,7 @@ fn canonical_message_metadata_for(
         .map(str::to_owned);
     let normalizer = tool_metadata_normalizer(source.as_deref());
     if let Some(normalize) = normalizer {
-        match rendering {
-            CanonicalRendering::Current => normalize(&mut metadata, envelope.facts(), &|id| {
-                is_host_invocation_id(envelope, id)
-            })?,
-            // Released rows served the capture fallback as the call id.
-            CanonicalRendering::ShippedRelease => {
-                normalize(&mut metadata, envelope.facts(), &|_| true)?;
-            }
-        }
+        normalize(&mut metadata, envelope.facts())?;
     }
     let tool_use_id = match rendering {
         CanonicalRendering::Current => host_tool_use_id(envelope),
@@ -545,7 +519,7 @@ fn canonical_message_metadata_for(
         CanonicalRendering::ShippedRelease => normalizer.and_then(|_| {
             envelope.facts().iter().find_map(|fact| match fact {
                 CanonicalObservationFactV1::ToolInvocation {
-                    invocation_id,
+                    invocation_id: Some(invocation_id),
                     name,
                     ..
                 } if is_subagent_dispatch_tool(name) => Some(invocation_id.as_str()),
@@ -911,11 +885,13 @@ fn canonical_cursor_dispatch_message_fields(
         timestamp: None,
         tool_names: Some(name.clone()),
     });
-    Ok(Some(format!(
-        "{}:tool_dispatch:{}",
-        envelope.relations().session_id().as_str(),
-        invocation_id.as_str()
-    )))
+    Ok(invocation_id.as_ref().map(|invocation_id| {
+        format!(
+            "{}:tool_dispatch:{}",
+            envelope.relations().session_id().as_str(),
+            invocation_id.as_str()
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -1100,6 +1076,9 @@ fn canonical_message_fields_for(
             | CanonicalObservationFactV1::Boundary { .. }
             | CanonicalObservationFactV1::Unknown { .. } => continue,
         };
+        if fields.text.is_empty() {
+            continue;
+        }
         return Ok(Some(fields));
     }
     Ok(None)
@@ -1396,7 +1375,7 @@ mod tests {
     #[test]
     fn cursor_transcript_message_metadata_normalizes_tool_fields() {
         let envelope = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new("tool.dispatch").unwrap(),
+            invocation_id: Some(ObservationId::new("tool.dispatch").unwrap()),
             name: "Task".to_owned(),
             arguments: json!({"prompt": "explore"}),
         }]);
@@ -1448,32 +1427,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_id_is_the_host_id_never_the_capture_fallback() {
-        // A capture that found no host id falls back to the record's stable
-        // id (or `{stable}:tool:{index}`); neither is served as a tool-use id.
-        for synthesized in ["record.fixture", "record.fixture:tool:0"] {
-            let fallback = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new(synthesized).unwrap(),
-                name: "Read".to_owned(),
-                arguments: json!({}),
-            }]);
-            assert_eq!(host_tool_use_id(&fallback), None, "{synthesized}");
-            assert!(
-                canonical_message_metadata(&fallback, None)
-                    .unwrap()
-                    .is_none()
-            );
-        }
+    fn tool_use_id_is_present_only_when_the_host_recorded_it() {
+        let host_unrecorded = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: None,
+            name: "Read".to_owned(),
+            arguments: json!({}),
+        }]);
+        assert_eq!(host_tool_use_id(&host_unrecorded), None);
+        assert!(
+            canonical_message_metadata(&host_unrecorded, None)
+                .unwrap()
+                .is_none()
+        );
 
         // The subagent dispatch binds a fork even when it is not first.
         let dispatching = envelope(vec![
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("toolu_read").unwrap(),
+                invocation_id: Some(ObservationId::new("toolu_read").unwrap()),
                 name: "Read".to_owned(),
                 arguments: json!({}),
             },
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("toolu_task").unwrap(),
+                invocation_id: Some(ObservationId::new("toolu_task").unwrap()),
                 name: "Task".to_owned(),
                 arguments: json!({"prompt": "explore"}),
             },
@@ -1481,7 +1456,7 @@ mod tests {
         assert_eq!(host_tool_use_id(&dispatching), Some("toolu_task"));
 
         let exec = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new("call_abc").unwrap(),
+            invocation_id: Some(ObservationId::new("call_abc").unwrap()),
             name: "exec".to_owned(),
             arguments: json!({}),
         }]);
@@ -1628,7 +1603,7 @@ mod tests {
                 ]),
             },
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("tool.fixture").unwrap(),
+                invocation_id: Some(ObservationId::new("tool.fixture").unwrap()),
                 name: "Read".to_owned(),
                 arguments: json!({"path": "redacted"}),
             },

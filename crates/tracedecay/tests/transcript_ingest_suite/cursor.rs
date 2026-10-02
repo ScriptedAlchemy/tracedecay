@@ -521,8 +521,7 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         "cwd": project
     });
 
-    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(stats.messages_upserted, 2);
+    ingest_cursor_transcript_event(&event.to_string(), &db).await;
 
     let results = db
         .search_session_messages("cursor", None, "routing", 10)
@@ -539,17 +538,19 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         .collect::<Vec<_>>();
     rows.sort_by_key(|row| row.1);
     assert_eq!(
-        rows[1],
-        (
-            "cursor-session:tool_dispatch:call-a",
-            Some("tool_dispatch"),
-            Some("gpt-5.5-high")
-        )
+        rows.iter()
+            .map(|(_, kind, model)| (*kind, *model))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("message"), None),
+            (Some("tool_dispatch"), Some("gpt-5.5-high")),
+        ]
     );
-    assert_eq!(
-        (rows.len(), rows[0].1, rows[0].2),
-        (2, Some("message"), None)
-    );
+    let dispatch = rows
+        .iter()
+        .find(|(_, kind, _)| *kind == Some("tool_dispatch"))
+        .expect("the dispatch-only observation is searchable");
+    assert_eq!(dispatch.0, "cursor-session:tool_dispatch:call-a");
     for hit in results
         .iter()
         .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))

@@ -152,13 +152,12 @@ fn normalize_cursor_record(
                 timestamp,
             });
         }
-        append_cursor_content_facts(content, &stable_record_id, &mut facts);
+        append_cursor_content_facts(content, &mut facts);
     }
     append_cursor_tool_call_facts(
         message
             .and_then(|message| message.get("tool_calls"))
             .or_else(|| native.get("tool_calls")),
-        &stable_record_id,
         &mut facts,
     );
     append_cursor_usage_fact(native, message, &mut facts);
@@ -212,30 +211,25 @@ fn canonical_cursor_message_content(content: &Value) -> Option<Value> {
     }
 }
 
-fn append_cursor_content_facts(
-    content: &Value,
-    stable_record_id: &ObservationId,
-    facts: &mut Vec<CanonicalObservationFactV1>,
-) {
+fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
     let Some(items) = content.as_array() else {
         return;
     };
     for item in items {
         match item.get("type").and_then(Value::as_str) {
             Some("tool_use") => {
-                let invocation_id = canonical_native_observation_id(
-                    item.get("id").and_then(Value::as_str),
-                    stable_record_id,
-                );
-                let name = item
+                let invocation_id =
+                    canonical_native_observation_id(item.get("id").and_then(Value::as_str));
+                let Some(name) = item
                     .get("name")
                     .and_then(Value::as_str)
                     .filter(|name| !name.trim().is_empty())
-                    .unwrap_or("tool")
-                    .to_string();
+                else {
+                    continue;
+                };
                 facts.push(CanonicalObservationFactV1::ToolInvocation {
                     invocation_id,
-                    name: name.clone(),
+                    name: name.to_owned(),
                     arguments: item
                         .get("input")
                         .or_else(|| item.get("arguments"))
@@ -256,7 +250,7 @@ fn append_cursor_content_facts(
                         .get("tool_use_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
-                        .map(|id| canonical_native_observation_id(Some(id), stable_record_id)),
+                        .and_then(|id| canonical_native_observation_id(Some(id))),
                     content: item
                         .get("content")
                         .or_else(|| item.get("result"))
@@ -290,7 +284,6 @@ fn append_cursor_content_facts(
 
 fn append_cursor_tool_call_facts(
     tool_calls: Option<&Value>,
-    stable_record_id: &ObservationId,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let Some(tool_calls) = tool_calls.and_then(Value::as_array) else {
@@ -298,19 +291,19 @@ fn append_cursor_tool_call_facts(
     };
     for tool_call in tool_calls {
         let function = tool_call.get("function").unwrap_or(tool_call);
-        let name = function
+        let Some(name) = function
             .get("name")
             .or_else(|| tool_call.get("name"))
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("tool")
-            .to_string();
+        else {
+            continue;
+        };
         facts.push(CanonicalObservationFactV1::ToolInvocation {
             invocation_id: canonical_native_observation_id(
                 tool_call.get("id").and_then(Value::as_str),
-                stable_record_id,
             ),
-            name,
+            name: name.to_owned(),
             arguments: function
                 .get("arguments")
                 .or_else(|| tool_call.get("arguments"))
@@ -568,13 +561,8 @@ pub fn cursor_projected_message_id(
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|id| ObservationId::new(id).ok())
-        .unwrap_or_else(|| fallback.clone())
+fn canonical_native_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|id| ObservationId::new(id).ok())
 }
 
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {

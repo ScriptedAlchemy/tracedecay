@@ -186,8 +186,9 @@ fn provenance_is_shared_across_every_output_of_one_observation() {
 
     let expected = ProjectionProvenance::for_observation(&observation).unwrap();
     assert_eq!(projection.message().unwrap().provenance(), &expected);
-    assert_eq!(projection.workflow_facts().len(), 2);
-    for fact in projection.workflow_facts() {
-        assert_eq!(fact.provenance(), &expected);
-    }
+    let [first, second] = projection.workflow_facts() else {
+        panic!("both workflow facts must remain outputs of the observation");
+    };
+    assert_eq!(first.provenance(), &expected);
+    assert_eq!(second.provenance(), &expected);
 }

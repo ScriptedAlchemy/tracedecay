@@ -1028,7 +1028,7 @@ fn cline_transition_observation(
                     timestamp: Some(1_800_000_001),
                 },
                 CanonicalObservationFactV1::ToolInvocation {
-                    invocation_id: ObservationId::new("call.native").unwrap(),
+                    invocation_id: Some(ObservationId::new("call.native").unwrap()),
                     name: "read_file".to_owned(),
                     arguments: json!({"path": "src/main.rs"}),
                 },

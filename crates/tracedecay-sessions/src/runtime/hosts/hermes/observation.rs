@@ -274,7 +274,7 @@ pub fn normalize_native_observation(
             success: None,
         });
     }
-    append_tool_invocations(&mut facts, native.tool_calls.as_ref(), &stable_record_id)?;
+    append_tool_invocations(&mut facts, native.tool_calls.as_ref())?;
 
     let (visibility, content) = match native.reasoning {
         Some(content) => (
@@ -351,7 +351,6 @@ fn canonical_message_role(
 fn append_tool_invocations(
     facts: &mut Vec<CanonicalObservationFactV1>,
     tool_calls: Option<&Value>,
-    message_id: &ObservationId,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     let Some(tool_calls) = tool_calls else {
         return Ok(());
@@ -374,20 +373,11 @@ fn append_tool_invocations(
             Value::String(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
             value => value,
         };
-        let invocation_evidence = match call.get("id") {
-            Some(native_id) => json!({
-                "message_id": message_id.as_str(),
-                "native_tool_id": native_id,
-            }),
-            None => json!({
-                "message_id": message_id.as_str(),
-                "tool_call": call,
-            }),
-        };
-        let invocation_id = stable_native_id("hermes.tool", &invocation_evidence)
-            .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
+            invocation_id: call
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| ObservationId::new(id).ok()),
             name: name.to_owned(),
             arguments,
         });

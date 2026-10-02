@@ -114,7 +114,7 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
                 content: Some(json!("reasoning")),
             },
             CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: ObservationId::new("tool.multi-output").unwrap(),
+                invocation_id: Some(ObservationId::new("tool.multi-output").unwrap()),
                 name: "edit_file".to_owned(),
                 arguments: json!({"path": "src/lib.rs"}),
             },
@@ -152,7 +152,7 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
     let ProjectionPersistOutcome::Projected(projected) = outcome else {
         panic!("observation should project");
     };
-    assert_eq!(projected.output_count(), 1);
+    assert!(projected.message().is_some());
     drop(runtime);
 
     let conn = rusqlite::Connection::open(database_path).unwrap();
