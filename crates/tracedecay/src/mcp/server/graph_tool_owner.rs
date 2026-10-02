@@ -16,6 +16,9 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::graph_tool::graph_tool_owner_stores;
 use tracedecay_mcp::server::join_hook_ingest_refresh;
+use tracedecay_mcp::tools::binding::{BranchSensitivity, tool_branch_sensitivity};
+use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::branch::BranchMemo;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OwnerStoresV1};
 
 use super::McpServer;
@@ -56,11 +59,26 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
 }
 
 impl McpServer {
+    /// Raw worktree writes and renames carry no hook hint or Git metadata
+    /// move, so a read is their witness: it serves now and the cooled-down
+    /// probe reconciles them for the next read.
+    fn probe_before_graph_read(
+        &self,
+        operation: ApplicationSurfaceOperation,
+        cg: &Arc<TraceDecay>,
+        live_branch: &BranchMemo,
+    ) {
+        if tool_branch_sensitivity(operation.mcp_tool_name()) == BranchSensitivity::Sensitive {
+            self.maybe_spawn_read_refresh(cg, live_branch);
+        }
+    }
+
     async fn compute_graph_tool(
         &self,
         invocation: GraphToolInvocationV1,
     ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
-        let (cg, _live_branch) = self.reopen_if_branch_drifted_memoized().await;
+        let (cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
+        self.probe_before_graph_read(invocation.operation, &cg, &live_branch);
         let server_stats = match invocation.operation {
             ApplicationSurfaceOperation::Status => Some(self.server_stats_json().await),
             _ => None,
