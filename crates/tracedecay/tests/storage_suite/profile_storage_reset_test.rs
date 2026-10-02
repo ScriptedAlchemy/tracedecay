@@ -235,9 +235,9 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
         .await
         .unwrap();
 
-    assert_eq!(
+    assert_path_eq(
         cg.store_layout().data_root,
-        client_profile.join("projects/proj_explicit")
+        client_profile.join("projects/proj_explicit"),
     );
     assert!(
         !cg.store_layout().data_root.join("config.json").exists(),
@@ -273,9 +273,9 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
         .await
         .unwrap();
 
-    assert_eq!(
+    assert_path_eq(
         cg.store_layout().data_root,
-        client_profile.join("projects/proj_db_only")
+        client_profile.join("projects/proj_db_only"),
     );
     assert!(
         !cg.store_layout().data_root.join("config.json").exists(),
@@ -539,7 +539,7 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
         .await
         .unwrap();
     let shard_root = main.store_layout().data_root.clone();
-    assert_eq!(shard_root, client_profile.join("projects/proj_auto_branch"));
+    assert_path_eq(shard_root, client_profile.join("projects/proj_auto_branch"));
     drop(main);
 
     run_git(&project, &["checkout", "feature/client-profile"]);

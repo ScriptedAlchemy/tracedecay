@@ -117,20 +117,45 @@ async fn rmcp_route_fixture_with_projects(
                 tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
             )
             .expect("install portable route profile worker plan");
-        let server = Box::pin(super::super::portable_project_server_for_request(
-            DaemonLifecycle::default(),
-            store_administration.clone(),
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            invocation,
-            super::super::http_application::DaemonHttpApplicationRegistry::default(),
-            &handshake,
-            super::super::ProjectServerRequirement::Core,
-            None,
-        ))
-        .await
-        .expect("open portable production project server");
+        // The portable route answers the first cold open with the warming
+        // hint once the bounded publication wait expires; production clients
+        // retry it. Cold opens on Windows outlast the bound, so the fixture
+        // rides the same retry a client would instead of demanding a
+        // synchronous answer.
+        let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        // One gate set shared across retries so every attempt rides the same
+        // background open task instead of claiming a fresh open per retry.
+        let project_open_gates = Arc::new(tokio::sync::Mutex::new(
+            super::super::ProjectOpenGates::default(),
+        ));
+        let lifecycle = DaemonLifecycle::default();
+        let server = loop {
+            match Box::pin(super::super::portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                super::super::http_application::DaemonHttpApplicationRegistry::default(),
+                &handshake,
+                super::super::ProjectServerRequirement::Core,
+                None,
+            ))
+            .await
+            {
+                Ok(server) => break server,
+                Err(error) => {
+                    assert!(
+                        super::super::error_is_project_warming(&error),
+                        "open portable production project server: {error:?}"
+                    );
+                    assert!(
+                        tokio::time::Instant::now() < give_up,
+                        "portable project warm-up never published a server: {error:?}"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
         (store_administration, server)
     };
 

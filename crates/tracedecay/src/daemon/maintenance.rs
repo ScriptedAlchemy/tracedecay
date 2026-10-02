@@ -1128,6 +1128,7 @@ pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
@@ -1781,13 +1782,17 @@ mod tests {
             .upsert_code_project("proj_unmounted", &checkout, None, None, None)
             .await
             .expect("register project");
+        // The scope hash is derived from the registry's stored canonical
+        // root, spelled plainly. Hashing the verbatim `\\?\` spelling
+        // `canonicalize` returns on Windows names a directory the tick's
+        // unmounted-scope lookup cannot prove, so it would skip the fixture.
         let store_root =
             tracedecay_code_index_retention::code_index_generations::code_index_store_root(
                 &tracedecay_runtime_core::storage::profile_sharded_data_root(
                     &profile_root,
                     &project.project_id,
                 ),
-                &checkout,
+                Path::new(&project.canonical_root),
             );
         tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
             &store_root,
