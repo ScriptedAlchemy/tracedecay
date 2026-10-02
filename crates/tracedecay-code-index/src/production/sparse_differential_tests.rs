@@ -1,12 +1,13 @@
+//! Every in-place edit of the cross-file fixtures, sealed over its parent,
+//! must seal what a cold build of the edited tree seals.
+
 use std::path::Path;
 
 use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
-use super::changed_resolution::{ChangedSitesV1, pair_edited_files};
-use super::resolution_outputs::resolve_files;
 use super::worker_tests::{
-    WorkerProjectionSink, WorkerPublicationStore, partitioned_restore, partitioned_seal,
-    worker_config, worker_id, worker_request_with_source,
+    WorkerProjectionSink, WorkerPublicationStore, worker_config, worker_id,
+    worker_request_with_source,
 };
 use super::*;
 
@@ -62,14 +63,40 @@ pub(super) fn language_for(path: &str) -> &'static str {
 /// follow path order, so two trees with the same paths share them, except
 /// that the `fresh` file gets its own occurrence as an edit does. Over the
 /// owner's active generation only the fresh file's bytes are captured, as a
-/// watched refresh captures only changed files.
-pub(super) fn publish(
-    owner: &mut CodeIndexProductionOwnerV1<WorkerPublicationStore, WorkerProjectionSink>,
+/// watched refresh captures only changed files; a build that must run cold
+/// is refused for the missing bytes and recaptures every file, as the
+/// daemon's reconcile does.
+pub(super) fn publish<P: CodeIndexAtomicPublicationPort>(
+    owner: &mut CodeIndexProductionOwnerV1<P, WorkerProjectionSink>,
     files: &[(String, String)],
     fresh: Option<usize>,
     over_parent: bool,
     sealed_at: i64,
-) -> Arc<CodeIndexPublishedGenerationV1> {
+) -> CodeIndexPublishedBuildV1 {
+    match owner.build_and_publish(
+        fixture_request(files, fresh, over_parent, sealed_at),
+        &UninterruptibleCodeIndexControlV1,
+    ) {
+        Err(CodeIndexProductionErrorV1::Input(CodeIndexInputErrorV1::MissingCapturedFile))
+            if over_parent =>
+        {
+            owner
+                .build_and_publish(
+                    fixture_request(files, fresh, false, sealed_at),
+                    &UninterruptibleCodeIndexControlV1,
+                )
+                .expect("publish the fixture tree from every file")
+        }
+        published => published.expect("publish the fixture tree"),
+    }
+}
+
+fn fixture_request(
+    files: &[(String, String)],
+    fresh: Option<usize>,
+    over_parent: bool,
+    sealed_at: i64,
+) -> CodeIndexBuildRequestV1 {
     let mut request = worker_request_with_source("file.changed.seed", sealed_at, b"");
     request.snapshot.files.clear();
     request.snapshot.sanitization_receipts.clear();
@@ -112,9 +139,7 @@ pub(super) fn publish(
         request.changed_files.insert(files[fresh].0.clone());
     }
     request.snapshot.content_identity = content_digest(&identity);
-    owner
-        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
-        .expect("publish the fixture tree")
+    request
 }
 
 /// `source` with every whole-identifier `name` renamed to `renamed`.
@@ -139,82 +164,81 @@ fn rename_identifier(source: &str, name: &str, renamed: &str) -> String {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DifferentialCounts {
-    /// Edits resolved from the parent's outputs.
-    incremental: usize,
-    /// Edits whose edited file moved name lookups, resolved whole.
-    whole: usize,
-    /// Incremental edits whose cross-file edges or call limitations moved.
+    /// Edits sealed over their parent.
+    sparse: usize,
+    /// Edits whose edited file moved name lookups, sealed cold.
+    cold: usize,
+    /// Sparse edits whose cross-file edges or call limitations moved.
     moved: usize,
 }
 
+/// What a restored generation answers queries from, independent of its
+/// generation identity and lineage.
+fn restored_answers(
+    store: &WorkerPublicationStore,
+    published: &CodeIndexPublishedBuildV1,
+) -> (Vec<CanonicalRelationEdgeV1>, Vec<crate::chunks::CodeIndexUnresolvedReferenceV1>) {
+    let restored = store
+        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(published.snapshot()))
+        .expect("the published generation restores")
+        .expect("an active generation");
+    (restored.edges, restored.unresolved_calls)
+}
+
 /// Publishes `base_tree` and then `edited_tree`, which differ only in file
-/// `index`, through one owner, so the edit builds over its parent. Asserts
-/// that the edit's edges, and its graph resolution from the parent's
-/// outputs, are exactly what resolving it whole derives, and that the build
-/// resolved the whole corpus only when the edit moved name lookups.
-fn assert_resolves_like_whole(
+/// `index`, through one owner, so the edit builds over its sealed parent.
+/// Asserts that the edit seals the file segments and graph pages, the
+/// statistics, and the restored edges and call limitations a cold build of
+/// the edited tree seals, and that only an edit that moved name lookups
+/// resolved the corpus whole.
+fn assert_seals_like_cold(
     base_tree: &[(String, String)],
     base_fresh: Option<usize>,
     edited_tree: &[(String, String)],
     index: usize,
     counts: &mut DifferentialCounts,
 ) {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("production owner");
+    let store = WorkerPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+        .expect("production owner");
     let parent = publish(&mut owner, base_tree, base_fresh, false, 1_100_000);
+    let parent_answers = restored_answers(&store, &parent);
     super::helpers::take_seal_reference_resolutions();
     let edited = publish(&mut owner, edited_tree, Some(index), true, 1_200_000);
     let build_resolutions = super::helpers::take_seal_reference_resolutions();
     let path = &edited_tree[index].0;
-    assert_eq!(
-        edited.edges,
-        collect_edge_evidence(&edited.files)
-            .expect("whole edge evidence")
-            .0,
-        "published edges after editing {path}"
-    );
 
-    let check = || Ok(());
-    let (parent_edges, parent_unresolved) =
-        resolve_files(&parent.files, &check).expect("resolve the parent");
-    let (edges, unresolved) = resolve_files(&edited.files, &check).expect("resolve the edit whole");
-    let (pairs, dropped) = pair_edited_files(
-        &edited.files,
-        |position| edited.files[position].authority.logical_path == *path,
-        parent.files.iter().cloned(),
-    )
-    .expect("the edited path has a parent file");
-    assert_eq!(dropped, parent.files.len() - 1);
-    match ChangedSitesV1::new(&edited.files, &pairs) {
-        Some(sites) => {
-            let cross_file_edges = sites
-                .cross_file_edges(&edited.files, parent_edges.iter())
-                .expect("resolve the edit from the parent");
-            let unresolved_calls = sites
-                .unresolved_calls(&edited.files, &cross_file_edges, &parent_unresolved, &check)
-                .expect("call limitations from the parent");
-            assert_eq!(cross_file_edges, edges, "edges after editing {path}");
-            assert_eq!(
-                unresolved_calls, unresolved,
-                "call limitations after editing {path}"
-            );
-            assert_eq!(
-                build_resolutions, 0,
-                "the build over the parent after editing {path}"
-            );
-            counts.incremental += 1;
-            if edges != parent_edges || unresolved != parent_unresolved {
+    let cold_store = WorkerPublicationStore::default();
+    let cold = publish(
+        &mut CodeIndexProductionOwnerV1::new(worker_config(), cold_store.clone(), WorkerProjectionSink)
+            .expect("cold production owner"),
+        edited_tree,
+        Some(index),
+        false,
+        1_200_000,
+    );
+    super::helpers::take_seal_reference_resolutions();
+    let answers = restored_answers(&store, &edited);
+    assert_eq!(answers, restored_answers(&cold_store, &cold), "restored answers after editing {path}");
+    assert_eq!(
+        edited.metadata().generation_statistics(),
+        cold.metadata().generation_statistics(),
+        "statistics after editing {path}"
+    );
+    match edited.cold_reason() {
+        None => {
+            assert_eq!(edited.lane_digest(), cold.lane_digest(), "segments and pages after editing {path}");
+            assert_eq!(build_resolutions, 0, "the build over the parent after editing {path}");
+            counts.sparse += 1;
+            if answers != parent_answers {
                 counts.moved += 1;
             }
         }
-        None => {
+        Some(CodeIndexColdBuildReasonV1::MovesNameLookups) => {
             assert_eq!(build_resolutions, 1, "the whole build after editing {path}");
-            counts.whole += 1;
+            counts.cold += 1;
         }
+        Some(reason) => panic!("editing {path} built cold for {}", reason.as_str()),
     }
 }
 
@@ -224,13 +248,11 @@ fn assert_resolves_like_whole(
 /// targets.
 fn differential_counts(language: &str) -> DifferentialCounts {
     let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("production owner");
+    let store = WorkerPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+        .expect("production owner");
     let base = publish(&mut owner, &tree, None, false, 1_000_000);
+    let base = base.decoded().expect("a cold seal holds its generation");
     let mut counts = DifferentialCounts::default();
     for index in 0..tree.len() {
         let (path, source) = &tree[index];
@@ -239,7 +261,7 @@ fn differential_counts(language: &str) -> DifferentialCounts {
         }
         let mut shifted = tree.clone();
         shifted[index].1 = format!("\n\n{source}");
-        assert_resolves_like_whole(&tree, None, &shifted, index, &mut counts);
+        assert_seals_like_cold(&tree, None, &shifted, index, &mut counts);
 
         let file = base
             .files
@@ -261,100 +283,98 @@ fn differential_counts(language: &str) -> DifferentialCounts {
         for name in names {
             let mut renamed = tree.clone();
             renamed[index].1 = rename_identifier(source, &name, &format!("{name}Renamed"));
-            assert_resolves_like_whole(&tree, None, &renamed, index, &mut counts);
-            assert_resolves_like_whole(&renamed, Some(index), &tree, index, &mut counts);
+            assert_seals_like_cold(&tree, None, &renamed, index, &mut counts);
+            assert_seals_like_cold(&renamed, Some(index), &tree, index, &mut counts);
         }
     }
     counts
 }
 
 #[test]
-fn rust_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn rust_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("rust"),
         DifferentialCounts {
-            incremental: 45,
-            whole: 14,
+            sparse: 45,
+            cold: 14,
             moved: 44,
         }
     );
 }
 
 #[test]
-fn typescript_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn typescript_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("typescript"),
         DifferentialCounts {
-            incremental: 44,
-            whole: 0,
+            sparse: 44,
+            cold: 0,
             moved: 44,
         }
     );
 }
 
 #[test]
-fn python_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn python_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("python"),
         DifferentialCounts {
-            incremental: 46,
-            whole: 0,
+            sparse: 46,
+            cold: 0,
             moved: 45,
         }
     );
 }
 
 #[test]
-fn go_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn go_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("go"),
         DifferentialCounts {
-            incremental: 46,
-            whole: 20,
+            sparse: 46,
+            cold: 20,
             moved: 46,
         }
     );
 }
 
 #[test]
-fn java_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn java_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("java"),
         DifferentialCounts {
-            incremental: 66,
-            whole: 2,
+            sparse: 66,
+            cold: 2,
             moved: 66,
         }
     );
 }
 
 #[test]
-fn ruby_edits_resolve_from_the_base_like_a_whole_resolution() {
+fn ruby_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
         differential_counts("ruby"),
         DifferentialCounts {
-            incremental: 52,
-            whole: 18,
+            sparse: 52,
+            cold: 18,
             moved: 52,
         }
     );
 }
 
 /// Fails on a restore that re-derives its generation's cross-file edges by
-/// resolving the whole corpus. A daemon restart restores the sealed parent
-/// and builds the next edit over it: neither may resolve the corpus whole,
-/// and both must hold exactly the edges a whole resolution derives.
+/// resolving the whole corpus, and on a build over a sealed parent that
+/// does. Both must hold exactly the edges a whole resolution derives.
 #[test]
 fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
     for language in ["rust", "typescript", "python", "go", "java", "ruby"] {
         let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
-        let mut owner = CodeIndexProductionOwnerV1::new(
-            worker_config(),
-            WorkerPublicationStore::default(),
-            WorkerProjectionSink,
-        )
-        .expect("production owner");
+        let store = WorkerPublicationStore::default();
+        let mut owner =
+            CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+                .expect("production owner");
         let parent = publish(&mut owner, &tree, None, false, 1_000_000);
+        let parent = parent.decoded().expect("a cold seal holds its generation");
         assert!(
             parent
                 .edges
@@ -362,11 +382,12 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
                 .any(|edge| edge.authority == EdgeAuthorityV1::NameResolved),
             "{language}: the fixture resolves cross-file edges"
         );
-        let (manifest, segments) = partitioned_seal(&parent);
-        drop(owner);
-
         super::helpers::take_seal_reference_resolutions();
-        let restored = Arc::new(partitioned_restore(&manifest, &segments));
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(parent.snapshot());
+        let restored = store
+            .decode_active(&scope)
+            .expect("the parent restores")
+            .expect("an active parent");
         assert_eq!(
             super::helpers::take_seal_reference_resolutions(),
             0,
@@ -374,11 +395,10 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         );
         assert_eq!(restored.edges, parent.edges, "{language}: restored edges");
         assert_eq!(restored.edge_abstentions, parent.edge_abstentions);
+        drop(owner);
 
-        let store = WorkerPublicationStore::default();
-        *store.active.lock().expect("publication lock") = Some(restored);
         let mut restarted =
-            CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+            CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
                 .expect("restarted production owner");
         let index = tree
             .iter()
@@ -389,11 +409,16 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         let mut shifted = tree.clone();
         shifted[index].1 = format!("\n\n{}", tree[index].1);
         let edited = publish(&mut restarted, &shifted, Some(index), true, 1_100_000);
+        assert_eq!(edited.cold_reason(), None, "{language}: the edit seals over its parent");
         assert_eq!(
             super::helpers::take_seal_reference_resolutions(),
             0,
             "{language}: the first build after the restart resolved the corpus whole"
         );
+        let edited = store
+            .decode_active(&scope)
+            .expect("the edit restores")
+            .expect("an active edit");
         assert_eq!(
             edited.edges,
             collect_edge_evidence(&edited.files)

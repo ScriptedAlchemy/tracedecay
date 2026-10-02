@@ -38,27 +38,6 @@ const BATCH_FIXTURE_SOURCE: &str = concat!(
 );
 
 #[derive(Default)]
-struct TestPublicationStore;
-
-impl CodeIndexAtomicPublicationPort for TestPublicationStore {
-    fn load_active(
-        &self,
-        _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(None)
-    }
-
-    fn publish_atomically(
-        &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
-        _expected_active_generation: Option<&tracedecay_domain::CodeGenerationId>,
-        _generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        Ok(())
-    }
-}
-
-#[derive(Default)]
 struct ApplyingProjectionSink;
 
 impl CodeChunkProjectionSink for ApplyingProjectionSink {
@@ -709,13 +688,14 @@ fn fixture_for_source_files(
             privacy_key_epoch: 7,
             max_snapshot_age_micros: None,
         },
-        TestPublicationStore,
+        super::super::MemorySealedPublicationStoreV1::default(),
         ApplyingProjectionSink,
     )
     .expect("fixture production owner opens");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
+    let generation = Arc::clone(generation.decoded().expect("a cold seal holds its generation"));
     let mut segments = BTreeMap::new();
     let manifest = generation
         .encode_partitioned_sealed(|request| {

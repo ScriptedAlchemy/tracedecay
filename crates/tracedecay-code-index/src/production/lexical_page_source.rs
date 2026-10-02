@@ -1152,6 +1152,7 @@ pub struct VerifiedSealedTextGenerationMetadataV1 {
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
     statistics: CodeIndexGenerationStatisticsV1,
+    chunk_policy: ChunkPolicyRevisionSummaryV1,
 }
 
 impl VerifiedSealedTextGenerationMetadataV1 {
@@ -1160,6 +1161,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
             manifest: generation.manifest().clone(),
             snapshot: generation.snapshot().clone(),
             statistics: generation.statistics.clone(),
+            chunk_policy: generation.chunk_policy_summary().clone(),
         }
     }
 
@@ -1167,6 +1169,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
         statistics: CodeIndexGenerationStatisticsV1,
+        chunk_policy: ChunkPolicyRevisionSummaryV1,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         if manifest.source_commitments.is_none() {
             return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
@@ -1189,6 +1192,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
             manifest,
             snapshot,
             statistics,
+            chunk_policy,
         })
     }
 
@@ -1196,14 +1200,16 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         &self.manifest
     }
 
-    /// Compare every owner-controlled input represented by the bounded
-    /// manifest and snapshot. Chunk policy census still requires the full
-    /// generation's chunk corpus.
-    pub fn manifest_compatibility_with(
+    /// Compare every owner-controlled input this sealed generation was
+    /// built under, including the policy census of its chunks.
+    pub fn compatibility_with(
         &self,
         config: &CodeIndexProductionConfigV1,
     ) -> CodeIndexGenerationCompatibilityV1 {
-        CodeIndexGenerationCompatibilityV1::for_metadata(&self.manifest, &self.snapshot, config)
+        let mut compatibility =
+            CodeIndexGenerationCompatibilityV1::for_metadata(&self.manifest, &self.snapshot, config);
+        self.chunk_policy.observe(config, &mut compatibility);
+        compatibility
     }
 
     pub fn source_commitments(
@@ -1251,6 +1257,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
         statistics: CodeIndexGenerationStatisticsV1,
+        chunk_policy: ChunkPolicyRevisionSummaryV1,
         source: PartitionedLexicalFileSourceV1,
         source_state_digest: ManifestDigest,
         maximum_page_chunks: usize,
@@ -1262,7 +1269,10 @@ impl VerifiedSealedLexicalPageSourceV1 {
             ));
         }
         let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
-            manifest, snapshot, statistics,
+            manifest,
+            snapshot,
+            statistics,
+            chunk_policy,
         )?;
         let file_count = u64::try_from(source.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(

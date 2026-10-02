@@ -37,19 +37,23 @@ use super::*;
 /// restore rebinds occurrences, so a one-file seal does not SHA-256-rebind
 /// every unchanged file's symbols. `full_replay_digest` is sealed as a
 /// parent delta (optional parent binding). Evidence request and receipt rows
-/// leave implicit what the generation's own chunks imply. Each file's
-/// cross-file evidence, the edges sealing resolved from it, its call sites
-/// sealing could not bind, and its symbols' lineage, is a segment of its own
-/// keyed by stable symbol identity, so a restore never re-resolves the corpus
-/// and one file's evidence decodes without any other file's symbols. The
-/// snapshot carries the sources capture omitted, with the reason.
+/// leave implicit what the generation's own chunks imply and name chunks by
+/// their file and position within it. Each file's cross-file evidence, the
+/// edges sealing resolved from it, its call sites sealing could not bind,
+/// and its symbols' lineage when it is not identity lineage, is a segment of
+/// its own keyed by stable symbol identity, so a restore never re-resolves
+/// the corpus and one file's evidence decodes without any other file's
+/// symbols. The manifest carries the generation's chunk count and policy
+/// census and its paged resolution index, so a successor builds from the
+/// sealed manifest and the files it changes. The snapshot carries the
+/// sources capture omitted, with the reason.
 ///
 /// Every other revision is refused through
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
 /// successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 19;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 20;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {

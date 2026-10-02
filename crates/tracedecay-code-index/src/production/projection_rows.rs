@@ -2,13 +2,16 @@
 //!
 //! A request's added-or-changed rows name chunks of the generation being
 //! sealed, and each row's current digest is that chunk's content digest, so
-//! the persisted form names those rows by position in the generation's
-//! chunk-id-ordered roster (as runs when the chunk is new) and keeps every
-//! other row whole. A receipt answers exactly the request's rows in chunk
-//! order, and a row the projector applied as the request says is a pure
-//! function of that row, so only the other decisions are persisted.
-//! Restore re-verifies the request, manifest, and publication digests over
-//! the rebuilt rows, so any disagreement fails closed.
+//! the persisted form names those rows by their file's snapshot key and their
+//! position among that file's chunks in chunk-id order (as runs when the
+//! chunks are new) and keeps every other row whole. A row therefore decodes
+//! against its own file, and a seal that wrote only some files' chunks names
+//! them without the generation's whole chunk roster. A receipt answers
+//! exactly the request's rows in chunk order, and a row the projector applied
+//! as the request says is a pure function of that row, so only the other
+//! decisions are persisted. Restore re-verifies the request, manifest, and
+//! publication digests over the rebuilt rows, so any disagreement fails
+//! closed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,14 +30,32 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(message.to_owned())
 }
 
-/// A generation's chunks in canonical chunk-id order. Encoding and restore
-/// both derive it from the file artifacts, so positions agree.
-pub(super) fn chunk_roster<'a>(
-    chunks: impl Iterator<Item = &'a Arc<CodeSearchChunkV1>>,
-) -> Vec<&'a CodeSearchChunkV1> {
-    let mut roster = chunks.map(Arc::as_ref).collect::<Vec<_>>();
-    roster.sort_by(|left, right| left.id.cmp(&right.id));
-    roster
+/// Each file's chunks in chunk-id order, by the file's snapshot key. Encoding
+/// and restore both derive it from the file artifacts, so positions agree.
+pub(super) struct FileChunkRostersV1<'a> {
+    files: BTreeMap<u32, Vec<&'a CodeSearchChunkV1>>,
+}
+
+impl<'a> FileChunkRostersV1<'a> {
+    pub(super) fn new(files: impl Iterator<Item = (u32, &'a [Arc<CodeSearchChunkV1>])>) -> Self {
+        Self {
+            files: files
+                .map(|(file_key, chunks)| {
+                    let mut roster = chunks.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                    roster.sort_by(|left, right| left.id.cmp(&right.id));
+                    (file_key, roster)
+                })
+                .collect(),
+        }
+    }
+
+    fn chunk(&self, file_key: u32, position: u32) -> Result<&'a CodeSearchChunkV1, CodeIndexProductionErrorV1> {
+        usize::try_from(position)
+            .ok()
+            .and_then(|position| self.files.get(&file_key)?.get(position))
+            .copied()
+            .ok_or_else(|| contract("sealed projection row names a chunk outside its file"))
+    }
 }
 
 #[derive(Serialize)]
@@ -46,29 +67,24 @@ pub(super) struct PersistedProjectionRequestRefV1<'a> {
     replay_reason: ProjectionReplayReasonV1,
 }
 
+/// `(file key, first position, count)`: consecutive new chunks of one file.
+type AddedRunV1 = (u32, u32, u32);
+
 #[derive(Serialize)]
 struct PersistedChangeSetRefV1<'a> {
     from_generation: &'a Option<CodeGenerationId>,
     to_generation: &'a CodeGenerationId,
     manifest_digest: &'a ManifestDigest,
-    added_or_changed: Vec<PersistedChangeRowRefV1<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    added: Vec<AddedRunV1>,
+    /// `(file key, position, prior content digest)`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    changed: Vec<(u32, u32, &'a ContentDigest)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rows: Vec<&'a ChangedCodeChunkV1>,
     deleted: &'a [ChangedCodeChunkV1],
     reused_count: u64,
     reused_digest: &'a ManifestDigest,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum PersistedChangeRowRefV1<'a> {
-    Added {
-        start: u32,
-        count: u32,
-    },
-    Changed {
-        current: u32,
-        prior: &'a ContentDigest,
-    },
-    Row(&'a ChangedCodeChunkV1),
 }
 
 #[derive(Deserialize)]
@@ -87,66 +103,59 @@ struct PersistedChangeSetV1 {
     from_generation: Option<CodeGenerationId>,
     to_generation: CodeGenerationId,
     manifest_digest: ManifestDigest,
-    added_or_changed: Vec<PersistedChangeRowV1>,
+    #[serde(default)]
+    added: Vec<AddedRunV1>,
+    #[serde(default)]
+    changed: Vec<(u32, u32, ContentDigest)>,
+    #[serde(default)]
+    rows: Vec<ChangedCodeChunkV1>,
     deleted: Vec<ChangedCodeChunkV1>,
     reused_count: u64,
     reused_digest: ManifestDigest,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum PersistedChangeRowV1 {
-    /// Roster chunks `start..start + count`, each new in this generation.
-    Added {
-        start: u32,
-        count: u32,
-    },
-    /// Roster chunk `current`, changed from content digest `prior`.
-    Changed {
-        current: u32,
-        prior: ContentDigest,
-    },
-    Row(ChangedCodeChunkV1),
-}
-
 impl<'a> PersistedProjectionRequestRefV1<'a> {
+    /// `rosters` must hold every file whose chunks the request adds or
+    /// changes; a row naming a chunk of no roster is kept whole.
     pub(super) fn new(
         request: &'a ProjectionBatchRequestV1,
-        roster: &[&CodeSearchChunkV1],
+        rosters: &FileChunkRostersV1<'_>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let positions = roster
-            .iter()
-            .enumerate()
-            .map(|(position, chunk)| {
-                u32::try_from(position)
-                    .map(|position| (&chunk.id, (position, &chunk.content_digest)))
-                    .map_err(|_| contract("sealed chunk roster exceeds u32"))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+        let mut positions = HashMap::new();
+        for (file_key, roster) in &rosters.files {
+            for (position, chunk) in roster.iter().enumerate() {
+                let position = u32::try_from(position)
+                    .map_err(|_| contract("sealed file chunk roster exceeds u32"))?;
+                positions.insert(&chunk.id, (*file_key, position, &chunk.content_digest));
+            }
+        }
         let changes = &request.changes;
+        let mut added = Vec::new();
+        let mut changed = Vec::new();
         let mut rows = Vec::new();
         for change in &changes.added_or_changed {
-            let position = positions
+            let located = positions
                 .get(&change.chunk_id)
-                .filter(|(_, digest)| change.current_digest.as_ref() == Some(*digest))
-                .map(|(position, _)| *position);
-            match (position, &change.prior_digest) {
-                (Some(position), None) => match rows.last_mut() {
-                    Some(PersistedChangeRowRefV1::Added { start, count })
-                        if start.checked_add(*count) == Some(position) =>
-                    {
-                        *count += 1;
-                    }
-                    _ => rows.push(PersistedChangeRowRefV1::Added {
-                        start: position,
-                        count: 1,
-                    }),
-                },
-                (Some(position), Some(prior)) => rows.push(PersistedChangeRowRefV1::Changed {
-                    current: position,
-                    prior,
-                }),
-                (None, _) => rows.push(PersistedChangeRowRefV1::Row(change)),
+                .filter(|(_, _, digest)| change.current_digest.as_ref() == Some(*digest));
+            match (located, &change.prior_digest) {
+                (Some((file_key, position, _)), None) => added.push((*file_key, *position)),
+                (Some((file_key, position, _)), Some(prior)) => {
+                    changed.push((*file_key, *position, prior));
+                }
+                (None, _) => rows.push(change),
+            }
+        }
+        added.sort_unstable();
+        changed.sort_by_key(|(file_key, position, _)| (*file_key, *position));
+        let mut runs: Vec<AddedRunV1> = Vec::new();
+        for (file_key, position) in added {
+            match runs.last_mut() {
+                Some((run_file, start, count))
+                    if *run_file == file_key && start.checked_add(*count) == Some(position) =>
+                {
+                    *count += 1;
+                }
+                _ => runs.push((file_key, position, 1)),
             }
         }
         Ok(Self {
@@ -155,7 +164,9 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
                 from_generation: &changes.from_generation,
                 to_generation: &changes.to_generation,
                 manifest_digest: &changes.manifest_digest,
-                added_or_changed: rows,
+                added: runs,
+                changed,
+                rows,
                 deleted: &changes.deleted,
                 reused_count: changes.reused_count,
                 reused_digest: &changes.reused_digest,
@@ -168,45 +179,39 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
 }
 
 impl PersistedProjectionRequestV1 {
+    pub(super) fn target_projection_key(&self) -> &ProjectionKeyV1 {
+        &self.target_projection_key
+    }
+
     pub(super) fn expand(
         self,
-        roster: &[&CodeSearchChunkV1],
+        rosters: &FileChunkRostersV1<'_>,
     ) -> Result<ProjectionBatchRequestV1, CodeIndexProductionErrorV1> {
-        let chunk = |position: u32| {
-            usize::try_from(position)
-                .ok()
-                .and_then(|position| roster.get(position))
-                .copied()
-                .ok_or_else(|| contract("sealed projection row names a chunk outside its roster"))
-        };
         let changes = self.changes;
         let mut added_or_changed = Vec::new();
-        for row in changes.added_or_changed {
-            match row {
-                PersistedChangeRowV1::Added { start, count } => {
-                    let end = start
-                        .checked_add(count)
-                        .ok_or_else(|| contract("sealed projection run exceeds u32"))?;
-                    for position in start..end {
-                        let chunk = chunk(position)?;
-                        added_or_changed.push(ChangedCodeChunkV1 {
-                            chunk_id: chunk.id.clone(),
-                            prior_digest: None,
-                            current_digest: Some(chunk.content_digest.clone()),
-                        });
-                    }
-                }
-                PersistedChangeRowV1::Changed { current, prior } => {
-                    let chunk = chunk(current)?;
-                    added_or_changed.push(ChangedCodeChunkV1 {
-                        chunk_id: chunk.id.clone(),
-                        prior_digest: Some(prior),
-                        current_digest: Some(chunk.content_digest.clone()),
-                    });
-                }
-                PersistedChangeRowV1::Row(change) => added_or_changed.push(change),
+        for (file_key, start, count) in changes.added {
+            let end = start
+                .checked_add(count)
+                .ok_or_else(|| contract("sealed projection run exceeds u32"))?;
+            for position in start..end {
+                let chunk = rosters.chunk(file_key, position)?;
+                added_or_changed.push(ChangedCodeChunkV1 {
+                    chunk_id: chunk.id.clone(),
+                    prior_digest: None,
+                    current_digest: Some(chunk.content_digest.clone()),
+                });
             }
         }
+        for (file_key, position, prior) in changes.changed {
+            let chunk = rosters.chunk(file_key, position)?;
+            added_or_changed.push(ChangedCodeChunkV1 {
+                chunk_id: chunk.id.clone(),
+                prior_digest: Some(prior),
+                current_digest: Some(chunk.content_digest.clone()),
+            });
+        }
+        added_or_changed.extend(changes.rows);
+        added_or_changed.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
         Ok(ProjectionBatchRequestV1 {
             request_digest: self.request_digest,
             changes: ChangedCodeChunkSetV1 {

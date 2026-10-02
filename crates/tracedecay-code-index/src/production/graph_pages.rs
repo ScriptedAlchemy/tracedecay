@@ -20,7 +20,7 @@ use crate::graph_projection::{
 use crate::lineage::LineageSymbolRecordV1;
 
 use super::graph_page_store::CodeGraphPageBuildFootprintV1;
-use super::{CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1};
+use super::{CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +147,6 @@ impl CodeIndexPublishedGenerationV1 {
             .map(|file| (&file.extraction.file_occurrence_id, file))
             .collect::<BTreeMap<_, _>>();
 
-        let check = || Ok::<(), GraphDbError>(());
         let mut owners = BTreeMap::<SymbolOccurrenceId, FileOccurrenceId>::new();
         for file in &self.files {
             let occurrence = &file.extraction.file_occurrence_id;
@@ -240,57 +239,114 @@ impl CodeIndexPublishedGenerationV1 {
                 .filter(|edge| !owners.contains_key(&edge.to_occurrence))
                 .map(|edge| edge.to_occurrence.clone())
                 .collect();
-            let artifacts = artifacts_by_occurrence.get(occurrence).copied();
-            let bindings = artifacts
-                .map(|file| {
-                    code_graph_symbol_bindings(
-                        Some(&files_by_occurrence),
-                        &self.manifest.generation_id,
-                        &file.artifacts.chunks.chunks,
-                        &check,
-                    )
-                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-                })
-                .transpose()?
-                .unwrap_or_default();
-            let page = PersistedCodeGraphPageV1 {
-                file: snapshot_file.clone(),
-                imports: artifacts
-                    .map(|file| file.artifacts.imports.clone())
-                    .unwrap_or_default(),
-                symbols: artifacts
-                    .map(|file| file.artifacts.symbols.clone())
-                    .unwrap_or_default(),
-                edges: page_edges.into_iter().cloned().collect(),
-                bindings,
-                unresolved_calls: unresolved
-                    .remove(occurrence)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-                target_files,
-                placeholder_targets,
-                owned_placeholders,
-            };
-            let encoded = serde_json::to_vec(&page).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "code graph page encoding failed: {error}"
-                ))
-            })?;
-            let page_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&encoded))
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            let build_footprint =
-                page_build_footprint(&page, &self.manifest.generation_id, encoded.len())?;
-            visit(SealedCodeGraphPageV1 {
-                file_key,
-                file_occurrence_id: occurrence.clone(),
-                logical_path: snapshot_file.logical_path.clone(),
-                page_digest,
-                encoded,
-                build_footprint,
-            })?;
+            visit(seal_code_graph_page(
+                CodeGraphPageInputsV1 {
+                    file_key,
+                    snapshot_file,
+                    artifacts: artifacts_by_occurrence
+                        .get(occurrence)
+                        .map(|file| file.as_ref()),
+                    edges: page_edges.into_iter().cloned().collect(),
+                    unresolved_calls: unresolved
+                        .remove(occurrence)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .cloned()
+                        .collect(),
+                    target_files,
+                    placeholder_targets,
+                    owned_placeholders,
+                },
+                &files_by_occurrence,
+                &self.manifest.generation_id,
+            )?)?;
         }
         Ok(())
     }
+}
+
+/// The symbol occurrences a file's graph page owns: its chunks' symbols and
+/// its symbols.
+pub(super) fn owned_occurrences(file: &FileGenerationArtifactsV1) -> BTreeSet<&SymbolOccurrenceId> {
+    file.artifacts
+        .chunks
+        .chunks
+        .iter()
+        .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
+        .chain(file.artifacts.symbols.iter().map(|symbol| &symbol.occurrence))
+        .collect()
+}
+
+/// Everything one file's graph page holds besides what its file says.
+pub(super) struct CodeGraphPageInputsV1<'a> {
+    pub(super) file_key: u32,
+    pub(super) snapshot_file: &'a SanitizedCodeFileV1,
+    pub(super) artifacts: Option<&'a FileGenerationArtifactsV1>,
+    /// The file's own and cross-file edges in canonical edge order.
+    pub(super) edges: Vec<CanonicalRelationEdgeV1>,
+    /// The file's call limitations in sorted order.
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+    pub(super) target_files: BTreeMap<SymbolOccurrenceId, FileOccurrenceId>,
+    pub(super) placeholder_targets: BTreeSet<SymbolOccurrenceId>,
+    pub(super) owned_placeholders: BTreeSet<SymbolOccurrenceId>,
+}
+
+/// Encode and content-address one file's graph page.
+pub(super) fn seal_code_graph_page(
+    inputs: CodeGraphPageInputsV1<'_>,
+    files_by_occurrence: &BTreeMap<&FileOccurrenceId, &SanitizedCodeFileV1>,
+    generation: &tracedecay_domain::CodeGenerationId,
+) -> Result<SealedCodeGraphPageV1, CodeIndexProductionErrorV1> {
+    let check = || Ok::<(), GraphDbError>(());
+    let CodeGraphPageInputsV1 {
+        file_key,
+        snapshot_file,
+        artifacts,
+        edges,
+        unresolved_calls,
+        target_files,
+        placeholder_targets,
+        owned_placeholders,
+    } = inputs;
+    let bindings = artifacts
+        .map(|file| {
+            code_graph_symbol_bindings(
+                Some(files_by_occurrence),
+                generation,
+                &file.artifacts.chunks.chunks,
+                &check,
+            )
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let page = PersistedCodeGraphPageV1 {
+        file: snapshot_file.clone(),
+        imports: artifacts
+            .map(|file| file.artifacts.imports.clone())
+            .unwrap_or_default(),
+        symbols: artifacts
+            .map(|file| file.artifacts.symbols.clone())
+            .unwrap_or_default(),
+        edges,
+        bindings,
+        unresolved_calls,
+        target_files,
+        placeholder_targets,
+        owned_placeholders,
+    };
+    let encoded = serde_json::to_vec(&page).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!("code graph page encoding failed: {error}"))
+    })?;
+    let page_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&encoded))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let build_footprint = page_build_footprint(&page, generation, encoded.len())?;
+    Ok(SealedCodeGraphPageV1 {
+        file_key,
+        file_occurrence_id: snapshot_file.file_occurrence_id.clone(),
+        logical_path: snapshot_file.logical_path.clone(),
+        page_digest,
+        encoded,
+        build_footprint,
+    })
 }

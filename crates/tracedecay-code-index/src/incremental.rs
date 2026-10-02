@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
-    CodeSearchChunkV1, FileOccurrenceId, ManifestDigest, SymbolOccurrenceId,
+    CodeSearchChunkV1, FileOccurrenceId, SymbolOccurrenceId,
 };
 
 use super::chunks::{ChunkingFailureV1, CodeFileChunksV1, symbol_occurrence_id};
@@ -147,52 +147,6 @@ impl GenerationChunkManifestV1 {
         })
     }
 
-    pub(crate) fn from_parent_delta_arcs(
-        generation_id: CodeGenerationId,
-        parent: &Self,
-        replaced_parent_occurrences: &BTreeSet<FileOccurrenceId>,
-        mut fresh_chunks: Vec<Arc<CodeSearchChunkV1>>,
-    ) -> Result<Self, ChunkIncrementErrorV1> {
-        generation_id.validate().map_err(|error| {
-            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                error,
-            ))
-        })?;
-        fresh_chunks.sort_by(|left, right| left.id.cmp(&right.id));
-        if let Some(duplicate) = fresh_chunks
-            .windows(2)
-            .find(|pair| pair[0].id >= pair[1].id)
-            .map(|pair| pair[0].id.clone())
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
-        }
-
-        let mut retained = parent
-            .chunks
-            .iter()
-            .filter(|chunk| !replaced_parent_occurrences.contains(&chunk.anchor.file_occurrence_id))
-            .cloned()
-            .peekable();
-        let mut fresh = fresh_chunks.into_iter().peekable();
-        let mut chunks = Vec::with_capacity(parent.chunks.len().saturating_add(fresh.len()));
-        while let (Some(left), Some(right)) = (retained.peek(), fresh.peek()) {
-            match left.id.cmp(&right.id) {
-                std::cmp::Ordering::Less => chunks.push(retained.next().expect("peeked")),
-                std::cmp::Ordering::Greater => chunks.push(fresh.next().expect("peeked")),
-                std::cmp::Ordering::Equal => {
-                    return Err(ChunkIncrementErrorV1::DuplicateChunk(left.id.clone()));
-                }
-            }
-        }
-        chunks.extend(retained);
-        chunks.extend(fresh);
-        Ok(Self {
-            generation_id,
-            chunks,
-        })
-    }
-
-    /// Construct a canonical generation chunk manifest.
     pub fn new(
         generation_id: CodeGenerationId,
         files: Vec<CodeFileChunksV1>,
@@ -500,129 +454,6 @@ pub fn plan_chunk_increment(
     Ok(changes)
 }
 
-/// Plan an increment when unchanged file pages are Arc-shared from `prior`.
-///
-/// A shared file occurrence is not a chunk proof. Each matched row is counted
-/// only after it is pointer-equal or digest-equal to the parent row. A
-/// divergent row is returned, naming that chunk id, before `reused_digest`
-/// is sealed. The seal itself stays the parent full-replay attestation plus
-/// reused cardinality.
-#[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
-pub(crate) fn plan_chunk_increment_arc_shared(
-    prior: &GenerationChunkManifestV1,
-    current: &GenerationChunkManifestV1,
-    shared_occurrences: &BTreeSet<FileOccurrenceId>,
-    unshared_occurrences: &BTreeSet<FileOccurrenceId>,
-    parent_full_replay_digest: &ManifestDigest,
-) -> Result<ChangedCodeChunkSetV1, ChunkIncrementErrorV1> {
-    if prior.generation_id == current.generation_id {
-        return Err(ChunkIncrementErrorV1::SameGeneration);
-    }
-    if shared_occurrences.is_empty() {
-        return Err(ChunkIncrementErrorV1::NonCanonical(
-            crate::noncanonical::noncanonical_detail(
-                crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
-                "arc-share increment requires shared file pages",
-            ),
-        ));
-    }
-
-    let mut previous = prior.chunks.iter().peekable();
-    let mut added_or_changed = Vec::new();
-    let mut reused_count = 0_u64;
-    let mut deleted = Vec::new();
-    for chunk in &current.chunks {
-        while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
-            deleted.push(ChangedCodeChunkV1 {
-                chunk_id: removed.id.clone(),
-                prior_digest: Some(removed.content_digest.clone()),
-                current_digest: None,
-            });
-        }
-        let matched = previous.next_if(|prior| prior.id == chunk.id);
-        let shared = !unshared_occurrences.contains(&chunk.anchor.file_occurrence_id);
-        match matched {
-            // Shared-file membership is not the unit check. Stop at the first
-            // row whose bytes diverged so the seal is not computed on it.
-            Some(prior_chunk) if shared => {
-                if !Arc::ptr_eq(prior_chunk, chunk)
-                    && prior_chunk.content_digest != chunk.content_digest
-                {
-                    return Err(arc_share_chunk_diverged(&chunk.id));
-                }
-                reused_count = reused_count.saturating_add(1);
-            }
-            Some(prior_chunk)
-                if Arc::ptr_eq(prior_chunk, chunk)
-                    || prior_chunk.content_digest == chunk.content_digest =>
-            {
-                reused_count = reused_count.saturating_add(1);
-            }
-            Some(prior_chunk) => {
-                added_or_changed.push(ChangedCodeChunkV1 {
-                    chunk_id: chunk.id.clone(),
-                    prior_digest: Some(prior_chunk.content_digest.clone()),
-                    current_digest: Some(chunk.content_digest.clone()),
-                });
-            }
-            None => {
-                added_or_changed.push(ChangedCodeChunkV1 {
-                    chunk_id: chunk.id.clone(),
-                    prior_digest: None,
-                    current_digest: Some(chunk.content_digest.clone()),
-                });
-            }
-        }
-    }
-    deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
-        chunk_id: removed.id.clone(),
-        prior_digest: Some(removed.content_digest.clone()),
-        current_digest: None,
-    }));
-
-    let shared_file_count = u64::try_from(shared_occurrences.len()).map_err(|_| {
-        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_detail(
-            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
-            "shared file count exceeds u64",
-        ))
-    })?;
-    let (reused_count, reused_digest) = ChangedCodeChunkSetV1::seal_arc_shared_reused_partition(
-        parent_full_replay_digest,
-        &prior.generation_id,
-        &current.generation_id,
-        reused_count,
-        shared_file_count,
-    )
-    .map_err(|error| {
-        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
-    })?;
-    let mut changes = ChangedCodeChunkSetV1 {
-        from_generation: Some(prior.generation_id.clone()),
-        to_generation: current.generation_id.clone(),
-        manifest_digest: placeholder_digest(),
-        added_or_changed,
-        deleted,
-        reused_count,
-        reused_digest,
-    };
-    changes.seal().map_err(|error| {
-        ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(error))
-    })?;
-    Ok(changes)
-}
-
-pub(crate) fn arc_share_chunk_diverged(chunk_id: &CodeSearchChunkId) -> ChunkIncrementErrorV1 {
-    ChunkIncrementErrorV1::NonCanonical(
-        crate::noncanonical::NonCanonicalCauseV1::new(
-            crate::noncanonical::NonCanonicalReasonCodeV1::DigestMismatch,
-        )
-        .with(
-            crate::noncanonical::NonCanonicalDetailKeyV1::ChunkId,
-            chunk_id.to_string(),
-        ),
-    )
-}
-
 fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
     match error {
         ChunkingFailureV1::GenerationMismatch => ChunkIncrementErrorV1::MixedGeneration,
@@ -655,19 +486,9 @@ fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
-    use super::{
-        ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment_arc_shared,
-    };
+    use super::{ChunkIncrementErrorV1, GenerationChunkManifestV1};
     use crate::parallelism::{CodeIndexParallelismErrorV1, force_install_failure_for_test};
-    use tracedecay_domain::{
-        BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
-        FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision,
-        SensitivityDecision, SensitivityLevelV1, SourceSpan,
-    };
+    use tracedecay_domain::CodeGenerationId;
 
     #[test]
     fn pool_failure_remains_a_typed_parallelism_error() {
@@ -686,137 +507,5 @@ mod tests {
                 CodeIndexParallelismErrorV1::PoolBuild { .. }
             ))
         ));
-    }
-
-    fn generation(label: &str) -> CodeGenerationId {
-        CodeGenerationId::new(label).expect("generation id")
-    }
-
-    fn identity<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture identity")
-    }
-
-    fn row(file: &FileOccurrenceId, chunk_id: &str, text: &str) -> Arc<CodeSearchChunkV1> {
-        Arc::new(CodeSearchChunkV1 {
-            id: identity::<CodeSearchChunkId>(chunk_id),
-            anchor: CodeSearchChunkAnchorV1 {
-                generation_id: generation("generation.row"),
-                file_occurrence_id: file.clone(),
-                symbol_occurrence_id: None,
-                parent_chunk_id: None,
-                source_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: text.len() as u64,
-                },
-                grain: CodeSearchChunkGrainV1::FileWindow,
-                ordinal: 0,
-            },
-            content_digest: ContentDigest::of_bytes(text.as_bytes()),
-            language_descriptor_revision: identity::<LanguageDescriptorRevision>("descriptor.v1"),
-            chunker_revision: identity::<ChunkerRevision>("chunker.v1"),
-            sanitizer_revision: identity::<SanitizerRevision>("sanitizer.v1"),
-            sensitivity: SensitivityDecision {
-                level: SensitivityLevelV1::Public,
-                policy_revision: identity::<PolicyRevisionId>("policy.v1"),
-            },
-            exact_terms: vec![],
-            subtokens: vec![],
-            sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
-        })
-    }
-
-    #[test]
-    fn parent_delta_chunks_remove_replaced_files_and_reject_fresh_collisions() {
-        let replaced_file = identity::<FileOccurrenceId>("file.replaced");
-        let shared_file = identity::<FileOccurrenceId>("file.shared");
-        let old = row(&replaced_file, "chunk.a-old", "old");
-        let shared = row(&shared_file, "chunk.b-shared", "shared");
-        let parent = GenerationChunkManifestV1::from_sorted_arcs(
-            generation("generation.prior"),
-            vec![old, Arc::clone(&shared)],
-        )
-        .expect("parent");
-        let fresh = row(&replaced_file, "chunk.c-fresh", "fresh");
-        let replaced = BTreeSet::from([replaced_file.clone()]);
-        let current = GenerationChunkManifestV1::from_parent_delta_arcs(
-            generation("generation.current"),
-            &parent,
-            &replaced,
-            vec![fresh],
-        )
-        .expect("parent delta");
-        assert_eq!(
-            current
-                .chunks
-                .iter()
-                .map(|chunk| chunk.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["chunk.b-shared", "chunk.c-fresh"]
-        );
-
-        let collision = row(&replaced_file, "chunk.b-shared", "collision");
-        assert!(matches!(
-            GenerationChunkManifestV1::from_parent_delta_arcs(
-                generation("generation.collision"),
-                &parent,
-                &replaced,
-                vec![collision],
-            ),
-            Err(ChunkIncrementErrorV1::DuplicateChunk(_))
-        ));
-    }
-
-    /// Known-good Arc-share rows seal. One divergent shared-file row must be
-    /// named and must stop the plan before `reused_digest` is sealed. A later
-    /// divergent row must not become the reported unit.
-    #[test]
-    fn arc_share_plan_stops_at_the_divergent_chunk_before_sealing() {
-        let file = identity::<FileOccurrenceId>("file.shared");
-        let stable = row(&file, "chunk.a-stable", "stable");
-        let early = row(&file, "chunk.m-diverged", "before");
-        let later = row(&file, "chunk.z-later", "before-later");
-        let prior = GenerationChunkManifestV1::from_sorted_arcs(
-            generation("generation.prior"),
-            vec![Arc::clone(&stable), Arc::clone(&early), Arc::clone(&later)],
-        )
-        .expect("prior rows");
-        let shared = BTreeSet::from([file.clone()]);
-        let parent = super::placeholder_digest();
-
-        let carried = GenerationChunkManifestV1::from_sorted_arcs(
-            generation("generation.current"),
-            vec![Arc::clone(&stable), Arc::clone(&early), Arc::clone(&later)],
-        )
-        .expect("pointer-equal carry");
-        let sealed =
-            plan_chunk_increment_arc_shared(&prior, &carried, &shared, &BTreeSet::new(), &parent)
-                .expect("pointer-equal shared rows are a known-good seal");
-        assert_eq!(sealed.reused_count, 3);
-
-        let diverged_early = row(&file, "chunk.m-diverged", "after");
-        let diverged_later = row(&file, "chunk.z-later", "after-later");
-        assert_ne!(diverged_early.content_digest, early.content_digest);
-        assert!(!Arc::ptr_eq(&diverged_early, &early));
-        let current = GenerationChunkManifestV1::from_sorted_arcs(
-            generation("generation.current"),
-            vec![stable, diverged_early, diverged_later],
-        )
-        .expect("divergent current rows");
-        let error =
-            plan_chunk_increment_arc_shared(&prior, &current, &shared, &BTreeSet::new(), &parent)
-                .expect_err("a divergent shared chunk must not seal");
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("chunk.m-diverged"),
-            "the lowest-id divergent chunk must be named before the seal, got {rendered}"
-        );
-        assert!(
-            !rendered.contains("chunk.z-later"),
-            "a later divergent chunk must not bury the first, got {rendered}"
-        );
     }
 }
