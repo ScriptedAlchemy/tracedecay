@@ -5839,7 +5839,6 @@ dependencies = [
  "tracedecay-tool-catalog",
  "tracing",
  "ureq",
- "url",
  "xattr",
  "yaml-edit",
 ]
@@ -5918,7 +5917,6 @@ name = "tracedecay-automation"
 version = "0.1.0"
 dependencies = [
  "hotpath",
- "schemars",
  "serde",
  "serde_json",
  "sha2",
@@ -5942,7 +5940,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tracedecay-agent-hosts",
  "tracedecay-automation",
@@ -6116,7 +6113,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "gix",
  "hotpath",
  "libc",
  "serde",
@@ -6126,7 +6122,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tracedecay-code-index",
  "tracedecay-domain",
- "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
 ]
@@ -6191,7 +6186,6 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
- "tracing",
 ]
 
 [[package]]
@@ -6216,7 +6210,6 @@ dependencies = [
 name = "tracedecay-daemon-control"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "hex",
  "hotpath",
  "serde",
@@ -6283,7 +6276,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
@@ -6463,7 +6455,6 @@ name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
  "hotpath",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -6607,8 +6598,6 @@ dependencies = [
  "tracedecay-lcm",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
- "tracedecay-rusqlite-runtime",
- "tracedecay-session-memory",
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
@@ -7020,7 +7009,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "criterion",
- "dirs",
  "filetime",
  "getrandom 0.2.17",
  "gix",
@@ -7054,7 +7042,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "gix",
  "hotpath",
  "same-file",
  "serde",
@@ -7097,7 +7084,6 @@ dependencies = [
  "hex",
  "hotpath",
  "libc",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
