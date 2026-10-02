@@ -676,6 +676,44 @@ async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
 }
 
 #[tokio::test]
+async fn cursor_text_blocks_are_stored_as_their_text() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"cursornow alpha: question"},{"type":"text","text":"second block"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"cursornow beta: reply"},{"type":"tool_use","id":"call_1","name":"Shell","input":{"command":"echo hi"}}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    ingest_cursor_transcript_event(&event.to_string(), &db).await;
+
+    let mut texts = db
+        .search_session_messages("cursor", None, "cursornow", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect::<Vec<_>>();
+    texts.sort();
+    assert_eq!(
+        texts,
+        vec![
+            "cursornow alpha: question\n\nsecond block",
+            "cursornow beta: reply"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
