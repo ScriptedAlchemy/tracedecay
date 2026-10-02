@@ -2805,9 +2805,13 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
     );
 }
 
-/// The segment digests one scope's active manifest names: its file segments
-/// and, last, its evidence pack.
-fn active_segment_digests(scope: &Path) -> Vec<String> {
+struct ActiveSegmentDigests {
+    files: BTreeSet<String>,
+    graph_pages: BTreeSet<String>,
+    evidence: String,
+}
+
+fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scope.join("active-code-generation-v1.json")).expect("active pointer"),
     )
@@ -2818,14 +2822,38 @@ fn active_segment_digests(scope: &Path) -> Vec<String> {
             .join(&pointer.generation_file),
     )
     .expect("active manifest");
-    CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
-        .expect("segment identities")
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("decode active manifest");
+    let digest = |value: &serde_json::Value| {
+        sha256_hex_suffix(value.as_str().expect("sha256 segment digest"))
+            .expect("sha256 segment digest")
+            .to_owned()
+    };
+    ActiveSegmentDigests {
+        files: manifest["generation"]["file_segments"]
+            .as_array()
+            .expect("active file segments")
+            .iter()
+            .map(|segment| digest(&segment["segment_digest"]))
+            .collect(),
+        graph_pages: manifest["generation"]["code_graph_pages"]
+            .as_array()
+            .expect("active graph pages")
+            .iter()
+            .map(|page| digest(&page["page_digest"]))
+            .collect(),
+        evidence: digest(&manifest["generation"]["generation_evidence"]["segment_digest"]),
+    }
+}
+
+/// Every content-addressed component named by one scope's active manifest.
+fn active_segment_digests(scope: &Path) -> Vec<String> {
+    let segments = active_segment_digests_by_kind(scope);
+    segments
+        .files
         .into_iter()
-        .map(|identity| {
-            sha256_hex_suffix(identity.digest.as_str())
-                .expect("sha256 segment digest")
-                .to_owned()
-        })
+        .chain(segments.graph_pages)
+        .chain(std::iter::once(segments.evidence))
         .collect()
 }
 
@@ -2986,18 +3014,23 @@ fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
         );
     }
 
-    let mut first = active_segment_digests(&scopes.first_scope);
-    let mut linked = active_segment_digests(&scopes.linked_scope);
-    let first_evidence = first.pop().expect("first evidence pack");
-    let linked_evidence = linked.pop().expect("linked evidence pack");
-    assert_eq!(first.len(), 2, "one file segment per source file");
+    let first = active_segment_digests_by_kind(&scopes.first_scope);
+    let linked = active_segment_digests_by_kind(&scopes.linked_scope);
     assert_eq!(
-        first, linked,
+        first.files, linked.files,
         "identical files seal to identical, worktree-independent segments"
     );
-    assert_ne!(first_evidence, linked_evidence);
-    let mut expected = first.into_iter().collect::<BTreeSet<_>>();
-    expected.extend([first_evidence, linked_evidence]);
+    assert!(
+        !first.files.is_empty(),
+        "the fixture must publish shared file segments"
+    );
+    assert_ne!(first.evidence, linked.evidence);
+    let mut expected = first.files;
+    expected.extend(first.graph_pages);
+    expected.insert(first.evidence);
+    expected.extend(linked.files);
+    expected.extend(linked.graph_pages);
+    expected.insert(linked.evidence);
     assert_eq!(
         segment_files(&segments_root),
         expected,
