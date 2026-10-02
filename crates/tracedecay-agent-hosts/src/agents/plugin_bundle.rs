@@ -29,7 +29,7 @@
 //!   `Stop`) and omits MCP: the installer registers `mcpServers.tracedecay`
 //!   in Kimi's session/user `mcp.json` so the host launches from the workspace.
 //! - `plugin/opencode/{tracedecay.ts,tracedecay-mcp.ts,opencode.registration.json}`,
-//!   OpenCode native plugin, MCP companion, and MCP/LSP registration.
+//!   OpenCode 2 native plugin, MCP companion, and MCP registration.
 //!   OpenCode has no `plugin.json`.
 //! - `plugin/.mcp.json`, shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json`, Cursor MCP config (deploys to `mcp.json`).

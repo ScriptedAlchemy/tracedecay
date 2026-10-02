@@ -15,7 +15,7 @@ use tracedecay_lsp::{
 };
 
 use super::LspFeedbackProjectionScope;
-use crate::operation_stream::ManagedTestRunSnapshot;
+use crate::managed_test_runs::ManagedTestRunSnapshot;
 
 /// `document_uri` is the client's spelling and is echoed on the envelope;
 /// `retained_document_uri` is the identity the managed run recorded the
@@ -66,18 +66,14 @@ pub(super) fn test_run_projection(
             };
         }
     }
-    let missing_results = snapshot
-        .completed
-        .saturating_sub(snapshot.available_results as u64);
-    let bounded_omissions = snapshot.available_results.saturating_sub(
-        snapshot
-            .result_offset
-            .saturating_add(snapshot.results.len()),
-    ) as u64;
+    let available_results = snapshot.results.len();
+    let shown_results = available_results.min(MAX_CONTEXT_PROJECTION_ITEMS);
+    let missing_results = snapshot.completed.saturating_sub(available_results as u64);
+    let bounded_omissions = (available_results - shown_results) as u64;
     let mut omitted_count =
         usize::try_from(missing_results.saturating_add(bounded_omissions)).unwrap_or(usize::MAX);
     let completed_with_full_results = snapshot.total == Some(snapshot.completed)
-        && snapshot.results.len() as u64 == snapshot.completed
+        && available_results as u64 == snapshot.completed
         && omitted_count == 0;
     let (coverage, producer_state, include_results) = match termination {
         OperationTermination::Completed if completed_with_full_results => (
@@ -114,23 +110,21 @@ pub(super) fn test_run_projection(
             false,
         ),
     };
-    let operation_id = snapshot.operation_id.to_string();
+    let operation_id = snapshot.operation_id;
     let items = if include_results {
         snapshot
             .results
             .into_iter()
+            .take(shown_results)
             .enumerate()
             .map(|(index, result)| ContextProjectionItem {
-                stable_id: format!(
-                    "{operation_id}.{}",
-                    snapshot.result_offset.saturating_add(index)
-                ),
+                stable_id: format!("{operation_id}.{index}"),
                 summary: bounded_test_run_summary(&result.test, result.passed),
                 retrieval_handle: None,
             })
             .collect()
     } else {
-        omitted_count = omitted_count.saturating_add(snapshot.results.len());
+        omitted_count = omitted_count.saturating_add(shown_results);
         Vec::new()
     };
     let omission_reasons = projection_omission_reasons(coverage, omitted_count, producer_state);

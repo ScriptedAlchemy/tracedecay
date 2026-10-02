@@ -1,13 +1,9 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    num::NonZeroUsize,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeGenerationSourceCommitmentsV1, CodeSearchChunkGrainV1, CodeSearchChunkV1,
-    ExactTechnicalTermV1, FileOccurrenceId,
+    ExactTechnicalTermV1,
 };
 
 use crate::{
@@ -1305,39 +1301,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
 
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
-    }
-
-    /// Emit pages only for `occurrences`, in their existing sealed order.
-    ///
-    /// The cursor restarts at the first retained file. Unchanged files stay
-    /// out of this source because their rows are already durable in the
-    /// parent text artifact the builder carries forward.
-    pub fn restrict_to_file_occurrences(
-        &mut self,
-        occurrences: &BTreeSet<FileOccurrenceId>,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        self.file_source.retain_occurrences(occurrences);
-        self.admitted_window.clear();
-        let file_count = u64::try_from(self.file_source.len()).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "partitioned sealed generation file count exceeds u64".to_owned(),
-            )
-        })?;
-        self.file_count = file_count;
-        self.first_file_offset = 0;
-        self.files_end_offset = file_count;
-        self.file_ranges = (0..file_count)
-            .map(|file| (file, file.saturating_add(1)))
-            .collect();
-        self.lexical_byte_offsets = self.file_source.lexical_byte_offsets()?;
-        self.total_lexical_units = self.lexical_byte_offsets.last().copied().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "partitioned lexical byte offsets are empty".to_owned(),
-            )
-        })?;
-        self.maximum_file_bytes = self.file_source.maximum_file_bytes();
-        self.cursor = VerifiedSealedLexicalCursorV1::initial(self.source_state_digest.clone(), 0)?;
-        Ok(())
     }
 
     pub fn format_revision(&self) -> u32 {

@@ -244,6 +244,9 @@ fn graph_read_failed<T>(
         CodeGraphReadError::Unavailable { detail } | CodeGraphReadError::Refused { detail } => {
             DashboardEnvelopeV1::unavailable(scope, None, detail)
         }
+        parked @ CodeGraphReadError::Parked { .. } => {
+            DashboardEnvelopeV1::unavailable(scope, None, parked.to_string())
+        }
         CodeGraphReadError::Stale { detail } => {
             let mut coverage = DashboardCoverageV1::unknown();
             coverage.omission_reasons.push(detail);

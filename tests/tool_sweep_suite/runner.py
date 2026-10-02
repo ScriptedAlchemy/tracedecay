@@ -976,8 +976,9 @@ def _prime_context_scout_diagnostic(
     boundary_payload = json.dumps(
         {
             "id": f"scout-boundary-{time.monotonic_ns()}",
-            "type": "session.idle",
-            "properties": {"sessionID": session_id},
+            "created": 0,
+            "type": "session.execution.succeeded",
+            "data": {"sessionID": session_id},
         }
     )
     boundary_command = [str(binary), "hook-opencode-event"]
@@ -1050,13 +1051,18 @@ def _prime_context_scout_diagnostic(
     _publish_context_scout_diagnostic(client, fixture, deadline)
     saved_edit_payload = json.dumps(
         {
+            "tool": "edit",
+            "sessionID": session_id,
+            "agent": "build",
+            "messageID": f"scout-saved-edit-message-{time.monotonic_ns()}",
             "id": f"scout-saved-edit-{time.monotonic_ns()}",
-            "type": "file.edited",
-            "properties": {"file": str(source), "sessionID": session_id},
+            "input": {"path": str(source)},
+            "status": "completed",
+            "result": {"content": []},
         }
     )
     _run_checked(
-        [str(binary), "hook-opencode-event"],
+        [str(binary), "hook-opencode-tool-after"],
         Path(fixture["root"]),
         "Context Scout OpenCode idle-window producer",
         timeout_s=60,

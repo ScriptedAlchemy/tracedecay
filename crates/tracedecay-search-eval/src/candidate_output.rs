@@ -1380,6 +1380,7 @@ fn publish_scope_generation(
         ))?)?,
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     };
     let target_projection_key = ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,

@@ -363,7 +363,8 @@ Exit status (a completed binary upgrade stays installed in every case):
       Code's `/plugins install`); act on the printed step, then rerun. Also
       75 when the restored daemon serves a store whose persisted shape this
       binary does not open: it names the store and the exact reset command
-      (`tracedecay wipe --stale --yes` for session stores), which nothing
+      (`tracedecay wipe --stale --yes` for the profile authority and session
+      stores), which nothing
       runs on your behalf
 
 Related: tracedecay upgrade (refresh only after a real install),
@@ -645,8 +646,11 @@ profile-scoped database state, including global, user memory/session, project, \
 legacy, remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
 exactly the stores the running daemon reports as requiring reset (a persisted \
 shape this binary does not open) and nothing else; the daemon recreates each \
-one empty. Profile identity, configuration, and agent integration config \
-remain untouched. \
+one empty. Resetting the profile authority (global.db) drops the project \
+registry, usage accounting, and remote-deletion records it holds, keeps every \
+project store, and prints the `tracedecay init` command that registers each \
+project again. Profile identity and agent integration config remain \
+untouched. \
 Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
 Prompts for a `go!` confirmation unless `--yes` is passed. When the managed \
 daemon holds the profile (even wedged or hung), wipe stops the installed \
