@@ -114,6 +114,15 @@ pub(crate) fn retained_noop_requires_follow_up_wake(
     serving_empty && !activation_deferred && consumed_external_arrival && source_is_noop
 }
 
+/// The verified head belongs to a different generation than the retained
+/// manifest this pass tried to recover. Replaying that manifest publishes a
+/// second graph over the generation that owns the head.
+pub(crate) fn graph_head_belongs_to_another_generation(error: &CodeIndexSchedulerErrorV1) -> bool {
+    error.activation_conflict_context().is_some_and(|context| {
+        context.site == "code_graph.recover_verified_snapshot_from_head.generation"
+    })
+}
+
 /// Whether this activation failure repeats the previous attempt's conflict
 /// verdict for the same sealed generation. A first Conflict can be a race
 /// with a concurrent publisher and retries like any transient failure, but
@@ -189,6 +198,10 @@ enum PublishedTextProjectionOutcomeV1 {
     WaitingForMemory,
     /// Shutdown retired the text control mid-slice.
     Shutdown,
+    /// Another owner holds the code-generation store lock. Unfinished, but a
+    /// continuation would only repeat the refusal: the worker retries when
+    /// that owner releases the lock.
+    WaitingForStore,
 }
 
 impl GraphSeatGateV1 {
@@ -1185,7 +1198,7 @@ mod terminal_publication_park_tests {
 
 /// The sealed-generation identity half of a freshness reading. Every other
 /// field is left at its default so callers can fill in the observation half
-/// with struct-update syntax, which keeps these seven, six of them
+/// with struct-update syntax, which keeps these eight, six of them
 /// `Option<String>`, matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
@@ -1211,6 +1224,10 @@ fn dashboard_freshness_identity(
         identity.latest_generation_id =
             Some(generation.manifest().generation_id.as_str().to_owned());
         identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.omitted_sources =
+            tracedecay_contracts::code_index_freshness::CodeIndexOmittedSourcesV1::from_snapshot(
+                snapshot,
+            );
         identity.sealed_at_micros = Some(generation.manifest().seal.sealed_at.0);
     }
     identity
@@ -1271,7 +1288,10 @@ fn dashboard_generation_is_ready(
     code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
     if graph_activation_enabled {
-        text_ready && matches!(code_graph_serving, Some(CodeGraphServingReadinessV1::Ready))
+        text_ready
+            && code_graph_serving
+                .as_ref()
+                .is_some_and(CodeGraphServingReadinessV1::is_activated)
     } else {
         latest.is_some() || text_ready
     }
@@ -1340,6 +1360,10 @@ fn dashboard_text_freshness_identity(
             .map(|revision| revision.as_str().to_owned());
         identity.latest_generation_id = Some(metadata.manifest().generation_id.as_str().to_owned());
         identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.omitted_sources =
+            tracedecay_contracts::code_index_freshness::CodeIndexOmittedSourcesV1::from_snapshot(
+                snapshot,
+            );
         identity.sealed_at_micros = Some(metadata.manifest().seal.sealed_at.0);
     }
     identity
@@ -2697,6 +2721,12 @@ impl CodeIndexSchedulerRegistryV1 {
                             "published text projection waits for resident memory to be given back"
                         );
                         return PublishedTextProjectionOutcomeV1::WaitingForMemory;
+                    } else if error.is_generation_store_lock_contended() {
+                        tracing::info!(
+                            event = "code_index_text_projection_waiting_for_store",
+                            "published text projection waits for the code-generation store lock"
+                        );
+                        return PublishedTextProjectionOutcomeV1::WaitingForStore;
                     } else {
                         tracing::warn!(
                             event = "code_index_text_projection_failed",

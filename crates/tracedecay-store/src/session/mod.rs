@@ -11,10 +11,7 @@ mod retrieval;
 mod summary;
 
 pub use common::{
-    SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,
-    SessionGenerationRebuildBeginOperation, SessionGenerationRebuildBeginPermit,
-    SessionProjectionBatchPersistOperation, SessionProjectionBatchPersistPermit,
-    SessionRefreshBeginOrJoinOperation, SessionRefreshBeginOrJoinPermit,
+    SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinOperation, SessionRefreshBeginOrJoinPermit,
     SessionRefreshCancelOperation, SessionRefreshCancelPermit, SessionRefreshCompleteOperation,
     SessionRefreshCompletePermit, SessionRefreshFailOperation, SessionRefreshFailPermit,
     SessionRefreshFailureCodeInvalidReasonV1, SessionRefreshProgressPersistOperation,
@@ -28,11 +25,8 @@ pub use common::{
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 pub use projection::{
-    MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionGenerationActivationReceiptV1,
-    SessionGenerationActivationRequestV1, SessionGenerationRebuildDispositionV1,
-    SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1,
-    SessionTemporalProjectionBatchDispositionV1, SessionTemporalProjectionBatchReceiptV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
+    MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionTemporalProjectionBatchDispositionV1,
+    SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
 pub use refresh::{
     SessionRefreshBeginOrJoinReceiptV1, SessionRefreshBeginOrJoinRequestV1,

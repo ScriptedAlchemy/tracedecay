@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
@@ -11,8 +13,9 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
-    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexFreshnessCoverageV1, CodeIndexReadinessTargetV1,
+    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexSourceOmissionReasonV1 as StatusOmissionReasonV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
@@ -20,8 +23,9 @@ use tracedecay_contracts::{
     callable_code_operation,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ProjectId, PublicRetrieverStatus, RefId, RetrieverKind,
-    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, WorktreeId,
+    CodeGenerationId, CodeSourceOmissionReasonV1, CommitId, OmittedCodeSourceV1, ProjectId,
+    PublicRetrieverStatus, RefId, RetrieverKind, SensitivityLevelV1, SnapshotFileDispositionV1,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
@@ -60,7 +64,9 @@ use crate::{
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
         CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
         RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-        classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
+        classification::{
+            NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
+        },
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
         freshness_witness::SourceSweepStatsV1,
@@ -1690,18 +1696,14 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     );
 }
 
-#[test]
-fn occurrence_graph_store_is_available_before_catalog_warm() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store_root = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
-        &fixture,
-        store_root.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("seed generation"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    let generation_id = latest.generation().manifest().generation_id.clone();
+/// Builds a generation's graph store the way publication does: from its
+/// sealed segments on disk, one window of files at a time, without decoding
+/// the generation.
+fn sealed_segment_graph_store(
+    binding: &super::super::CodeGraphReplayBindingV1,
+    generation_id: &tracedecay_domain::CodeGenerationId,
+    scratch: &Path,
+) -> Arc<crate::code_index::graph_projection::CodeGraphProjectionStore> {
     let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
         crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
     )
@@ -1710,11 +1712,6 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
     )
     .expect("projection identity");
-    // Build the graph the way publication does: from the sealed segments on
-    // disk, one window of files at a time.
-    let binding = scheduler
-        .code_graph_replay_binding(&generation_id)
-        .expect("sealed replay binding");
     let digest = tracedecay_domain::sha256_hex_suffix(binding.sealed_state_digest.as_str())
         .expect("sha256 sealed digest");
     let sealed_manifest = std::fs::read(
@@ -1730,7 +1727,6 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
     let source =
         crate::code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
             .expect("sealed manifest opens");
-    let scratch = TempDir::new().expect("graph row scratch");
     let manifest = crate::code_index::graph_projection::build_sealed_code_graph_rows(
         projection.clone(),
         &source,
@@ -1749,11 +1745,8 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
             Ok(())
         },
         &projector_revision,
-        tracedecay_graph_db::GraphGenerationRowSpill::create(
-            scratch.path().join("rows"),
-            projection,
-        )
-        .expect("row spill"),
+        tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)
+            .expect("row spill"),
         &|| Ok(()),
     )
     .expect("code graph rows")
@@ -1764,13 +1757,32 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         Arc::new(tracedecay_graph_db::NeverCancelled),
     )
     .expect("verified graph snapshot");
-    let graph_store = Arc::new(
+    Arc::new(
         crate::code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
         )
         .expect("graph projection store"),
+    )
+}
+
+#[test]
+fn occurrence_graph_store_is_available_before_catalog_warm() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store_root = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store_root.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let binding = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
     let reader = graph_store
         .evidence_reader_with_cancellation(
             &generation_id,
@@ -3331,6 +3343,78 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
     registry.shutdown().await;
 }
 
+/// A persistent publication seats its graph head on the text owner before the
+/// serving decode, and the holder that decode usually meets is the pass's own
+/// text projection, gone before the follow-up pass. The predecessor's decoded
+/// seat must not make the follow-up pass treat the successor as already seated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_decode_of_a_graph_serving_publication_seats_on_the_follow_up_pass() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+    let text = registry
+        .latest_text_serving_for_root(fixture.path())
+        .await
+        .expect("the publication's text owner serves");
+    let generation_id = text.metadata().manifest().generation_id.clone();
+    let binding = registry
+        .code_graph_replay_binding(fixture.path(), &generation_id)
+        .await
+        .expect("mounted worktree")
+        .expect("sealed replay binding");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
+    let reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation_id,
+            Some(text.metadata().snapshot().repository.clone()),
+            text.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph evidence reader");
+    text.install_graph_serving(
+        reader,
+        Some(graph_store),
+        super::super::CodeGraphServingAuthorityV1::Memory,
+    )
+    .expect("the publication's graph head serves from its text owner");
+
+    let holder = acquire_code_generation_store_lock(&held.scoped_store)
+        .expect("hold the code-generation store lock");
+    let (second, release_after_decode) = held.decode().await;
+    drop(holder);
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+
+    let ready = wait_for_ready_generation(&registry, fixture.path())
+        .await
+        .unwrap_or_else(|stalled| panic!("the new generation never seated: {stalled:?}"));
+    assert_eq!(ready, second);
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        Some(second.clone()),
+        "the refused decode's follow-up pass seats the new generation"
+    );
+    assert_eq!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .map(|id| id.as_str().to_owned()),
+        Some(second)
+    );
+    registry.shutdown().await;
+}
+
 /// A serving decode that fails for a reason no holder will release parks
 /// typed, so status names the failure instead of an eternal `indexing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3339,6 +3423,14 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+    let predecessor = registry
+        .latest_complete_serving_for_test(fixture.path())
+        .await
+        .expect("the predecessor still serves before the failed decode")
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
 
     let pointer: serde_json::Value = serde_json::from_slice(
         &std::fs::read(held.scoped_store.join("active-code-generation-v1.json"))
@@ -3411,6 +3503,14 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
             .is_none_or(|seat| seat.generation().manifest().generation_id.as_str() != second),
         "a corrupt generation never seats"
     );
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat.generation().manifest().generation_id.clone()),
+        Some(predecessor),
+        "a permanently undecodable successor keeps the predecessor serving"
+    );
     registry.shutdown().await;
 }
 
@@ -3433,7 +3533,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
-    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")
         .expect("serving swap gate stays armed");
@@ -3479,7 +3579,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .wait_for_readiness(
             fixture.path(),
             CodeIndexReadinessTargetV1::Ready,
-            Duration::from_secs(10),
+            SERVING_SEAT_FAILURE_CEILING,
         )
         .await
         .expect("readiness wait");
@@ -5122,20 +5222,23 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
     registry.shutdown().await;
 }
 
-/// Unix filenames may hold a literal backslash (systemd escapes `-` in unit
-/// names as `\x2d`), which no logical path can carry. Such files leave the
-/// snapshot instead of rejecting it, and the freshness witness skips them the
-/// same way, so an unchanged checkout is not reported as moved.
+/// A Git path no logical path can carry (a literal backslash, legal on Unix;
+/// systemd escapes `-` in unit names as `\x2d`) and a privacy-withheld file
+/// are omitted sources. The sealed snapshot names each by its raw Git path
+/// with the reason, status reports partial coverage with the count while a
+/// `fresh` wait still ends, an unchanged checkout stays fresh, and a newly
+/// added unrepresentable file starts a successor that names it.
 #[cfg(unix)]
 #[tokio::test]
-async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
+async fn omitted_sources_carry_their_reason_into_the_snapshot_and_status() {
     let fixture = GitFixture::new(&[
-        ("src/main.rs", "fn main() {}\n"),
-        ("src/odd\\name.rs", "pub fn odd() {}\n"),
+        ("config/broken.json", "{broken"),
         (
             "deploy/mnt-data\\x2dfiles.mount",
             "[Mount]\nWhat=/dev/sdb\n",
         ),
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/odd\\name.rs", "pub fn odd() {}\n"),
     ]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -5147,20 +5250,96 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
         )
         .await
         .expect("mount daemon-owned scheduler");
+    let withheld = CodeSourceOmissionReasonV1::PrivacyWithheld {
+        detail: "privacy sanitizer quarantined an ambiguous structured document".to_owned(),
+    };
     let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    let seated_paths = seated
-        .generation()
-        .snapshot()
+    let snapshot = seated.generation().snapshot();
+    let rows = snapshot
         .files
         .iter()
-        .map(|file| file.logical_path.as_str())
+        .map(|file| (file.logical_path.as_str(), file.disposition))
         .collect::<Vec<_>>();
-    assert_eq!(seated_paths, ["src/main.rs"]);
+    assert_eq!(
+        rows,
+        [
+            ("config/broken.json", SnapshotFileDispositionV1::Ignored),
+            ("src/main.rs", SnapshotFileDispositionV1::Present),
+        ]
+    );
+    assert_eq!(
+        snapshot.omitted_sources,
+        [
+            OmittedCodeSourceV1 {
+                git_path: b"config/broken.json".to_vec(),
+                reason: withheld.clone(),
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"deploy/mnt-data\\x2dfiles.mount".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/odd\\name.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+        ]
+    );
+    let initial = seated.generation().manifest().generation_id.clone();
     drop(seated);
 
     settle_text_projection(&registry, fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
+    let omitted_status =
+        |freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1| {
+            freshness.omitted_sources.as_ref().map(|omitted| {
+                (
+                    omitted.count,
+                    omitted
+                        .sources
+                        .iter()
+                        .map(|source| (source.display_path.clone(), source.reason.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+    let status_withheld = StatusOmissionReasonV1::PrivacyWithheld {
+        detail: "privacy sanitizer quarantined an ambiguous structured document".to_owned(),
+    };
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(
+        freshness.coverage,
+        CodeIndexFreshnessCoverageV1::PartialOmittedSources
+    );
+    assert_eq!(
+        omitted_status(&freshness),
+        Some((
+            3,
+            vec![
+                ("config/broken.json".to_owned(), status_withheld.clone()),
+                (
+                    "deploy/mnt-data\\x2dfiles.mount".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/odd\\name.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+            ],
+        ))
+    );
+    assert_eq!(
+        freshness.readiness(CodeIndexReadinessTargetV1::Fresh),
+        CodeIndexReadinessV1::Reached
+    );
+
     let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
@@ -5174,18 +5353,19 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
     let probe_at = tracedecay_contracts::now_micros().0;
     registry.probe_freshness_admission(fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
-
-    let mounted = registry.mounted.lock().await;
-    let scheduler = mounted.get(&canonical).expect("mounted worktree");
-    assert_eq!(
-        scheduler
-            .scheduler
-            .lock()
-            .expect("scheduler")
-            .pending_hint_count(),
-        Some(0),
-        "an unchanged checkout with a skipped path must not become an overflow hint"
-    );
+    {
+        let mounted = registry.mounted.lock().await;
+        let scheduler = mounted.get(&canonical).expect("mounted worktree");
+        assert_eq!(
+            scheduler
+                .scheduler
+                .lock()
+                .expect("scheduler")
+                .pending_hint_count(),
+            Some(0),
+            "an unchanged checkout with omitted sources must not become an overflow hint"
+        );
+    }
     let receipts = registry.event_to_ready_receipts();
     assert!(
         receipts.iter().all(|receipt| {
@@ -5194,9 +5374,61 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
                 .wake_micros()
                 .is_none_or(|wake_micros| wake_micros < probe_at)
         }),
-        "an unchanged checkout with a skipped path must not reconcile again: {receipts:#?}"
+        "an unchanged checkout with omitted sources must not reconcile again: {receipts:#?}"
     );
-    drop(mounted);
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(initial.clone())
+    );
+
+    fixture.edit("src/late\\added.rs", "pub fn late() {}\n");
+    std::fs::write(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+        "pub fn not_utf8() {}\n",
+    )
+    .expect("write a non-UTF-8 source name");
+    registry.probe_freshness_admission(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        omitted_status(&freshness),
+        Some((
+            5,
+            vec![
+                ("config/broken.json".to_owned(), status_withheld),
+                (
+                    "deploy/mnt-data\\x2dfiles.mount".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/late\\added.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/odd\\name.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/\u{fffd}.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+            ],
+        ))
+    );
+    assert_eq!(
+        freshness
+            .omitted_sources
+            .as_ref()
+            .and_then(|omitted| omitted.sources.last())
+            .map(|source| source.git_path_bytes.as_slice()),
+        Some(b"src/\xff.rs".as_slice())
+    );
     registry.shutdown().await;
 }
 
@@ -5848,19 +6080,19 @@ async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_
         )
         .await
         .expect("remount worktree over the retained store");
-    let mut signals = OwnerSignals::subscribe(&restarted, fixture.path()).await;
-    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(latest) = restarted.latest_complete_fresh(fixture.path()).await
-                && latest.generation().manifest().generation_id != sealed_id
-            {
-                break latest;
-            }
-            signals.changed().await;
-        }
-    })
-    .await
-    .expect("a restart over changed bytes with equal stat metadata must rebuild");
+    let rebuilt = wait_for_owner(
+        &restarted,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "a restart over changed bytes with equal stat metadata must rebuild",
+        || async {
+            restarted
+                .latest_complete_fresh(fixture.path())
+                .await
+                .filter(|latest| latest.generation().manifest().generation_id != sealed_id)
+        },
+    )
+    .await;
     let served = rebuilt
         .lexical()
         .iter()
@@ -7827,6 +8059,57 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
     );
 }
 
+/// Deleting a non-UTF-8 path must not decode its name lossily into the
+/// string-keyed change set: the lossy decode can equal a real UTF-8 path, and
+/// the deletion would then remove that distinct file from the candidates.
+#[cfg(unix)]
+#[test]
+fn non_utf8_deletion_never_displaces_the_utf8_path_its_lossy_name_matches() {
+    let fixture = GitFixture::new(&[("src/keep.rs", "pub fn keep() -> u32 { 1 }\n")]);
+    std::fs::write(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+        "pub fn non_utf8() {}\n",
+    )
+    .expect("write a non-UTF-8 source name");
+    write(
+        fixture.path(),
+        "src/\u{fffd}.rs",
+        "pub fn utf8_replacement() {}\n",
+    );
+    fixture.commit_all("track both names");
+    std::fs::remove_file(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+    )
+    .expect("delete the non-UTF-8 source");
+
+    let classification = WorktreeChangeClassificationV1::classify(
+        &tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix"),
+    )
+    .expect("classify");
+
+    assert_eq!(
+        classification.non_utf8_changes(),
+        &[NonUtf8ClassifiedChangeV1 {
+            git_path: b"src/\xff.rs".to_vec(),
+            class: WorktreeChangeClassV1::UnstagedDeleted,
+        }]
+    );
+    assert!(
+        classification.changes().is_empty(),
+        "the lossy decode must never enter the string-keyed change set: {:?}",
+        classification.changes()
+    );
+    assert!(classification.has_changes());
+    assert!(
+        classification.candidate_paths().contains("src/\u{fffd}.rs"),
+        "the distinct UTF-8 file must survive the non-UTF-8 deletion"
+    );
+}
+
 /// A filesystem rename is reconciled as the truthful delete-plus-add pair and
 /// produces the same final code lanes as a fresh scan of the renamed tree.
 #[test]
@@ -8470,25 +8753,23 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
-    let outcome = registry
-        .exact_occurrence(
-            RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request,
-        )
-        .await;
-    let elapsed = started.elapsed();
+    let outcome = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await
+    })
+    .await
+    .expect("expired query should answer while the scheduler lock is held");
     release_tx.send(()).expect("release scheduler lock");
     lock_thread.join().expect("scheduler lock thread joins");
 
     assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "expired query waited {elapsed:?} for scheduler work"
-    );
     registry.shutdown().await;
 }
 

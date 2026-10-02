@@ -698,8 +698,9 @@ impl ResidentMemoryPressureV1 {
     ///
     /// At most one checkpoint per [`RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1`]
     /// reads the process; the others, and any checkpoint racing that read,
-    /// answer the standing observation.
-    pub fn sample_for_checkpoint(&self) -> Option<ResidentMemoryPressureStateV1> {
+    /// answer the standing observation. If sampling fails, the last published
+    /// pressure verdict remains authoritative.
+    pub fn sample_for_checkpoint(&self) -> ResidentMemoryPressureStateV1 {
         let now = self.checkpoint_micros();
         let next = self.next_checkpoint_sample_micros.load(Ordering::Acquire);
         if now < next
@@ -708,7 +709,7 @@ impl ResidentMemoryPressureV1 {
                 .compare_exchange(next, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
         {
-            return Some(self.state());
+            return self.state();
         }
         let sample = (self.sampler)();
         hotpath::gauge!("daemon.memory.checkpoint_samples_total").inc(1_u64);
@@ -718,7 +719,17 @@ impl ResidentMemoryPressureV1 {
             self.checkpoint_micros().saturating_add(interval),
             Ordering::Release,
         );
-        self.publish_observation(sample?.admission_bytes());
+        if let Some(sample) = sample {
+            self.publish_observation(sample.admission_bytes());
+            self.publish_over_budget_gauge();
+        }
+        self.state()
+    }
+
+    /// Refresh pressure after reclaim without running reclaimers recursively.
+    fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
+        let sample = (self.sampler)()?;
+        self.publish_observation(sample.admission_bytes());
         self.publish_over_budget_gauge();
         Some(self.state())
     }
@@ -771,20 +782,6 @@ impl ResidentMemoryPressureV1 {
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
-        self.publish_over_budget_gauge();
-        self.state()
-    }
-
-    /// Publish RSS measured by a reclaimer after it released memory.
-    ///
-    /// This updates the canonical admission observation without running the
-    /// reclaimer registry again. Reclaimers that can measure their process
-    /// effect use this path from inside the original pressure pass.
-    fn publish_post_reclaim_observed_resident_bytes(
-        &self,
-        observed_bytes: u64,
-    ) -> ResidentMemoryPressureStateV1 {
-        self.publish_observation(observed_bytes);
         self.publish_over_budget_gauge();
         self.state()
     }
@@ -1066,9 +1063,8 @@ pub fn register_process_allocator_pressure_reclaimer_v1(
         PROCESS_ALLOCATOR_TRIM_PRESSURE_PRIORITY_V1,
         Arc::new(move |request| {
             let trim = release_process_allocator_memory_v1();
-            if let (Some(after_bytes), Some(pressure)) = (trim.after_bytes, pressure_weak.upgrade())
-            {
-                pressure.publish_post_reclaim_observed_resident_bytes(after_bytes);
+            if let Some(pressure) = pressure_weak.upgrade() {
+                pressure.resample_after_reclaim();
             }
             tracing::info!(
                 event = "process_allocator_trimmed",

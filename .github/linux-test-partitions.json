@@ -67,14 +67,18 @@
         "test:claude_observation_benchmark",
         "bins",
         "test:core_cli_suite",
-        "test:work_route_exposure_conformance"
+        "test:work_route_exposure_conformance",
+        "test:c_library_allocator",
+        "test:retained_parse_heap",
+        "test:refresh_memory_journey"
       ],
       "executables": [
         "example:tracedecay-host-cli-fixture"
       ],
       "features": [
         "tracedecay/test-helpers",
-        "tracedecay/search-eval"
+        "tracedecay/search-eval",
+        "tracedecay-cli/alloc-mimalloc"
       ],
       "linux_group": "root-journeys"
     },

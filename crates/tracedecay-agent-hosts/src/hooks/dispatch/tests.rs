@@ -394,96 +394,24 @@ async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
 }
 
 #[test]
-fn opencode_event_uses_nested_properties_identity() {
+fn opencode_event_uses_nested_data_identity() {
     let material = native_material(
         r#"{
-                "id": "event-17",
-                "properties": {
-                    "sessionID": "session-23",
-                    "file": "/project/src/lib.rs"
+                "id": "evt-17",
+                "type": "session.execution.succeeded",
+                "data": {
+                    "sessionID": "session-23"
                 }
             }"#,
-        tracedecay_hooks::HookEventFamily::SavedEdit,
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
         UtcMicros(41),
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"event-17"));
+    assert_ne!(material.event_id, hash16(b"evt-17"));
     assert_eq!(material.protected_session_id, hash32(b"session-23"));
-    assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
-}
-
-fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
-    ))
-    .unwrap();
-    let event = fixture["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| event["identity"] == "lsp_updated")
-        .unwrap()["request"]
-        .clone();
-    let event_json = serde_json::to_string(&event).unwrap();
-    (event, event_json)
-}
-
-#[tokio::test]
-async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
-    let profile_home = tempfile::tempdir().unwrap();
-    let profile = ProfileRoot::under_home(profile_home.path());
-    let project = tempfile::tempdir().unwrap();
-    let (event, event_json) = opencode_lsp_fixture_event();
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-        "action": "opencode_lsp_updated",
-        "status": "accepted",
-    })]);
-
-    let dispatch = dispatch_opencode_lsp_updated(
-        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
-        &event_json,
-        project.path(),
-        None,
-    )
-    .await;
-
-    assert!(matches!(
-        dispatch,
-        HookDispatch::Handled {
-            guidance: None,
-            disposition: HookTransportDispositionV1::Accepted,
-        }
-    ));
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0.as_deref(), Some(project.path()));
-    assert_eq!(calls[0].1["action"], "opencode_lsp_updated");
-    assert_eq!(calls[0].1["event"], event);
-}
-
-#[tokio::test]
-async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
-    let profile_home = tempfile::tempdir().unwrap();
-    let profile = ProfileRoot::under_home(profile_home.path());
-    let project = tempfile::tempdir().unwrap();
-    let (_event, event_json) = opencode_lsp_fixture_event();
-    let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-        "action": "opencode_lsp_updated",
-        "status": "rejected",
-    })]);
-
-    let dispatch = dispatch_opencode_lsp_updated(
-        &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
-        &event_json,
-        project.path(),
-        None,
-    )
-    .await;
-    assert!(matches!(
-        dispatch,
-        HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
-    ));
+    assert_eq!(material.effect_receipt_id, None);
+    assert_eq!(material.file_id, None);
 }
 
 #[tokio::test]
@@ -560,19 +488,19 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
 }
 
 #[test]
-fn opencode_tool_event_uses_nested_input_and_output_identity() {
+fn opencode_tool_event_uses_call_and_input_path_identity() {
     let material = native_material(
         r#"{
+                "tool": "edit",
+                "sessionID": "session-29",
+                "id": "call-31",
                 "input": {
-                    "tool": "apply_patch",
-                    "sessionID": "session-29",
-                    "callID": "call-31"
+                    "path": "/project/src/main.rs",
+                    "oldString": "a",
+                    "newString": "b"
                 },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/src/main.rs"}]
-                    }
-                }
+                "status": "completed",
+                "result": {"content": []}
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -589,17 +517,11 @@ fn opencode_tool_event_uses_nested_input_and_output_identity() {
 fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     let first = native_material(
         r#"{
-                "input": {
-                    "tool": "apply_patch",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "first payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/first.rs"}]
-                    }
-                }
+                "tool": "edit",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/project/first.rs", "oldString": "first", "newString": "payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -607,17 +529,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let aliases_changed = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "unrelated payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/project/first.rs"}]
-                    }
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/project/first.rs", "content": "unrelated payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -625,17 +541,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let path_changed = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-31",
-                    "args": {"patchText": "unrelated payload"}
-                },
-                "output": {
-                    "metadata": {
-                        "files": [{"filePath": "/elsewhere/alias.rs"}]
-                    }
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-31",
+                "input": {"path": "/elsewhere/alias.rs", "content": "unrelated payload"},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -643,11 +553,11 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
     .unwrap();
     let different_native_event = native_material(
         r#"{
-                "input": {
-                    "tool": "write",
-                    "sessionID": "session-29",
-                    "callID": "call-32"
-                }
+                "tool": "write",
+                "sessionID": "session-29",
+                "id": "call-32",
+                "input": {},
+                "status": "completed"
             }"#,
         tracedecay_hooks::HookEventFamily::SavedEdit,
         UtcMicros(43),
@@ -901,14 +811,16 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     let replayed = spool.claim_replay_batches(UtcMicros(10), 1).unwrap();
     assert_eq!(replayed[0].records[0].native_lifecycle, Some(lifecycle));
 
-    let file_edit = fixture["events"]
+    // The execution boundary names a session but no tool call, so it carries
+    // no Context Scout lifecycle identity.
+    let boundary = fixture["events"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|event| event["identity"] == "saved_edit")
+        .find(|event| event["identity"] == "stop")
         .unwrap()["request"]
         .to_string();
-    let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
+    let fields = serde_json::from_str::<NativeIdentityFields>(&boundary).unwrap();
     assert!(
         native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, [1; 16]).is_none()
     );

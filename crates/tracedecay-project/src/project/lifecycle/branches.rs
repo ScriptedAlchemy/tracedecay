@@ -204,12 +204,10 @@ impl TraceDecay {
         let db_path = store_layout.graph_db_path.clone();
 
         if !db_path.exists() {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "project database for branch provenance '{branch_name}' not found at '{}'",
-                    db_path.display()
-                ),
-            });
+            return Err(TraceDecayError::not_found(format!(
+                "project database for branch provenance '{branch_name}' not found at '{}'",
+                db_path.display()
+            )));
         }
 
         let db = Self::mount_project_graph(

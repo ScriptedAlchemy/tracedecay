@@ -155,6 +155,30 @@ async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
         "the structured MCP problem must carry the detail: {structured}"
     );
 
+    // A verified-graph tool reads the graph projection without the primitive
+    // runtime; the park must reach it typed instead of as a retryable
+    // not-ready-yet graph.
+    let dead_code = tool(
+        &socket,
+        &handshake,
+        "tracedecay_dead_code",
+        json!({ "format": "json" }),
+    )
+    .await;
+    assert_eq!(
+        (
+            &dead_code["problem"]["code"],
+            &dead_code["problem"]["retryable"],
+            &dead_code["problem"]["detail"],
+        ),
+        (
+            &json!("application.code-index.parked"),
+            &json!(false),
+            &parked_detail,
+        ),
+        "a verified graph read on a parked worktree must carry the park: {dead_code}"
+    );
+
     let cli = cli_symbol_search(environment.home(), &project, &request, true);
     assert_eq!(
         (

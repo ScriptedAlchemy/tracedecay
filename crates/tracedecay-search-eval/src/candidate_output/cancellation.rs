@@ -59,6 +59,7 @@ pub(super) fn prove_cancellation(
         content_identity: content_digest(&bytes),
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,

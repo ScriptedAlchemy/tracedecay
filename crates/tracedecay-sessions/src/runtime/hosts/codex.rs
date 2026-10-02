@@ -91,7 +91,7 @@ use crate::runtime::source::{
 };
 
 #[cfg(test)]
-pub(crate) use context::{evict_prior_context_for_test, prior_context_scan_count_for_test};
+pub(crate) use context::evict_prior_context_for_test;
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
@@ -253,6 +253,9 @@ impl<'a> PendingTranscript<'a> {
         if let Some(witness) = witness
             && hub.file_converged(consumer, path, witness)
         {
+            return Ok(None);
+        }
+        if witness.is_none() && hub.path_recorded_converged(consumer, path) {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -1005,6 +1008,19 @@ impl CodexDiscoveryHub {
             }
             return Ok(CodexDiscoveryDelivery::Waiting);
         }
+    }
+
+    /// Whether `consumer` already recorded `path` converged. Used when the
+    /// file's change time is still inside the coarse timestamp quantum and
+    /// cannot yet mint a fresh witness, but an earlier pass already proved
+    /// the bytes unchanged.
+    fn path_recorded_converged(&self, consumer: &str, path: &Path) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .consumers
+            .get(consumer)
+            .is_some_and(|state| state.converged.contains_key(path))
     }
 
     /// Whether `consumer` already finished `path` while it had exactly

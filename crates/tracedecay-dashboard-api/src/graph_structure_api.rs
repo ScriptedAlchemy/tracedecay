@@ -1183,6 +1183,12 @@ fn graph_error_response<T: Serialize>(
         CodeGraphReadError::Corrupt { detail } => {
             failed_response::<T>(state, "graph_projection_corrupt", detail, false)
         }
+        parked @ CodeGraphReadError::Parked { .. } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "code_index_parked",
+            &parked.to_string(),
+        ),
     }
 }
 

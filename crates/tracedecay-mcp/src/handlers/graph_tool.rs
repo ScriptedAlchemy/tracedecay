@@ -9,13 +9,16 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
-use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_contracts::retrieval::{
-    DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1,
-    StatusResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
+    RetrieveResultV1, StatusResultV1,
 };
+use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, OwnerStoreDeclarationV1, OwnerStoresV1,
+};
 
 use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
 use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search};
@@ -34,6 +37,7 @@ use crate::handlers::health::{
     compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
     compute_test_risk, render_dsm_md,
 };
+use crate::handlers::hook_runtime::decode_hook_runtime_request;
 use crate::handlers::info::{
     compute_config, compute_files, compute_port_order, compute_port_status, compute_todos,
     render_files_md, render_registry_listing_md, render_status_md,
@@ -47,6 +51,32 @@ use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation 
 use crate::tools::response_trailers::ResponseTrailer;
 use crate::tools::{render, renderers};
 use crate::{McpToolContext, ToolResult};
+
+/// The stores the project's owner needs mounted to answer `operation` with
+/// `arguments`, as the operation declares them in the tool catalog or, for an
+/// operation that multiplexes actions, as the requested action declares them.
+/// A request whose action does not decode declares nothing, so it waits for
+/// every store and the full owner's decode refuses it.
+pub fn graph_tool_owner_stores(
+    operation: ApplicationSurfaceOperation,
+    arguments: &serde_json::Map<String, Value>,
+) -> OwnerStoresV1 {
+    let action = match operation.owner_stores() {
+        OwnerStoreDeclarationV1::Every(stores) => return stores,
+        OwnerStoreDeclarationV1::PerAction => Value::Object(arguments.clone()),
+    };
+    let declared = match operation {
+        ApplicationSurfaceOperation::AdminCli => {
+            decode_primitive_request::<AdminCliSurfaceRequestV1>(&action, operation.mcp_tool_name())
+                .map(|request| request.owner_stores())
+        }
+        ApplicationSurfaceOperation::HookRuntime => {
+            decode_hook_runtime_request(&action).map(|request| request.owner_stores())
+        }
+        _ => return OwnerStoresV1::ProjectSessions,
+    };
+    declared.unwrap_or(OwnerStoresV1::ProjectSessions)
+}
 
 /// Computes one graph-tool operation's typed result on the owner's side.
 ///
@@ -75,13 +105,16 @@ pub async fn compute_graph_tool(
             compute_rename_preview(ctx, &open(read("rename_preview")?).await?, args).await
         }
         ApplicationSurfaceOperation::PortStatus => {
-            compute_port_status(&open(read("port_status")?).await?, args).await
+            let graph = open(read("port_status")?).await?;
+            with_read_cost(&graph, compute_port_status(&graph, args).await)
         }
         ApplicationSurfaceOperation::PortOrder => {
-            compute_port_order(&open(read("port_order")?).await?, args).await
+            let graph = open(read("port_order")?).await?;
+            with_read_cost(&graph, compute_port_order(&graph, args).await)
         }
         ApplicationSurfaceOperation::Todos => {
-            compute_todos(&open(read("todos")?).await?, args, scope_prefix).await
+            let graph = open(read("todos")?).await?;
+            with_read_cost(&graph, compute_todos(&graph, args, scope_prefix).await)
         }
         ApplicationSurfaceOperation::TestMap
         | ApplicationSurfaceOperation::TestRisk
@@ -181,7 +214,26 @@ pub async fn compute_graph_tool(
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("invalid source metadata operation: {error}"),
                 })?;
-            compute_files(&open(operation).await?, request, scope_prefix).await
+            let graph = open(operation).await?;
+            // The freshness read names the latest text generation, which can
+            // run ahead of the generation this verified graph serves. Attach
+            // the omission block only when it describes the same sealed
+            // generation the listing comes from.
+            let worktree_omitted_sources = ctx.freshness().await.and_then(|payload| {
+                payload
+                    .worktrees
+                    .into_iter()
+                    .next()
+                    .filter(|worktree| {
+                        worktree.latest_generation_id.as_deref()
+                            == Some(graph.generation().as_str())
+                    })
+                    .and_then(|worktree| worktree.omitted_sources)
+            });
+            with_read_cost(
+                &graph,
+                compute_files(&graph, request, scope_prefix, worktree_omitted_sources).await,
+            )
         }
         ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
         ApplicationSurfaceOperation::Search => {
@@ -215,7 +267,7 @@ async fn compute_health_report(
         "health_read"
     };
     let graph = open(read(graph_operation)?).await?;
-    let mut completion = match operation {
+    let completion = match operation {
         ApplicationSurfaceOperation::TestMap => compute_test_map(&graph, args).await,
         ApplicationSurfaceOperation::TestRisk => {
             compute_test_risk(&graph, args, scope_prefix).await
@@ -227,7 +279,16 @@ async fn compute_health_report(
         ApplicationSurfaceOperation::Health => compute_health(&graph, args, scope_prefix).await,
         ApplicationSurfaceOperation::Dsm => compute_dsm(&graph, args, scope_prefix).await,
         operation => Err(unknown_tool_error(operation.mcp_tool_name())),
-    }?;
+    };
+    with_read_cost(&graph, completion)
+}
+
+/// Reports what the verified-graph read cost beside its result.
+fn with_read_cost(
+    graph: &VerifiedGraphQuery,
+    completion: Result<GraphToolCompletionV1>,
+) -> Result<GraphToolCompletionV1> {
+    let mut completion = completion?;
     completion.cost = Some(graph.read_cost());
     Ok(completion)
 }
