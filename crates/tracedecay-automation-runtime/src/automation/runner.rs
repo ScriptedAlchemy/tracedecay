@@ -11,6 +11,7 @@ use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
+    runtime_failure_class,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
@@ -873,7 +874,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                         &evidence_bundles,
                         Some(&output),
                         &err,
-                        AgentTaskFailureClass::Permanent,
+                        runtime_failure_class(&err),
                         &retry_report,
                     )
                     .await;
@@ -961,7 +962,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                             skill_bundle.evidence_hash.clone(),
                             Some(combined_skill_failure_projection(&output)),
                             err.to_string(),
-                            AgentTaskFailureClass::Permanent,
+                            runtime_failure_class(&err),
                             &retry_report,
                         )
                         .await;

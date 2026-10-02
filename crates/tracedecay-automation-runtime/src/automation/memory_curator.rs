@@ -10,6 +10,7 @@ use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
+    runtime_failure_class,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
@@ -397,7 +398,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
-                        AgentTaskFailureClass::Permanent,
+                        runtime_failure_class(&error),
                         &retry_report,
                     )
                     .await?;
@@ -456,7 +457,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
-                        AgentTaskFailureClass::Permanent,
+                        runtime_failure_class(&error),
                         &retry_report,
                         applied_ops,
                         None,

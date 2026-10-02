@@ -532,6 +532,49 @@ pub enum AgentTaskError {
     Failed { reason: String },
 }
 
+/// The typed failure class of local automation work (store writes, project
+/// routing, host CLIs) that failed after the backend answered.
+pub fn runtime_failure_class(error: &TraceDecayError) -> AgentTaskFailureClass {
+    match error {
+        TraceDecayError::LockDeadline { .. } | TraceDecayError::SyncLock { .. } => {
+            AgentTaskFailureClass::Retryable
+        }
+        TraceDecayError::ProjectRoute { retryable, .. } => {
+            if *retryable {
+                AgentTaskFailureClass::Retryable
+            } else {
+                AgentTaskFailureClass::Permanent
+            }
+        }
+        TraceDecayError::HostCliUnavailable { .. } => AgentTaskFailureClass::Unavailable,
+        TraceDecayError::Io(error) => match error.kind() {
+            std::io::ErrorKind::TimedOut => AgentTaskFailureClass::Timeout,
+            std::io::ErrorKind::PermissionDenied => AgentTaskFailureClass::Denied,
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe => AgentTaskFailureClass::Disconnected,
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotConnected => {
+                AgentTaskFailureClass::Unavailable
+            }
+            std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ResourceBusy
+            | std::io::ErrorKind::StorageFull => AgentTaskFailureClass::Retryable,
+            _ => AgentTaskFailureClass::Permanent,
+        },
+        TraceDecayError::File { .. }
+        | TraceDecayError::Database { .. }
+        | TraceDecayError::Search { .. }
+        | TraceDecayError::Config { .. }
+        | TraceDecayError::ProfileResetRequired { .. }
+        | TraceDecayError::ResetRequired { .. }
+        | TraceDecayError::ToolRefused(_)
+        | TraceDecayError::Sqlite(_)
+        | TraceDecayError::Json(_)
+        | TraceDecayError::Automation(_) => AgentTaskFailureClass::Permanent,
+    }
+}
+
 impl AgentTaskError {
     /// The typed state for a failure a backend observed as `class`.
     pub fn new(class: AgentTaskFailureClass, reason: impl Into<String>) -> Self {
@@ -796,6 +839,85 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn runtime_failures_are_classified_by_their_typed_cause() {
+        let failures = [
+            (
+                TraceDecayError::LockDeadline {
+                    resource: "test lock",
+                    deadline_ms: 1,
+                },
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                TraceDecayError::SyncLock {
+                    message: "busy".to_owned(),
+                },
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                TraceDecayError::ProjectRoute {
+                    reason_code: "temporarily_unavailable".to_owned(),
+                    retryable: true,
+                    detail: "route unavailable".to_owned(),
+                    typed_detail: None,
+                },
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                TraceDecayError::ProjectRoute {
+                    reason_code: "invalid_route".to_owned(),
+                    retryable: false,
+                    detail: "route invalid".to_owned(),
+                    typed_detail: None,
+                },
+                AgentTaskFailureClass::Permanent,
+            ),
+            (
+                TraceDecayError::HostCliUnavailable {
+                    program: "codex".to_owned(),
+                    lifecycle: "deploy".to_owned(),
+                },
+                AgentTaskFailureClass::Unavailable,
+            ),
+            (
+                TraceDecayError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out",
+                )),
+                AgentTaskFailureClass::Timeout,
+            ),
+            (
+                TraceDecayError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    "busy",
+                )),
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                TraceDecayError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "pipe closed",
+                )),
+                AgentTaskFailureClass::Disconnected,
+            ),
+            (
+                TraceDecayError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+                AgentTaskFailureClass::Permanent,
+            ),
+            (
+                TraceDecayError::Config {
+                    message: "invalid configuration".to_owned(),
+                },
+                AgentTaskFailureClass::Permanent,
+            ),
+        ];
+
+        for (error, expected) in failures {
+            assert_eq!(runtime_failure_class(&error), expected);
+        }
     }
 
     #[test]

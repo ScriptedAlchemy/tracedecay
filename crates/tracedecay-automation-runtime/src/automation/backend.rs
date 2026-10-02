@@ -9,7 +9,7 @@ pub use tracedecay_automation::backend::{
     AgentBackendAvailability, AgentTaskBackend, AgentTaskContract, AgentTaskError,
     AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, agent_task_contract, agent_task_failure_disposition, prompt_version,
-    task_key,
+    runtime_failure_class, task_key,
 };
 pub use tracedecay_contracts::automation::AgentTaskRetryAttempt;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;

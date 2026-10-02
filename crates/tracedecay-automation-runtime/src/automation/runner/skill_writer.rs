@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::automation::artifacts::sha256_json;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskResponse,
+    runtime_failure_class,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::host_io::HostIo;
@@ -522,7 +523,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                         evidence_hash,
                         Some(proposed_ops),
                         err.to_string(),
-                        AgentTaskFailureClass::Permanent,
+                        runtime_failure_class(&err),
                         &retry_report,
                     )
                     .await?;

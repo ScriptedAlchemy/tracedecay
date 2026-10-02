@@ -10,8 +10,8 @@ use crate::automation::automatic_facts::{
     record_session_automatic_facts,
 };
 use crate::automation::backend::{
-    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    AgentTaskRetryReport,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    runtime_failure_class,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
@@ -494,7 +494,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
                 evidence_hash,
                 Some(proposed_summary),
                 error.to_string(),
-                AgentTaskFailureClass::Permanent,
+                runtime_failure_class(&error),
                 retry_report,
                 Some(json!({
                     "automatic_fact_receipts": settled_values,
@@ -905,7 +905,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
                         evidence_hash,
                         Some(session_fact_finalization_failure_summary(&proposals)?),
                         err.to_string(),
-                        AgentTaskFailureClass::Permanent,
+                        runtime_failure_class(&err),
                         &retry_report,
                     )
                     .await?;
