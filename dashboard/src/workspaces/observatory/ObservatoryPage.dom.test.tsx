@@ -341,6 +341,32 @@ describe('ObservatoryPage store telemetry', () => {
     expect(panel.textContent).toContain('0 / 0');
   });
 
+  it('names a failed mount and its retry command in the pipeline evidence', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      domain_state: 'error',
+      payload: {
+        worktrees: [],
+        note: 'the last code-index mount for this project failed',
+        mount_failure: {
+          message: 'the code-index scheduler could not mount for this project',
+          remediation: 'run `tracedecay sync` to retry the code-index mount',
+        },
+      },
+    });
+    renderObservatory('pipeline');
+
+    await screen.findAllByText('run `tracedecay sync` to retry the code-index mount');
+    const pipelines = screen.getAllByRole('region', { name: 'Code-index pipeline' });
+    expect(pipelines.length).toBeGreaterThan(0);
+    for (const pipeline of pipelines) {
+      expect(pipeline.textContent).toContain('the code-index scheduler could not mount for this project');
+      expect(pipeline.textContent).toContain('run `tracedecay sync` to retry the code-index mount');
+    }
+    expect(screen.queryByText(/no mounted code-index worktree/)).toBeNull();
+  });
+
   it('keeps partial, stale, and unavailable clone states distinct', async () => {
     const ready = readyCodeIndexFreshnessEnvelope();
     const observation = cloneIndexObservation();

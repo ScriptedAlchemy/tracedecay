@@ -64,6 +64,7 @@ fn pending_work(data_root: &std::path::Path) -> Vec<tracedecay_hooks::HookEventE
         tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         UtcMicros(1_000),
     )
+    .unwrap()
 }
 
 fn restart_ledger(data_root: &std::path::Path) {
@@ -167,7 +168,16 @@ fn pre_ledger_pending_work_is_refused_for_reset_not_adopted() {
         spool.commit().unwrap();
     }
 
-    assert_eq!(pending_work(data_root.path()), Vec::new());
+    let pending = hook_v2_pending_work_envelopes(data_root.path(), host, now);
+    assert!(
+        matches!(
+            pending,
+            Err(HookV2AdmissionLedgerUnavailable::Ledger(
+                tracedecay_hooks::HookAdmissionLedgerError::ResetRequired
+            ))
+        ),
+        "pre-ledger pending work is a reset refusal, not an empty drain: {pending:?}"
+    );
     assert!(record_hook_v2_admission(data_root.path(), &provider, now).is_none());
     assert!(pre_ledger_root.is_dir());
     assert_eq!(
@@ -366,5 +376,25 @@ fn concurrent_profile_scoped_admissions_are_all_recorded() {
         admit_all(),
         vec!["exact_duplicate"; usize::from(WRITERS)],
         "every concurrent admission was durably recorded exactly once"
+    );
+}
+
+#[test]
+fn an_admission_ledger_root_that_is_not_a_directory_is_unavailable_not_empty() {
+    let data_root = tempfile::tempdir().unwrap();
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
+    let ledger_root = hook_v2_admission_ledger_root(data_root.path(), host);
+    std::fs::create_dir_all(ledger_root.parent().unwrap()).unwrap();
+    std::fs::write(&ledger_root, b"not a ledger").unwrap();
+
+    let pending = hook_v2_pending_work_envelopes(data_root.path(), host, UtcMicros(1_000));
+    assert!(
+        matches!(
+            pending,
+            Err(HookV2AdmissionLedgerUnavailable::Ledger(
+                tracedecay_hooks::HookAdmissionLedgerError::UnsafePath
+            ))
+        ),
+        "an unusable admission ledger is a typed failure, not nothing owed: {pending:?}"
     );
 }

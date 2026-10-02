@@ -37,7 +37,10 @@ pub struct DaemonRuntimeHealthSignalV1 {
     pub quick_check_ok: Option<bool>,
     /// The storage authority audit passed, when the daemon has run it.
     pub authority_audit_ok: Option<bool>,
-    /// The session temporal projections are healthy, when determined.
+    /// The session temporal projections are healthy, when determined. A
+    /// sessions store that is busy importing, or too large for its bounded
+    /// probes, leaves this `None`; that is the store's state, not the
+    /// runtime's, so it never weakens runtime coverage.
     pub temporal_ok: Option<bool>,
 }
 
@@ -47,9 +50,10 @@ pub struct DaemonRuntimeHealthSignalV1 {
 /// degraded condition: it reports `Unreachable`. A serving runtime whose storage
 /// authority signals prove a failure is `Stuck`; one that is serving but has not
 /// converged is `Degraded`; one that is serving, converged, and clean is
-/// `Healthy`, but only with complete coverage when every optional signal was
-/// actually observed. A missing signal drops coverage to partial (an honest
-/// "healthy so far as observed", never a healthy-complete claim).
+/// `Healthy`, but only with complete coverage when both storage probes were
+/// actually observed. A missing storage probe drops coverage to partial (an
+/// honest "healthy so far as observed", never a healthy-complete claim).
+/// Session temporal health only ever proves a failure here.
 #[must_use]
 pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealthReadV1 {
     if !signal.serving {
@@ -73,9 +77,8 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
     }
-    let fully_observed = signal.quick_check_ok == Some(true)
-        && signal.authority_audit_ok == Some(true)
-        && signal.temporal_ok == Some(true);
+    let fully_observed =
+        signal.quick_check_ok == Some(true) && signal.authority_audit_ok == Some(true);
     let coverage = if fully_observed {
         DoctorCoverageCompletenessV1::Complete
     } else {
@@ -288,6 +291,7 @@ mod tests {
         DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
         DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
         DoctorStorageIncompleteReasonV1, RuntimeHealthReadV1, RuntimeLivenessV1,
+        runtime_health_finding,
     };
 
     use super::*;
@@ -312,40 +316,48 @@ mod tests {
         DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, finding).unwrap()
     }
 
+    /// Issue #2876: a sessions store whose temporal health doctor could not
+    /// determine turned "daemon runtime is live and serving" into a warning.
     #[test]
-    fn runtime_healthy_requires_all_signals_observed_for_complete_coverage() {
+    fn a_live_runtime_is_healthy_whatever_the_sessions_store_could_report() {
         let healthy = DaemonRuntimeHealthSignalV1 {
             serving: true,
             startup_converged: true,
             quick_check_ok: Some(true),
             authority_audit_ok: Some(true),
-            temporal_ok: Some(true),
+            temporal_ok: None,
+        };
+        let finding = |signal| {
+            let finding = runtime_health_finding(&runtime_health_read(&signal)).unwrap();
+            (finding.state(), finding.coverage().statement().to_owned())
         };
         assert_eq!(
-            runtime_health_read(&healthy),
-            RuntimeHealthReadV1::Observed {
-                liveness: RuntimeLivenessV1::Healthy,
-                coverage: DoctorCoverageCompletenessV1::Complete,
-            }
+            finding(healthy),
+            (
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "daemon runtime is live and serving".to_owned()
+            )
         );
-        for partial in [
-            DaemonRuntimeHealthSignalV1 {
-                temporal_ok: None,
-                ..healthy
-            },
-            DaemonRuntimeHealthSignalV1 {
+        assert_eq!(
+            finding(DaemonRuntimeHealthSignalV1 {
                 authority_audit_ok: None,
                 ..healthy
-            },
-        ] {
-            assert_eq!(
-                runtime_health_read(&partial),
-                RuntimeHealthReadV1::Observed {
-                    liveness: RuntimeLivenessV1::Healthy,
-                    coverage: DoctorCoverageCompletenessV1::Partial,
-                }
-            );
-        }
+            })
+            .0,
+            DoctorEvidenceStateV1::Partial,
+            "a storage probe that did not run still weakens runtime coverage"
+        );
+        assert_eq!(
+            finding(DaemonRuntimeHealthSignalV1 {
+                temporal_ok: Some(false),
+                ..healthy
+            }),
+            (
+                DoctorEvidenceStateV1::Degraded,
+                "daemon runtime is stuck and awaiting recovery".to_owned()
+            ),
+            "a temporal failure it does observe still makes the runtime stuck"
+        );
     }
 
     #[test]

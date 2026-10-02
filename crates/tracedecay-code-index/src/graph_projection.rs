@@ -35,7 +35,7 @@ mod traversal;
 pub use self::builder::build_sealed_code_graph_rows;
 pub(crate) use self::builder::{
     CodeGraphRowSampleV1, CodeGraphSampleFileV1, code_graph_symbol_bindings,
-    sample_code_graph_rows, unresolved_call_limitations,
+    emit_persisted_code_graph_page, sample_code_graph_rows, unresolved_call_limitations,
 };
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::InteractiveCatalogCache;

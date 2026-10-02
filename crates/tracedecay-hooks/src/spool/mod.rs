@@ -43,8 +43,8 @@ mod types;
 use checkpoint::{CHECKPOINT_ENTRY_BYTES, CHECKPOINT_HEADER_BYTES, CHECKPOINT_MAGIC};
 use checkpoint::{
     CHECKPOINT_REWRITE_BYTE_THRESHOLD, CHECKPOINT_REWRITE_FRAME_THRESHOLD, CheckpointAnchorV1,
-    RecordsFileRevisionV1, read_checkpoint, read_frame_at, read_transition, records_file_revision,
-    write_checkpoint, write_transition,
+    RecordsFileRevisionV1, RecordsPrefixDigestV1, read_checkpoint, read_frame_at, read_transition,
+    records_file_revision, write_checkpoint, write_transition,
 };
 use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, SpoolIntegrityV1};
 pub use types::{
@@ -71,7 +71,7 @@ const SPOOL_MAGIC: &[u8; 4] = b"TDH2";
 const SPOOL_FORMAT_VERSION: u16 = 1;
 const SPOOL_META_VERSION: u16 = 1;
 // Member filenames retain the spool layout generation; this header version owns the body shape.
-const CHECKPOINT_FORMAT_VERSION: u16 = 2;
+const CHECKPOINT_FORMAT_VERSION: u16 = 3;
 const FRAME_LENGTH_BYTES: usize = 4;
 const FRAME_HEADER_BYTES: usize = 4 + 2 + 8 + 8 + 32 + 4;
 const FRAME_CHECKSUM_BYTES: usize = framed_log::CHECKSUM_BYTES;
@@ -115,6 +115,10 @@ pub struct HookSpoolV1 {
     meta: HookSpoolMetaV1,
     checkpoint: Option<CheckpointAnchorV1>,
     observed_records_revision: Option<RecordsFileRevisionV1>,
+    /// Digest of `[0, physical_len)` as this handle read or wrote it. The
+    /// revision cannot see a same-length in-place write within one timestamp
+    /// tick, so an append re-hashes the file against this before attesting.
+    records_prefix: RecordsPrefixDigestV1,
     pending: Vec<PendingRecordV1>,
     pending_by_session: BTreeMap<[u8; 32], (u32, u64)>,
     physical_len: u64,
@@ -302,49 +306,49 @@ impl HookSpoolV1 {
             .as_ref()
             .map_or(0, |checkpoint| checkpoint.bytes);
         let mut checkpoint_records = 0u32;
-        let (mut scan, reusable_checkpoint) = match cached_checkpoint {
-            Some(checkpoint) if checkpoint.records_revision == current_revision => {
+        let revision_trusted = match cached_checkpoint {
+            Some(checkpoint) if checkpoint.records_revision == current_revision => Some(checkpoint),
+            Some(checkpoint) => {
+                let transition = read_transition(&root)?;
+                let extends_checkpoint = transition.as_ref().is_some_and(|transition| {
+                    transition.checkpoint_checksum == checkpoint.checksum
+                        && transition.checkpoint_revision == checkpoint.records_revision
+                        && Some(&transition.current_revision) == current_revision.as_ref()
+                        && transition.current_revision.length >= checkpoint.covered_end()
+                });
+                extends_checkpoint.then_some(checkpoint)
+            }
+            None => None,
+        };
+        // The revision names the file, not its bytes: only the covered
+        // digest proves the indexed prefix is still what the checkpoint saw.
+        let mut records_prefix = RecordsPrefixDigestV1::empty();
+        let content_trusted = match revision_trusted {
+            Some(checkpoint)
+                if records_prefix.read_through(&root, checkpoint.covered_end())?
+                    && records_prefix.checksum() == checkpoint.covered_checksum =>
+            {
+                Some(checkpoint)
+            }
+            Some(_) => {
+                records_prefix = RecordsPrefixDigestV1::empty();
+                None
+            }
+            None => None,
+        };
+        let (mut scan, reusable_checkpoint) = match content_trusted {
+            Some(checkpoint) => {
                 checkpoint_records = u32::try_from(checkpoint.records.len())
                     .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-                let validated_end = checkpoint
-                    .records_revision
-                    .as_ref()
-                    .map_or(0, |revision| revision.length);
                 let anchor = CheckpointAnchorV1 {
                     records_revision: checkpoint.records_revision.clone(),
                     checksum: checkpoint.checksum,
                 };
+                let covered_end = checkpoint.covered_end();
                 (
-                    scan_records_from(&root, config, checkpoint.records, validated_end)?,
+                    scan_records_from(&root, config, checkpoint.records, covered_end)?,
                     Some(anchor),
                 )
-            }
-            Some(checkpoint) => {
-                let transition = read_transition(&root)?;
-                let validated_end = checkpoint
-                    .records_revision
-                    .as_ref()
-                    .map_or(0, |revision| revision.length);
-                let transition_matches = transition.as_ref().is_some_and(|transition| {
-                    transition.checkpoint_checksum == checkpoint.checksum
-                        && transition.checkpoint_revision == checkpoint.records_revision
-                        && Some(&transition.current_revision) == current_revision.as_ref()
-                        && transition.current_revision.length >= validated_end
-                });
-                if transition_matches {
-                    checkpoint_records = u32::try_from(checkpoint.records.len())
-                        .map_err(|_| HookSpoolError::MetadataCorrupted)?;
-                    let anchor = CheckpointAnchorV1 {
-                        records_revision: checkpoint.records_revision.clone(),
-                        checksum: checkpoint.checksum,
-                    };
-                    (
-                        scan_records_from(&root, config, checkpoint.records, validated_end)?,
-                        Some(anchor),
-                    )
-                } else {
-                    (scan_records(&root, config)?, None)
-                }
             }
             None => (scan_records(&root, config)?, None),
         };
@@ -374,6 +378,9 @@ impl HookSpoolV1 {
                 scan.physical_len = scan.valid_end;
                 scan.partial_tail = None;
             }
+        }
+        if !records_prefix.read_through(&root, scan.physical_len)? {
+            return Err(HookSpoolError::Io);
         }
 
         let checkpoint_suffix_bytes =
@@ -408,7 +415,7 @@ impl HookSpoolV1 {
                 (Some(checkpoint), false) => checkpoint,
                 _ => {
                     checkpoint_rewritten = true;
-                    write_checkpoint(&root, config, &scan.records)?
+                    write_checkpoint(&root, config, &scan.records, &records_prefix)?
                 }
             })
         } else {
@@ -456,6 +463,7 @@ impl HookSpoolV1 {
             meta,
             checkpoint,
             observed_records_revision,
+            records_prefix,
             pending,
             pending_by_session,
             physical_len: scan.physical_len,
@@ -577,7 +585,9 @@ impl HookSpoolV1 {
             self.reclaim(now)?;
             return self.append_record(envelope, native_lifecycle, binding, now, false);
         }
-        if records_file_revision(&self.root)? != self.observed_records_revision {
+        if records_file_revision(&self.root)? != self.observed_records_revision
+            || !self.records_prefix.matches_file(&self.root)?
+        {
             self.recovery_required = true;
             return Err(HookSpoolError::MetadataCorrupted);
         }
@@ -586,6 +596,7 @@ impl HookSpoolV1 {
             self.recovery_required = true;
             return Err(error);
         }
+        self.records_prefix.extend(&frame);
         let record = decode_complete_frame(&frame, self.physical_len, self.config.host)?;
         // Reopen carries the sequence forward from the frame itself, so the
         // next metadata write persists it; an append writes no metadata.
@@ -944,7 +955,9 @@ impl HookSpoolV1 {
             return Ok(());
         }
         staged.publish().map_err(|_| HookSpoolError::Io)?;
-        let checkpoint = match write_checkpoint(&self.root, self.config, &rebuilt) {
+        let records_prefix = RecordsPrefixDigestV1::of(&bytes);
+        let checkpoint = match write_checkpoint(&self.root, self.config, &rebuilt, &records_prefix)
+        {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
                 self.recovery_required = true;
@@ -953,6 +966,7 @@ impl HookSpoolV1 {
         };
         self.pending = rebuilt;
         self.observed_records_revision = checkpoint.records_revision.clone();
+        self.records_prefix = records_prefix;
         self.checkpoint = Some(checkpoint);
         self.physical_len = u64::try_from(bytes.len()).map_err(|_| HookSpoolError::SpoolFull)?;
         hotpath::gauge!("hooks.spool.compact.frame_count").set(self.pending.len());
@@ -1052,10 +1066,12 @@ impl HookSpoolV1 {
                     return Err(error);
                 }
             };
+            // The entry came from the checkpoint index, so a frame it names
+            // that no longer decodes is a stale index, not a verdict on the
+            // file: the next open's full scan locates any corruption.
             let record = match decode_complete_frame(&frame, entry.file_offset, self.config.host) {
                 Ok(record) if entry.matches_record(&record) => record,
-                Ok(_) => return self.fail_checkpoint_mismatch(),
-                Err(_) => return self.fail_corrupted(entry.file_offset),
+                Ok(_) | Err(_) => return self.fail_checkpoint_mismatch(),
             };
             let pending = self
                 .pending

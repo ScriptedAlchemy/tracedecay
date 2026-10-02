@@ -1747,6 +1747,7 @@ fn sealed_segment_graph_store(
         &projector_revision,
         tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)
             .expect("row spill"),
+        &mut |_| Ok(()),
         &|| Ok(()),
     )
     .expect("code graph rows")

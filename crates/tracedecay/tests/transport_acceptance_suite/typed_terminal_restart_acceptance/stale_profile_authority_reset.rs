@@ -23,14 +23,16 @@ use crate::common::{
     canonical_existing_path, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
 };
 
-const STALE_STORE_RESET: &str = "tracedecay wipe --stale --yes";
-const REGISTRY_REASON: &str = "database error: table 'graph_scopes' has an incompatible number \
+pub(super) const STALE_STORE_RESET: &str = "tracedecay wipe --stale --yes";
+pub(super) const REGISTRY_REASON: &str = "database error: table 'graph_scopes' has an incompatible number \
      of columns (operation: validate global database authority schema)";
 
 /// Rewrites `graph_scopes` into the shape v1.0.0-beta.63 and earlier wrote,
 /// with each scope's `db_relpath`, keeping its rows, indexes and triggers.
-fn give_registry_the_released_graph_scope_shape(db_path: &Path) {
-    let connection = rusqlite::Connection::open(db_path).expect("open the profile authority");
+/// Every registered store carries these tables. Returns how many scopes the
+/// store records.
+pub(super) fn give_registry_the_released_graph_scope_shape(db_path: &Path) -> i64 {
+    let connection = rusqlite::Connection::open(db_path).expect("open a registered store");
     let dependents: Vec<String> = connection
         .prepare(
             "SELECT sql FROM sqlite_schema WHERE tbl_name = 'graph_scopes' \
@@ -72,19 +74,18 @@ fn give_registry_the_released_graph_scope_shape(db_path: &Path) {
             .execute_batch(&sql)
             .expect("restore a graph scope dependent");
     }
-    let released: i64 = connection
+    connection
         .query_row(
             "SELECT count(*) FROM graph_scopes WHERE db_relpath LIKE 'projects/%/tracedecay.db'",
             [],
             |row| row.get(0),
         )
-        .expect("count released graph scopes");
-    assert_eq!(released, 1, "the registered project keeps its graph scope");
+        .expect("count released graph scopes")
 }
 
 /// The stores `tracedecay doctor --json` names as pending resets, read from
 /// the daemon's reset census.
-fn doctor_store_resets(home: &Path, project: &Path) -> (Option<i32>, Vec<String>) {
+pub(super) fn doctor_store_resets(home: &Path, project: &Path) -> (Option<i32>, Vec<String>) {
     let (exit, report, _) = run_doctor_json(home, project);
     let pending = report["checks"]
         .as_array()
@@ -115,7 +116,7 @@ fn search_problem(home: &Path, project: &Path) -> Value {
     envelope["problem"]["detail"].clone()
 }
 
-fn registered_project_ids(home: &Path, project: &Path) -> Vec<String> {
+pub(super) fn registered_project_ids(home: &Path, project: &Path) -> Vec<String> {
     let listed = super::typed_envelope(&super::tool_call(
         home,
         project,
@@ -149,7 +150,11 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
     daemon
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
-    give_registry_the_released_graph_scope_shape(&profile_root.join("global.db"));
+    assert_eq!(
+        give_registry_the_released_graph_scope_shape(&profile_root.join("global.db")),
+        1,
+        "the registered project keeps its graph scope"
+    );
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     let detail = search_problem(&home_path, &project_path);

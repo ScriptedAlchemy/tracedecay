@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::watch;
 use tracedecay_contracts::ResolvedScope;
 
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
@@ -137,6 +138,7 @@ pub struct CodeIndexActivationV1 {
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
+    mount_failed: watch::Sender<bool>,
     hint_sink: CodeIndexActivationHintSinkV1,
     retirement: Arc<CodeIndexActivationRetirementV1>,
     #[cfg(test)]
@@ -182,6 +184,7 @@ impl CodeIndexActivationV1 {
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
+            mount_failed: watch::channel(false).0,
             hint_sink,
             retirement: Arc::new(CodeIndexActivationRetirementV1::new()),
             #[cfg(test)]
@@ -207,6 +210,23 @@ impl CodeIndexActivationV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Whether the last mount attempt failed and no later attempt mounted.
+    pub fn mount_failed(&self) -> bool {
+        *self.mount_failed.borrow()
+    }
+
+    /// Subscribe to failed-mount publication for a readiness wait.
+    pub fn subscribe_mount_failure(&self) -> watch::Receiver<bool> {
+        self.mount_failed.subscribe()
+    }
+
+    /// Whether a mount attempt is currently in flight for this route. A
+    /// retained mount failure while one is in flight is a retry underway,
+    /// not the terminal observation the flag alone would name.
+    pub fn mount_in_progress(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTING
     }
 
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
@@ -293,6 +313,7 @@ impl CodeIndexActivationV1 {
         let state = Arc::clone(&self.state);
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
+        let mount_failed = self.mount_failed.clone();
         let hint_sink = Arc::clone(&self.hint_sink);
         runtime.spawn(hotpath::future!(
             async move {
@@ -305,10 +326,16 @@ impl CodeIndexActivationV1 {
                         .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
-                if let Err(error) = mount().await {
+                let mounted = mount().await;
+                if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
                     hotpath::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
+                    // The retained failure publishes only once the attempt
+                    // has fully settled: a waiter that reads the flag while
+                    // `mount_in_progress` still holds is observing a retry
+                    // underway, not the terminal observation this flag names.
+                    mount_failed.send_replace(true);
                     tracing::warn!(
                         event = "code_index_activation",
                         project = %project_root.display(),
@@ -318,6 +345,7 @@ impl CodeIndexActivationV1 {
                     );
                     return;
                 }
+                mount_failed.send_replace(false);
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
@@ -723,6 +751,40 @@ mod tests {
         wait_until(|| linked_activation.is_mounted()).await;
         assert_eq!(primary_mounts.load(Ordering::SeqCst), 1);
         assert_eq!(linked_mounts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_mount_stays_visible_until_a_retry_mounts() {
+        let repository = repository();
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&mount_attempts);
+        let activation = CodeIndexActivationV1::new(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            Arc::new(move || {
+                let attempts = Arc::clone(&attempts);
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("private mount detail".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                })
+            }),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        );
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.mount_failed() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.is_mounted() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!activation.mount_failed());
     }
 
     #[tokio::test]

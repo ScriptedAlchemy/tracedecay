@@ -1960,6 +1960,24 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     let host_admission = profile.join(".user-sessions.db.host-admission");
     std::fs::create_dir(&host_admission).unwrap();
     std::fs::write(host_admission.join("pending"), b"admission spool").unwrap();
+    // What the beta.65 operator profile kept after `wipe --all` (#2875).
+    let surviving_state = [
+        "hook-v2-profile-admissions/claude/admissions.v1.bin",
+        "hook-v2-profile-admissions/claude/admission-work-completions.v1.json",
+        "hook-v2-profile-admissions/claude/admissions.v1.lock",
+        "hook-v2-profile-admissions/codex/admissions.v2.log",
+        "lcm-payloads/payload",
+        "response-handles/handle",
+        "maintenance/unregistered-project-directory-inventory-v2/page",
+        "maintenance/retention-cold-store-cursor-v1.json",
+        "hook_analytics.jsonl",
+        "hook_analytics.jsonl.lock",
+    ];
+    for relative in surviving_state {
+        let path = profile.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"profile state").unwrap();
+    }
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all", "--yes"]);
@@ -2007,6 +2025,17 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     assert_namespace_absent(
         &host_admission,
         "wipe --all left the profile host-admission database companion",
+    );
+    let mut survivors = surviving_state
+        .iter()
+        .filter_map(|relative| relative.split('/').next())
+        .filter(|root| profile.join(root).exists())
+        .collect::<Vec<_>>();
+    survivors.dedup();
+    assert_eq!(
+        survivors,
+        Vec::<&str>::new(),
+        "wipe --all left profile state"
     );
     assert_eq!(std::fs::read(&config_path).unwrap(), config);
     assert_eq!(std::fs::read(&identity_path).unwrap(), identity);
