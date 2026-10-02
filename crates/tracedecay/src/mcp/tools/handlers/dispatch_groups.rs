@@ -591,9 +591,12 @@ fn graph_freshness_reader<'a>(
     tool_name: &str,
     options: &'a ToolCallRegistryOptions<'a>,
 ) -> Option<&'a CodeIndexFreshnessReader> {
-    matches!(tool_name, "tracedecay_search" | "tracedecay_context")
-        .then_some(options.code_index_freshness_reader.as_ref())
-        .flatten()
+    matches!(
+        tool_name,
+        "tracedecay_search" | "tracedecay_context" | "tracedecay_files"
+    )
+    .then_some(options.code_index_freshness_reader.as_ref())
+    .flatten()
 }
 
 /// Binds the admitted authorities a moved handler family reads.

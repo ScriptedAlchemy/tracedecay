@@ -450,7 +450,7 @@ async fn replace_symbol_proves_missing_symbol_leaves_the_file_unchanged() {
     assert_eq!(missing["failed"], true);
     assert_eq!(
         missing["message"],
-        "source edit failed before the effect: config error: symbol 'missing_symbol' not found"
+        "source edit failed before the effect: symbol 'missing_symbol' not found"
     );
     assert_eq!(read_project_file(&project, "src/main.rs"), original);
 

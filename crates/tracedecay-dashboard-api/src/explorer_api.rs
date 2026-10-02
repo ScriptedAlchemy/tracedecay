@@ -768,6 +768,11 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "graph_budget_exhausted",
             detail,
         ),
+        parked @ CodeGraphReadError::Parked { .. } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "code_index_parked",
+            parked.to_string(),
+        ),
     }
 }
 

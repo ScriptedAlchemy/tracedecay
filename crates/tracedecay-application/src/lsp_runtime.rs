@@ -18,6 +18,7 @@ use tracedecay_contracts::feedback::FeedbackDiagnosticsReadResultV1;
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, UtcMicros,
 };
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::{
     AdmittedRoot, ContextCoverage, ContextProducerState, ContextProjectionChange,
@@ -34,7 +35,7 @@ pub use crate::lsp_support::{
     LspWorkspaceDocumentIndexPort, UpstreamCapabilityInitializationAuthority,
 };
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
-const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
+const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 2;
 
 fn byte_offsets_to_utf16_range(
     text: &str,
@@ -330,7 +331,6 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
     identity: ContextProjectionIdentity,
     generation: u64,
     operation_id: String,
-    operation_generation: u64,
     operation_completed: u64,
     operation_total: Option<u64>,
     operation_termination: Option<OperationTermination>,
@@ -343,10 +343,13 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
 
 /// Mount-ready bundle construction. The same concrete feedback source is
 /// shared by cycle triggers, managed diagnostics, and context projections.
+/// `test_run_store` is the project sessions store managed test runs are
+/// recorded in.
 #[allow(clippy::too_many_arguments)]
 pub fn lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
     feedback_runtime: Arc<FeedbackRuntime>,
+    test_run_store: RegisteredGlobalDbLeaseV1,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     workspace_index: Arc<dyn crate::lsp_support::LspWorkspaceDocumentIndexPort>,
     diagnostic_records: Arc<dyn LspFeedbackDiagnosticRecordPort>,
@@ -366,7 +369,7 @@ where
         code_index,
         workspace_index,
     )?);
-    let test_runs = lsp_test_result_port(project.clone());
+    let test_runs = lsp_test_result_port(project.clone(), test_run_store, runtime.clone());
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
         diagnostic_records,
         project.clone(),

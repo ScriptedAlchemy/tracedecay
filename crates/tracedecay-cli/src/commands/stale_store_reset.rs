@@ -6,9 +6,10 @@ use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent
 use tracedecay_hooks::{
     PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR,
 };
-use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, profile_sharded_data_root, validate_project_id,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
+    validate_project_id,
 };
 use tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME;
 
@@ -106,6 +107,13 @@ fn resettable_targets(stores: &[StoreResetRequiredV1]) -> Result<Vec<ResettableS
 
 fn reset_stores(profile_root: &Path, targets: &[ResettableStoreV1]) -> Result<()> {
     for target in targets {
+        if *target == ResettableStoreV1::ProfileAuthority {
+            println!(
+                "resetting the profile authority loses the project registry, usage accounting \
+                 and remote-deletion records it holds; every project store (code index, \
+                 graph, sessions, memory) stays in place"
+            );
+        }
         let (directory, members) = store_location(profile_root, target)?;
         let removed = match members {
             StoreMembers::DatabaseFamily(database) => remove_store_family(&directory, database)?,
@@ -123,6 +131,58 @@ fn reset_stores(profile_root: &Path, targets: &[ResettableStoreV1]) -> Result<()
             target.label(),
             directory.display()
         );
+    }
+    if targets.contains(&ResettableStoreV1::ProfileAuthority) {
+        print_project_registrations(profile_root)?;
+    }
+    Ok(())
+}
+
+/// Each project store records its own root and identity, so the commands
+/// that register it in the recreated profile authority are derived from its
+/// manifest.
+fn print_project_registrations(profile_root: &Path) -> Result<()> {
+    let projects_root = profile_root.join("projects");
+    let entries = match std::fs::read_dir(&projects_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to list '{}': {error}", projects_root.display()),
+            });
+        }
+    };
+    let mut manifests = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!("failed to list '{}': {error}", projects_root.display()),
+        })?;
+        let path = entry.path().join(STORE_MANIFEST_FILENAME);
+        if path.is_file() {
+            manifests.push(path);
+        }
+    }
+    manifests.sort();
+    let mut lines = Vec::new();
+    for path in manifests {
+        lines.push(match read_store_manifest(&path) {
+            Ok(manifest) if manifest.project_root.is_dir() => format!(
+                "  tracedecay init {}",
+                shell_words::quote(&manifest.project_root.to_string_lossy())
+            ),
+            Ok(manifest) => format!(
+                "  (not registrable: {} names {}, which no longer exists)",
+                path.display(),
+                manifest.project_root.display()
+            ),
+            Err(error) => format!("  (not registrable: {}: {error})", path.display()),
+        });
+    }
+    if !lines.is_empty() {
+        println!("the project registry is empty; register each project store again with:");
+        for line in lines {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -146,6 +206,10 @@ fn store_location(
         Ok::<_, TraceDecayError>(profile_sharded_data_root(profile_root, project_id))
     };
     Ok(match target {
+        ResettableStoreV1::ProfileAuthority => (
+            profile_root.to_path_buf(),
+            StoreMembers::DatabaseFamily(GLOBAL_DB_FILENAME),
+        ),
         ResettableStoreV1::ProfileSessions => (
             profile_root.to_path_buf(),
             StoreMembers::DatabaseFamily(USER_SESSIONS_DB_FILENAME),
@@ -211,6 +275,10 @@ mod tests {
             "tracedecay.grafeo",
             "store_manifest.json",
             "user-sessions.db",
+            "global.db",
+            "global.db-wal",
+            "global.db-shm",
+            "profile-identity.json",
         ] {
             std::fs::write(root.join(file), file).expect("write store file");
         }
@@ -224,6 +292,7 @@ mod tests {
         }
 
         assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 6);
+        assert_eq!(remove_store_family(root, GLOBAL_DB_FILENAME).unwrap(), 3);
 
         let mut kept: Vec<String> = std::fs::read_dir(root)
             .unwrap()
@@ -234,6 +303,7 @@ mod tests {
             kept,
             [
                 "code-index-v1",
+                "profile-identity.json",
                 "store_manifest.json",
                 "tracedecay.db",
                 "tracedecay.db-wal",
@@ -280,30 +350,24 @@ mod tests {
         );
         assert_eq!(
             resettable_targets(&[
+                store("profile authority", "tracedecay wipe --stale --yes"),
                 store("profile sessions", "tracedecay wipe --stale --yes"),
-                store("profile authority", "tracedecay wipe --all --yes"),
+            ])
+            .unwrap(),
+            [
+                ResettableStoreV1::ProfileAuthority,
+                ResettableStoreV1::ProfileSessions
+            ]
+        );
+        assert_eq!(
+            resettable_targets(&[
+                store("profile sessions", "tracedecay wipe --stale --yes"),
+                store("ProfileMemory", "tracedecay wipe --all --yes"),
             ])
             .unwrap_err()
             .to_string(),
-            "config error: profile authority requires reset (rows predate the unified identity) \
+            "config error: ProfileMemory requires reset (rows predate the unified identity) \
              and is not reset on its own; run `tracedecay wipe --all --yes`. Nothing was wiped."
-        );
-        assert_eq!(
-            resettable_targets(&[StoreResetRequiredV1 {
-                store: "profile authority".to_owned(),
-                authority: "LCM".to_owned(),
-                found_version: Some(13),
-                required_version: Some(14),
-                reason: "LCM profile schema 13 is incompatible with required schema 14; reset \
-                          the profile"
-                    .to_owned(),
-                remedy: "tracedecay wipe --all --yes".to_owned(),
-            }])
-            .unwrap_err()
-            .to_string(),
-            "config error: profile authority requires reset (LCM profile schema 13 is \
-             incompatible with required schema 14; reset the profile) and is not reset on its \
-             own; run `tracedecay wipe --all --yes`. Nothing was wiped."
         );
     }
 }

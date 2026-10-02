@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
-use crate::global_db_operation_error;
+use super::rows::audit_read_error;
 
-use super::{OPERATION, normalize_trigger_sql};
+use super::normalize_trigger_sql;
 
 pub(in crate::schema_contract) struct Trigger {
     pub(in crate::schema_contract) name: &'static str,
@@ -16,6 +17,20 @@ pub(in crate::schema_contract) struct Invariant {
     pub(in crate::schema_contract) triggers: &'static [Trigger],
     pub(super) audit_query: Option<&'static str>,
     pub(super) violation: &'static str,
+    /// A schema migration still in flight can be what leaves this violated,
+    /// so the next open may no longer find it.
+    pub(super) migration_pending: bool,
+}
+
+impl Invariant {
+    pub(super) fn violated(&self) -> TraceDecayError {
+        TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: self.migration_pending,
+            },
+            self.violation,
+        )
+    }
 }
 
 const OBSERVATION_IMMUTABILITY: &[Trigger] = &[
@@ -1258,21 +1273,25 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
         triggers: OBSERVATION_IMMUTABILITY,
         audit_query: None,
         violation: "observation immutability trigger contract is unavailable",
+        migration_pending: false,
     },
     Invariant {
         triggers: RECEIPT_IMMUTABILITY,
         audit_query: None,
         violation: "sanitization receipt immutability trigger contract is unavailable",
+        migration_pending: false,
     },
     Invariant {
         triggers: PROJECTION_AUDIT_INVALIDATION,
         audit_query: None,
         violation: "projection authority audit invalidation contract is unavailable",
+        migration_pending: false,
     },
     Invariant {
         triggers: STORE_PROJECT_IMMUTABILITY,
         audit_query: None,
         violation: "store project identity is not immutable",
+        migration_pending: false,
     },
     Invariant {
         triggers: GRAPH_SCOPE_IDENTITY,
@@ -1283,6 +1302,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE store.store_id IS NULL LIMIT 1",
         ),
         violation: "graph_scopes contains a store/project identity mismatch",
+        migration_pending: false,
     },
     Invariant {
         triggers: QUEUE_IDENTITY,
@@ -1294,6 +1314,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE observation.observation_id IS NULL LIMIT 1",
         ),
         violation: "projection_queue contains an observation identity mismatch",
+        migration_pending: false,
     },
     Invariant {
         triggers: PROVENANCE_RECEIPT,
@@ -1305,6 +1326,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE observation.observation_id IS NULL LIMIT 1",
         ),
         violation: "observation projection provenance contains a receipt mismatch",
+        migration_pending: false,
     },
     Invariant {
         triggers: WORKFLOW_FACT_RECEIPT,
@@ -1317,6 +1339,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE observation.observation_id IS NULL LIMIT 1",
         ),
         violation: "workflow projection contains an observation receipt mismatch",
+        migration_pending: false,
     },
     Invariant {
         triggers: DISPOSITION_RECEIPT,
@@ -1328,6 +1351,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE observation.observation_id IS NULL LIMIT 1",
         ),
         violation: "observation projection disposition contains a receipt mismatch",
+        migration_pending: false,
     },
     Invariant {
         triggers: MESSAGE_CREATED_DOMAIN,
@@ -1336,6 +1360,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE message_created NOT IN (0, 1) LIMIT 1",
         ),
         violation: "observation projection provenance contains invalid message_created",
+        migration_pending: false,
     },
     Invariant {
         triggers: CHECKPOINT_DOMAIN,
@@ -1344,6 +1369,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE last_sequence < 0 LIMIT 1",
         ),
         violation: "observation projection checkpoints contains a negative sequence",
+        migration_pending: false,
     },
     Invariant {
         triggers: &[],
@@ -1354,6 +1380,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE receipt.receipt_id IS NULL LIMIT 1",
         ),
         violation: "committed observation references a missing receipt",
+        migration_pending: false,
     },
     Invariant {
         triggers: &[],
@@ -1366,6 +1393,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "committed observation contains invalid authority JSON",
+        migration_pending: false,
     },
     Invariant {
         triggers: &[],
@@ -1375,21 +1403,25 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "projection checkpoint exceeds the committed observation frontier",
+        migration_pending: false,
     },
     Invariant {
         triggers: &[],
         audit_query: Some(FOREIGN_KEY_AUDIT_QUERY),
         violation: "global database contains a foreign-key violation",
+        migration_pending: false,
     },
     Invariant {
         triggers: SOURCE_CURSOR_ADVANCE_IMMUTABILITY,
         audit_query: None,
         violation: "source cursor advance immutability trigger contract is unavailable",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_SUMMARY_AUTHORITY_IMMUTABILITY,
         audit_query: None,
         violation: "session summary payload authority is mutable",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_RECEIPT_IMMUTABILITY,
@@ -1427,6 +1459,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "session temporal receipts or cursor keys are mutable",
+        migration_pending: true,
     },
     Invariant {
         triggers: SESSION_CURSOR_KEY_GUARDS,
@@ -1476,6 +1509,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "session cursor key rotation state is invalid",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_REFRESH_STATE_GUARDS,
@@ -1560,6 +1594,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "session refresh operation state is invalid",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_TEMPORAL_GENERATION_GUARDS,
@@ -1571,6 +1606,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "session temporal generation state is invalid",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_SUMMARY_OWNER_GUARDS,
@@ -1583,11 +1619,13 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
              LIMIT 1",
         ),
         violation: "session temporal authority ownership is invalid",
+        migration_pending: false,
     },
     Invariant {
         triggers: SESSION_TEMPORAL_FTS,
         audit_query: None,
         violation: "session temporal full-text trigger contract is unavailable",
+        migration_pending: false,
     },
 ];
 
@@ -1600,7 +1638,7 @@ pub(super) async fn replace_trigger(
         trigger.name, trigger.create_sql
     ))
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))
+    .map_err(audit_read_error)
 }
 
 #[hotpath::measure(
@@ -1618,22 +1656,12 @@ pub(super) async fn trigger_contracts_intact(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut actual = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        let name = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let table = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let sql = row
-            .get::<String>(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        let name = row.get::<String>(0).map_err(audit_read_error)?;
+        let table = row.get::<String>(1).map_err(audit_read_error)?;
+        let sql = row.get::<String>(2).map_err(audit_read_error)?;
         actual.insert(name.to_ascii_lowercase(), (table, sql));
     }
     Ok(INVARIANTS

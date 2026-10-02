@@ -1862,8 +1862,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 if prepare_graph && graph_already_serves {
                     // A retained native graph serves without a full decode.
                     // Explicit complete-generation demand still admits binding
-                    // and seating, independently of redundant activation.
-                    prepare_graph = serving_empty
+                    // and seating, independently of redundant activation. A
+                    // predecessor in the serving slot does not satisfy that
+                    // demand for the text owner's generation.
+                    let text_generation_is_unseated = graph_text.as_ref().is_some_and(|text| {
+                        let generation_id = &text.metadata().manifest().generation_id;
+                        worker_serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                            .is_none_or(|seat| {
+                                &seat.generation().manifest().generation_id != generation_id
+                            })
+                    });
+                    prepare_graph = text_generation_is_unseated
                         && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
                 let retained_generation = graph_text
@@ -3087,35 +3099,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                 None,
                             ));
                         }
-                    }
-                }
-                // A publication left unseated whose text owner already serves
-                // supersedes the predecessor's seat; an occupied slot tells
-                // later passes no decode is owed, so the successor never seats.
-                if published_pass && !matches!(&result, Ok((Ok(_), Some(_), _))) {
-                    let advertised = worker_text_generation
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .as_ref()
-                        .filter(|text| text.query_owners_are_ready())
-                        .map(|text| text.metadata().manifest().generation_id.clone());
-                    let superseded = advertised.is_some_and(|advertised| {
-                        worker_serving_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .as_ref()
-                            .is_some_and(|seat| {
-                                seat.generation().manifest().generation_id != advertised
-                            })
-                    });
-                    if superseded {
-                        Self::release_superseded_serving_seat(
-                            &worker_serving_generation,
-                            &worker_serving_generation_epoch,
-                            &worker_serving_source_witness,
-                            &worker_serving_seats,
-                            &worker_serving_generation_changed,
-                        );
                     }
                 }
                 // The source proof and serving witness are now published as

@@ -58,6 +58,7 @@ fn generation(
         content_identity: content('f'),
         captured_at: UtcMicros(10),
         files,
+        omitted_sources: Vec::new(),
     };
     let intake = SanitizedCodeIntake::new(registry(), id("sanitizer.v1"), UtcMicros(20));
     let validated = intake

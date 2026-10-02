@@ -9,14 +9,15 @@ use tracedecay_contracts::retrieval::{
     TestPrimitivePortContext, TestPrimitivePortOutcome,
 };
 use tracedecay_contracts::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
-    EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage,
-    PageCursor, PageState, RequestAdmission, RequestContext, RetrievalEvidence, TemporalState,
-    now_micros,
+    ApplicationContractError, ApplicationProblem, CoverageCompleteness, CoverageDomainState,
+    EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
+    OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
+    RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, ManifestDigest, RetrievalGrainV1,
-    SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
+    ApplicationProblemDetailV1, CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1,
+    ManifestDigest, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -286,6 +287,20 @@ fn graph_read_outcome<T>(
     match error {
         CodeGraphReadError::Cancelled => RetrievalPortOutcome::Cancelled(evidence),
         CodeGraphReadError::TimedOut => RetrievalPortOutcome::TimedOut(evidence),
+        CodeGraphReadError::Parked {
+            cause,
+            remedy,
+            retries_on_wake,
+        } => RetrievalPortOutcome::Refused(
+            evidence,
+            Box::new(ApplicationProblem::from_detail(
+                ApplicationProblemDetailV1::Parked {
+                    cause: cause.clone(),
+                    remedy: remedy.clone(),
+                    retries_on_wake: *retries_on_wake,
+                },
+            )),
+        ),
         _ => RetrievalPortOutcome::Refused(
             evidence,
             Box::new(code_graph_read_failure(error).into_problem()),
@@ -388,6 +403,11 @@ pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFa
             PrimitiveFailureKind::Unavailable,
             "application.code-graph.corrupt",
             "The project's verified code-graph projection is corrupt.",
+        ),
+        CodeGraphReadError::Parked { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-index.parked",
+            "The code index for this worktree is parked until the operator applies its remedy.",
         ),
     };
     PrimitiveFailure {
