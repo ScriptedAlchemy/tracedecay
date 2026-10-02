@@ -973,6 +973,8 @@ impl CodeIndexWorktreeSchedulerV1 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
@@ -1291,6 +1293,92 @@ mod tests {
                 .generation()
                 .snapshot()
                 .files
+        );
+    }
+
+    /// Two non-UTF-8 names that decode lossily to the same string, and a
+    /// backslash name, are committed beside an ordinary source. None of them
+    /// becomes a row under a name that does not exist; each is an omitted
+    /// source under its exact Git bytes.
+    #[cfg(unix)]
+    #[test]
+    fn exact_capture_names_unrepresentable_committed_paths_by_their_bytes() {
+        let project = TempDir::new().expect("project root");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn kept() {}\n")
+            .expect("ordinary source");
+        for raw in [
+            b"src/\xfe.rs".as_slice(),
+            b"src/\xff.rs".as_slice(),
+            b"src/odd\\name.rs".as_slice(),
+        ] {
+            std::fs::write(
+                project.path().join(std::ffi::OsStr::from_bytes(raw)),
+                "pub fn unrepresentable() {}\n",
+            )
+            .expect("unrepresentable source name");
+        }
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "fixture"]);
+        let store = TempDir::new().expect("code-index store");
+        let scheduler = CodeIndexWorktreeSchedulerV1::open(
+            ProjectId::new("project.unrepresentable-exact-capture").expect("project id"),
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open code-index scheduler");
+        let source = ExactGitTreeSourceV1 {
+            reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            revision: tracedecay_domain::CommitId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD"],
+            ))
+            .expect("revision"),
+            tree: tracedecay_domain::TreeId::new(git_output(
+                project.path(),
+                &["rev-parse", "HEAD^{tree}"],
+            ))
+            .expect("tree"),
+        };
+
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(
+                &source,
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None,
+                },
+            )
+            .expect("capture a tree with unrepresentable paths");
+
+        captured.snapshot.validate().expect("canonical snapshot");
+        assert_eq!(
+            captured
+                .snapshot
+                .files
+                .iter()
+                .map(|file| file.logical_path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/lib.rs"]
+        );
+        assert_eq!(
+            captured.snapshot.omitted_sources,
+            [
+                b"src/odd\\name.rs".as_slice(),
+                b"src/\xfe.rs".as_slice(),
+                b"src/\xff.rs".as_slice(),
+            ]
+            .map(|git_path| tracedecay_domain::OmittedCodeSourceV1 {
+                git_path: git_path.to_vec(),
+                reason: tracedecay_domain::CodeSourceOmissionReasonV1::UnrepresentablePath,
+            })
         );
     }
 

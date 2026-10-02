@@ -625,6 +625,68 @@ mod tests {
         );
     }
 
+    fn snapshot_with_omitted_sources() -> SanitizedCodeSnapshotV1 {
+        let mut snapshot = snapshot();
+        snapshot.files[1].disposition = SnapshotFileDispositionV1::Ignored;
+        snapshot.omitted_sources = vec![
+            OmittedCodeSourceV1 {
+                git_path: b"src/b.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::PrivacyWithheld {
+                    detail: "quarantined".to_owned(),
+                },
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/odd\\name.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/\xff.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+        ];
+        snapshot
+    }
+
+    #[test]
+    fn omitted_sources_must_be_ordered_and_carry_a_reason_their_path_supports() {
+        snapshot_with_omitted_sources()
+            .validate()
+            .expect("canonical omitted sources");
+
+        let mut duplicate = snapshot_with_omitted_sources();
+        duplicate
+            .omitted_sources
+            .push(duplicate.omitted_sources[2].clone());
+        assert_eq!(
+            duplicate.validate().unwrap_err().to_string(),
+            "snapshot omitted source order is not canonical"
+        );
+
+        let mut representable = snapshot_with_omitted_sources();
+        representable.omitted_sources[1].git_path = b"src/odd_name.rs".to_vec();
+        assert_eq!(
+            representable.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a path a row could name is not unrepresentable"
+        );
+
+        let mut withheld_present = snapshot_with_omitted_sources();
+        withheld_present.files[1].disposition = SnapshotFileDispositionV1::Present;
+        assert_eq!(
+            withheld_present.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source cannot also be indexed"
+        );
+
+        let mut withheld_without_row = snapshot_with_omitted_sources();
+        withheld_without_row.omitted_sources[0].git_path = b"src/absent.rs".to_vec();
+        assert_eq!(
+            withheld_without_row.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source keeps its ignored row"
+        );
+    }
+
     #[test]
     fn generation_manifest_requires_matching_canonical_language_revisions() {
         generation_manifest()
