@@ -4362,6 +4362,7 @@ export type RequestCostReceiptV1 = {
   adjacency_queries: number;
   adjacency_rows: number;
   bytes_hydrated: number;
+  catalog_symbols: number;
   point_reads: StorePointReadsV1;
   wall_micros: number;
 };
