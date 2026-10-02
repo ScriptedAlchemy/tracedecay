@@ -262,7 +262,7 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
             .iter()
             .map(|release| release.bytes.measured().unwrap_or(0))
             .sum::<u64>(),
-        1_849_469,
+        *both_bytes,
         "the two releases give back exactly what the shared row held"
     );
     let idle = owners.report(later);
