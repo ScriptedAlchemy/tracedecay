@@ -195,6 +195,7 @@ describe('AgentsPage read coverage', () => {
               adjacency_queries: 1,
               adjacency_rows: 107,
               bytes_hydrated: 40_960,
+              catalog_symbols: 9,
             },
           },
         ],

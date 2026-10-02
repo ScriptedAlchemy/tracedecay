@@ -21959,6 +21959,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "catalog_symbols": {
+          "description": "Symbol summaries served from the generation's in-memory catalog.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "point_reads": {
           "$ref": "#/$defs/StorePointReadsV1",
           "description": "Entity and relation point reads, by the store that served them."
@@ -21975,7 +21981,8 @@
         "point_reads",
         "adjacency_queries",
         "adjacency_rows",
-        "bytes_hydrated"
+        "bytes_hydrated",
+        "catalog_symbols"
       ],
       "type": "object"
     },
