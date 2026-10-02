@@ -718,22 +718,28 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit)
-                .await?
-                .into_iter()
-                .filter(|(observation_id, fact)| {
-                    !transcript_observations
-                        .get(observation_id)
-                        .is_some_and(|&index| {
-                            transcript_results[index]
-                                .message
-                                .text
-                                .contains(&fact.message.text)
-                        })
-                })
-                .map(|(_, fact)| fact)
-                .collect();
+        let mut workflow_results = Vec::new();
+        let mut workflow_observations = BTreeMap::new();
+        for (observation_id, fact) in
+            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?
+        {
+            if let Some(&index) = transcript_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut transcript_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            if let Some(&index) = workflow_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut workflow_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            workflow_observations.insert(observation_id, workflow_results.len());
+            workflow_results.push(fact);
+        }
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -886,6 +892,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         }
         Ok(values)
     }
+}
+
+fn append_observation_text(text: &mut String, fact_text: &str) {
+    if fact_text.is_empty() || text.contains(fact_text) {
+        return;
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(fact_text);
 }
 
 #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
