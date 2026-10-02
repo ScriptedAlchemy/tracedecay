@@ -8,73 +8,46 @@
 //!
 //! # What `opencode plugin` actually is
 //!
-//! `opencode plugin <module>` (alias `plug`, flags `-g/--global`,
-//! `-f/--force`) is a *package* installer, verified against the shipped host
-//! binary (opencode 1.18.4). Its behavior:
-//!
-//! 1. It classifies the spec. A spec that starts with `file://` or `.`, or is
-//!    absolute, is a **path** spec; anything else is an **npm** spec that the
-//!    host installs from the registry. A path spec is resolved to a `file://`
-//!    URL, so a local directory is a first-class spelling and TraceDecay would
-//!    never have to name a package it does not publish.
-//! 2. It reads `package.json` from the resolved target and requires a plugin
-//!    entrypoint (`exports["./server"]`, `exports["./tui"]`, or `main`).
-//!    A bare `.ts` file with no sibling manifest is rejected.
-//! 3. On success it **appends the spec to the `plugin` array** of the
-//!    scope's `opencode.json` (`--global` -> the profile config dir,
-//!    otherwise `<worktree>/.opencode/opencode.json`). That array is the
-//!    entire persistent effect of the command.
+//! `opencode plugin add|remove|list|check|update` (OpenCode 2.x) is a
+//! *package* manager: it installs npm names with versions, tags, or ranges
+//! and npm-compatible Git specifications, and records the spec in the
+//! `plugins` array of the global `opencode.json`. OpenCode's own documentation
+//! excludes local paths from `plugin add` ("configure local paths directly"),
+//! so the command has no spelling for a file TraceDecay deploys.
 //!
 //! # Why TraceDecay does not drive it
 //!
-//! OpenCode's config loader scans **`{plugin,plugins}/*.{ts,js}` in every
-//! config directory** it resolves, and those directories are the profile
-//! config dir plus each `.opencode` dir found walking up from the project.
-//! TraceDecay's deployed `plugins/tracedecay.ts` is therefore loaded by
-//! OpenCode's *own* discovery contract, with no registration step at all. The
-//! file deployment is not emulation of host-private state, it is the host's
-//! documented directory contract, which is precisely the condition under which
-//! the host-capability doctrine does **not** demand CLI adoption.
+//! OpenCode's config loader loads **direct `.ts` and `.js` files from every
+//! discovered `.opencode/plugins/` directory and from the global config
+//! directory's `plugins/`**. TraceDecay's deployed `plugins/tracedecay.ts` is
+//! therefore loaded by OpenCode's *own* discovery contract, with no
+//! registration step at all. The file deployment is not emulation of
+//! host-private state, it is the host's documented directory contract, which
+//! is precisely the condition under which the host-capability doctrine does
+//! **not** demand CLI adoption.
 //!
-//! Driving `opencode plugin` on top of that would be actively harmful:
-//!
-//! * **It would double-load the plugin.** The host de-duplicates plugin
-//!   origins by resolved `file://` URL. A staged module directory
-//!   (`…/tracedecay/index.ts`, needed for the `package.json` entrypoint the
-//!   command requires) resolves to a *different* URL than the discovered
-//!   `…/plugins/tracedecay.ts`, so both would load and every hook event would
-//!   be dispatched to the tracedecay binary twice.
-//! * **There is no removal counterpart.** OpenCode ships `plugin` only; there
-//!   is no `plugin remove`/`uninstall` subcommand. An adopted install would
-//!   leave TraceDecay editing the host-recorded `plugin` array by hand on
-//!   uninstall, strictly more emulation than today, not less.
-//! * **The project-local scope cannot be targeted anyway.** `opencode plugin`
-//!   without `--global` resolves its scope from the process working directory,
-//!   and [`super::super::host_cli::run_host_cli`] admits the profile home as
-//!   the child working directory. This is the same blocker documented for
-//!   Kiro's `--scope workspace`, and it applies here unchanged.
-//!
-//! So the plugin stays TraceDecay-deployed and `plugin` stays host-owned. The
-//! invariants below make both halves of that boundary executable: the deployed
-//! path must remain one the host's own loader discovers, and TraceDecay's
-//! `opencode.json` merge must never write the key `opencode plugin` owns.
+//! Listing the same file in `plugins` as well would register a second plugin
+//! origin beside the discovered one, so `plugins` stays host-owned: the
+//! deployed path must remain one the host's own loader discovers, and
+//! TraceDecay's `opencode.json` merge must never write the key `opencode
+//! plugin add` owns.
 //!
 //! # The rest of the OpenCode integration
 //!
 //! * `opencode mcp add` exists but is an interactive wizard with no
 //!   documented non-interactive flags, so the MCP merge stays
 //!   TraceDecay-written. See the doc comment on
-//!   [`super::install_registration_entries`].
-//! * The custom LSP registration has no CLI at all.
+//!   [`super::install_mcp_server`].
 //! * The `AGENTS.md` prompt rules have no CLI at all.
 
 use std::path::Path;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-/// The `opencode.json` key `opencode plugin` writes, and the only key in that
-/// file this integration treats as host-recorded rather than TraceDecay-owned.
-pub(super) const HOST_OWNED_PLUGIN_KEY: &str = "plugin";
+/// The `opencode.json` key `opencode plugin add` writes, and the only key in
+/// that file this integration treats as host-recorded rather than
+/// TraceDecay-owned.
+pub(super) const HOST_OWNED_PLUGIN_KEY: &str = "plugins";
 
 /// Directory names OpenCode's own loader scans for plugin files, in each
 /// config directory it resolves. Both spellings are accepted by the host; the
@@ -88,10 +61,9 @@ const HOST_PLUGIN_DISCOVERY_EXTENSIONS: &[&str] = &["ts", "js"];
 /// registration: a `*.ts`/`*.js` file directly inside a `plugin`/`plugins`
 /// directory of a config root.
 ///
-/// The host's glob is exactly one level deep, so a file nested in a
-/// sub-directory (a staged *module*, which is what `opencode plugin` would
-/// need) is deliberately **not** discovered, that asymmetry is the whole
-/// reason the CLI is not adopted here, and the tests below pin it.
+/// The host loads direct files and immediate package directories, so a file
+/// nested in a sub-directory of a package is deliberately **not** treated as
+/// a discovered plugin file; the tests below pin it.
 pub(super) fn is_host_discovered_plugin_path(path: &Path) -> bool {
     let discovered_extension = path
         .extension()
@@ -118,13 +90,13 @@ pub(super) fn host_owned_plugin_registration(
 /// Refuse a TraceDecay write to `opencode.json` that would create, alter, or
 /// drop the host-recorded `plugin` registration.
 ///
-/// TraceDecay merges `mcp` and `lsp` into this file because neither has a
-/// non-interactive host command. `plugin` is different: it has one, TraceDecay
-/// deliberately does not drive it, and therefore TraceDecay must not write its
-/// effect either. Emulating the key would be indistinguishable on disk from a
-/// real `opencode plugin` install while carrying none of the host's own
-/// manifest and engine validation, exactly the half-emulated state the
-/// host-capability doctrine forbids. A guard is cheaper than the incident.
+/// TraceDecay merges `mcp` into this file because it has no non-interactive
+/// host command. `plugins` is different: it has one, TraceDecay deliberately
+/// does not drive it, and therefore TraceDecay must not write its effect
+/// either. Emulating the key would be indistinguishable on disk from a real
+/// `opencode plugin add` install while carrying none of the host's own
+/// package validation, exactly the half-emulated state the host-capability
+/// doctrine forbids. A guard is cheaper than the incident.
 pub(super) fn ensure_host_owned_plugin_registration_untouched(
     before: Option<&serde_json::Value>,
     config: &serde_json::Value,
@@ -151,40 +123,6 @@ mod tests {
 
     use serde_json::json;
 
-    fn tracedecay_registration(bin: &str) -> serde_json::Value {
-        json!({
-            "mcp": { "tracedecay": { "type": "local", "command": [bin, "serve"] } },
-            "lsp": { "tracedecay": {
-                "command": [bin, "lsp", "bridge", "--stdio"],
-                "extensions": super::super::TRACEDECAY_LSP_EXTENSIONS,
-                "env": { "TRACEDECAY_LSP_BROKER_UPSTREAM": "0" },
-                "initialization": { "tracedecay": {
-                    "brokerUpstream": false,
-                    "duplicateAnalyzerAvoidance": true,
-                    "analyzerOwnership": { "mode": "projection_only", "retainedByExtension": {} }
-                }}
-            }}
-        })
-    }
-
-    fn assert_plugin_change_refused(before: serde_json::Value, after: serde_json::Value) {
-        let path = Path::new("/home/example/.config/opencode/opencode.json");
-        let error = ensure_host_owned_plugin_registration_untouched(Some(&before), &after, path)
-            .expect_err("changing the host plugin registration must refuse");
-        let TraceDecayError::Config { message } = error else {
-            panic!("the refusal must surface as a config error, got {error}");
-        };
-        assert_eq!(
-            message,
-            format!(
-                "refusing to change `{HOST_OWNED_PLUGIN_KEY}` in {}: that registration belongs to \
-                 `opencode plugin`, which TraceDecay does not drive (the deployed plugin is loaded \
-                 by OpenCode's own `{{plugin,plugins}}/*.{{ts,js}}` discovery instead)",
-                path.display()
-            )
-        );
-    }
-
     /// The global deployment path must stay one OpenCode discovers on its own.
     /// If it ever moves out of `plugins/` or stops being a `.ts` file, the
     /// host silently stops loading the plugin and nothing else in this crate
@@ -200,13 +138,10 @@ mod tests {
         );
     }
 
-    /// The executable form of the adoption decision: a staged *module*
-    /// directory, the only shape `opencode plugin` accepts, because it needs
-    /// a `package.json` entrypoint, is NOT discovered by the host's own
-    /// loader. Driving the CLI would therefore add a second, distinct plugin
-    /// origin next to the discovered file rather than replacing it.
+    /// A file nested inside a package directory, or a non-script file, is not
+    /// a discovered plugin file; only the direct `plugins/*.{ts,js}` shape is.
     #[test]
-    fn a_staged_module_directory_would_not_be_discovered_and_so_would_double_register() {
+    fn nested_or_non_script_paths_are_not_discovered_plugin_files() {
         assert!(
             !is_host_discovered_plugin_path(Path::new("plugins/tracedecay/index.ts")),
             "a nested module entrypoint must not be mistaken for a discovered plugin file"
@@ -221,7 +156,7 @@ mod tests {
     }
 
     /// TraceDecay's own registration merge must leave the key `opencode
-    /// plugin` writes exactly as the host left it.
+    /// plugin add` writes exactly as the host left it.
     #[test]
     fn the_registration_merge_preserves_a_host_written_plugin_registration() {
         let home = tempfile::tempdir().unwrap();
@@ -229,59 +164,85 @@ mod tests {
         let host_written = json!(["some-operator-plugin@1.2.3"]);
         std::fs::write(
             &config_path,
-            serde_json::to_vec_pretty(&json!({ "plugin": host_written })).unwrap(),
+            serde_json::to_vec_pretty(&json!({ "plugins": host_written })).unwrap(),
         )
         .unwrap();
 
-        super::super::install_registration_entries(&config_path, "/usr/bin/tracedecay", true, true)
-            .unwrap();
+        super::super::install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
-        let mut expected = tracedecay_registration("/usr/bin/tracedecay");
-        expected["plugin"] = host_written.clone();
-        assert_eq!(config, expected);
+        assert_eq!(config["plugins"], host_written);
+        assert!(config.pointer("/mcp/servers/tracedecay").is_some());
 
-        super::super::remove_registration_entries(&config_path, true, true).unwrap();
+        super::super::uninstall_mcp_server(&config_path).unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(
-            config["plugin"], host_written,
+            config["plugins"], host_written,
             "uninstall must not disturb the host-recorded plugin registration"
         );
     }
 
     /// And it must not invent one where the host recorded none: writing
-    /// `plugin` ourselves would forge an `opencode plugin` install.
+    /// `plugins` ourselves would forge an `opencode plugin add` install.
     #[test]
     fn the_registration_merge_never_writes_the_host_owned_plugin_key() {
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join("opencode.json");
 
-        super::super::install_registration_entries(&config_path, "/usr/bin/tracedecay", true, true)
-            .unwrap();
+        super::super::install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
-        assert_eq!(config, tracedecay_registration("/usr/bin/tracedecay"));
-    }
-
-    #[test]
-    fn a_write_that_would_forge_the_host_plugin_registration_is_refused() {
-        assert_plugin_change_refused(
-            json!(["operator-plugin"]),
-            json!({ "plugin": ["operator-plugin", "tracedecay"] }),
+        assert!(
+            config.get(HOST_OWNED_PLUGIN_KEY).is_none(),
+            "TraceDecay must leave the plugin registration to `opencode plugin`"
         );
     }
 
+    /// The guard itself refuses rather than writing, and names the host
+    /// command that owns the key.
+    #[test]
+    fn a_write_that_would_forge_the_host_plugin_registration_is_refused() {
+        let before = json!(["operator-plugin"]);
+        let forged = json!({ "plugins": ["operator-plugin", "tracedecay"] });
+
+        let error = ensure_host_owned_plugin_registration_untouched(
+            Some(&before),
+            &forged,
+            Path::new("/home/example/.config/opencode/opencode.json"),
+        )
+        .expect_err("a forged plugin registration must refuse, never write");
+
+        let TraceDecayError::Config { message } = error else {
+            panic!("the refusal must surface as a config error");
+        };
+        assert!(
+            message.contains("`opencode plugin`"),
+            "the refusal must name the host command that owns the key: {message}"
+        );
+    }
+
+    /// A dropped registration is just as wrong as a forged one.
     #[test]
     fn a_write_that_would_drop_the_host_plugin_registration_is_refused() {
-        assert_plugin_change_refused(json!(["operator-plugin"]), json!({ "mcp": {} }));
+        let before = json!(["operator-plugin"]);
+
+        assert!(
+            ensure_host_owned_plugin_registration_untouched(
+                Some(&before),
+                &json!({ "mcp": {} }),
+                Path::new("/home/example/.config/opencode/opencode.json"),
+            )
+            .is_err()
+        );
     }
 
     /// An untouched key, the steady state, passes.
     #[test]
     fn an_untouched_plugin_registration_passes_the_guard() {
         let before = json!(["operator-plugin"]);
-        let config = json!({ "plugin": ["operator-plugin"], "mcp": { "tracedecay": {} } });
+        let config =
+            json!({ "plugins": ["operator-plugin"], "mcp": { "servers": { "tracedecay": {} } } });
 
         ensure_host_owned_plugin_registration_untouched(
             Some(&before),

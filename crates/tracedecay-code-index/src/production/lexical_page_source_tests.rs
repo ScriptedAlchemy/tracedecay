@@ -606,6 +606,7 @@ fn fixture_for_source_files(
         content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: files.clone(),
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,

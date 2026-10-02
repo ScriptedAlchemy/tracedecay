@@ -282,17 +282,21 @@ fn is_project_store_authority(authority: &str) -> bool {
     PROJECT_STORE_AUTHORITIES.contains(&authority)
 }
 
-/// Authorities refused while admitting a registered store. The daemon holds
-/// that store in its typed reset-required state, so the scoped reset deletes
-/// exactly the refused stores.
-const REGISTERED_STORE_AUTHORITIES: [&str; 7] = [
+/// Authorities refused while admitting a registered store: the profile
+/// authority or a session store. The daemon holds that store in its typed
+/// reset-required state, so the scoped reset deletes exactly the refused
+/// stores.
+const REGISTERED_STORE_AUTHORITIES: [&str; 10] = [
+    "project registry",
     "observations",
     "session temporal",
     "session temporal profile schema",
     "workflow",
     "authority schema",
     "LCM",
+    "LCM profile schema",
     "git correlation",
+    "git correlation profile schema",
 ];
 
 fn is_registered_store_authority(authority: &str) -> bool {
@@ -367,7 +371,10 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
              this binary does not open or migrate that shape; reset it (its old data is \
              deleted, nothing is backed up):\n  \
              {command}    deletes only the stores the daemon reports as requiring reset\n\
-             the daemon recreates each one empty"
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
         );
     }
     format!(
@@ -517,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn lcm_profile_schema_refusal_names_the_profile_wide_reset() {
+    fn lcm_profile_schema_refusal_names_the_scoped_reset() {
         let response = tool_error_response(
             json!(4),
             "tracedecay_message_search",
@@ -532,21 +539,10 @@ mod tests {
             .as_str()
             .expect("the refusal names its reset command");
         assert!(
-            remedy.contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
+            remedy.contains("\n  tracedecay wipe --stale --yes"),
             "{remedy}"
         );
-        assert!(
-            !remedy.contains(tracedecay_domain::errors::STALE_STORE_RESET_COMMAND),
-            "{remedy}"
-        );
-        assert_eq!(
-            wire["error"]["message"]
-                .as_str()
-                .expect("human-readable refusal")
-                .contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
-            true,
-            "the human-readable message must carry the profile-wide reset too: {wire}"
-        );
+        assert!(!remedy.contains("wipe --all"), "{remedy}");
     }
 
     #[test]
@@ -581,13 +577,18 @@ mod tests {
         );
         assert!(!stale.contains("wipe --all"), "{stale}");
 
-        let profile = super::reset_required_remedy("project registry", None);
-        assert!(profile.contains("refused authority: project registry"));
-        assert!(
-            profile.contains("\n  tracedecay wipe --all --yes"),
-            "{profile}"
+        assert_eq!(
+            super::reset_required_remedy("project registry", None),
+            "refused authority: project registry\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             tracedecay wipe --stale --yes    deletes only the stores the daemon reports as \
+             requiring reset\n\
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
         );
-        assert!(!profile.contains("reset-project-store"), "{profile}");
 
         let host = super::reset_required_remedy("managed skill prompt index", None);
         assert!(host.contains("refused authority: managed skill prompt index"));
