@@ -1537,14 +1537,22 @@ impl VerifiedSealedLexicalPageSourceV1 {
                     return Ok(Err(error));
                 }
                 crate::hotpath_observe::record_pages(staged.cursor.next_page_ordinal());
-                self.cursor = staged.cursor;
+                self.accept_cursor(staged.cursor);
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
             StagedSealedLexicalPageReadV1::Complete { receipt, cursor } => {
-                self.cursor = cursor;
+                self.accept_cursor(cursor);
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Complete(receipt)))
             }
         }
+    }
+
+    /// Advance to an accepted cursor and drop the admitted files it passed.
+    /// Staging never drops a file: a caller that accepts only a prefix of a
+    /// batch rewinds to files the refused suffix already admitted.
+    fn accept_cursor(&mut self, cursor: VerifiedSealedLexicalCursorV1) {
+        self.admitted_window = self.admitted_window.split_off(&cursor.next_file_offset);
+        self.cursor = cursor;
     }
 
     /// Stage a bounded ordered page batch and advance only through the prefix
@@ -1630,7 +1638,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
 
         match staged {
             StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor } => {
-                self.cursor = cursor;
+                self.accept_cursor(cursor);
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)))
             }
             StagedSealedLexicalPageBatchReadV1::Pages(mut pages) => {
@@ -1648,7 +1656,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 let accepted_cursor = pages[accepted_page_count - 1].next_cursor().clone();
                 pages.truncate(accepted_page_count);
                 crate::hotpath_observe::record_pages(accepted_cursor.next_page_ordinal());
-                self.cursor = accepted_cursor;
+                self.accept_cursor(accepted_cursor);
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
             }
         }
@@ -1872,7 +1880,6 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 );
             }
             let next_file_offset = admitted.next_file_offset;
-            self.admitted_window.remove(&cursor.next_file_offset);
             cursor.next_file_ordinal =
                 cursor.next_file_ordinal.checked_add(1).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
@@ -1969,9 +1976,10 @@ impl VerifiedSealedLexicalPageSourceV1 {
         if self.admitted_window.contains_key(&file_offset) {
             return Ok(());
         }
-        // A rejected batch or restored cursor may revisit a range before the
-        // current prefetch window. Keep one window, including during retries.
-        self.admitted_window.clear();
+        // Files from the accepted cursor on stay admitted: a batch that is
+        // accepted only up to a prefix restages them on its retry.
+        let accepted = self.cursor.next_file_offset;
+        self.admitted_window.retain(|offset, _| *offset >= accepted);
         self.fill_admitted_window(file_offset, control)
     }
 
