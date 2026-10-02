@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     GitBlameV1, GitCoverageV1, GitDiffScopeV1, GitDiffV1, GitHeadStateV1, GitHistoryV1,
-    GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1,
+    GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1,
     GitOperationStateV1, HunkRefV1, ManifestDigest, RepositoryId, UtcMicros,
 };
 
@@ -25,8 +25,6 @@ pub struct GitPreviewSurfaceRequest {
     /// Selection digests drawn from the referenced preview input.
     #[serde(default)]
     pub selected_hunk_digests: Vec<ManifestDigest>,
-    #[serde(default)]
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
 }
 
 /// Public MCP/CLI request to apply one immutable Git index preview.

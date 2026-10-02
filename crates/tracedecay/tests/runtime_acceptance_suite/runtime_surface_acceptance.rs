@@ -62,9 +62,8 @@ use tracedecay_domain::{
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
+    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
 };
 use tracedecay_lsp::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
@@ -709,30 +708,49 @@ fn run_application_tool_markdown(
 }
 
 #[cfg(all(unix, feature = "test-transport"))]
-async fn preview_commit_via_mcp(
+async fn staged_hunks_input_via_mcp(
     fixture: &RuntimeFixture,
     request_id: &str,
-    message: &str,
-) -> GitIndexPreviewV1 {
-    let captured_at = wall_clock_micros();
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: captured_at,
+) -> tracedecay_contracts::git::GitHunkPreviewInputV1 {
+    let result = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitHunks,
+        RequestId::new(request_id).expect("MCP hunks request id"),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitHunks,
+            serde_json::json!({"scope": "staged"}),
+        )
+        .expect("MCP hunks request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP Git hunks dispatch");
+    let ApplicationOutcome::Evidence(evidence) =
+        &result.result.as_ref().expect("MCP hunks result").outcome
+    else {
+        panic!("MCP git_hunks must return an evidence outcome");
     };
+    let input: tracedecay_contracts::git::GitHunkPreviewInputV1 = serde_json::from_value(
+        evidence.payload.clone().expect("MCP hunks payload")["result"]["value"].clone(),
+    )
+    .expect("typed MCP hunk preview input");
+    assert!(
+        !input.hunks.is_empty(),
+        "git_hunks found no staged hunks to preview"
+    );
+    input
+}
+
+#[cfg(all(unix, feature = "test-transport"))]
+async fn preview_unstage_hunks_via_mcp(
+    fixture: &RuntimeFixture,
+    request_id: &str,
+) -> GitIndexPreviewV1 {
+    let input = staged_hunks_input_via_mcp(fixture, &format!("{request_id}.hunks")).await;
     let request = GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                message.to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(input.preview_input_id),
+        selected_hunk_digests: input.hunks.iter().map(|entry| entry.digest.clone()).collect(),
     };
     let result = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
@@ -1811,25 +1829,16 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
 
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
-    let captured_at = wall_clock_micros();
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: captured_at,
-    };
+    let hunks_input =
+        staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks").await;
     let preview_request = GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                "test: prove Git transport parity\n".to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
+        operation: GitIndexTransactionOperationV1::UnstageHunks,
+        preview_input_id: Some(hunks_input.preview_input_id),
+        selected_hunk_digests: hunks_input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
     };
     let preview_arguments = serde_json::to_value(&preview_request).expect("preview arguments");
 
@@ -1850,20 +1859,9 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         serde_json::from_value(cli_preview.payload.expect("CLI immutable preview"))
             .expect("CLI immutable preview");
 
-    // `commit_index` publication is deliberately unavailable (deferred,
-    // 2026-08-05). The files ref backend locks only names already
-    // present in an update-ref transaction, so nothing prevents a new loose
-    // ref appearing between namespace validation and destination publication.
-    // Until that is soundly closed, preflight reports this exact typed
-    // unsupported state and apply proves no mutation. Asserting the
-    // disposition here keeps the deferral visible: without it, the terminal
-    // abort below reads as an unexplained parity failure rather than as the
-    // blocker the daemon actually found.
     assert_eq!(
         cli_preview_payload.disposition,
-        GitIndexPreviewDispositionV1::Unsupported(
-            GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-        )
+        GitIndexPreviewDispositionV1::Applicable
     );
     let mcp_preview = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
@@ -1907,10 +1905,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         mcp_preview_payload.candidate_index_tree
     );
     assert_eq!(
-        cli_preview_payload.commit_intent_digest,
-        mcp_preview_payload.commit_intent_digest
-    );
-    assert_eq!(
         cli_preview_payload.disposition,
         mcp_preview_payload.disposition
     );
@@ -1940,29 +1934,23 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     let ApplicationOutcome::Effect(cli_apply) = cli_apply.outcome else {
         panic!("CLI git_apply must return an effect outcome");
     };
-    // The deferred publication is still a real admitted transaction: it must
-    // terminate in a durable receipt on the transport rather than a transport
-    // exception, and that receipt must report the attempt as failed with no
-    // change rather than as a successful empty commit.
     assert_eq!(
         cli_apply.execution.termination,
-        OperationTermination::Failed
+        OperationTermination::Completed
     );
     let cli_receipt: GitIndexTransactionReceiptV1 =
         serde_json::from_value(cli_apply.payload.clone().expect("CLI durable Git receipt"))
             .expect("typed CLI Git receipt");
-    assert_eq!(
-        cli_receipt.outcome,
-        GitIndexReceiptOutcomeV1::AbortedNoChange
-    );
-    assert!(
-        cli_receipt.created_commit.is_none(),
-        "deferred ref publication must never report a created commit"
-    );
+    assert_eq!(cli_receipt.outcome, GitIndexReceiptOutcomeV1::Committed);
     assert_eq!(
         git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
         original_head,
-        "deferred ref publication must leave HEAD exactly where the preview found it"
+        "an index-only apply must leave HEAD exactly where the preview found it"
+    );
+    let index_tree_after_apply = git_stdout(&fixture.project, &["write-tree"]);
+    assert_ne!(
+        index_tree_after_apply, staged_tree_before_apply,
+        "a committed unstage must move the index back toward HEAD"
     );
 
     let mcp_apply = resolve_mcp_application_surface(
@@ -2009,8 +1997,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_eq!(
         git_stdout(&fixture.project, &["write-tree"]),
-        staged_tree_before_apply,
-        "a proven no-mutation apply must leave the caller's staged index intact"
+        index_tree_after_apply,
+        "a replayed apply must not mutate the index a second time"
     );
 
     std::fs::write(
@@ -2019,12 +2007,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     )
     .expect("write conflicting replay change");
     git(&fixture.project, &["add", "src/main.rs"]);
-    let conflicting_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.conflicting-preview",
-        "test: conflicting replay\n",
-    )
-    .await;
+    let conflicting_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.conflicting-preview").await;
     let before_conflicting_replay_tree = git_stdout(&fixture.project, &["write-tree"]);
     let conflicting_replay = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitApply,
@@ -2058,12 +2042,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         "conflicting replay rejection must not alter the native index"
     );
 
-    let stale_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.stale-preview",
-        "test: stale CAS must not commit\n",
-    )
-    .await;
+    let stale_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.stale-preview").await;
     std::fs::write(
         fixture.project.join("src/main.rs"),
         "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// drift after preview\n",
@@ -2117,12 +2097,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         "CAS drift rejection must preserve the caller's newer index"
     );
 
-    let cancellation_preview = preview_commit_via_mcp(
-        &fixture,
-        "request.git-parity.cancellation-preview",
-        "test: cancelled apply must not commit\n",
-    )
-    .await;
+    let cancellation_preview =
+        preview_unstage_hunks_via_mcp(&fixture, "request.git-parity.cancellation-preview").await;
     let cancellation_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let cancellation_tree = git_stdout(&fixture.project, &["write-tree"]);
     let cancellation_deadline =

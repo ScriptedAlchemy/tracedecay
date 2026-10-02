@@ -1,6 +1,6 @@
 //! Public read-only Git intelligence and preview/apply surface bindings.
 //!
-//! Internal `stage_hunks` / `unstage_hunks` / `commit_index` capabilities remain
+//! Internal `stage_hunks` / `unstage_hunks` capabilities remain
 //! application-only (no surface bindings). Adapters expose only `git_preview`
 //! and `git_apply`; query status/diff/history/blame/hunk reads are callable
 //! independently and expose no mutation capability.
@@ -395,7 +395,6 @@ mod tests {
         assert!(!operations.iter().any(|name| {
             name.contains("stage_hunks")
                 || name.contains("unstage_hunks")
-                || name.contains("commit_index")
         }));
         assert!(contribution.bindings().iter().all(|binding| {
             binding.surface() != BindingSurface::Http

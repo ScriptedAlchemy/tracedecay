@@ -11535,7 +11535,6 @@
             "source_edit",
             "git_index_stage",
             "git_index_unstage",
-            "git_index_commit",
             "configuration_write",
             "administrative"
           ],

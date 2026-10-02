@@ -530,7 +530,6 @@ where
         let effect = match request.binding.operation {
             GitIndexTransactionOperationV1::StageHunks => GitIndexEffectV1::StageHunks,
             GitIndexTransactionOperationV1::UnstageHunks => GitIndexEffectV1::UnstageHunks,
-            GitIndexTransactionOperationV1::CommitIndex => GitIndexEffectV1::CommitIndex,
         };
         let current = self.authorization.recheck(request, preview)?;
         if request.context.admission_at(current.evaluated_at) != RequestAdmission::Admitted
@@ -619,7 +618,6 @@ where
         None,
         preview.repository_snapshot.index.tree_id.clone(),
         preview.repository_snapshot.head.commit().cloned(),
-        None,
         GitIndexReceiptOutcomeV1::AbortedNoChange,
         request.observed_at,
     )
@@ -761,18 +759,10 @@ where
             &[]
         }
         GitIndexReceiptOutcomeV1::Committed => {
-            if journal.operation == GitIndexTransactionOperationV1::CommitIndex {
-                &[
-                    GitIndexJournalPhaseV1::IndexCommitted,
-                    GitIndexJournalPhaseV1::RefCommitted,
-                    GitIndexJournalPhaseV1::Verifying,
-                ]
-            } else {
-                &[
-                    GitIndexJournalPhaseV1::IndexCommitted,
-                    GitIndexJournalPhaseV1::Verifying,
-                ]
-            }
+            &[
+                GitIndexJournalPhaseV1::IndexCommitted,
+                GitIndexJournalPhaseV1::Verifying,
+            ]
         }
     };
     for phase in phases {

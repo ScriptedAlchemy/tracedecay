@@ -14,9 +14,9 @@ use tracedecay_contracts::{
     GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt, OperationTermination,
 };
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitDegradationV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
+    GitDegradationV1, GitDiffScopeV1, GitHeadStateV1,
     GitIndexPreviewDispositionV1, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexReceiptOutcomeV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
@@ -71,7 +71,6 @@ pub trait GitIndexPreviewAssembler {
         preview: &MaterializedGitIndexPreview,
         transaction_id: &GitIndexTransactionId,
         request: &GitIndexApplyRequestV1,
-        created_commit: Option<&tracedecay_domain::GitOidV1>,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError>;
 
     fn reconcile(
@@ -270,7 +269,6 @@ impl NativeGitIndexPreviewAssembler {
         let scope = match operation {
             GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
             GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
-            GitIndexTransactionOperationV1::CommitIndex => return Ok(Vec::new()),
         };
         let current_refs = self
             .read_authority()
@@ -405,13 +403,11 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
         preview: &MaterializedGitIndexPreview,
         transaction_id: &GitIndexTransactionId,
         request: &GitIndexApplyRequestV1,
-        created_commit: Option<&tracedecay_domain::GitOidV1>,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError> {
         self.for_preview(&preview.preview)?.finalize(
             preview,
             transaction_id,
             request,
-            created_commit,
         )
     }
 
@@ -477,10 +473,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             }
             return Err(GitIndexTransactionPortError::StalePreview);
         }
-        if let Some(reason) = unsupported_commit_preflight(request)? {
-            drop(lock);
-            return unsupported_materialized(request, runner, reason);
-        }
         // The snapshot already matched the caller's byte for byte above, so a
         // digest we cannot compute over it is our own canonicalization
         // failing, not the repository moving underneath the request.
@@ -514,29 +506,26 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
                         .preview_candidate_tree_under_lock(&lock, &patches, true)
                         .map_err(map_native_error)?,
                 ),
-                GitIndexTransactionOperationV1::CommitIndex => current.index.tree_id.clone(),
             };
             (selected_hunks, patches, candidate_index_tree)
         } else {
             (Vec::new(), Vec::new(), None)
         };
         let expires_at = UtcMicros(request.observed_at.0.saturating_add(30_000_000));
-        let preview = GitIndexPreviewV1::new_with_commit_intent(
+        let preview = GitIndexPreviewV1::new(
             request.preview_id.clone(),
             request.binding.operation,
             current,
             snapshot_digest,
             selected_hunks,
             candidate_index_tree,
-            request.commit_intent.as_ref(),
             disposition,
             request.observed_at,
             expires_at,
         )
         // Every input here is either the caller's own request or state we just
-        // recaptured and matched, so a rejected construction, a commit intent
-        // the preview will not carry, most often, is a rejection of the
-        // request rather than evidence that it went stale.
+        // recaptured and matched, so a rejected construction is a rejection
+        // of the request rather than evidence that it went stale.
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
             preview,
@@ -571,7 +560,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         preview: &MaterializedGitIndexPreview,
         transaction_id: &GitIndexTransactionId,
         request: &GitIndexApplyRequestV1,
-        created_commit: Option<&tracedecay_domain::GitOidV1>,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError> {
         let lock = preview
             .runner
@@ -579,12 +567,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .map_err(map_native_error)?;
         let current =
             self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner, &lock)?;
-        if !live_result_matches_preview(
-            &self.repository_root,
-            &preview.preview,
-            &current,
-            created_commit,
-        ) {
+        if !live_result_matches_preview(&preview.preview, &current) {
             return Err(GitIndexTransactionPortError::NeedsInspection);
         }
         let final_snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
@@ -596,7 +579,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             final_snapshot_digest,
             current.index.tree_id.clone(),
             current.head.commit().cloned(),
-            created_commit.cloned(),
             GitIndexReceiptOutcomeV1::Committed,
             request.observed_at,
         )
@@ -621,35 +603,20 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .map_err(|_| GitIndexRecoveryError::Indeterminate)?;
         let old = &record.preview.repository_snapshot;
         let phase = record.journal.phase;
-        let (outcome, created_commit) = if &current == old
+        let outcome = if &current == old
             && matches!(
                 phase,
                 tracedecay_domain::GitIndexJournalPhaseV1::Prepared
                     | tracedecay_domain::GitIndexJournalPhaseV1::NativeApplyStarted
                     | tracedecay_domain::GitIndexJournalPhaseV1::NeedsInspection
             ) {
-            (GitIndexReceiptOutcomeV1::AbortedNoChange, None)
-        } else if record.preview.operation != GitIndexTransactionOperationV1::CommitIndex
-            && phase.permits_recovered_outcome(
-                record.preview.operation,
-                GitIndexReceiptOutcomeV1::Committed,
-            )
+            GitIndexReceiptOutcomeV1::AbortedNoChange
+        } else if phase.permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed)
             && hunk_commit_matches_preview(&current, old, &record.preview)
         {
-            (GitIndexReceiptOutcomeV1::Committed, None)
-        } else if record.preview.operation == GitIndexTransactionOperationV1::CommitIndex
-            && phase.permits_recovered_outcome(
-                record.preview.operation,
-                GitIndexReceiptOutcomeV1::Committed,
-            )
-            && commit_matches_preview(&self.repository_root, old, &record.preview, &current)
-        {
-            (
-                GitIndexReceiptOutcomeV1::Committed,
-                current.head.commit().cloned(),
-            )
+            GitIndexReceiptOutcomeV1::Committed
         } else {
-            (GitIndexReceiptOutcomeV1::NeedsInspection, None)
+            GitIndexReceiptOutcomeV1::NeedsInspection
         };
         let final_snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)?;
         GitIndexTransactionReceiptV1::new(
@@ -660,7 +627,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             final_snapshot_digest,
             current.index.tree_id,
             current.head.commit().cloned(),
-            created_commit,
             outcome,
             record.journal.updated_at,
         )
@@ -773,51 +739,8 @@ fn unsupported_native_preflight(
     Ok(None)
 }
 
-fn unsupported_commit_preflight(
-    request: &GitIndexPreviewRequestV1,
-) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
-    if request.binding.operation != GitIndexTransactionOperationV1::CommitIndex {
-        return Ok(None);
-    }
-    // The files ref backend locks only names already present in an update-ref
-    // transaction. It has no primitive that prevents a new loose ref from
-    // appearing between namespace validation and destination publication.
-    Ok(Some(
-        GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable,
-    ))
-}
-
 fn supported_object_format(format: &str) -> bool {
     matches!(format, "sha1" | "sha256")
-}
-
-fn unsupported_materialized(
-    request: &GitIndexPreviewRequestV1,
-    runner: FixedGitIndexRunner,
-    reason: GitIndexUnsupportedStateV1,
-) -> Result<MaterializedGitIndexPreview, GitIndexTransactionPortError> {
-    let snapshot_digest =
-        GitIndexPreviewV1::repository_snapshot_digest(&request.repository_snapshot)
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
-        request.preview_id.clone(),
-        request.binding.operation,
-        request.repository_snapshot.clone(),
-        snapshot_digest,
-        Vec::new(),
-        None,
-        request.commit_intent.as_ref(),
-        GitIndexPreviewDispositionV1::Unsupported(reason),
-        request.observed_at,
-        UtcMicros(request.observed_at.0.saturating_add(30_000_000)),
-    )
-    .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-    Ok(MaterializedGitIndexPreview {
-        preview,
-        execution: completed_execution(request),
-        runner,
-        patches: Vec::new(),
-    })
 }
 
 fn unsupported_hunk_selection(
@@ -880,16 +803,10 @@ fn unsupported_selected_paths(
             GitIndexUnsupportedStateV1::UnreadableWorkingTree
         }
         GitIndexTransactionOperationV1::UnstageHunks => GitIndexUnsupportedStateV1::UnreadableIndex,
-        GitIndexTransactionOperationV1::CommitIndex => {
-            GitIndexUnsupportedStateV1::UnreadableWorkingTree
-        }
     };
     let scope = match operation {
         GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
         GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
-        GitIndexTransactionOperationV1::CommitIndex => {
-            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
-        }
     };
     let Ok(diff) = intelligence.diff(&scope) else {
         return Some(unreadable);
@@ -1103,47 +1020,6 @@ fn read_git_command(repository_root: &Path) -> Command {
     command
 }
 
-fn commit_matches_preview(
-    repository_root: &Path,
-    old: &RepositoryStateSnapshotV1,
-    preview: &GitIndexPreviewV1,
-    current: &RepositoryStateSnapshotV1,
-) -> bool {
-    let (
-        GitHeadStateV1::Attached {
-            branch: old_branch,
-            commit: old_head,
-        },
-        GitHeadStateV1::Attached {
-            branch: current_branch,
-            commit: head,
-        },
-        Some(expected_tree),
-    ) = (
-        &old.head,
-        &current.head,
-        preview.candidate_index_tree.as_ref(),
-    )
-    else {
-        return false;
-    };
-    if old_branch != current_branch
-        || current.index.tree_id.as_ref() != Some(expected_tree)
-        || current.working_tree != old.working_tree
-        || current.submodule_digest != old.submodule_digest
-        || !same_stable_native_evidence(current, old)
-    {
-        return false;
-    }
-    let tree_expression = format!("{}^{{tree}}", head.as_str());
-    let parent_expression = format!("{}^", head.as_str());
-    let tree = read_git_value(repository_root, &tree_expression);
-    let parent = read_git_value(repository_root, &parent_expression);
-    tree.as_deref() == Some(expected_tree.as_str())
-        && parent.as_deref() == Some(old_head.as_str())
-        && commit_intent_matches_preview(repository_root, head, preview)
-}
-
 fn hunk_commit_matches_preview(
     current: &RepositoryStateSnapshotV1,
     old: &RepositoryStateSnapshotV1,
@@ -1160,53 +1036,14 @@ fn hunk_commit_matches_preview(
 /// boundary; this observation additionally refuses success if HEAD/ref or
 /// stable repository authority drifted before the terminal receipt.
 fn live_result_matches_preview(
-    repository_root: &Path,
     preview: &GitIndexPreviewV1,
     current: &RepositoryStateSnapshotV1,
-    created_commit: Option<&tracedecay_domain::GitOidV1>,
 ) -> bool {
     let old = &preview.repository_snapshot;
     match preview.operation {
         GitIndexTransactionOperationV1::StageHunks
         | GitIndexTransactionOperationV1::UnstageHunks => {
-            created_commit.is_none() && hunk_commit_matches_preview(current, old, preview)
-        }
-        GitIndexTransactionOperationV1::CommitIndex => {
-            let (
-                GitHeadStateV1::Attached {
-                    branch: old_branch,
-                    commit: old_head,
-                },
-                GitHeadStateV1::Attached {
-                    branch: current_branch,
-                    commit: current_head,
-                },
-                Some(created_commit),
-                Some(expected_tree),
-            ) = (
-                &old.head,
-                &current.head,
-                created_commit,
-                preview.candidate_index_tree.as_ref(),
-            )
-            else {
-                return false;
-            };
-            if old_branch != current_branch
-                || current_head != created_commit
-                || current.index.tree_id.as_ref() != Some(expected_tree)
-                || current.working_tree != old.working_tree
-                || current.submodule_digest != old.submodule_digest
-                || !same_stable_native_evidence(current, old)
-            {
-                return false;
-            }
-            let tree_expression = format!("{}^{{tree}}", created_commit.as_str());
-            let parent_expression = format!("{}^", created_commit.as_str());
-            read_git_value(repository_root, &tree_expression).as_deref()
-                == Some(expected_tree.as_str())
-                && read_git_value(repository_root, &parent_expression).as_deref()
-                    == Some(old_head.as_str())
+            hunk_commit_matches_preview(current, old, preview)
         }
     }
 }
@@ -1242,107 +1079,7 @@ fn same_stable_native_evidence(
     // Every underlying stable authority is compared explicitly above.
 }
 
-/// A restart may prove an unsigned commit by reconstructing every durable
-/// intent field from the immutable commit object. Signed intents intentionally
-/// retain only a key-reference digest in the preview, so they remain
-/// `NeedsInspection` rather than guessing a key identity.
-fn commit_intent_matches_preview(
-    repository_root: &Path,
-    head: &tracedecay_domain::GitOidV1,
-    preview: &GitIndexPreviewV1,
-) -> bool {
-    let Some(expected_digest) = preview.commit_intent_digest.as_ref() else {
-        return false;
-    };
-    let Ok(signature_output) = read_git_command(repository_root)
-        .args(["show", "-s", "--format=%G?", head.as_str()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    let Ok(signature_status) = String::from_utf8(signature_output.stdout) else {
-        return false;
-    };
-    if !signature_output.status.success() || signature_status.trim() != "N" {
-        return false;
-    }
-    let output = read_git_command(repository_root)
-        .args([
-            "show",
-            "-s",
-            "--format=format:%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",
-            head.as_str(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok();
-    let Some(output) = output.filter(|output| output.status.success()) else {
-        return false;
-    };
-    let Ok(text) = String::from_utf8(output.stdout) else {
-        return false;
-    };
-    let mut parts = text.splitn(7, '\0');
-    let Some(author_name) = parts.next() else {
-        return false;
-    };
-    let Some(author_email) = parts.next() else {
-        return false;
-    };
-    let Some(author_seconds) = parts.next().and_then(|value| value.parse::<i64>().ok()) else {
-        return false;
-    };
-    let Some(committer_name) = parts.next() else {
-        return false;
-    };
-    let Some(committer_email) = parts.next() else {
-        return false;
-    };
-    let Some(committer_seconds) = parts.next().and_then(|value| value.parse::<i64>().ok()) else {
-        return false;
-    };
-    let Some(message) = parts.next() else {
-        return false;
-    };
-    let Some(author_micros) = author_seconds.checked_mul(1_000_000) else {
-        return false;
-    };
-    let Some(committer_micros) = committer_seconds.checked_mul(1_000_000) else {
-        return false;
-    };
-    GitIndexCommitIntentV1::new(
-        message.to_owned(),
-        GitCommitIdentityV1 {
-            name: author_name.to_owned(),
-            email: author_email.to_owned(),
-            at: UtcMicros(author_micros),
-        },
-        GitCommitIdentityV1 {
-            name: committer_name.to_owned(),
-            email: committer_email.to_owned(),
-            at: UtcMicros(committer_micros),
-        },
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .and_then(|intent| intent.compute_digest())
-    .is_ok_and(|digest| digest == *expected_digest)
-}
 
-fn read_git_value(repository_root: &Path, expression: &str) -> Option<String> {
-    let output = read_git_command(repository_root)
-        .args(["rev-parse", "--verify", expression])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
-}
 
 /// Fixed native implementation used by the daemon coordinator. It accepts
 /// only preview-bound durable input and rematerializes exact patches after
@@ -1418,7 +1155,6 @@ where
             preview_id: input.preview_id.clone(),
             repository_snapshot: input.repository_snapshot.clone(),
             selected_hunks: preview.selected_hunks.clone(),
-            commit_intent: input.commit_intent.clone(),
             observed_at: request.observed_at,
         };
         let Ok(mut materialized) = self.assembler.materialize(&rematerialize_request) else {
@@ -1429,7 +1165,6 @@ where
             || materialized.preview.repository_snapshot_digest != preview.repository_snapshot_digest
             || materialized.preview.selected_hunks != preview.selected_hunks
             || materialized.preview.candidate_index_tree != preview.candidate_index_tree
-            || materialized.preview.commit_intent_digest != preview.commit_intent_digest
             || materialized.preview.disposition != preview.disposition
         {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
@@ -1456,7 +1191,7 @@ where
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
 
-        let created_commit = match preview.operation {
+        match preview.operation {
             GitIndexTransactionOperationV1::StageHunks => {
                 if let Err(error) =
                     materialized
@@ -1465,7 +1200,6 @@ where
                 {
                     return Ok(classify_native_failure(&error));
                 }
-                None
             }
             GitIndexTransactionOperationV1::UnstageHunks => {
                 if let Err(error) =
@@ -1475,19 +1209,13 @@ where
                 {
                     return Ok(classify_native_failure(&error));
                 }
-                None
             }
-            GitIndexTransactionOperationV1::CommitIndex => {
-                return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-            }
-        };
+        }
         drop(index_lock);
-        match self.assembler.finalize(
-            &materialized,
-            transaction_id,
-            request,
-            created_commit.as_ref(),
-        ) {
+        match self
+            .assembler
+            .finalize(&materialized, transaction_id, request)
+        {
             Ok(result) => Ok(NativeGitIndexApplyOutcomeV1::Completed(Box::new(result))),
             // Final observation happens after the native publication/commit
             // operation, so failing to observe it is itself ambiguous.
@@ -1642,13 +1370,11 @@ mod tests {
         RequestContext, RequestId, ResolvedScope,
     };
     use tracedecay_domain::{
-        ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitIndexIdempotencyKey,
-        GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexSigningPolicyV1, GitIndexTransactionId,
+        ActorId, ComponentVersion, GitCoverageV1, GitIndexIdempotencyKey,
+        GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexTransactionId,
         GitIndexTransactionJournalV1, GitObjectFormatV1, GitOperationStateV1, RefId,
     };
-    use tracedecay_runtime_core::test_executable::write_executable_script;
     use tracedecay_store::GitIndexTransactionRecordV1;
-    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
 
@@ -1780,32 +1506,26 @@ mod tests {
         (preview, patches)
     }
 
-    fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
-        let identity = GitCommitIdentityV1 {
-            name: "TraceDecay Test".to_owned(),
-            email: "tracedecay@example.com".to_owned(),
-            at: UtcMicros(1_000_000),
-        };
-        GitIndexCommitIntentV1::new(
-            message.to_owned(),
-            identity.clone(),
-            identity,
-            GitIndexSigningPolicyV1::UnsignedPermitted,
-        )
-        .expect("commit intent")
-    }
-
-    fn commit_request(
+    fn hunk_request(
+        assembler: &NativeGitIndexPreviewAssembler,
         snapshot: RepositoryStateSnapshotV1,
-        intent: GitIndexCommitIntentV1,
+        operation: GitIndexTransactionOperationV1,
+        scope: GitDiffScopeV1,
         preview_id: &str,
     ) -> GitIndexPreviewRequestV1 {
-        let capability_id = CapabilityId::new("capability.git.commit-index").expect("capability");
-        let use_case_id = UseCaseId::new("use-case.git.commit-index").expect("use case");
+        let snapshot_digest =
+            GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+        let references = assembler
+            .read_authority()
+            .hunk_refs(&scope, preview_id, &snapshot_digest)
+            .expect("current hunk refs");
+        assert!(!references.is_empty(), "fixture must offer a hunk");
+        let binding = tracedecay_contracts::GitIndexOperationBindingV1::for_operation(operation)
+            .expect("operation binding");
         let GitHeadStateV1::Attached { branch, .. } = &snapshot.head else {
             panic!("fixture has attached HEAD");
         };
-        let scope = ResolvedScope::new(
+        let request_scope = ResolvedScope::new(
             snapshot.project_id.clone(),
             snapshot.repository_id.clone(),
             snapshot.worktree_id.clone().expect("fixture worktree"),
@@ -1819,15 +1539,15 @@ mod tests {
             ActorId::new("actor.git-preview.issuer").expect("issuer"),
             UtcMicros(1),
             UtcMicros(1_000),
-            scope.clone(),
-            BTreeSet::from([capability_id.clone()]),
-            BTreeSet::from([use_case_id.clone()]),
+            request_scope.clone(),
+            BTreeSet::from([binding.capability_id.clone()]),
+            BTreeSet::from([binding.use_case_id.clone()]),
             DisclosureClass::Sensitive,
         )
         .expect("grant");
         let context = RequestContext::new(
             ActorId::new("actor.git-preview.requester").expect("requester"),
-            scope,
+            request_scope,
             grant,
             RequestId::new(format!("request.{preview_id}")).expect("request"),
             Deadline::new(UtcMicros(500)).expect("deadline"),
@@ -1849,15 +1569,10 @@ mod tests {
         GitIndexPreviewRequestV1 {
             context,
             authority,
-            binding: tracedecay_contracts::GitIndexOperationBindingV1 {
-                capability_id,
-                use_case_id,
-                operation: GitIndexTransactionOperationV1::CommitIndex,
-            },
+            binding,
             preview_id: GitIndexPreviewId::new(preview_id).expect("preview id"),
             repository_snapshot: snapshot,
-            selected_hunks: Vec::new(),
-            commit_intent: Some(intent),
+            selected_hunks: references,
             observed_at: UtcMicros(10),
         }
     }
@@ -1880,11 +1595,6 @@ mod tests {
             GitIndexJournalPhaseV1::IndexCommitted => &[
                 GitIndexJournalPhaseV1::NativeApplyStarted,
                 GitIndexJournalPhaseV1::IndexCommitted,
-            ][..],
-            GitIndexJournalPhaseV1::RefCommitted => &[
-                GitIndexJournalPhaseV1::NativeApplyStarted,
-                GitIndexJournalPhaseV1::IndexCommitted,
-                GitIndexJournalPhaseV1::RefCommitted,
             ][..],
             GitIndexJournalPhaseV1::Verifying => &[
                 GitIndexJournalPhaseV1::NativeApplyStarted,
@@ -1976,7 +1686,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_preflight_classifies_repository_and_commit_blockers_without_mutation() {
+    fn preview_preflight_classifies_repository_blockers_without_mutation() {
         let bare = tempfile::tempdir().expect("bare repository");
         git(bare.path(), &["init", "--bare", "--quiet"]);
         let bare_runner = FixedGitIndexRunner::new(bare.path()).expect("bare runner");
@@ -2000,12 +1710,16 @@ mod tests {
     #[test]
     fn native_blockers_never_mint_a_preview_from_stale_caller_state() {
         let (directory, assembler, runner) = repository_fixture();
-        let stale = commit_request(
+        fs::write(directory.path().join("packet.txt"), "changed\n").expect("worktree change");
+        let stale = hunk_request(
+            &assembler,
             exact_snapshot(&assembler, &runner),
-            commit_intent("stale preview\n"),
+            GitIndexTransactionOperationV1::StageHunks,
+            GitDiffScopeV1::WorkingTree,
             "git-index-preview.stale-native-blocker",
         );
-        fs::write(directory.path().join("packet.txt"), "changed\n").expect("stale worktree");
+        fs::write(directory.path().join("packet.txt"), "changed again\n")
+            .expect("drifted worktree");
         fs::write(runner.index_lock_path(), b"external owner").expect("external lock");
         assert!(matches!(
             assembler.materialize(&stale),
@@ -2013,55 +1727,26 @@ mod tests {
         ));
         fs::remove_file(runner.index_lock_path()).expect("remove external lock");
 
-        let hook = directory.path().join(".git/hooks/pre-commit");
-        write_executable_script(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
         assert!(matches!(
             assembler.materialize(&stale),
             Err(GitIndexTransactionPortError::StalePreview)
         ));
 
         let fresh_snapshot = exact_snapshot(&assembler, &runner);
-        let fresh = commit_request(
+        let fresh = hunk_request(
+            &assembler,
             fresh_snapshot.clone(),
-            commit_intent("fresh preview\n"),
+            GitIndexTransactionOperationV1::StageHunks,
+            GitDiffScopeV1::WorkingTree,
             "git-index-preview.fresh-native-blocker",
         );
         let materialized = assembler
             .materialize(&fresh)
-            .expect("verified unsupported preview");
+            .expect("materialized preview");
         assert_eq!(materialized.preview.repository_snapshot, fresh_snapshot);
         assert_eq!(
             materialized.preview.disposition,
-            GitIndexPreviewDispositionV1::Unsupported(
-                GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-            )
-        );
-    }
-
-    #[test]
-    fn files_ref_backend_exposes_no_destination_publication_window() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let request = commit_request(
-            exact_snapshot(&assembler, &runner),
-            commit_intent("unavailable commit\n"),
-            "git-index-preview.atomic-ref-unavailable",
-        );
-        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
-        let materialized = assembler.materialize(&request).expect("typed preview");
-        assert_eq!(
-            materialized.preview.disposition,
-            GitIndexPreviewDispositionV1::Unsupported(
-                GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-            )
-        );
-
-        git(directory.path(), &["branch", "concurrent", &head_before]);
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            head_before,
-            "a concurrent new ref cannot race a destination publication because no publication is admitted"
+            GitIndexPreviewDispositionV1::Applicable
         );
     }
 
@@ -2237,20 +1922,21 @@ mod tests {
         assert_eq!(runner.write_tree().expect("unstaged tree"), original_tree);
     }
 
-    /// Ref publication is typed-unavailable (`AtomicRefNamespaceUnavailable`),
-    /// so a rematerialized commit input after a daemon restart must resolve to
-    /// a proven no-mutation outcome and leave the repository untouched.
+    /// A rematerialized hunk input after a daemon restart must still reach the
+    /// real index: the restarted executor applies the durable preview input
+    /// rather than any caller-resident copy.
     #[test]
-    fn apply_rematerializes_exact_commit_input_after_executor_restart() {
+    fn apply_rematerializes_exact_hunk_input_after_executor_restart() {
         let (directory, assembler, runner) = repository_fixture();
         fs::write(directory.path().join("packet.txt"), "after restart\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
         let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
+        let index_before = runner.write_tree().expect("index before restart apply");
         let snapshot = exact_snapshot(&assembler, &runner);
-        let intent = commit_intent("commit after daemon restart\n");
-        let preview_request = commit_request(
+        let preview_request = hunk_request(
+            &assembler,
             snapshot.clone(),
-            intent.clone(),
+            GitIndexTransactionOperationV1::StageHunks,
+            GitDiffScopeV1::WorkingTree,
             "git-index-preview.restart",
         );
         let first_executor = FixedDaemonGitIndexExecutor::new(assembler);
@@ -2260,10 +1946,11 @@ mod tests {
             .preview;
         drop(first_executor);
 
-        let input = GitIndexPreviewInputV1::new_commit(
+        let input = GitIndexPreviewInputV1::new_hunk_selection(
             preview.preview_id.clone(),
+            preview.operation,
             snapshot,
-            intent,
+            preview.selected_hunks.clone(),
             preview.created_at,
             preview.expires_at,
         )
@@ -2301,12 +1988,17 @@ mod tests {
             .expect("restart-safe native apply");
         assert!(matches!(
             outcome,
-            NativeGitIndexApplyOutcomeV1::ProvenNoMutation
+            NativeGitIndexApplyOutcomeV1::Completed(_)
         ));
         assert_eq!(
             git_value(directory.path(), &["rev-parse", "HEAD"]),
             head_before,
-            "unavailable commit publication must not move HEAD"
+            "an index hunk apply must not move HEAD"
+        );
+        assert_ne!(
+            runner.write_tree().expect("index after restart apply"),
+            index_before,
+            "rematerialized input must reach the real index"
         );
     }
 
@@ -2424,7 +2116,7 @@ mod tests {
             .expect("drift snapshot");
         drop(lock);
         assert!(
-            !live_result_matches_preview(directory.path(), &preview, &current, None),
+            !live_result_matches_preview(&preview, &current),
             "a hunk mutation must not report success after HEAD/ref drift"
         );
 
@@ -2569,9 +2261,11 @@ mod tests {
             drifted, via_alias,
             "exact CAS must still reject genuine content drift after alias canonicalization"
         );
-        let stale = commit_request(
+        let stale = hunk_request(
+            &daemon_assembler,
             via_alias,
-            commit_intent("alias stale preview\n"),
+            GitIndexTransactionOperationV1::StageHunks,
+            GitDiffScopeV1::WorkingTree,
             "git-index-preview.alias-stale",
         );
         assert!(

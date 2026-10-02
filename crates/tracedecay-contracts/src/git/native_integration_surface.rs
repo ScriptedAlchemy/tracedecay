@@ -5,7 +5,7 @@
 //!
 //! This is a different family from the Git index-transaction bindings, which
 //! stay limited to `git_preview` / `git_apply`. This module never exposes
-//! `stage_hunks`, `unstage_hunks`, or `commit_index`.
+//! `stage_hunks` or `unstage_hunks`.
 //!
 //! Requests carry exact typed identity only. Filesystem paths, free-form
 //! object IDs, Git arguments, commit messages, remotes, branch display names,
@@ -1011,7 +1011,6 @@ mod tests {
             let operation = binding.operation().as_str();
             !operation.contains("stage_hunks")
                 && !operation.contains("unstage_hunks")
-                && !operation.contains("commit_index")
         }));
     }
 

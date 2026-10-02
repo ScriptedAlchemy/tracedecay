@@ -6,12 +6,12 @@ use tracedecay_domain::{
     CiFailureCoverageV1, CiFailureGenerationEvidenceV1, CiFailureKindV1,
     CiFailureLocalizationResultV1, CiFailureLocalizationStateV1, CiFailureParserIdentityV1,
     CiFailureRunIdentityV1, CommitId, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass,
-    FeedbackScopeV1, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1,
+    FeedbackScopeV1, GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1,
     GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1, GitHubReviewCoverageV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1, GitHubReviewReadOperationV1,
     GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1,
-    GitHubStackSnapshotV1, GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
-    GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1,
+    GitHubStackSnapshotV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
+    GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
     GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
     GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitTopologyAnchorTargetV1,
     GitTopologyGenerationRefV1, GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1,
@@ -26,11 +26,43 @@ use tracedecay_domain::{
     VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, canonical_sha256,
     derive_git_topology_anchor_id,
 };
+use tracedecay_domain::{
+    GitBlobExpectationV1, GitFileModeV1, GitIndexEntryExpectationV1, HunkDirectionV1, HunkRefV1,
+    ManifestDigest,
+};
 
 use tracedecay_domain::test_fixtures::id;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture oid is canonical")
+}
+
+fn hunk(preview_id: &GitIndexPreviewId, snapshot_digest: ManifestDigest) -> HunkRefV1 {
+    HunkRefV1 {
+        repository: id("repository.fixture"),
+        worktree: id("worktree.fixture"),
+        direction: HunkDirectionV1::WorkingTreeToIndex,
+        path: "src/lib.rs".to_owned(),
+        original_path: None,
+        expected_base_blob: GitBlobExpectationV1::Present(oid('c')),
+        expected_index_entry: GitIndexEntryExpectationV1 {
+            blob: GitBlobExpectationV1::Present(oid('c')),
+            mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).expect("regular mode")),
+            unmerged_stage: None,
+        },
+        expected_worktree_blob: Some(GitBlobExpectationV1::Present(oid('e'))),
+        expected_worktree_mode: Some(
+            GitFileModeV1::new(GitFileModeV1::REGULAR).expect("regular mode"),
+        ),
+        hunk_header: "@@ -1,1 +1,1 @@".to_owned(),
+        context_digest: digest('f'),
+        patch_digest: digest('0'),
+        selected_line_bitmap: vec![1],
+        attributes_digest: None,
+        preview_id: preview_id.as_str().to_owned(),
+        schema_version: "hunkref.v1".to_owned(),
+        snapshot_digest,
+    }
 }
 
 use tracedecay_domain::test_fixtures::digest;
@@ -290,26 +322,14 @@ fn generation_ref_binds_the_observed_head_commit() {
 fn integration_receipt_sources_stay_ordered() {
     let snapshot = snapshot(1, 'a');
     let repository = RepositoryCaptureAnchorRefV1::new(&generation(), &snapshot).unwrap();
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: UtcMicros(1),
-    };
-    let intent = GitIndexCommitIntentV1::new(
-        "fixture commit".to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .unwrap();
-    let preview = GitIndexPreviewV1::new_with_commit_intent(
-        GitIndexPreviewId::new("preview.fixture").unwrap(),
-        GitIndexTransactionOperationV1::CommitIndex,
-        snapshot,
+    let preview_id = GitIndexPreviewId::new("preview.fixture").unwrap();
+    let preview = GitIndexPreviewV1::new(
+        preview_id.clone(),
+        GitIndexTransactionOperationV1::StageHunks,
+        snapshot.clone(),
         repository.snapshot_digest.clone(),
-        vec![],
+        vec![hunk(&preview_id, repository.snapshot_digest.clone())],
         Some(oid('c')),
-        Some(&intent),
         GitIndexPreviewDispositionV1::Applicable,
         UtcMicros(2),
         UtcMicros(20),
@@ -322,7 +342,6 @@ fn integration_receipt_sources_stay_ordered() {
         &preview,
         digest('f'),
         Some(oid('c')),
-        Some(oid('e')),
         Some(oid('e')),
         GitIndexReceiptOutcomeV1::Committed,
         UtcMicros(3),

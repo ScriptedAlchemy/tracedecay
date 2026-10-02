@@ -14,12 +14,10 @@ use tracedecay_contracts::{
 use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use tracedecay_domain::git::{
     GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
-    GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1,
-    MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS,
+    GitIndexTransactionOperationV1, MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS,
 };
 use tracedecay_domain::{
-    ComponentVersion, GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId,
-    GitIndexPreviewInputV1, GitIndexSigningPolicyV1, canonical_sha256,
+    ComponentVersion, GitIndexPreviewId, GitIndexPreviewInputV1, canonical_sha256,
 };
 use tracedecay_domain::{ProjectId, UtcMicros};
 
@@ -137,26 +135,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         initial.catalog_digest
     );
 
-    std::fs::write(project_root.join("file.txt"), "commit unavailable\n").unwrap();
-    git(&project_root, &["add", "."]);
-    let unavailable_commit = transaction_preview(
-        &owner,
-        "commit-unavailable",
-        GitIndexTransactionOperationV1::CommitIndex,
-    );
     let before = git(&project_root, &["rev-parse", "HEAD"]);
-    let index_before = std::fs::read(project_root.join(".git/index")).unwrap();
-    let unavailable_result = owner.service.apply(&unavailable_commit).unwrap();
-    assert_eq!(
-        unavailable_result.receipt.outcome,
-        GitIndexReceiptOutcomeV1::AbortedNoChange
-    );
-    assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), before);
-    assert_eq!(
-        std::fs::read(project_root.join(".git/index")).unwrap(),
-        index_before
-    );
-
     std::fs::write(project_root.join("file.txt"), "accepted\n").unwrap();
     let index_tree_before = git(&project_root, &["write-tree"]);
     let accepted = transaction_preview(&owner, "accepted", operation);
@@ -282,20 +261,6 @@ fn transaction_preview(
         current.evaluated_at,
     )
     .unwrap();
-    let identity = GitCommitIdentityV1 {
-        name: "Fixture".into(),
-        email: "fixture@example.com".into(),
-        at: current.evaluated_at,
-    };
-    let intent = (operation == GitIndexTransactionOperationV1::CommitIndex).then(|| {
-        GitIndexCommitIntentV1::new(
-            format!("catalog {suffix}"),
-            identity.clone(),
-            identity,
-            GitIndexSigningPolicyV1::UnsignedPermitted,
-        )
-        .unwrap()
-    });
     let preview_id = GitIndexPreviewId::new(format!("preview.catalog.{suffix}")).unwrap();
     let hunks = if operation == GitIndexTransactionOperationV1::StageHunks {
         let hunks = NativeGitIntelligence::new(
@@ -316,24 +281,14 @@ fn transaction_preview(
     };
     let expires_at =
         UtcMicros(current.evaluated_at.0 + MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS);
-    let input = if let Some(intent) = &intent {
-        GitIndexPreviewInputV1::new_commit(
-            preview_id.clone(),
-            snapshot.clone(),
-            intent.clone(),
-            current.evaluated_at,
-            expires_at,
-        )
-    } else {
-        GitIndexPreviewInputV1::new_hunk_selection(
-            preview_id.clone(),
-            operation,
-            snapshot.clone(),
-            hunks.clone(),
-            current.evaluated_at,
-            expires_at,
-        )
-    }
+    let input = GitIndexPreviewInputV1::new_hunk_selection(
+        preview_id.clone(),
+        operation,
+        snapshot.clone(),
+        hunks.clone(),
+        current.evaluated_at,
+        expires_at,
+    )
     .unwrap();
     owner.service.save_preview_input(input).unwrap();
     let grant = CapabilityGrantSnapshot::new(
@@ -379,20 +334,13 @@ fn transaction_preview(
             preview_id,
             repository_snapshot: snapshot,
             selected_hunks: hunks,
-            commit_intent: intent,
             observed_at: current.evaluated_at,
         })
         .unwrap()
         .preview;
     assert_eq!(
         preview.disposition,
-        if operation == GitIndexTransactionOperationV1::CommitIndex {
-            GitIndexPreviewDispositionV1::Unsupported(
-                GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable,
-            )
-        } else {
-            GitIndexPreviewDispositionV1::Applicable
-        },
+        GitIndexPreviewDispositionV1::Applicable,
     );
     tracedecay_contracts::GitIndexApplyRequestV1 {
         context,

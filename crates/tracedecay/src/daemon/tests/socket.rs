@@ -1285,10 +1285,9 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     use std::process::Command;
 
     use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
-    use tracedecay_domain::{
-        GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexSigningPolicyV1,
-        GitIndexTransactionOperationV1, UtcMicros,
-    };
+    use tracedecay_contracts::git::GitReadRequestV1;
+    use tracedecay_daemon_protocol::surface::GitReadSurfaceRequest;
+    use tracedecay_domain::{GitIndexTransactionOperationV1, UtcMicros};
 
     fn git(root: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
@@ -1333,7 +1332,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .await
         .expect("mount project owner");
     std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
-    git(repository.path(), &["add", "packet.txt"]);
     let observed_at = UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -1343,25 +1341,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         )
         .unwrap_or(i64::MAX),
     );
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: observed_at,
-    };
-    let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
-        operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_input_id: None,
-        selected_hunk_digests: Vec::new(),
-        commit_intent: Some(
-            GitIndexCommitIntentV1::new(
-                "socket Git transaction\n".to_owned(),
-                identity.clone(),
-                identity,
-                GitIndexSigningPolicyV1::UnsignedPermitted,
-            )
-            .expect("commit intent"),
-        ),
-    };
     let deadline =
         Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000))).expect("deadline");
     let cancellation = CancellationContext::active("cancel.socket-git").expect("cancellation");
@@ -1379,6 +1358,63 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
     let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    async fn read_hunks(
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        lines: &mut tokio::io::Lines<
+            tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        >,
+        request_id: &str,
+        observed_at: UtcMicros,
+        deadline: &Deadline,
+        cancellation: &CancellationContext,
+    ) -> tracedecay_contracts::git::GitHunkPreviewInputV1 {
+        let read_request = super::super::DaemonInvocationRequest::git_read(
+            request_id,
+            ApplicationSurfaceOperation::GitHunks,
+            GitReadSurfaceRequest {
+                request: GitReadRequestV1::Hunks {
+                    scope: tracedecay_domain::GitDiffScopeV1::WorkingTree,
+                    daemon_binding: None,
+                },
+                max_entries: 1_000,
+                max_bytes: 4 * 1024 * 1024,
+            },
+            observed_at,
+            deadline.clone(),
+            cancellation.clone(),
+        );
+        writer
+            .write_all(serde_json::to_string(&read_request).unwrap().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().expect("hunks read response");
+        let response: Value = serde_json::from_str(&line).expect("read JSON");
+        assert_eq!(response["status"], "git_read", "{response:#}");
+        serde_json::from_value(response["result"]["payload"]["result"]["value"].clone())
+            .expect("typed hunk preview input")
+    }
+
+    let hunks_input = read_hunks(
+        &mut writer,
+        &mut lines,
+        "request.socket.hunks",
+        observed_at,
+        &deadline,
+        &cancellation,
+    )
+    .await;
+    assert!(!hunks_input.hunks.is_empty());
+    let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::StageHunks,
+        preview_input_id: Some(hunks_input.preview_input_id.clone()),
+        selected_hunk_digests: hunks_input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
+    };
 
     let preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.preview",
@@ -1401,14 +1437,9 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let preview: tracedecay_domain::GitIndexPreviewV1 =
         serde_json::from_value(preview_response["preview"]["payload"].clone())
             .expect("typed immutable preview");
-    // An unsupported preview is never cached for apply, so a disposition
-    // regression here surfaces as an unexplained abort several requests later
-    // rather than as the blocker the daemon actually found.
     assert_eq!(
         preview.disposition,
-        tracedecay_domain::GitIndexPreviewDispositionV1::Unsupported(
-            tracedecay_domain::GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
-        ),
+        tracedecay_domain::GitIndexPreviewDispositionV1::Applicable,
         "{preview_response:#}"
     );
 
@@ -1422,7 +1453,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         apply.clone(),
         UtcMicros(1),
         deadline.clone(),
-        cancellation,
+        cancellation.clone(),
     );
     let apply_request_json = serde_json::to_string(&apply_request).unwrap();
     for attempt in 1..=2 {
@@ -1439,20 +1470,14 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             response["status"], "git_apply",
             "attempt {attempt}: {response:#}"
         );
-        // Ref publication is typed-unavailable, so attempt 1 must abort with
-        // no repository change and attempt 2 must replay that same terminal
-        // failed receipt rather than re-entering native Git.
+        // Attempt 1 commits the staged hunk; attempt 2 must replay that same
+        // terminal receipt rather than re-entering native Git.
         assert_eq!(
-            response["effect"]["receipt"]["outcome"], "failed",
+            response["effect"]["receipt"]["outcome"], "completed",
             "attempt {attempt}: {response:#}"
         );
         assert_eq!(
-            response["effect"]["payload"]["outcome"], "aborted_no_change",
-            "attempt {attempt}: {response:#}"
-        );
-        assert_eq!(
-            response["effect"]["payload"]["created_commit"],
-            Value::Null,
+            response["effect"]["payload"]["outcome"], "committed",
             "attempt {attempt}: {response:#}"
         );
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
@@ -1477,6 +1502,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let response: Value =
         serde_json::from_str(&lines.next_line().await.unwrap().expect("stale response")).unwrap();
     assert_eq!(response["status"], "git_apply", "{response:#}");
+    // The repository moved past the preview snapshot, so a new idempotency key
+    // reaches a terminal no-change receipt rather than a second mutation.
     assert_eq!(
         response["effect"]["payload"]["outcome"],
         "aborted_no_change"
@@ -1487,30 +1514,25 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "base\nnext\nrecovery\n",
     )
     .expect("recovery fixture change");
-    git(repository.path(), &["add", "packet.txt"]);
+    let recovery_input = read_hunks(
+        &mut writer,
+        &mut lines,
+        "request.socket.recovery-hunks",
+        observed_at,
+        &deadline,
+        &cancellation,
+    )
+    .await;
     let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
         tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_input_id: None,
-            selected_hunk_digests: Vec::new(),
-            commit_intent: Some(
-                GitIndexCommitIntentV1::new(
-                    "socket recovery fence\n".to_owned(),
-                    GitCommitIdentityV1 {
-                        name: "TraceDecay Test".to_owned(),
-                        email: "tracedecay@example.com".to_owned(),
-                        at: observed_at,
-                    },
-                    GitCommitIdentityV1 {
-                        name: "TraceDecay Test".to_owned(),
-                        email: "tracedecay@example.com".to_owned(),
-                        at: observed_at,
-                    },
-                    GitIndexSigningPolicyV1::UnsignedPermitted,
-                )
-                .unwrap(),
-            ),
+            operation: GitIndexTransactionOperationV1::StageHunks,
+            preview_input_id: Some(recovery_input.preview_input_id.clone()),
+            selected_hunk_digests: recovery_input
+                .hunks
+                .iter()
+                .map(|entry| entry.digest.clone())
+                .collect(),
         },
         observed_at,
         deadline.clone(),
