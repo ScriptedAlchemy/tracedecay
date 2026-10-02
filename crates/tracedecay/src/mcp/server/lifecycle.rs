@@ -483,23 +483,29 @@ impl McpServer {
             let _running = running_guard;
             match refresh(request).await {
                 Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
+                    eprintln!("READ_REFRESH outcome=admitted_tokens");
                     if let Ok(mut guard) = token_map.lock() {
                         *guard = fresh;
                     }
                 }
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {
+                    eprintln!("READ_REFRESH outcome=admitted");
+                }
                 Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
+                    eprintln!("READ_REFRESH outcome=not_applicable");
                     tracing::debug!(
                         "background code-index reconciliation does not apply without Git identity"
                     );
                 }
                 Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
+                    eprintln!("READ_REFRESH outcome=linked_worktree_disabled");
                     tracing::info!(
                         reason = "linked_worktree_disabled",
                         "automatic code-index refresh disabled by watch policy"
                     );
                 }
                 Err(e) => {
+                    eprintln!("READ_REFRESH outcome=error error={e}");
                     warn_reconcile_not_admitted(
                         &e,
                         "background read reconciliation was not admitted",
