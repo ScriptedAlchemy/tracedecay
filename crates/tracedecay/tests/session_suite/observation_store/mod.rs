@@ -510,6 +510,74 @@ fn canonical_revision_observation(
     .unwrap()
 }
 
+/// Snapshot-provider analogue of [`canonical_revision_observation`]: a
+/// message-only canonical envelope ordered by snapshot position, like records
+/// admitted before location facts were projected.
+fn snapshot_revision_observation(
+    provider: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    content: &str,
+) -> DurableObservationV1 {
+    let session_id = format!("session.{provider}.location-revision");
+    let stable_record_id = ObservationId::new("record.snapshot.stable").unwrap();
+    let relations =
+        CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
+            .with_message_id(stable_record_id.clone());
+    let message = CanonicalObservationFactV1::Message {
+        role: CanonicalMessageRoleV1::Assistant,
+        content: json!(content),
+        model: None,
+        timestamp: None,
+    };
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
+    let payload = serde_json::to_value(
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new(provider).unwrap(),
+            "message",
+            stable_record_id.clone(),
+            relations,
+            vec![message],
+            evidence,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(receipt_id).unwrap(),
+            ComponentVersion::new("privacy.observation-record.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(payload_reference),
+    )
+    .unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        provider_source(provider, &session_id),
+        scope(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        stable_record_id,
+    )
+    .unwrap();
+
+    DurableObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
 fn mutate_observation_payload(
     observation: &DurableObservationV1,
     receipt_id: &str,
@@ -1485,6 +1553,84 @@ fn canonical_payload_revision_adopts_only_dropped_codex_tool_arguments() {
         &stored_dropped,
         &current_renamed
     ));
+}
+
+/// Snapshot hosts and Vibe now lead every canonical payload with a
+/// location-only `Session` fact. The revision normalizer adopts that fact for
+/// records admitted before the change, and for retained location-only sessions
+/// adopts a moved path/provenance, but any other authored difference stays an
+/// identity collision.
+#[test]
+fn canonical_payload_revision_adopts_snapshot_location_session() {
+    for provider in ["cline", "kiro"] {
+        let stored = snapshot_revision_observation(
+            provider,
+            1,
+            41,
+            42,
+            &format!("receipt.{provider}.location.stored"),
+            "stable authored content",
+        );
+        let location_session = |payload: &mut serde_json::Value| {
+            let session = serde_json::to_value(CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: Some("/workspace/task".to_string()),
+                transcript_path: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: None,
+                native_source: None,
+                profile: None,
+                location_provenance: Some("task_metadata".to_string()),
+            })
+            .unwrap();
+            payload["facts"].as_array_mut().unwrap().insert(0, session);
+        };
+        let current = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.current"),
+            location_session,
+        );
+        assert!(
+            is_canonical_payload_revision_replay(&stored, &current),
+            "{provider}: a leading location session must adopt on replay"
+        );
+
+        let moved = mutate_observation_payload(&current, "receipt.location.moved", |payload| {
+            payload["facts"][0]["location_path"] = json!("/workspace/moved");
+        });
+        assert!(
+            is_canonical_payload_revision_replay(&current, &moved),
+            "{provider}: a moved location path must adopt on replay"
+        );
+
+        let changed_content = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.changed"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][1]["content"] = json!("changed authored content");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &changed_content),
+            "{provider}: location adoption must not launder authored changes"
+        );
+
+        let bloated_session = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.bloated"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][0]["project_path"] = json!("/workspace/task");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &bloated_session),
+            "{provider}: a session with authored fields is not location-only"
+        );
+    }
 }
 
 #[tokio::test]

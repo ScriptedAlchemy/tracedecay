@@ -500,7 +500,19 @@ fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
         );
     }
     assert_eq!(canonical["evidence"], expected["evidence"]);
-    assert_eq!(canonical["facts"], expected["facts"]);
+    let facts = canonical["facts"].as_array().unwrap();
+    assert_eq!(facts[0]["kind"], "session");
+    assert!(
+        facts[0]["location_path"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty()),
+        "the leading session fact must carry the workspace location"
+    );
+    assert_eq!(
+        facts[0]["location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
+    assert_eq!(facts[1..], expected["facts"].as_array().unwrap()[..]);
     assert_eq!(text, expected["facts"][0]["content"].as_str().unwrap());
     assert!(
         canonical["facts"]

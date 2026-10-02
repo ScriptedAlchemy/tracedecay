@@ -18,7 +18,9 @@ use crate::restart_atomicity::{
     ingest_global_sources_for_provider, ingest_user_provider, mark_test_project,
     open_project_session_db, set_projection_failure,
 };
-use crate::support::{create_git_repo_with_linked_worktree, init_git_repo, setup};
+use crate::support::{
+    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+};
 
 pub(super) fn vscode_storage_root(
     home: &std::path::Path,
@@ -200,6 +202,65 @@ async fn cline_task_history_populates_searchable_messages() {
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_provider_ingests(SessionProvider::Cline, &home, &db, &project).await;
+}
+
+#[tokio::test]
+async fn cline_like_task_location_projects_session_metadata() {
+    // Table-driven across the three Cline-like storage roots.
+    for (provider, extension_id, selected_provider) in [
+        ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
+        (
+            "roo-code",
+            "rooveterinaryinc.roo-cline",
+            SessionProvider::RooCode,
+        ),
+        ("kilo", "kilocode.kilo-code", SessionProvider::Kilo),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        write_task(
+            &vscode_storage_root(&home, extension_id),
+            &project,
+            &format!("{provider}-location"),
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        ingest_global_sources_for_provider(&home, &db, &project, Some(selected_provider)).await;
+
+        let cwd_key = format!("{provider}_session_cwd");
+        let worktree_key = format!("{provider}_session_worktree");
+        let provenance_key = format!("{provider}_session_location_provenance");
+
+        let session = db
+            .get_session(provider, &format!("{provider}-location"))
+            .await
+            .unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+        assert_metadata_path_eq(&metadata[cwd_key.as_str()], &project);
+        assert_metadata_path_eq(&metadata[worktree_key.as_str()], &project);
+        assert_eq!(
+            metadata[provenance_key.as_str()].as_str(),
+            Some("task_metadata"),
+            "{provider}: session location provenance"
+        );
+
+        let hit = db
+            .search_session_messages(provider, None, "billing pipeline", 10)
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{provider}: task message should be searchable"));
+        let message_metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_metadata_path_eq(&message_metadata[cwd_key.as_str()], &project);
+        assert_metadata_path_eq(&message_metadata[worktree_key.as_str()], &project);
+        assert_eq!(
+            message_metadata[provenance_key.as_str()].as_str(),
+            Some("task_metadata"),
+            "{provider}: message location provenance"
+        );
+    }
 }
 
 #[tokio::test]

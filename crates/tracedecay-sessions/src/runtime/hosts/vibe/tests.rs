@@ -195,13 +195,24 @@ async fn vibe_workflow_lookalike_admits_as_one_ordinary_message() {
     assert_eq!(observations.len(), 1);
     let envelope: tracedecay_domain::CanonicalObservationEnvelopeV1 =
         serde_json::from_value(observations[0].observation().payload().clone()).unwrap();
-    let [tracedecay_domain::CanonicalObservationFactV1::Message { content, .. }] = envelope.facts()
+    let [
+        tracedecay_domain::CanonicalObservationFactV1::Session {
+            location_provenance,
+            ..
+        },
+        tracedecay_domain::CanonicalObservationFactV1::Message { content, .. },
+    ] = envelope.facts()
     else {
         panic!(
-            "lookalike must admit as exactly one message fact: {:?}",
+            "lookalike must admit as a location session plus one message fact: {:?}",
             envelope.facts()
         );
     };
+    assert_eq!(
+        location_provenance.as_deref(),
+        Some("session_meta"),
+        "the leading session fact must carry meta.json location provenance"
+    );
     assert_eq!(
         content,
         &Value::String("Vibe workflow lookalike remains an ordinary message".to_owned())
