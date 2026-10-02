@@ -973,7 +973,8 @@ mod tests {
         schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
-        CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+        CodeIndexFreshnessCoverageV1, CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1,
+        CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
     };
     use tracedecay_contracts::storage::{
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
@@ -1455,6 +1456,45 @@ mod tests {
                         .to_owned()
                 )
             )
+        );
+    }
+
+    /// Sources no generation can index leave the read current, but status
+    /// says how many captured sources the index does not hold.
+    #[test]
+    fn a_fresh_read_with_omitted_sources_is_current_and_names_their_count() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+            coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            omitted_sources: Some(CodeIndexOmittedSourcesV1 {
+                count: 2,
+                sources: vec![CodeIndexOmittedSourceV1 {
+                    git_path_bytes: b"src/odd\\name.rs".to_vec(),
+                    display_path: "src/odd\\name.rs".to_owned(),
+                    reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, FreshnessLabelV1::Current);
+        assert!(
+            warning
+                .expect("omitted sources are named")
+                .starts_with("2 captured source file(s) are not indexed")
+        );
+        let complete = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            omitted_sources: None,
+            ..freshness
+        };
+        assert_eq!(
+            code_index_freshness_projection(&complete),
+            (FreshnessLabelV1::Current, None)
         );
     }
 
