@@ -19,7 +19,6 @@ use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
-use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -88,9 +87,11 @@ fn complete_protocol_controls_with_ceiling(
     Ok(Some((deadline, cancellation)))
 }
 
+/// Run one application-surface tool through `executor` and render its result,
+/// spilling oversized payloads under `response_handle_root` when one is given.
 #[hotpath::measure(future = true, label = "mcp.application.surface.total")]
-pub(super) async fn handle_application_surface(
-    cg: &TraceDecay,
+pub async fn handle_application_surface(
+    response_handle_root: Option<&std::path::Path>,
     operation: ApplicationSurfaceOperation,
     normalized: ApplicationToolRequest,
     executor: Option<&dyn DaemonInvocationExecutor>,
@@ -160,7 +161,7 @@ pub(super) async fn handle_application_surface(
         }
     }
     .map_err(application_surface_dispatch_error)?;
-    render_application_surface_result(Some(&cg.store_layout().response_handle_root), &result)
+    render_application_surface_result(response_handle_root, &result)
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see

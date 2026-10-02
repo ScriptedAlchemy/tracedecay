@@ -91,10 +91,14 @@ use tracedecay_query::retrieval::lexical::{
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
     VerifiedCodeLexicalArtifactV1,
 };
+use tracedecay_query::retrieval::ports::{
+    TEXT_ARTIFACT_BASE_BATCH_BYTES_V1, TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+    TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+};
 
 /// Bumped whenever the workload shape changes, so a profile comparison
 /// across a shape change is visibly not comparable.
-const WORKLOAD_REVISION: &str = "index-bench.v1";
+const WORKLOAD_REVISION: &str = "index-bench.v2";
 const CORPUS_ENV: &str = "TRACEDECAY_INDEX_BENCH_CORPUS";
 const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 
@@ -103,22 +107,14 @@ const REPLICAS_ENV: &str = "TRACEDECAY_INDEX_BENCH_REPLICAS";
 /// directory rather than clustering in whichever one sorts first.
 const EDIT_STRIDE: usize = 17;
 
-/// Sealed-source paging bounds. Page granularity stays small so the corpus
-/// yields many pages (the batch-stage span needs repetitions to be readable)
-/// and the retained window stays far below the 4 GB ceiling the profiling job
-/// budgets on any runner.
-const MAX_PAGE_CHUNKS: usize = 64;
-const MAX_PAGE_BYTES: usize = 512 * 1024;
-/// Offered transaction width, equal to the scheduler's own unscaled batch
-/// limits (`TEXT_ARTIFACT_BASE_BATCH_PAGES_V1`,
-/// `TEXT_ARTIFACT_BASE_BATCH_BYTES_V1`). Transaction width decides how often
-/// the artifact pays a rollback-journal commit, so a narrower window would
-/// profile a commit frequency no daemon produces. The builder's memory ledger
-/// narrows this offer to the admissible prefix, exactly as it does for the
-/// scheduler. The scheduler scales these with host memory; a benchmark must
-/// not, or head and base measure different workloads on different runners.
-const BATCH_MAX_PAGES: usize = 64;
-const BATCH_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+/// Sealed-source paging bounds and the offered transaction width are the
+/// daemon's own (`TEXT_ARTIFACT_PAGE_*_V1`, the unscaled
+/// `TEXT_ARTIFACT_BASE_BATCH_*_V1`). A narrower page refuses real clone bodies
+/// the daemon admits, and a narrower window would profile a commit frequency
+/// no daemon produces. The builder's memory ledger narrows the offered window
+/// to the admissible prefix, exactly as it does for the scheduler. The
+/// scheduler scales the batch with host memory; a benchmark must not, or head
+/// and base measure different workloads on different runners.
 const FINALIZATION_WORK_BUDGET: usize = 4_096;
 
 const CLEAN_SEALED_AT: i64 = 1_700_000_000_000_000;
@@ -409,6 +405,7 @@ struct GenerationRun {
     increment_wall: Duration,
     increment_clone_payloads_computed: u64,
     increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
     body_refresh: BodyRefreshMetrics,
 }
 
@@ -441,6 +438,7 @@ fn build_generations(
     let clean_wall = clean_started.elapsed();
     let clean_chunks = clean.chunks().chunks().len() as u64;
     let clean_pool_stats = owner.physical_artifact_pool_stats();
+    let clean_parse_stats = owner.retained_parse_stats();
 
     let (edited, edited_paths) = edit(files);
     let edited_files = edited_paths.len() as u64;
@@ -458,6 +456,20 @@ fn build_generations(
         .map_err(|error| format!("build incremental generation: {error}"))?;
     let increment_wall = increment_started.elapsed();
     let increment_pool_stats = owner.physical_artifact_pool_stats();
+    let increment_parse_stats = owner.retained_parse_stats();
+    let retained_parses = serde_json::json!({
+        "clean_retained_documents": clean_parse_stats.retained_documents,
+        "increment_retained_reparses": (increment_parse_stats.incremental_parses
+            + increment_parse_stats.noop_parses)
+            .saturating_sub(clean_parse_stats.incremental_parses + clean_parse_stats.noop_parses),
+        "increment_initial_parses": increment_parse_stats
+            .initial_parses
+            .saturating_sub(clean_parse_stats.initial_parses),
+        "increment_reset_parses": increment_parse_stats
+            .reset_parses
+            .saturating_sub(clean_parse_stats.reset_parses),
+        "increment_retained_documents": increment_parse_stats.retained_documents,
+    });
     let (generation, body_refresh) = if clone_envelope {
         build_body_refresh(
             &mut owner,
@@ -492,6 +504,7 @@ fn build_generations(
         increment_clone_payloads_reused: increment_pool_stats
             .clone_payloads_reused
             .saturating_sub(clean_pool_stats.clone_payloads_reused),
+        retained_parses,
         body_refresh,
     })
 }
@@ -547,10 +560,10 @@ fn run(options: &Options) -> Result<String, String> {
         &sealed,
         &control,
         SealedDrainBounds {
-            batch_pages: BATCH_MAX_PAGES,
-            batch_retained_bytes: BATCH_MAX_RETAINED_BYTES,
-            page_chunks: MAX_PAGE_CHUNKS,
-            page_bytes: MAX_PAGE_BYTES,
+            batch_pages: TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
+            batch_retained_bytes: TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            page_chunks: TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            page_bytes: TEXT_ARTIFACT_PAGE_BYTES_V1,
         },
     )?;
     let drain_wall = drain_started.elapsed();
@@ -603,6 +616,7 @@ fn run(options: &Options) -> Result<String, String> {
         clone_census,
         increment_clone_payloads_computed: generations.increment_clone_payloads_computed,
         increment_clone_payloads_reused: generations.increment_clone_payloads_reused,
+        retained_parses: generations.retained_parses,
         body_refresh: generations.body_refresh,
         sealed_bytes: sealed_len,
         sealed_state_digest: state_digest.as_str(),
@@ -753,7 +767,7 @@ fn ingest_artifact(
     // charge exceeds the batch budget, and the builder correctly refuses them.
     let mut offered = 0usize;
     while offered < pages.len() {
-        let window = &pages[offered..pages.len().min(offered + BATCH_MAX_PAGES)];
+        let window = &pages[offered..pages.len().min(offered + TEXT_ARTIFACT_BASE_BATCH_PAGES_V1)];
         let prepared = builder
             .prepare_admissible_page_prefix(window, control)
             .map_err(|error| format!("prepare lexical artifact batch: {error}"))?;
@@ -1092,6 +1106,7 @@ struct SummaryFields<'a> {
     clone_census: serde_json::Value,
     increment_clone_payloads_computed: u64,
     increment_clone_payloads_reused: u64,
+    retained_parses: serde_json::Value,
     body_refresh: BodyRefreshMetrics,
     sealed_bytes: u64,
     sealed_state_digest: &'a str,
@@ -1122,6 +1137,7 @@ fn summary(fields: SummaryFields<'_>) -> String {
         "language_files": fields.language_files,
         "edited_files": fields.edited_files,
         "clean_chunks": fields.clean_chunks,
+        "retained_parses": fields.retained_parses,
         "source_total_bytes": fields.source_total_bytes,
         "symbol_count": fields.symbol_count,
         "clones": {

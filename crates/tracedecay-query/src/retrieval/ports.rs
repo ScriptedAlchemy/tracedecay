@@ -33,6 +33,17 @@ pub trait RetrievalExecutionControl: Send + Sync {
 /// streaming rows, but consult request authority before starting the next page.
 pub const RETRIEVAL_CANDIDATE_BATCH_SIZE: usize = 128;
 
+/// Page bounds for streaming one sealed generation into the durable lexical
+/// text artifact. One page is one bounded unit of background build progress,
+/// and every sealed record, including the largest clone body a real
+/// repository admits, must fit one page.
+pub const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
+pub const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+/// Unscaled transaction width of one text-artifact source batch. The daemon
+/// scales it with host memory; a benchmark offers it unscaled.
+pub const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
+pub const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
+
 pub(crate) fn retrieval_checkpoint(
     control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {

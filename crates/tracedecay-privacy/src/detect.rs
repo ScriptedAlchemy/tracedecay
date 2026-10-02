@@ -714,7 +714,7 @@ pub(super) fn redact_text(
     // overhead on every string of every hydrated payload.
     hotpath::gauge!("runtime_core.privacy.rules_evaluated").inc(patterns.len() as f64);
     let mut candidates = Vec::new();
-    for (pattern, keywords_present) in patterns.iter().zip(patterns.keyword_presence(text)) {
+    for (pattern, ranges) in patterns.matched_ranges(text) {
         let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
         let priority = match pattern.kind() {
             CredentialPatternKind::PrivateKey => 4,
@@ -722,8 +722,7 @@ pub(super) fn redact_text(
             CredentialPatternKind::KnownCredential => 2,
         };
         candidates.extend(
-            pattern
-                .ranges_when_keywords_present(text, keywords_present)
+            ranges
                 .into_iter()
                 .map(|range| (range, detector, confidence, replacement, priority)),
         );

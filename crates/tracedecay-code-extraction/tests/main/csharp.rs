@@ -346,6 +346,34 @@ public class Foo
 }
 
 #[test]
+fn test_cs_attribute_inside_preprocessor_conditional() {
+    let source = r#"
+public class Foo
+{
+#if DEBUG
+    [Conditional("DEBUG")]
+#elif TRACE
+    [Traced]
+#else
+    [Obsolete]
+#endif
+    public void Log() {}
+}
+"#;
+    let extractor = CSharpExtractor;
+    let result = extractor.extract_artifact("test.cs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("Conditional", "Log"),
+            ("Traced", "Log"),
+            ("Obsolete", "Log")
+        ]
+    );
+}
+
+#[test]
 fn test_cs_inheritance() {
     let source = r#"
 public interface IAnimal
@@ -533,5 +561,41 @@ namespace MyApp
         methods[0].qualified_name.contains("Run"),
         "qualified_name should contain method: {}",
         methods[0].qualified_name
+    );
+}
+
+#[test]
+fn csharp_declaration_line_is_past_its_attributes() {
+    let source = "[Serializable]\n\
+public class Circle {\n\
+    [Obsolete]\n\
+    private double r;\n\
+\n\
+    [Obsolete]\n\
+    [Pure]\n\
+    public double Area() { return r; }\n\
+\n\
+#if DEBUG\n\
+    [Pure]\n\
+#endif\n\
+    public string Name() { return \"c\"; }\n\
+}\n";
+    let result = CSharpExtractor.extract_artifact("Circle.cs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let lines: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| ["Circle", "r", "Area", "Name"].contains(&n.name.as_str()))
+        .filter(|n| n.kind != NodeKind::AnnotationUsage)
+        .map(|n| (n.name.as_str(), n.start_line, n.attrs_start_line))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("Circle", 1, 0),
+            ("r", 3, 2),
+            ("Area", 7, 5),
+            ("Name", 12, 9)
+        ]
     );
 }

@@ -1177,10 +1177,6 @@ mod tests {
     /// the failure appears and again only when its typed condition changes.
     #[tokio::test]
     async fn a_repeating_discovery_failure_is_warned_once_per_state_change() {
-        // Sibling tests reach this warn callsite with no subscriber and cache
-        // `Interest::never()` for the process. Rebuild interest so this
-        // thread's census is the one that decides enablement.
-        tracedecay_runtime_core::logging::install_tracing_callsite_keepalive();
         let (_temp, project, transcript, source) = fixture();
         let session = transcript
             .parent()
@@ -1190,11 +1186,10 @@ mod tests {
         std::fs::write(session.join("state.json"), "{ not json").unwrap();
         let admission = MemoryHostAdmission::default();
         let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let dispatch = tracing::Dispatch::new(WarningCensus {
+        let _guard = tracedecay_runtime_core::logging::set_tracing_capture(WarningCensus {
             message: "Kimi session discovery is incomplete",
             count: std::sync::Arc::clone(&warnings),
         });
-        let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let mut failures = 0;
         for _ in 0..5 {

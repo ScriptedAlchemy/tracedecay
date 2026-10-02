@@ -84,7 +84,6 @@ notify = "6"
 filetime = "0.2"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tokio = { version = "1", features = ["full", "test-util"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = [
     "test-helpers",
     "lite",

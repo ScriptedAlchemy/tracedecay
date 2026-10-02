@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracedecay_contracts::retrieval::LexicalAnchorDropReasonV1;
+use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, SearchDisplayUnavailableV1};
 use tracedecay_query::code_search::{self, CodeIndexSearchDisplayV1};
 use tracedecay_query::retrieval::RetrievalPortError;
+use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
 use tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1;
 
 use crate::code_index_scheduler;
@@ -455,6 +456,24 @@ pub fn code_index_search_display_binding(
     Ok((display, provenance))
 }
 
+/// The chunk an occurrence reads from: a text-lane occurrence names it under
+/// `source_prefix`; a graph-lane occurrence names its symbol, and its evidence
+/// anchor names the chunk the published graph binds that symbol to.
+fn occurrence_chunk_id<'p>(
+    provenance: &'p tracedecay_domain::OccurrenceProvenance,
+    source_prefix: &str,
+) -> Option<&'p str> {
+    let source = provenance.source_occurrence_id.as_str();
+    if source.starts_with("code-graph:") {
+        provenance
+            .retriever_evidence_anchor
+            .as_str()
+            .strip_prefix("code-graph:chunk:")
+    } else {
+        source.strip_prefix(source_prefix)
+    }
+}
+
 pub fn code_index_text_search_display_binding(
     latest: &code_index_scheduler::LatestCodeTextGenerationV1,
     request: &tracedecay_domain::RetrievalRequest,
@@ -487,10 +506,7 @@ pub fn code_index_text_search_display_binding(
         .occurrences
         .iter()
         .find_map(|provenance| {
-            let chunk_id = provenance
-                .source_occurrence_id
-                .as_str()
-                .strip_prefix(&source_prefix)?;
+            let chunk_id = occurrence_chunk_id(provenance, &source_prefix)?;
             (provenance.repository_id.as_ref() == Some(&request.scope.root.repository)
                 && provenance.source_namespace == provenance.freshness.source_namespace
                 && provenance.freshness.compatibility
@@ -1316,11 +1332,10 @@ where
                 };
                 let hydrated_prefix_len = hydrated.results.len();
                 let mut display_by_anchor = HashMap::new();
+                let mut display_unavailable_by_anchor = HashMap::new();
                 let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
                 for result in hydrated.results {
-                    use tracedecay_query::retrieval::hydrate::{
-                        HydrationOutcomeV1, HydrationUnavailableV1,
-                    };
+                    use tracedecay_query::retrieval::hydrate::HydrationOutcomeV1;
 
                     match result.outcome {
                         HydrationOutcomeV1::Complete(display)
@@ -1331,16 +1346,25 @@ where
                                 .insert(result.ranked.candidate.anchor_id.clone(), display);
                             hydrated_candidates.push(result.ranked);
                         }
-                        HydrationOutcomeV1::Unavailable(
-                            HydrationUnavailableV1::AuthorityUnavailable,
-                        ) => {}
-                        HydrationOutcomeV1::Unavailable(_) => {
+                        HydrationOutcomeV1::Unavailable(reason) => {
+                            // A candidate the caller may no longer read is not served.
+                            let Some(omitted) = search_display_unavailable(reason) else {
+                                continue;
+                            };
+                            display_unavailable_by_anchor
+                                .insert(result.ranked.candidate.anchor_id.clone(), omitted);
                             hydrated_candidates.push(result.ranked);
                         }
                     }
                 }
-                hydrated_candidates
-                    .extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
+                // Candidates past the hydrated-results cap are served unhydrated.
+                for ranked in ordered_candidates.into_iter().skip(hydrated_prefix_len) {
+                    display_unavailable_by_anchor.insert(
+                        ranked.candidate.anchor_id.clone(),
+                        SearchDisplayUnavailableV1::BudgetExceeded,
+                    );
+                    hydrated_candidates.push(ranked);
+                }
                 let ordered_candidates = hydrated_candidates;
                 if let Some(reason) = control.request_termination() {
                     return code_index_search_unavailable_for_generation(
@@ -1420,6 +1444,7 @@ where
                         ordered_candidates,
                         query_fallback: executed.authorized.fallback,
                         display_by_anchor,
+                        display_unavailable_by_anchor,
                         next_cursor,
                         coverage,
                         lexical_routes,
@@ -1429,6 +1454,22 @@ where
             label = "daemon.code_index.search"
         ))
     })
+}
+
+/// The typed omission a served candidate carries when its display could not
+/// be hydrated; `None` for a candidate withheld from the page entirely.
+fn search_display_unavailable(
+    reason: HydrationUnavailableV1,
+) -> Option<SearchDisplayUnavailableV1> {
+    match reason {
+        HydrationUnavailableV1::AuthorityUnavailable => None,
+        HydrationUnavailableV1::Incompatible => Some(SearchDisplayUnavailableV1::Incompatible),
+        HydrationUnavailableV1::Stale => Some(SearchDisplayUnavailableV1::Stale),
+        HydrationUnavailableV1::Invalid => Some(SearchDisplayUnavailableV1::Invalid),
+        HydrationUnavailableV1::Internal => Some(SearchDisplayUnavailableV1::Internal),
+        HydrationUnavailableV1::BudgetExceeded => Some(SearchDisplayUnavailableV1::BudgetExceeded),
+        HydrationUnavailableV1::Cancelled => Some(SearchDisplayUnavailableV1::Cancelled),
+    }
 }
 
 /// Count each caller anchor against the sites this response carries: a

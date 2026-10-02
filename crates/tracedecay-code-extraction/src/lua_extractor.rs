@@ -436,6 +436,7 @@ impl LuaExtractor {
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                                 unmodeled_import: None,
+                                argument_count: None,
                             });
                         }
                         // Recurse into the call for nested calls.

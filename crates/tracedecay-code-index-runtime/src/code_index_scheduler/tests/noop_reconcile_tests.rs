@@ -59,7 +59,7 @@ async fn unchanged_reconcile_does_not_reactivate_the_serving_generation() {
     );
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     drop(admission);
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         let receipts = registry.event_to_ready_receipts();
         if let Some(receipt) = receipts.iter().find(|receipt| {

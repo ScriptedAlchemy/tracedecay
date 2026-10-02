@@ -968,17 +968,29 @@ describe('projectJourney events', () => {
     const projection = projectJourney(
       sources({ selected: { laneId: laneIdOf('cursor', 'absent'), messages: [message()] } }),
     );
-    expect(projection.events.some((event) => event.source === 'transcript')).toBe(false);
+    expect(projection.events.filter((event) => event.source === 'transcript')).toEqual([]);
+    expect(projection.events.find((event) => event.kind === 'session_start')).toEqual({
+      id: `start:${ROOT}`,
+      laneId: ROOT,
+      kind: 'session_start',
+      time: T0,
+      sequence: 0,
+      grade: 'exact',
+      source: 'session',
+      label: 'start',
+      detail: null,
+      ref: 'root',
+    });
     expect(projection.gaps.some((gap) => gap.kind === 'undated_events')).toBe(false);
   });
 
-  it('truncates a long turn to one line of at most 140 characters', () => {
+  it('truncates a long turn to one line of 140 characters', () => {
     const projection = projectJourney(
       sources({ selected: { laneId: ROOT, messages: [message({ content: 'x'.repeat(400) })] } }),
     );
-    const detail = projection.events.find((event) => event.source === 'transcript')?.detail;
-    expect(detail).toHaveLength(140);
-    expect(detail?.endsWith('…')).toBe(true);
+    expect(projection.events.find((event) => event.source === 'transcript')?.detail).toBe(
+      `${'x'.repeat(139)}…`,
+    );
   });
 });
 

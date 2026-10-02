@@ -675,14 +675,9 @@ static SHARED_JSONL_BUILD_OBSERVERS: OnceLock<
     Mutex<HashMap<PathBuf, std::sync::Weak<SharedJsonlBuildObservation>>>,
 > = OnceLock::new();
 #[cfg(test)]
-static SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static SHARED_JSONL_PEAK_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static SHARED_JSONL_TOTAL_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SHARED_JSONL_PREPARATION_RENDEZVOUS: OnceLock<
+    Mutex<HashMap<u64, Arc<SharedJsonlPreparationRendezvous>>>,
+> = OnceLock::new();
 #[cfg(test)]
 static SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE: OnceLock<Mutex<HashMap<u64, usize>>> =
     OnceLock::new();
@@ -801,24 +796,122 @@ impl Drop for SharedJsonlBuildGuard {
     }
 }
 
+/// Test latch proving that independent frame preparations of one file overlap.
+/// A preparation with a peer in its window waits until two are inside at once,
+/// so the owning test passes only when the path really runs them concurrently.
+/// A preparation that no other thread could join, because it runs outside a
+/// multi-worker pool, records the serialization and proceeds, so a serial path
+/// fails the owning test's assertion instead of hanging it.
 #[cfg(test)]
-struct SharedJsonlFramePreparationGuard;
+#[derive(Default)]
+struct SharedJsonlPreparationRendezvous {
+    state: Mutex<SharedJsonlPreparationRendezvousState>,
+    overlap: std::sync::Condvar,
+}
 
 #[cfg(test)]
-impl SharedJsonlFramePreparationGuard {
-    fn enter(file_identity: u64) -> Self {
-        use std::sync::atomic::Ordering;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SharedJsonlPreparationRendezvousState {
+    inside: usize,
+    overlapped: bool,
+    serialized: bool,
+}
 
-        let active = SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel) + 1;
-        SHARED_JSONL_PEAK_FRAME_PREPARATIONS.fetch_max(active, Ordering::AcqRel);
-        SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel);
-        let preparations =
-            SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut preparations = preparations.lock().unwrap_or_else(PoisonError::into_inner);
-        let count = preparations.entry(file_identity).or_default();
-        *count = count.saturating_add(1);
-        Self
+#[cfg(test)]
+struct SharedJsonlPreparationRendezvousRegistration {
+    file_identity: u64,
+    rendezvous: Arc<SharedJsonlPreparationRendezvous>,
+}
+
+#[cfg(test)]
+impl SharedJsonlPreparationRendezvous {
+    const PEERS: usize = 2;
+
+    fn registry() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Self>>> {
+        SHARED_JSONL_PREPARATION_RENDEZVOUS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn register(file_identity: u64) -> SharedJsonlPreparationRendezvousRegistration {
+        let rendezvous = Arc::new(Self::default());
+        let previous = Self::registry().insert(file_identity, Arc::clone(&rendezvous));
+        assert!(
+            previous.is_none(),
+            "a shared JSONL file may have only one preparation rendezvous"
+        );
+        SharedJsonlPreparationRendezvousRegistration {
+            file_identity,
+            rendezvous,
+        }
+    }
+
+    fn arrive(file_identity: u64, window_preparations: usize) {
+        if window_preparations < Self::PEERS {
+            return;
+        }
+        let Some(rendezvous) = Self::registry().get(&file_identity).cloned() else {
+            return;
+        };
+        let mut state = rendezvous
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.overlapped {
+            return;
+        }
+        state.inside += 1;
+        if state.inside >= Self::PEERS {
+            state.overlapped = true;
+            rendezvous.overlap.notify_all();
+            return;
+        }
+        let joinable =
+            rayon::current_thread_index().is_some() && rayon::current_num_threads() >= Self::PEERS;
+        if !joinable {
+            state.inside -= 1;
+            state.serialized = true;
+            return;
+        }
+        // ponytail: serialization inside a multi-worker pool (one unsplit
+        // chunk) parks here, since this path has no deadline to cancel it.
+        drop(
+            rendezvous
+                .overlap
+                .wait_while(state, |state| !state.overlapped)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+    }
+}
+
+#[cfg(test)]
+impl SharedJsonlPreparationRendezvousRegistration {
+    fn state(&self) -> SharedJsonlPreparationRendezvousState {
+        *self
+            .rendezvous
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SharedJsonlPreparationRendezvousRegistration {
+    fn drop(&mut self) {
+        SharedJsonlPreparationRendezvous::registry().remove(&self.file_identity);
+    }
+}
+
+#[cfg(test)]
+fn enter_shared_jsonl_frame_preparation(file_identity: u64, window_preparations: usize) {
+    let preparations =
+        SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut preparations = preparations.lock().unwrap_or_else(PoisonError::into_inner);
+    let count = preparations.entry(file_identity).or_default();
+    *count = count.saturating_add(1);
+    drop(preparations);
+    SharedJsonlPreparationRendezvous::arrive(file_identity, window_preparations);
 }
 
 #[cfg(test)]
@@ -830,13 +923,6 @@ fn shared_jsonl_frame_preparations_for_test(file_identity: u64) -> usize {
         .get(&file_identity)
         .copied()
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-impl Drop for SharedJsonlFramePreparationGuard {
-    fn drop(&mut self) {
-        SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
 }
 
 struct SharedJsonlPreparationWaitGuard;
@@ -1102,7 +1188,7 @@ fn build_shared_jsonl_page_with_frame_limit(
         }
     };
     #[cfg(test)]
-    let preparation_file_identity = raw.file_identity;
+    let (preparation_file_identity, window_preparations) = (raw.file_identity, raw.frames.len());
     if cancellation
         .as_ref()
         .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire))
@@ -1124,8 +1210,10 @@ fn build_shared_jsonl_page_with_frame_limit(
             let prepared = tokio::sync::OnceCell::new();
             if prepare_frames {
                 #[cfg(test)]
-                let _frame_preparation =
-                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
+                enter_shared_jsonl_frame_preparation(
+                    preparation_file_identity,
+                    window_preparations,
+                );
                 let result = prepare_observation_record_v1(
                     bytes.as_ref(),
                     range,
@@ -1310,7 +1398,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     )?;
     let task_cancellation = cancellation.clone();
     #[cfg(test)]
-    let preparation_file_identity = page.file_identity;
+    let (preparation_file_identity, window_preparations) = (page.file_identity, jobs.len());
     let prepared = tokio::task::spawn_blocking(move || {
         jobs.into_par_iter()
             .map(|(index, bytes, range)| {
@@ -1334,8 +1422,10 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
                 let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
-                let _frame_preparation =
-                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
+                enter_shared_jsonl_frame_preparation(
+                    preparation_file_identity,
+                    window_preparations,
+                );
                 Ok((
                     index,
                     prepare_observation_record_v1(

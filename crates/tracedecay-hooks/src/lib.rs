@@ -572,17 +572,38 @@ mod tests {
 
     #[test]
     fn closed_hook_wire_rejects_unknown_event_and_capability_fields() {
-        let mut wire = serde_json::to_value(envelope()).unwrap();
+        let original = envelope();
+        let clean = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<HookEventEnvelopeV2>(clean.clone()).unwrap(),
+            original
+        );
+        let mut wire = clean;
         wire["event"]["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<HookEventEnvelopeV2>(wire).is_err());
+        let error = serde_json::from_value::<HookEventEnvelopeV2>(wire)
+            .expect_err("unknown event fields must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown field `unexpected`, expected `boundary`"
+        );
 
-        let mut capability = serde_json::to_value(HookCapabilityV1 {
+        let capability = HookCapabilityV1 {
             family: HookEventFamily::SessionBoundary,
             support: HookEventSupportV1::Native,
-        })
-        .unwrap();
-        capability["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<HookCapabilityV1>(capability).is_err());
+        };
+        let clean_capability = serde_json::to_value(capability).unwrap();
+        assert_eq!(
+            serde_json::from_value::<HookCapabilityV1>(clean_capability.clone()).unwrap(),
+            capability
+        );
+        let mut unknown = clean_capability;
+        unknown["unexpected"] = serde_json::json!(true);
+        let error = serde_json::from_value::<HookCapabilityV1>(unknown)
+            .expect_err("unknown capability fields must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown field `unexpected`, expected `family` or `support`"
+        );
     }
 
     #[test]
