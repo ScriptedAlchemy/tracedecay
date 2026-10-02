@@ -618,7 +618,7 @@ async fn run_user_job_with_backend_publication(
                     .append_failed(
                         None,
                         format!("job pre-run command failed: {err}"),
-                        AgentTaskFailureClass::Permanent,
+                        err.failure_class(),
                         None,
                         None,
                     )
@@ -1006,7 +1006,33 @@ fn build_job_prompt(
     prompt
 }
 
-async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Result<String> {
+#[derive(Debug, thiserror::Error)]
+enum PreRunCommandError {
+    #[error("command timed out after {JOB_COMMAND_TIMEOUT_SECS}s")]
+    TimedOut,
+    #[error("failed to spawn command: {0}")]
+    Spawn(std::io::Error),
+    #[error("command exited with {status}: {stderr}")]
+    Exited {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+}
+
+impl PreRunCommandError {
+    fn failure_class(&self) -> AgentTaskFailureClass {
+        match self {
+            Self::TimedOut => AgentTaskFailureClass::Timeout,
+            Self::Spawn(_) => AgentTaskFailureClass::Unavailable,
+            Self::Exited { .. } => AgentTaskFailureClass::Permanent,
+        }
+    }
+}
+
+async fn run_pre_run_command(
+    command: &str,
+    project_root: Option<&Path>,
+) -> std::result::Result<String, PreRunCommandError> {
     #[cfg(windows)]
     let mut process = {
         let mut process = tokio::process::Command::new("cmd");
@@ -1030,20 +1056,13 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
         process.output(),
     )
     .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!("command timed out after {JOB_COMMAND_TIMEOUT_SECS}s"),
-    })?
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("failed to spawn command: {e}"),
-    })?;
+    .map_err(|_| PreRunCommandError::TimedOut)?
+    .map_err(PreRunCommandError::Spawn)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "command exited with {}: {}",
-                output.status,
-                truncate_chars_for_prompt(stderr.trim(), 500),
-            ),
+        return Err(PreRunCommandError::Exited {
+            status: output.status,
+            stderr: truncate_chars_for_prompt(stderr.trim(), 500),
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
