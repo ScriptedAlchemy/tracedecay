@@ -713,19 +713,24 @@ impl ManagedTestRun {
         else {
             return Ok(());
         };
-        finish_test_run(
+        publish_test_run_terminal(
             &self.emitter,
-            self.started_at,
-            &self.deadline,
-            OperationTermination::Failed,
-            0,
+            test_run_receipt(
+                self.started_at,
+                &self.deadline,
+                OperationTermination::Failed,
+                0,
+            ),
         )
         .await?;
         Err(test_run_record_error(error))
     }
 
-    /// Publishes the terminal receipt and settles the durable record with the
-    /// run's exit status and outcome counts.
+    /// Settles the durable record with the run's exit status and outcome
+    /// counts, then publishes the terminal receipt. Readers rely on that
+    /// order: a run whose live stream terminated has its outcome recorded
+    /// unless recording it failed. The receipt is published either way, so
+    /// no subscriber waits on a run that already ended.
     #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.finish")]
     pub(super) async fn finish(
         &self,
@@ -734,14 +739,8 @@ impl ManagedTestRun {
         exit_code: Option<i32>,
         report: &LibtestReport,
     ) -> Result<OperationReceipt> {
-        let receipt = finish_test_run(
-            &self.emitter,
-            self.started_at,
-            &self.deadline,
-            termination,
-            bytes_consumed,
-        )
-        .await?;
+        let receipt =
+            test_run_receipt(self.started_at, &self.deadline, termination, bytes_consumed);
         let outcome = ManagedTestRunOutcomeV1 {
             receipt: receipt.clone(),
             exit_code,
@@ -755,11 +754,14 @@ impl ManagedTestRun {
                 .collect(),
             ignored: report.ignored.len() as u64,
         };
-        self.recording
+        let recorded = self
+            .recording
             .store
             .record_managed_test_run_outcome(&self.operation_id(), &outcome)
             .await
-            .map_err(test_run_record_error)?;
+            .map_err(test_run_record_error);
+        publish_test_run_terminal(&self.emitter, receipt.clone()).await?;
+        recorded?;
         Ok(receipt)
     }
 
@@ -800,14 +802,7 @@ async fn begin_test_run(
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
     let emitter = operation_event_authority()
-        .begin_managed_test_run(
-            root_uri.clone(),
-            request_id,
-            head_commit_id.clone(),
-            Some(admission.code_generation_id.clone()),
-            document_content_digests,
-            admission.deadline.clone(),
-        )
+        .begin_managed_test_run(root_uri.clone(), request_id, admission.deadline.clone())
         .await
         .map_err(|error| test_run_event_error(&error))?;
     let run = ManagedTestRun {
@@ -822,6 +817,7 @@ async fn begin_test_run(
         session_id: run.recording.session_id.clone(),
         head_commit_id,
         code_generation_id: Some(admission.code_generation_id),
+        document_content_digests,
         started_at: run.started_at,
         requested_tests: admission.requested_tests,
     };
@@ -910,13 +906,12 @@ async fn emit_observed_test_results(
         .map_err(|error| test_run_event_error(&error))
 }
 
-async fn finish_test_run(
-    emitter: &OperationEmitter,
+fn test_run_receipt(
     started_at: UtcMicros,
     effective_deadline: &Deadline,
     termination: OperationTermination,
     bytes_consumed: u64,
-) -> Result<OperationReceipt> {
+) -> OperationReceipt {
     let ended_at = now_micros();
     let elapsed_micros = ended_at.0.saturating_sub(started_at.0) as u64;
     let cancellation = matches!(
@@ -927,7 +922,7 @@ async fn finish_test_run(
         stage: CancellationStage::DuringRead,
         observed_at: ended_at,
     });
-    let receipt = OperationReceipt {
+    OperationReceipt {
         started_at,
         ended_at,
         effective_deadline: effective_deadline.clone(),
@@ -938,12 +933,18 @@ async fn finish_test_run(
             elapsed_micros,
         },
         termination,
-    };
+    }
+}
+
+async fn publish_test_run_terminal(
+    emitter: &OperationEmitter,
+    receipt: OperationReceipt,
+) -> Result<()> {
     emitter
-        .terminal(receipt.clone())
+        .terminal(receipt)
         .await
-        .map_err(|error| test_run_event_error(&error))?;
-    Ok(receipt)
+        .map(|_| ())
+        .map_err(|error| test_run_event_error(&error))
 }
 
 fn test_run_event_error(error: &OperationEventError) -> TraceDecayError {

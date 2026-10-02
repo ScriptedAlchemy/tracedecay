@@ -209,9 +209,7 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
         // the last published state here is how a second linked worktree kept
         // allocating until the cgroup killer. Reclaimers stay off this thread:
         // the indexing pool's stack cannot host them.
-        let Some(state) = pressure.sample_for_checkpoint() else {
-            return false;
-        };
+        let state = pressure.sample_for_checkpoint();
         if matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. }) {
             self.tripped.store(true, Ordering::Release);
             return true;
@@ -305,5 +303,18 @@ mod tests {
         assert_eq!(epoch.load(Ordering::Acquire), 3);
         assert!(!shutting_down.load(Ordering::Acquire));
         assert!(!control.is_deadline_exceeded());
+    }
+
+    #[test]
+    fn checkpoint_sampling_failure_preserves_known_pressure() {
+        let limit = NonZeroU64::new(100 * 1024 * 1024).expect("limit");
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        ));
+        pressure.publish_observed_resident_bytes(limit.get());
+        let control = DaemonCodeIndexControlV1::default().with_resident_memory(pressure);
+        assert!(control.is_cancelled());
+        assert!(control.refused_by_resident_memory());
     }
 }

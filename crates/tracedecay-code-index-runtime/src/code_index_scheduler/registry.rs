@@ -1198,7 +1198,7 @@ mod terminal_publication_park_tests {
 
 /// The sealed-generation identity half of a freshness reading. Every other
 /// field is left at its default so callers can fill in the observation half
-/// with struct-update syntax, which keeps these seven, six of them
+/// with struct-update syntax, which keeps these eight, six of them
 /// `Option<String>`, matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
@@ -1224,6 +1224,10 @@ fn dashboard_freshness_identity(
         identity.latest_generation_id =
             Some(generation.manifest().generation_id.as_str().to_owned());
         identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.omitted_sources =
+            tracedecay_contracts::code_index_freshness::CodeIndexOmittedSourcesV1::from_snapshot(
+                snapshot,
+            );
         identity.sealed_at_micros = Some(generation.manifest().seal.sealed_at.0);
     }
     identity
@@ -1353,6 +1357,10 @@ fn dashboard_text_freshness_identity(
             .map(|revision| revision.as_str().to_owned());
         identity.latest_generation_id = Some(metadata.manifest().generation_id.as_str().to_owned());
         identity.snapshot_content_identity = Some(snapshot.content_identity.as_str().to_owned());
+        identity.omitted_sources =
+            tracedecay_contracts::code_index_freshness::CodeIndexOmittedSourcesV1::from_snapshot(
+                snapshot,
+            );
         identity.sealed_at_micros = Some(metadata.manifest().seal.sealed_at.0);
     }
     identity

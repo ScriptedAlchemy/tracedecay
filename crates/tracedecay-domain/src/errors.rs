@@ -92,6 +92,22 @@ pub enum TraceDecayError {
         typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
+    /// A project open failed for a reason its admission acts on: first-touch
+    /// bootstrap and the reopen backoff both match `kind`, never `detail`.
+    #[error("{detail}")]
+    ProjectOpen {
+        kind: ProjectOpenFailureKind,
+        detail: String,
+    },
+
+    /// A request the caller has to correct; repeating it unchanged repeats
+    /// the answer.
+    #[error("{message}")]
+    InvalidRequest {
+        reason: InvalidRequestReason,
+        message: String,
+    },
+
     /// A command answered with a typed refusal rather than failing; the
     /// process boundary names the refusal and its stable code.
     #[error(transparent)]
@@ -122,6 +138,44 @@ pub enum TraceDecayError {
 }
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
+
+/// Why a project open failed, as the open's admission decides recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectOpenFailureKind {
+    /// Identity resolution found no enrollment marker or registry match.
+    IdentityUnregistered,
+    /// The project has no index database yet; first-touch init creates it.
+    IndexMissing,
+    /// Every code-runtime seat is taken; one frees when another project
+    /// retires.
+    CodeRuntimeBudgetExhausted { limit: usize },
+    /// The global authority audit judged persisted rows and rejected them.
+    /// The verdict is a property of the stored data, so reopening repeats it
+    /// unless `migration_pending` names a migration that can still clear it.
+    AuthorityVerdict { migration_pending: bool },
+    /// An earlier failure of this route is backed off until its retry time.
+    BackedOff { retry_after_ms: u64 },
+}
+
+/// Why a request has to be corrected before it can succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidRequestReason {
+    MissingRequiredParameter,
+    NotFound,
+    /// The string is not a handle a truncated response envelope emitted.
+    InvalidResponseHandle,
+}
+
+impl InvalidRequestReason {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingRequiredParameter => "missing_required_parameter",
+            Self::NotFound => "not_found",
+            Self::InvalidResponseHandle => "invalid_handle",
+        }
+    }
+}
 
 /// `code` is the refusal record's own code when the result carries one.
 #[derive(Debug, Error)]
@@ -169,6 +223,11 @@ pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
 /// by the `store` label [`StoreResetRequiredV1`] carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResettableStoreV1 {
+    /// The profile database (`global.db`): project registry, usage
+    /// accounting, and remote-deletion records. Project stores keep their own
+    /// identity, so its reset leaves every project store intact but
+    /// unregistered.
+    ProfileAuthority,
     ProfileSessions,
     ProjectSessions {
         project_id: String,
@@ -183,6 +242,7 @@ pub enum ResettableStoreV1 {
 }
 
 impl ResettableStoreV1 {
+    const PROFILE_AUTHORITY_LABEL: &'static str = "profile authority";
     const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
     const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
     const PROFILE_HOOK_ADMISSIONS_LABEL: &'static str = "profile hook admissions";
@@ -191,6 +251,7 @@ impl ResettableStoreV1 {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
+            Self::ProfileAuthority => Self::PROFILE_AUTHORITY_LABEL.to_owned(),
             Self::ProfileSessions => Self::PROFILE_SESSIONS_LABEL.to_owned(),
             Self::ProjectSessions { project_id } => {
                 format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
@@ -207,6 +268,7 @@ impl ResettableStoreV1 {
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
+            Self::PROFILE_AUTHORITY_LABEL => return Some(Self::ProfileAuthority),
             Self::PROFILE_SESSIONS_LABEL => return Some(Self::ProfileSessions),
             Self::PROFILE_HOOK_ADMISSIONS_LABEL => return Some(Self::ProfileHookAdmissions),
             _ => {}
@@ -347,6 +409,35 @@ impl TraceDecayError {
         })
     }
 
+    pub fn project_open(kind: ProjectOpenFailureKind, detail: impl Into<String>) -> Self {
+        Self::ProjectOpen {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn project_open_failure_kind(&self) -> Option<ProjectOpenFailureKind> {
+        match self {
+            Self::ProjectOpen { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    pub fn missing_required_parameter(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::MissingRequiredParameter,
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            reason: InvalidRequestReason::NotFound,
+            message: message.into(),
+        }
+    }
+
     pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,
@@ -416,10 +507,6 @@ impl TraceDecayError {
             operation: operation.into(),
             message: flatten_error_chain(&source),
         }
-    }
-
-    pub fn is_database_error(&self) -> bool {
-        matches!(self, Self::Database { .. })
     }
 
     /// A hook-runtime failure raised without an admission authority behind it

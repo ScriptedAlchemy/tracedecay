@@ -889,7 +889,7 @@ mod tests {
             mcp_call(
                 2,
                 "tracedecay_callees",
-                r#"{"duration_us":1500,"cost":{"wall_micros":1234,"point_reads":{"graph_sealed":21,"graph_staging":0},"adjacency_queries":1,"adjacency_rows":107,"bytes_hydrated":40960}}"#,
+                r#"{"duration_us":1500,"cost":{"wall_micros":1234,"point_reads":{"graph_sealed":21,"graph_staging":0},"adjacency_queries":1,"adjacency_rows":107,"bytes_hydrated":40960,"catalog_symbols":7}}"#,
             ),
         ];
         let payload = diagnostics_payload_from_parts(0, &HookAnalyticsRows::empty(), Some(&events));
@@ -911,6 +911,7 @@ mod tests {
                         adjacency_queries: 1,
                         adjacency_rows: 107,
                         bytes_hydrated: 40960,
+                        catalog_symbols: 7,
                     }),
                 ),
                 ("tracedecay_search", None),

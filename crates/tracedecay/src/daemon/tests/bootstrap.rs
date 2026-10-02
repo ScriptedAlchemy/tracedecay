@@ -1974,10 +1974,10 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
     let first_attempts = Arc::clone(&attempts);
     let first = tasks.start(route.clone(), async move {
         first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Err(tracedecay_domain::errors::TraceDecayError::Database {
-            message: "session temporal receipts or cursor keys are mutable".to_string(),
-            operation: "ensure global database authority invariants".to_string(),
-        })
+        Err(authority_verdict(
+            true,
+            "session temporal receipts or cursor keys are mutable",
+        ))
     });
     let first = match first {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
@@ -2018,10 +2018,11 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         .await
         .expect_err("the injected invariant rejection must surface");
     assert!(
-        error
-            .to_string()
-            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
-        "cached route failure must carry the stable backoff marker: {error}"
+        matches!(
+            error.project_open_failure_kind(),
+            Some(tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. })
+        ),
+        "cached route failure must carry the typed backoff: {error}"
     );
     let repeated_attempts = Arc::clone(&attempts);
     let started = std::time::Instant::now();
@@ -2043,10 +2044,11 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         }
     };
     assert!(
-        repeated_error
-            .to_string()
-            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
-        "repeated routing must return the typed backoff failure"
+        matches!(
+            repeated_error.project_open_failure_kind(),
+            Some(tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff { .. })
+        ),
+        "repeated routing must return the typed backoff failure: {repeated_error}"
     );
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::Relaxed),
@@ -2196,71 +2198,78 @@ fn authority_invariant_error(message: &str) -> tracedecay_domain::errors::TraceD
     }
 }
 
-#[test]
-fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
-    let error = tracedecay_domain::errors::TraceDecayError::Database {
-        message: "DuplicateCodeAuthority { shard_id: fixture }".to_string(),
-        operation: "register code-shard authority".to_string(),
-    };
-
-    assert_eq!(
-        super::super::project_open_retry_backoff(&error),
-        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
-    );
+fn authority_verdict(
+    migration_pending: bool,
+    violation: &str,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_open(
+        tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict { migration_pending },
+        violation,
+    )
 }
 
-#[test]
-fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
-    let error = tracedecay_domain::errors::TraceDecayError::Database {
-        message: "ProjectCodeBudgetExhausted { limit: 4 }".to_string(),
-        operation: "open registered session runtime".to_string(),
-    };
-
+/// The registry's budget refusal backs the route off at the resource cadence,
+/// and the client is told the time it actually has to wait, not the debounce.
+#[tokio::test]
+async fn exhausted_code_runtime_capacity_backs_off_at_resource_cadence() {
+    let error = tracedecay_store_runtime::registry_open_error(
+        "open registered session runtime",
+        tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted { limit: 4 },
+    );
     assert_eq!(
         super::super::project_open_retry_backoff(&error),
         Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
     );
+
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("code-budget");
+    let state = match tasks.start(route.clone(), async move { Err(error) }) {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_)
+        | super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("the first open must start a tracked task")
+        }
+    };
+    let cached = super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("the budget refusal must surface");
+    let status = tasks.status(&route).expect("refused route status");
+    assert_eq!(
+        status.reason,
+        tracedecay_contracts::project_open::ProjectOpenStatusReasonV1::RetryBackoff
+    );
+    let data = super::super::project_open_error_response(serde_json::json!(5), &cached)
+        .error
+        .expect("backed-off route refusal")
+        .data
+        .expect("typed backoff data");
+    assert_eq!(data["kind"], "project_route_open_backoff");
+    assert_eq!(data["retryable"], true);
+    let retry_after_ms = data["retry_after_ms"]
+        .as_u64()
+        .expect("backoff names its wait");
     assert!(
-        super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF
-            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
+        retry_after_ms > 250 && retry_after_ms <= 1_000,
+        "the client must wait out the 1s resource backoff, not the 250ms debounce: {data}"
     );
 }
 
 #[test]
-fn mutable_cursor_key_rejection_keeps_the_transient_debounce() {
+fn authority_verdicts_back_off_unless_a_migration_can_clear_them() {
     assert_eq!(
-        super::super::project_open_retry_backoff(&authority_invariant_error(
+        super::super::project_open_retry_backoff(&authority_verdict(
+            true,
             "session temporal receipts or cursor keys are mutable",
         )),
         Some(super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
     );
-}
-
-/// Every authority verdict that is a property of the stored rows must back off,
-/// including messages nobody has enumerated yet.
-///
-/// The column-versus-JSON disagreement below was unclassified and spun warm-up
-/// at the debounce cadence, burning roughly three quarters of a core. It is a
-/// deterministic judgement of persisted data, so it cannot self-clear, and
-/// neither can the rest of this family.
-#[test]
-fn deterministic_authority_verdicts_all_back_off() {
-    for message in [
-        "committed observation authority columns disagree with observation JSON",
-        "sanitization receipt authority columns disagree with receipt JSON",
-        "summary publication receipt authority columns disagree with receipt JSON",
-        "source cursor authority keys disagree with cursor JSON",
-        "committed source cursor disagrees with observation source evidence",
-        "committed observation references a missing receipt",
-        "projection provenance disagrees with deterministic output",
-        "an invariant message that does not exist yet",
-    ] {
-        assert_eq!(
-            super::super::project_open_retry_backoff(&authority_invariant_error(message)),
-            Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
-            "{message} cannot clear on its own and must not reopen at the debounce cadence"
-        );
-    }
+    assert_eq!(
+        super::super::project_open_retry_backoff(&authority_verdict(
+            false,
+            "committed observation authority columns disagree with observation JSON",
+        )),
+        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
+    );
 }
 
 #[test]
@@ -2432,12 +2441,13 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let (release, blocked) = tokio::sync::oneshot::channel();
     let inflight = match tasks.start_cancellable(route, move |_| async move {
         blocked.await.expect("release ordinary open");
-        Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
+        Err(tracedecay_domain::errors::TraceDecayError::project_open(
+            tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing,
+            format!(
                 "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                 missing_graph_db_path.display()
             ),
-        })
+        ))
     }) {
         super::super::ProjectOpenTaskClaim::InFlight(state) => state,
         super::super::ProjectOpenTaskClaim::Failed(_)
