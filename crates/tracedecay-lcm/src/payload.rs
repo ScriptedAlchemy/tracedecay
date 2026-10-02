@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 pub use crate::contracts::validate_payload_ref;
 use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{
+    Executor, QueryExecutor, WriteStatement, params, params_from_iter,
+};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc};
@@ -189,60 +191,89 @@ pub async fn upsert_payload_metadata(
     conn: &(impl Executor + ?Sized),
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
-    conn.execute(
-        "INSERT INTO lcm_external_payloads (
-            payload_ref, provider, session_id, message_id, kind, content_hash,
-            byte_count, char_count, created_at, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(payload_ref) DO NOTHING",
-        params![
-            payload.payload_ref.as_str(),
-            payload.provider.as_str(),
-            payload.session_id.as_str(),
-            payload.message_id.as_str(),
-            payload.kind.as_str(),
-            payload.content_hash.as_str(),
-            payload.byte_count as i64,
-            payload.char_count as i64,
-            payload.created_at,
-            payload.metadata_json.as_deref(),
-        ],
-    )
-    .await?;
-    // A reference is being written to this payload. Clearing its GC mark in
-    // the same transaction is what lets payload GC read its reference closure
-    // outside its write transaction: GC deletes only payloads whose
-    // unreferenced mark survived into that transaction.
-    conn.execute(
-        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
-        params![payload.payload_ref.as_str()],
-    )
-    .await?;
-    let mut rows = conn
-        .query(
-            "SELECT provider, session_id, message_id, kind, content_hash,
+    upsert_payload_metadata_batch(conn, std::slice::from_ref(payload)).await
+}
+
+pub async fn upsert_payload_metadata_batch(
+    conn: &(impl Executor + ?Sized),
+    payloads: &[LcmPayloadRef],
+) -> Result<(), LcmError> {
+    // Ten bound variables per upsert row; the chunk stays far under SQLite's
+    // parameter cap while covering any one message's payload fan-out.
+    for chunk in payloads.chunks(100) {
+        let mut statements = Vec::with_capacity(chunk.len() * 2);
+        for payload in chunk {
+            statements.push(WriteStatement::new(
+                "INSERT INTO lcm_external_payloads (
+                    payload_ref, provider, session_id, message_id, kind, content_hash,
                     byte_count, char_count, created_at, metadata_json
-             FROM lcm_external_payloads WHERE payload_ref = ?1",
-            params![payload.payload_ref.as_str()],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("payload manifest replay row disappeared".to_string()))?;
-    let matches = row.get::<String>(0)? == payload.provider
-        && row.get::<String>(1)? == payload.session_id
-        && row.get::<String>(2)? == payload.message_id
-        && row.get::<String>(3)? == payload.kind
-        && row.get::<String>(4)? == payload.content_hash
-        && row.get::<i64>(5)? == payload.byte_count as i64
-        && row.get::<i64>(6)? == payload.char_count as i64
-        && row.get::<Option<String>>(8)? == payload.metadata_json;
-    if !matches {
-        return Err(LcmError::ImmutablePayloadConflict {
-            payload_ref: payload.payload_ref.clone(),
-        });
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(payload_ref) DO NOTHING",
+                params![
+                    payload.payload_ref.as_str(),
+                    payload.provider.as_str(),
+                    payload.session_id.as_str(),
+                    payload.message_id.as_str(),
+                    payload.kind.as_str(),
+                    payload.content_hash.as_str(),
+                    payload.byte_count as i64,
+                    payload.char_count as i64,
+                    payload.created_at,
+                    payload.metadata_json.as_deref(),
+                ],
+            )?);
+            // A reference is being written to this payload. Clearing its GC mark in
+            // the same transaction is what lets payload GC read its reference closure
+            // outside its write transaction: GC deletes only payloads whose
+            // unreferenced mark survived into that transaction.
+            statements.push(WriteStatement::new(
+                "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
+                params![payload.payload_ref.as_str()],
+            )?);
+        }
+        conn.execute_statements(statements).await?;
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
+                            byte_count, char_count, created_at, metadata_json
+                     FROM lcm_external_payloads
+                     WHERE payload_ref IN ({placeholders})"
+                ),
+                params_from_iter(chunk.iter().map(|payload| payload.payload_ref.as_str())),
+            )
+            .await?;
+        let expected: std::collections::HashMap<&str, &LcmPayloadRef> = chunk
+            .iter()
+            .map(|payload| (payload.payload_ref.as_str(), payload))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await? {
+            let Some(payload) = expected.get(row.get::<String>(0)?.as_str()) else {
+                continue;
+            };
+            seen.insert(payload.payload_ref.as_str());
+            let matches = row.get::<String>(1)? == payload.provider
+                && row.get::<String>(2)? == payload.session_id
+                && row.get::<String>(3)? == payload.message_id
+                && row.get::<String>(4)? == payload.kind
+                && row.get::<String>(5)? == payload.content_hash
+                && row.get::<i64>(6)? == payload.byte_count as i64
+                && row.get::<i64>(7)? == payload.char_count as i64
+                && row.get::<Option<String>>(9)? == payload.metadata_json;
+            if !matches {
+                return Err(LcmError::ImmutablePayloadConflict {
+                    payload_ref: payload.payload_ref.clone(),
+                });
+            }
+        }
+        if seen.len() != expected.len() {
+            return Err(LcmError::Db(
+                "payload manifest replay row disappeared".to_string(),
+            ));
+        }
     }
     Ok(())
 }
