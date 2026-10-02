@@ -13,9 +13,9 @@ use tracedecay_domain::{
 use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphNamespace, GraphSpillRowFootprint};
 
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
-use crate::graph_projection::builder::emit_persisted_code_graph_page;
 use crate::graph_projection::{
     CodeGraphSymbolBindingV1, code_graph_projection_identity, code_graph_symbol_bindings,
+    emit_persisted_code_graph_page,
 };
 use crate::lineage::LineageSymbolRecordV1;
 
