@@ -18,7 +18,7 @@ mod plugin_cli;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -323,9 +323,7 @@ impl AgentIntegration for OpenCodeIntegration {
         if !config_path.exists() {
             return false;
         }
-        super::load_json_file(&config_path)
-            .pointer(MCP_SERVER_POINTER)
-            .is_some()
+        config_has_tracedecay(&super::load_json_file(&config_path))
     }
 
     fn detected_host_surface(
@@ -384,9 +382,14 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
     if !config_path.exists() {
         return false;
     }
-    super::load_json_file(&config_path)
-        .pointer(MCP_SERVER_POINTER)
-        .is_some()
+    config_has_tracedecay(&super::load_json_file(&config_path))
+}
+
+fn config_has_tracedecay(config: &Value) -> bool {
+    config.pointer(MCP_SERVER_POINTER).is_some()
+        || config
+            .pointer(&format!("/mcp/{LEGACY_MCP_SERVER_KEY}"))
+            .is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +907,11 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRo
     {
         dc.fail(
             "V1-era `mcp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
+        );
+    }
+    if config.pointer("/lsp/tracedecay").is_some() {
+        dc.fail(
+            "retired `lsp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
         );
     }
 }
