@@ -3,8 +3,6 @@
 //! then refines its working directory. A genuine collision stays on that
 //! queue row and must not stop later sessions.
 
-use std::time::{Duration, Instant};
-
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
@@ -23,7 +21,6 @@ use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite,
 };
-
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::tests::harness::{
@@ -342,7 +339,7 @@ fn lcm_request(provider: &str, session_id: &str) -> LcmCompressionRequest {
 }
 
 async fn lcm_compress(database: &RegisteredGlobalDb, provider: &str, session_id: &str) {
-    let control = ExecutionControl::new(Some(Instant::now() + Duration::from_secs(30)));
+    let control = ExecutionControl::new(None);
     let response = database
         .lcm_compress_guarded(&lcm_request(provider, session_id), &control, || Ok(()))
         .await

@@ -2404,7 +2404,7 @@ async fn update_active_replay_metadata(
 /// project fields the rollout projection writes for that store; the
 /// projection's working directory later refines `project_path`.
 /// `INSERT OR IGNORE` leaves a row the rollout projection already created.
-pub async fn ensure_session(
+async fn ensure_session(
     conn: &impl Executor,
     scope: &ObservationScopeV1,
     provider: &str,
