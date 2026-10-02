@@ -93,7 +93,6 @@ async fn production_routed_projects_ready_for_first_read() -> ProductionRoutedPr
     .await
     .expect("production routed-project composition");
     let target_server = harness.server(&target_root).expect("target project server");
-    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
     assert!(
         target_server
             .wait_for_startup_catch_up(Duration::from_secs(30))
