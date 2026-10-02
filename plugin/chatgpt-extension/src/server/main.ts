@@ -81,7 +81,7 @@ export async function serveLoopbackHttp(createServer: () => McpServer, host: str
   if (typeof address !== "object" || address === null) throw new Error("loopback HTTP server did not report a bound address");
   boundPort = address.port;
   return {
-    url: `http://${host}:${boundPort}/mcp`,
+    url: `http://${host === "::1" ? "[::1]" : host}:${boundPort}/mcp`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => (error === undefined ? resolve() : reject(error)));
@@ -91,7 +91,7 @@ export async function serveLoopbackHttp(createServer: () => McpServer, host: str
 }
 
 async function handleHttp(createServer: () => McpServer, request: IncomingMessage, response: ServerResponse, host: string, port: number, token: string): Promise<void> {
-  const url = new URL(request.url ?? "/", `http://${host}:${port}`);
+  const url = new URL(request.url ?? "/", `http://${host === "::1" ? "[::1]" : host}:${port}`);
   if (url.pathname !== "/mcp") {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "not_found" }));

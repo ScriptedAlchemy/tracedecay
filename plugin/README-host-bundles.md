@@ -41,10 +41,10 @@ never replaced wholesale.
   staged plugin source under
   `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. ChatGPT registers
   plugins only through its own interactive surfaces, so install and
-  `update-plugin` commit the staged bytes and report the in-app install (or
-  the `node ... server.mjs --http 127.0.0.1:8787` connector step) as a
-  pending operator action; `uninstall` removes the receipt-owned staged
-  tree. The explorer is a read-only MCP App over the same daemon authority:
+  `update-plugin` commit the staged bytes and report host registration as
+  unverifiable (informational, exit 0), with activation guidance in the README.
+  `uninstall` removes the receipt-owned staged tree. The explorer is a read-only
+  MCP App over the same daemon authority:
   MCP-transport operations go through a spawned `tracedecay serve`, HTTP
   operations use the profile's `daemon-authority.json` token server-side
   only. The committed `embedded/` bundle follows the Cursor

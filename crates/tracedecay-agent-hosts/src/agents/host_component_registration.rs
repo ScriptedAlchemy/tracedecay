@@ -183,11 +183,6 @@ impl CatalogHostComponentRegistrationAuthority {
             // writes the host-owned `~/.factory/mcp.json`; the deployed
             // descriptor alone is not the lifecycle.
             || component_set.host == crate::agents::host_bundle::HostKindV1::FactoryDroid
-            // ChatGPT's deployed artifact is the staged portable bundle; the
-            // host carries nothing until its own interactive plugin or
-            // connector flow consumes it, so the deployed bytes alone are not
-            // the lifecycle.
-            || component_set.host == crate::agents::host_bundle::HostKindV1::ChatGpt
             || component_set.host == crate::agents::host_bundle::HostKindV1::Cline
             || component_set.host == crate::agents::host_bundle::HostKindV1::RooCode
             || component_set.host == crate::agents::host_bundle::HostKindV1::Kilo
@@ -366,6 +361,7 @@ impl CatalogHostComponentRegistrationAuthority {
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Repairable => 2,
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Missing => 3,
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Corrupt => 4,
+                    crate::agents::host_bundle::HostBundleRegistrationStateV1::Unverifiable => 5,
                 }]);
             }
         }
@@ -708,7 +704,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                 if matches!(
                     component_set.host,
                     crate::agents::host_bundle::HostKindV1::KimiCode
-                        | crate::agents::host_bundle::HostKindV1::ChatGpt
                 ) {
                     match self
                         .integration

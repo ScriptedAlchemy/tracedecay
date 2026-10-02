@@ -514,9 +514,9 @@ fn uninstall_restores_the_exact_pre_install_home_on_every_host() {
     let mut residue = Vec::new();
     for host in RECEIPT_BACKED_HOST_KINDS {
         let id = integration_id_for_host(host);
-        // Kimi and ChatGPT defer activation to the host's own interactive
-        // install, so their lifecycle phases report the pending operator step.
-        let pending_allowed = matches!(host, HostKindV1::KimiCode | HostKindV1::ChatGpt);
+        // Kimi's observable activation remains pending until its host install.
+        // ChatGPT staging converges without claiming host registration.
+        let pending_allowed = matches!(host, HostKindV1::KimiCode);
         let cli = IsolatedCli::new();
         seed_operator_home(cli.home.path());
         install_fake_native_hosts(&cli.bin_dir);
@@ -524,9 +524,8 @@ fn uninstall_restores_the_exact_pre_install_home_on_every_host() {
 
         run_phase(&cli, id, &["install", "--agent", id], pending_allowed);
         assert_install_changed_surface(host, cli.home.path());
-        // Deferred hosts only stage under `.tracedecay` until the host's own
-        // interactive install consumes the bundle.
-        if !pending_allowed {
+        // Staged sources live under `.tracedecay`, outside this home snapshot.
+        if !matches!(host, HostKindV1::KimiCode | HostKindV1::ChatGpt) {
             assert_ne!(home_snapshot(&cli), before, "{id} install changed nothing");
         }
         run_phase(&cli, id, &["update-plugin"], pending_allowed);

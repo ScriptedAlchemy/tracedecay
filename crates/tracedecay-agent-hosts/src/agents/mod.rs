@@ -296,12 +296,10 @@ pub trait AgentIntegration {
     /// through an interactive UI, or `None` for a host TraceDecay can activate
     /// non-interactively.
     ///
-    /// This is the capability twin of the typed deferral
-    /// [`AgentIntegration::preflight_non_interactive_install`] returns: doctor
-    /// needs the same fact without an `InstallContext`. Every integration returning `Some` here must also return
-    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight,
-    /// otherwise doctor would downgrade a state that an unattended reinstall
-    /// could actually have repaired.
+    /// Doctor uses this without an `InstallContext`. Observable registrations
+    /// awaiting the host's UI return `DeferredUserAction` from preflight;
+    /// hosts without registration readback report `Unverifiable` and complete
+    /// their owned staging without a standing deferral.
     fn interactive_activation_guidance(&self) -> Option<String> {
         None
     }

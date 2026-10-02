@@ -19,22 +19,21 @@ generation provenance.
 
 ## Requirements
 
-- `tracedecay` on `PATH` (the `graph` server) and Node.js (the explorer).
+- TraceDecay installed and Node.js on `PATH`. The lifecycle pins the resolved TraceDecay binary for both MCP servers.
 - The TraceDecay daemon (`tracedecay serve`) with at least one registered
   project.
 
 ## Installing
 
 `tracedecay install --agent chatgpt` stages this bundle at
-`~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` and reports the
-remaining host-side step. ChatGPT registers plugins and connectors only
+`~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` and reports host registration as unverifiable (exit 0). ChatGPT registers plugins and connectors only
 through its own interactive surfaces — developer-mode connector setup or
 the app's plugin flow — so TraceDecay cannot activate it for you.
 
 Two ways to finish:
 
 1. Point a connector at the bundle's MCP endpoint:
-   `node <staged>/chatgpt-extension/embedded/server.mjs --http 127.0.0.1:8787`
+   `node <staged>/chatgpt-extension/embedded/server.mjs --binary /absolute/path/to/tracedecay --http 127.0.0.1:8787`
    (wrap it with `tunnel-client --mcp-server-url` for ChatGPT cloud).
 2. Install the staged bundle through ChatGPT's plugin flow, which launches
    `graph` and `tracedecay-explorer` from `mcp.json` over stdio.

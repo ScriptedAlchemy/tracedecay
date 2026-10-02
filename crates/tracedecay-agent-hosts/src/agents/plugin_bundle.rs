@@ -111,6 +111,17 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
             message: format!("plugin MCP config mcpServers.{key} must be an object"),
         })?
         .insert("command".to_string(), serde_json::json!(bin));
+    // The explorer is a Node adapter that spawns the same resolved CLI.
+    // Pin both legs of the connection so a host's PATH cannot change authority.
+    if let Some(explorer) = servers.get_mut("tracedecay-explorer") {
+        let args = explorer
+            .get_mut("args")
+            .and_then(|value| value.as_array_mut())
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "explorer MCP config is missing args".to_string(),
+            })?;
+        args.extend([serde_json::json!("--binary"), serde_json::json!(bin)]);
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
@@ -230,7 +241,7 @@ const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
 /// Codex manifest + shared MCP + Codex hooks + README.
 pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".codex-plugin/plugin.json", ".codex-plugin/plugin.json"),
-    plugin_file!(".mcp.json", ".mcp.json"),
+    plugin_file!(".mcp.json", "mcp.json"),
     plugin_file!("README.md", "README-codex.md"),
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
@@ -251,6 +262,10 @@ pub const CHATGPT_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("plugin.json", "plugin.json"),
     plugin_file!("mcp.json", "mcp.json"),
     plugin_file!("README.md", "README-chatgpt.md"),
+];
+
+/// The same MCP App and adapter are installed in Codex and ChatGPT.
+const EXPLORER_FILES: &[PluginFile] = &[
     plugin_file!(
         "chatgpt-extension/embedded/server.mjs",
         "chatgpt-extension/embedded/server.mjs"
@@ -345,7 +360,7 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
 /// `agents::codex::rendered_global_plugin_files`, the raw templates here are
 /// not directly installable (`hooks/hooks.json` is an empty scaffold).
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[CODEX_MANIFEST_FILES], all_skill_files())
+    compose(&[CODEX_MANIFEST_FILES, EXPLORER_FILES], all_skill_files())
 }
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown
@@ -368,6 +383,7 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
 pub fn chatgpt_files() -> Vec<(&'static str, &'static str)> {
     CHATGPT_MANIFEST_FILES
         .iter()
+        .chain(EXPLORER_FILES.iter())
         .map(|file| (file.relative, file.contents))
         .collect()
 }

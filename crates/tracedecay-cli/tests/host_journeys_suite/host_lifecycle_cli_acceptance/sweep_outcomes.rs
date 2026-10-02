@@ -669,14 +669,11 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }
 
-/// ChatGPT needs no host binary and keeps no locally readable registry:
-/// `install` commits the receipt-owned staged bundle and reports the
-/// host-side step as pending, the sweep keeps reporting it, `doctor`
-/// reports the same pending action, and `uninstall` removes the staged
-/// bundle while leaving operator-foreign host files untouched.
+/// Staging converges without claiming host registration. Doctor reports the
+/// unverifiable host step informationally and rejects an incomplete stage.
 #[cfg(unix)]
 #[test]
-fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
+fn chatgpt_stages_an_unverifiable_registration_and_uninstalls_its_bundle() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::ChatGpt);
     let originals = seed_host(case, &cli);
@@ -684,22 +681,12 @@ fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
         .home
         .path()
         .join(".tracedecay/host-bundle-stage/chatgpt/tracedecay");
-    let command = format!(
-        "node {} --http 127.0.0.1:8787",
-        staged
-            .join("chatgpt-extension/embedded/server.mjs")
-            .display()
-    );
 
     let install = cli.run(&["install", "--agent", case.id]);
     let install_stderr = stderr(&install);
-    assert_eq!(
-        install.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
-        "{install_stderr}"
-    );
+    assert_eq!(install.status.code(), Some(0), "{install_stderr}");
     assert!(
-        install_stderr.contains(&format!("chatgpt: pending operator action: `{command}`")),
+        install_stderr.contains("ChatGPT registration is unverifiable locally"),
         "{install_stderr}"
     );
     // The receipt-owned staged bundle is the operator's install payload.
@@ -733,19 +720,24 @@ fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
     let update_stderr = stderr(&update);
     assert_eq!(
         update.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
-        "the pending host stays tracked and the sweep keeps reporting it: {update_stderr}"
+        Some(0),
+        "the staged host stays tracked: {update_stderr}"
     );
     assert!(
-        update_stderr.contains(&format!("chatgpt: pending operator action: `{command}`")),
+        update_stderr.contains("ChatGPT registration is unverifiable locally"),
         "{update_stderr}"
     );
 
-    let doctor = stderr(&cli.run(&["doctor"]));
-    assert!(
-        doctor.contains(&format!("pending operator action: {command}")),
-        "{doctor}"
-    );
+    {
+        let _daemon = ProfileDaemon::start(&cli);
+        let doctor_result = cli.run(&["doctor"]);
+        let doctor = stderr(&doctor_result);
+        assert_eq!(doctor_result.status.code(), Some(0), "{doctor}");
+        assert!(
+            doctor.contains("ChatGPT registration is unverifiable locally"),
+            "{doctor}"
+        );
+    }
 
     // A bundle left without its manifest is a broken stage, not an absent
     // one: doctor fails it, and reinstalling converges the staged bytes the
@@ -761,11 +753,7 @@ fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
 
     let reinstall = cli.run(&["install", "--agent", case.id]);
     let reinstall_stderr = stderr(&reinstall);
-    assert_eq!(
-        reinstall.status.code(),
-        Some(PENDING_OPERATOR_ACTION_EXIT),
-        "{reinstall_stderr}"
-    );
+    assert_eq!(reinstall.status.code(), Some(0), "{reinstall_stderr}");
     assert!(
         staged.join("plugin.json").is_file(),
         "reinstall did not restore the staged manifest"

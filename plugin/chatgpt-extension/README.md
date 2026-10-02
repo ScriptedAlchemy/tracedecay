@@ -81,7 +81,7 @@ native extension's offline-packaging exception. `pnpm run build` regenerates
 `embedded/app.html` and `embedded/server.mjs`; `pnpm run check:embedded`
 performs a byte-for-byte drift check. `dist/` and `test-results/` stay
 ignored. The lifecycle stamps the installed `tracedecay` binary's resolved
-path into the staged `mcp.json` `graph.command` at deploy time, so the
+path into the staged `mcp.json` `graph.command` and the explorer's `--binary` argument at deploy time, so the
 staged bundle runs against the exact binary that installed it.
 
 ## Verification
@@ -106,14 +106,19 @@ staged bundle runs against the exact binary that installed it.
 `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` under the shared
 receipt-backed lifecycle; `update-plugin` and `update` refresh it and
 `uninstall --agent chatgpt` removes exactly the receipt-owned bytes.
-ChatGPT exposes no host CLI or local registry, so every lifecycle command
-reports a pending operator step instead of a completed activation: install
-the staged bundle inside ChatGPT through its interactive plugin flow, or
-point a connector at `node <staged>/chatgpt-extension/embedded/server.mjs
---http 127.0.0.1:8787`. `tracedecay doctor` verifies the staged bundle
-(intact manifest, `extensions.com.openai` mapping, every declared file
-present) and repeats the pending step; it never claims a registration it
-cannot observe.
+ChatGPT exposes no host CLI or local registry. Successful staging exits 0;
+host registration is `unverifiable`, with informational activation guidance.
+Install the staged bundle inside ChatGPT or connect an MCP endpoint using:
+`node <staged>/chatgpt-extension/embedded/server.mjs --binary /absolute/path/to/tracedecay --http 127.0.0.1:8787`.
+`tracedecay doctor` verifies the staged manifest and every declared file,
+fails incomplete or damaged staging, and reports host registration as
+unverifiable without a permanently pending action.
+
+The Codex bundle includes this same explorer and app resource. Run
+`tracedecay install --agent codex` to install them through Codex's native
+plugin lifecycle, then invoke `tracedecay_workspace` in a local Codex chat.
+The staged MCP configuration pins the binary for both servers. No cloud
+endpoint or tunnel is required for this local stdio route.
 
 ## Host support: verified vs. external prerequisite
 

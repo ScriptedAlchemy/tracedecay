@@ -2835,18 +2835,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(agent-hosts)* ChatGPT joins the receipt-backed host lifecycle as a
-  staged-bundle host: `tracedecay install --agent chatgpt` deploys the
-  portable `plugin.json` + `mcp.json` pair, the `tracedecay-explorer` MCP
-  App server, app UI, icon, and README into
-  `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` and reports the
-  in-app install (or loopback `server.mjs --http` connector step) as a
-  pending operator action with exit 75. `update`/`update-plugin` refresh
-  the staged bytes, `doctor` verifies the bundle and repeats the pending
-  step, and `uninstall --agent chatgpt` removes exactly the receipt-owned
-  tree. ChatGPT cloud reachability stays a documented external
-  prerequisite, not a verified route.
-
 - *(dashboard)* rebuild the Code workspace's default lens as the lookbook V2
   semantic cortex: a seven-cell graph register, a full-bleed field with HUD
   legends, an exact ledger, and a workspace-owned inspector that reads the

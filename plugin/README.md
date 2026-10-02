@@ -16,7 +16,8 @@ connector flow. Its `extensions.com.openai` block supplies the OpenAI
 presentation and hook mapping, and `mcp.json` launches both the `graph`
 server (`tracedecay serve`) and the `tracedecay-explorer` MCP App server
 from `chatgpt-extension/`. Codex still reads the `.codex-plugin/plugin.json`
-overlay its own lifecycle deploys; it does not read the portable pair.
+overlay its own lifecycle deploys. Its rendered MCP configuration includes
+both servers and the same explorer app assets.
 
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the

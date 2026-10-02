@@ -1,18 +1,8 @@
 //! ChatGPT host integration.
 //!
-//! `TraceDecay` stages its portable Agent Plugins bundle, `plugin.json`,
-//! `mcp.json`, and the compiled ChatGPT code explorer, under its own profile
-//! through the receipt-backed component transaction. ChatGPT exposes no
-//! non-interactive registration surface: connectors are added through
-//! developer mode and plugins through the app's own interactive flow, and no
-//! host CLI or local registry file exists for TraceDecay to drive. Every
-//! lifecycle command therefore commits the staged source it owns and reports
-//! the remaining host-side step as a typed pending action that cannot be
-//! verified locally. `uninstall` removes the staged source; the connector or
-//! plugin the operator created in ChatGPT is theirs to remove. There is no
-//! project-local route.
-//!
-//! ChatGPT owns connector activation; TraceDecay owns only its staged source.
+//! TraceDecay owns the receipt-backed staged source. ChatGPT owns interactive
+//! activation and exposes no supported local registration readback. Successful
+//! staging is terminal; registration is reported as unverifiable, never current.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +11,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
     NonInteractiveInstallOutcome,
 };
 
@@ -67,23 +57,17 @@ impl AgentIntegration for ChatGptIntegration {
 
     fn preflight_non_interactive_install(
         &self,
-        ctx: &InstallContext,
+        _ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        // The component transaction deploys the staged source; ChatGPT's own
-        // interactive install must then register it. There is no state to
-        // probe for `Ready`: ChatGPT keeps no locally readable registry, so
-        // activation is a standing deferral rather than a recoverable one.
-        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-            chatgpt_lifecycle_unavailable("install", Some(&chatgpt_staged_plugin_dir(&ctx.home))),
-        ))
+        Ok(NonInteractiveInstallOutcome::Ready)
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
-        Some(chatgpt_lifecycle_unavailable("install", None).remediation)
+        Some("ChatGPT registration is unverifiable locally; install the staged bundle inside ChatGPT or follow its README to connect an MCP endpoint".to_string())
     }
 
     fn interactive_removal_guidance(&self) -> Option<String> {
-        Some(chatgpt_lifecycle_unavailable("remove", None).remediation)
+        Some("remove the TraceDecay plugin or connector inside ChatGPT; TraceDecay removes only its staged source".to_string())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -96,11 +80,7 @@ impl AgentIntegration for ChatGptIntegration {
         _component: super::host_bundle::HostComponentV1,
         _ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        // ChatGPT keeps no locally readable registration surface: connector
-        // state lives host-side and the desktop app's plugin store is not a
-        // documented readable registry. Reporting anything beyond Missing
-        // would assert state this integration cannot observe.
-        super::host_bundle::HostBundleRegistrationStateV1::Missing
+        super::host_bundle::HostBundleRegistrationStateV1::Unverifiable
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -123,11 +103,10 @@ impl AgentIntegration for ChatGptIntegration {
             .find(|dir| dir.is_dir())
     }
 
-    fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        Err(deferred_user_action_error(chatgpt_lifecycle_unavailable(
-            "install",
-            Some(&chatgpt_staged_plugin_dir(&ctx.home)),
-        )))
+    fn activate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
+        Err(TraceDecayError::Config {
+            message: "ChatGPT activation is available only inside the host; registration is unverifiable locally".to_string(),
+        })
     }
 
     fn deactivate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
@@ -172,64 +151,13 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .collect()
 }
 
-fn deferred_user_action_error(action: DeferredUserAction) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: action.remediation,
-    }
-}
-
-fn chatgpt_lifecycle_unavailable(action: &str, staged_dir: Option<&Path>) -> DeferredUserAction {
-    // The one operator step that is itself a command: serving the staged
-    // bundle's MCP adapter on loopback for a developer-mode connector.
-    let command = staged_dir.map_or_else(
-        || format!("finish the {action} inside ChatGPT"),
-        |dir| {
-            format!(
-                "node {} --http 127.0.0.1:8787",
-                dir.join("chatgpt-extension/embedded/server.mjs").display()
-            )
-        },
-    );
-    let remediation = match action {
-        "install" => match staged_dir {
-            Some(dir) => format!(
-                "ChatGPT registers plugins and connectors only through its own interactive \
-                 surfaces (developer-mode connector setup, the desktop app); there is no host \
-                 CLI or local registry for TraceDecay to drive. TraceDecay committed the \
-                 staged bundle it owns at {}; install it inside ChatGPT, or point a connector \
-                 at its MCP endpoint (`{command}`)",
-                dir.display()
-            ),
-            None => "register the TraceDecay plugin or connector inside ChatGPT (developer-mode \
-                     connector setup or the app's plugin flow); ChatGPT keeps no local registry \
-                     for TraceDecay to drive"
-                .to_string(),
-        },
-        _ => "remove the TraceDecay plugin or connector inside ChatGPT through its own \
-              interactive surfaces; TraceDecay removes only the staged bundle it owns"
-            .to_string(),
-    };
-    DeferredUserAction {
-        remediation,
-        command,
-    }
-}
-
-/// Doctor's line for a staged bundle ChatGPT has not observably activated.
-/// ChatGPT keeps no locally readable registry, so the host-side step stays
-/// pending from TraceDecay's vantage rather than silently converging.
-fn pending_activation_notice(home: &Path) -> String {
-    let action = chatgpt_lifecycle_unavailable("install", Some(&chatgpt_staged_plugin_dir(home)));
-    format!("pending operator action: {}", action.command)
-}
-
 // ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
 /// Check the staged ChatGPT bundle: its manifest parses, every file the
-/// rendered inventory names is present, and the host-side activation step is
-/// reported as pending. An absent bundle warns (not every machine runs
+/// rendered inventory names is present, and host registration is reported as
+/// unverifiable. An absent bundle warns (not every machine runs
 /// ChatGPT); a partial one fails. Whether ChatGPT has consumed the bundle is
 /// never claimed, no local surface reports it. Byte equality is not asserted
 /// here: `mcp.json` embeds the installing machine's resolved tracedecay path,
@@ -292,8 +220,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         }
     }
 
-    let missing: Vec<&'static str> = rendered_plugin_files("tracedecay")
-        .unwrap_or_default()
+    let missing: Vec<&'static str> = super::plugin_bundle::chatgpt_files()
         .into_iter()
         .map(|(relative, _)| relative)
         .filter(|relative| !staged_dir.join(relative).is_file())
@@ -309,5 +236,5 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     }
 
-    dc.pending(&pending_activation_notice(home));
+    dc.info("ChatGPT registration is unverifiable locally; install the staged bundle inside ChatGPT or follow its README to connect an MCP endpoint");
 }

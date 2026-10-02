@@ -3,7 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -49,7 +49,7 @@ function rawPost(url: string, hostHeader: string, body: string, authorization?: 
   return new Promise((resolve, reject) => {
     const request = httpRequest(
       {
-        host: target.hostname,
+        host: target.hostname.replace(/^\[|\]$/gu, ""),
         port: target.port,
         path: target.pathname,
         method: "POST",
@@ -134,12 +134,22 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     });
   });
 
-  it("runs the packaged embedded server over stdio exactly as plugin/mcp.json launches it", async () => {
+  it("runs the receipt-staged explorer without relying on tracedecay on PATH", async () => {
     const packageRoot = path.resolve(import.meta.dirname, "..");
+    const staged = path.join(fixture.home, ".tracedecay/host-bundle-stage/chatgpt/tracedecay");
+    const install = spawnSync(fixture.binary, ["install", "--agent", "chatgpt"], {
+      env: fixture.env, cwd: fixture.home, encoding: "utf8",
+    });
+    expect(install.status, install.stderr).toBe(0);
+    const manifest = JSON.parse(await readFile(path.join(staged, "mcp.json"), "utf8"));
+    const explorer = manifest.mcpServers["tracedecay-explorer"];
+    const launchEnv = Object.fromEntries(Object.entries(fixture.env)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[0] !== "TRACEDECAY_BIN"));
+    launchEnv.PATH = "";
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [path.join(packageRoot, "embedded", "server.mjs")],
-      env: Object.fromEntries(Object.entries(fixture.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+      args: explorer.args.map((arg: string) => arg.replaceAll("${PLUGIN_ROOT}", staged)),
+      env: launchEnv,
       cwd: fixture.home,
       stderr: "pipe",
     });
@@ -169,6 +179,10 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
       expect(state.projects.data.map((project) => project.project_root).sort()).toEqual([billing.root, shipping.root].sort());
     } finally {
       await packaged.close();
+      const uninstall = spawnSync(fixture.binary, ["uninstall", "--agent", "chatgpt"], {
+        env: fixture.env, cwd: fixture.home, encoding: "utf8",
+      });
+      expect(uninstall.status, uninstall.stderr).toBe(0);
     }
   });
 
@@ -307,10 +321,10 @@ export function taxTotal(invoices: Invoice[]): number {
     expect(content._meta).toMatchObject({ "openai/deepLink": expect.stringContaining(`/projects/${billingProjectId}/symbols/`) });
   });
 
-  it("serves the same server over loopback Streamable HTTP and rejects foreign Host headers", async () => {
+  it.each(["127.0.0.1", "::1"])("serves Streamable HTTP on %s and rejects unauthorized requests and foreign Host headers", async (address) => {
     const createServer = () => createExtensionServer({ bridge, assets: ASSETS });
     const token = "test-loopback-token";
-    const http = await serveLoopbackHttp(createServer, "127.0.0.1", 0, token);
+    const http = await serveLoopbackHttp(createServer, address, 0, token);
     try {
       const transport = new StreamableHTTPClientTransport(new URL(http.url), {
         requestInit: { headers: { authorization: `Bearer ${token}` } },
