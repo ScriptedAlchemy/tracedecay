@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{CodexMeta, session_meta_from_record, turn_context_from_record};
 use crate::runtime::jsonl_observation_admission::jsonl_frame_hints;
-use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
+use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 
 /// Chunk the prior-context walk reads backwards from the resume offset.
 const PRIOR_CONTEXT_CHUNK_BYTES: u64 = 8 * 1024;
@@ -28,10 +28,10 @@ impl CodexContextState {
 
     /// Context in effect at `before_offset`, with the bytes read to rebuild it.
     ///
-    /// A cached context for an earlier offset of the same file replays only
-    /// the records between the two. Otherwise the walk runs backwards from the
-    /// cursor and stops at the last record that set the cwd, normally the
-    /// current turn's context, instead of replaying the whole prefix.
+    /// The cwd is set by the last context record before the cursor, normally
+    /// the current turn's, so the walk runs backwards from the cursor and stops
+    /// there instead of replaying the prefix. A cached context for an earlier
+    /// offset of the same file also stops it at that offset.
     #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
     pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> (Self, u64) {
         if before_offset == 0 {
@@ -41,16 +41,17 @@ impl CodexContextState {
             return (Self::from_meta(meta), 0);
         };
         let generation = prior_context_generation(&file);
-        let scanned = match generation
+        let (floor, floor_state) = generation
             .and_then(|generation| cached_prior_context(path, generation, before_offset))
-        {
-            Some(cached) => Self::replay_forward(file, cached, before_offset, path, meta),
-            None => Self::last_context_before(&mut file, before_offset, path, meta),
-        };
-        let (state, read) = match scanned {
-            Ok(scanned) => scanned,
-            Err(read) => return (Self::from_meta(meta), read),
-        };
+            .map_or_else(
+                || (0, Self::from_meta(meta)),
+                |(state, offset)| (offset, state),
+            );
+        let (state, read) =
+            match Self::last_context_cwd(&mut file, floor, before_offset, path, meta) {
+                Ok((cwd, read)) => (cwd.map_or(floor_state, |cwd| Self { cwd }), read),
+                Err(read) => return (Self::from_meta(meta), read),
+            };
         if let Some(generation) = generation {
             store_prior_context(path, generation, before_offset, state.clone());
         }
@@ -58,45 +59,15 @@ impl CodexContextState {
         (state, read)
     }
 
-    fn replay_forward(
-        mut file: File,
-        (mut state, mut offset): (Self, u64),
-        before_offset: u64,
-        path: &Path,
-        meta: &CodexMeta,
-    ) -> Result<(Self, u64), u64> {
-        file.seek(SeekFrom::Start(offset)).map_err(|_| 0_u64)?;
-        let start = offset;
-        let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
-        while offset < before_offset {
-            let frame = frames.next_frame().map_err(|_| offset - start)?;
-            let byte_len = match frame {
-                RawJsonlFrame::Eof => break,
-                RawJsonlFrame::Complete { byte_len }
-                | RawJsonlFrame::Partial { byte_len }
-                | RawJsonlFrame::Oversized { byte_len, .. }
-                | RawJsonlFrame::BudgetExhausted { byte_len, .. } => byte_len,
-            };
-            offset = offset.saturating_add(byte_len);
-            if offset > before_offset {
-                break;
-            }
-            if !matches!(frame, RawJsonlFrame::Complete { .. }) {
-                continue;
-            }
-            if let Ok(record) = serde_json::from_slice::<Value>(frames.record()) {
-                state.observe_context_record(&record, path, meta);
-            }
-        }
-        Ok((state, offset - start))
-    }
-
-    fn last_context_before(
+    /// The cwd the last context record of `[floor, before_offset)` sets, with
+    /// the bytes read to find it. `floor` is a record boundary.
+    fn last_context_cwd(
         file: &mut File,
+        floor: u64,
         before_offset: u64,
         path: &Path,
         meta: &CodexMeta,
-    ) -> Result<(Self, u64), u64> {
+    ) -> Result<(Option<PathBuf>, u64), u64> {
         let mut read = 0_u64;
         let mut chunk = Vec::new();
         // Pieces of the line whose start the walk has not reached, last first.
@@ -106,8 +77,8 @@ impl CodexContextState {
         // inside, which no prior context includes.
         let mut in_cursor_record = true;
         let mut end = before_offset;
-        while end > 0 {
-            let start = end.saturating_sub(PRIOR_CONTEXT_CHUNK_BYTES);
+        while end > floor {
+            let start = end.saturating_sub(PRIOR_CONTEXT_CHUNK_BYTES).max(floor);
             chunk.resize(usize::try_from(end - start).map_err(|_| read)?, 0);
             file.seek(SeekFrom::Start(start)).map_err(|_| read)?;
             file.read_exact(&mut chunk).map_err(|_| read)?;
@@ -118,7 +89,7 @@ impl CodexContextState {
                     && let Some(cwd) =
                         line_context_cwd(&rest[newline + 1..], &pieces, pieces_len, path, meta)
                 {
-                    return Ok((Self { cwd }, read));
+                    return Ok((Some(cwd), read));
                 }
                 in_cursor_record = false;
                 pieces.clear();
@@ -134,12 +105,10 @@ impl CodexContextState {
             }
             end = start;
         }
-        if !in_cursor_record
-            && let Some(cwd) = line_context_cwd(&[], &pieces, pieces_len, path, meta)
-        {
-            return Ok((Self { cwd }, read));
-        }
-        Ok((Self::from_meta(meta), read))
+        let first = (!in_cursor_record)
+            .then(|| line_context_cwd(&[], &pieces, pieces_len, path, meta))
+            .flatten();
+        Ok((first, read))
     }
 
     pub(super) fn observe_context_record(
@@ -201,8 +170,8 @@ fn line_context_cwd(
     context_cwd(&record, path, meta).flatten()
 }
 
-/// Bounded cache of resumed prior-context state keyed by rollout path so the
-/// next window of the same file only parses the delta beyond its last resume
+/// Bounded cache of resumed prior-context state keyed by rollout path, so the
+/// next window of the same file walks back no further than its last resume
 /// offset.
 const PRIOR_CONTEXT_CACHE_CAPACITY: usize = 512;
 

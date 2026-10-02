@@ -313,8 +313,16 @@ struct UnchangedGenerationProof {
     digest: ResumeDigest,
 }
 
+/// Proofs kept per file, newest first: a project scope and the profile scope
+/// each catch the same rollout up under their own cursor, so one proof per
+/// file would let each batch evict the proof the other's next batch needs.
+///
+/// ponytail: a file read under more scopes than this rehashes on eviction;
+/// key proofs by scope if that shows up.
+const UNCHANGED_GENERATION_PROOFS_PER_FILE: usize = 1;
+
 type UnchangedGenerationCache =
-    BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationProof>;
+    BoundedLatestProofCache<JsonlNativeFileIdentity, Vec<UnchangedGenerationProof>>;
 
 fn unchanged_generation_cache() -> &'static Mutex<UnchangedGenerationCache> {
     static CACHE: std::sync::OnceLock<Mutex<UnchangedGenerationCache>> = std::sync::OnceLock::new();
@@ -399,8 +407,9 @@ fn cached_unchanged_generation(
     }
     let cache = unchanged_generation_cache().lock().ok()?;
     cache
-        .get(&key.native_identity)
-        .filter(|proof| proof.key == key)
+        .get(&key.native_identity)?
+        .iter()
+        .find(|proof| proof.key == key)
         .cloned()
 }
 
@@ -418,7 +427,12 @@ fn remember_unchanged_generation_if_settled(path: &Path, proof: UnchangedGenerat
     let Ok(mut cache) = unchanged_generation_cache().lock() else {
         return;
     };
-    cache.insert(proof.key.native_identity, proof);
+    let native_identity = proof.key.native_identity;
+    let mut proofs = cache.get(&native_identity).cloned().unwrap_or_default();
+    proofs.retain(|kept| kept.key != proof.key);
+    proofs.insert(0, proof);
+    proofs.truncate(UNCHANGED_GENERATION_PROOFS_PER_FILE);
+    cache.insert(native_identity, proofs);
 }
 
 /// A cache entry needs a change token whose equality proves the bytes
@@ -2246,6 +2260,45 @@ mod tests {
             first.io.identity_window_bytes
         );
         assert!(second.io.scan_payload_read_bytes >= first.new_cursor.position);
+    }
+
+    /// Two scopes catch one file up batch by batch under their own cursors.
+    /// However their batches interleave, each resumes from the digest its own
+    /// previous batch proved instead of rehashing the prefix.
+    #[test]
+    fn interleaved_cursors_each_resume_without_rehashing_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("two-scopes.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let batch = |previous: Option<&RawNewJsonl>, max_new_bytes| {
+            try_stream_new_jsonl_raw_strict_with_resume(
+                &path,
+                previous.map_or_else(StoredCursor::default, |scan| scan.new_cursor),
+                Some(max_new_bytes),
+                MAX_JSONL_RECORD_BYTES,
+                previous.map(|scan| JsonlResumeState {
+                    generation: scan.new_cursor.file_id,
+                    file_identity: scan.file_identity,
+                    fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+                }),
+            )
+            .unwrap()
+        };
+        let mut scopes = [(batch(None, 1_024), 1_024), (batch(None, 1_536), 1_536)];
+        for _ in 0..8 {
+            for (scope, max_new_bytes) in &mut scopes {
+                let next = batch(Some(scope), *max_new_bytes);
+                assert_eq!(next.start_offset, scope.new_cursor.position);
+                assert_eq!(
+                    next.io.prefix_validation_bytes, 0,
+                    "the batch at {} rehashed its prefix",
+                    next.start_offset
+                );
+                *scope = next;
+            }
+        }
     }
 
     #[test]

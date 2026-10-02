@@ -93,7 +93,7 @@ fn prior_context_is_the_last_cwd_set_before_the_cursor() {
     assert_eq!(
         read,
         after_d - set_b,
-        "a later cursor replays only the records since the cached one"
+        "a later cursor walks back no further than the cached one"
     );
 }
 
