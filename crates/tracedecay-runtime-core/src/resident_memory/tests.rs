@@ -1588,10 +1588,13 @@ fn allocator_reclaim_publishes_recovery_after_recent_checkpoint() {
         Arc::clone(&pressure),
     ));
     let shed = Arc::clone(&sample);
+    let owner_passes = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&owner_passes);
     let _owner_shed = pressure
         .register_pressure_reclaimer(
             super::RESIDENT_OWNERS_PRESSURE_PRIORITY_V1,
             Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
                 shed.lock().expect("sample").cgroup_committed_bytes = Some(1);
                 0
             }),
@@ -1603,6 +1606,7 @@ fn allocator_reclaim_publishes_recovery_after_recent_checkpoint() {
         ResidentMemoryPressureStateV1::OverBudget { .. }
     ));
     pressure.publish_observed_resident_bytes(limit.get());
+    assert_eq!(owner_passes.load(Ordering::Relaxed), 1);
     assert!(matches!(
         pressure.state(),
         ResidentMemoryPressureStateV1::Nominal { .. }
