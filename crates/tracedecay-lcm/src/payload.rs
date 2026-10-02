@@ -245,34 +245,41 @@ pub async fn upsert_payload_metadata_batch(
                 params_from_iter(chunk.iter().map(|payload| payload.payload_ref.as_str())),
             )
             .await?;
-        let expected: std::collections::HashMap<&str, &LcmPayloadRef> = chunk
-            .iter()
-            .map(|payload| (payload.payload_ref.as_str(), payload))
-            .collect();
-        let mut seen = std::collections::HashSet::new();
+        let mut stored = std::collections::HashMap::new();
         while let Some(row) = rows.next().await? {
-            let Some(payload) = expected.get(row.get::<String>(0)?.as_str()) else {
-                continue;
+            stored.insert(
+                row.get::<String>(0)?,
+                (
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<Option<String>>(9)?,
+                ),
+            );
+        }
+        for payload in chunk {
+            let Some(row) = stored.get(payload.payload_ref.as_str()) else {
+                return Err(LcmError::Db(
+                    "payload manifest replay row disappeared".to_string(),
+                ));
             };
-            seen.insert(payload.payload_ref.as_str());
-            let matches = row.get::<String>(1)? == payload.provider
-                && row.get::<String>(2)? == payload.session_id
-                && row.get::<String>(3)? == payload.message_id
-                && row.get::<String>(4)? == payload.kind
-                && row.get::<String>(5)? == payload.content_hash
-                && row.get::<i64>(6)? == payload.byte_count as i64
-                && row.get::<i64>(7)? == payload.char_count as i64
-                && row.get::<Option<String>>(9)? == payload.metadata_json;
+            let matches = row.0 == payload.provider
+                && row.1 == payload.session_id
+                && row.2 == payload.message_id
+                && row.3 == payload.kind
+                && row.4 == payload.content_hash
+                && row.5 == payload.byte_count as i64
+                && row.6 == payload.char_count as i64
+                && row.7 == payload.metadata_json;
             if !matches {
                 return Err(LcmError::ImmutablePayloadConflict {
                     payload_ref: payload.payload_ref.clone(),
                 });
             }
-        }
-        if seen.len() != expected.len() {
-            return Err(LcmError::Db(
-                "payload manifest replay row disappeared".to_string(),
-            ));
         }
     }
     Ok(())
