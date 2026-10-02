@@ -38,6 +38,7 @@ use super::{
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+    CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
@@ -3098,9 +3099,21 @@ impl CodeIndexSchedulerRegistryV1 {
                     &result,
                     Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
                 );
+                let waited_for_memory = worker_residency.refresh_waits_for_memory();
                 worker_residency.set_refresh_waits_for_memory(refused_for_memory);
-                if refused_for_memory {
+                if let Ok((Err(error), _, _)) = &result
+                    && refused_for_memory
+                {
+                    park_convergence(
+                        &worker_convergence_park,
+                        error.to_string(),
+                        CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1,
+                        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                        true,
+                    );
                     worker_residency.yield_serving_graph_to_refresh(&worker_resident_owners);
+                } else if waited_for_memory {
+                    clear_graph_resident_memory_park(&worker_convergence_park);
                 }
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
@@ -3206,6 +3219,17 @@ impl CodeIndexSchedulerRegistryV1 {
                                         remediation,
                                     } => Some((reason, remediation)),
                                 }
+                            } else if refused_for_memory {
+                                if !waited_for_memory {
+                                    tracing::warn!(
+                                        event = "code_index_refresh_waiting_for_memory",
+                                        path = "background_worker",
+                                        trigger = trigger.label(),
+                                        error = %error,
+                                        "code-index refresh refused for resident memory; the served generation stays stale until memory is given back"
+                                    );
+                                }
+                                None
                             } else {
                                 tracing::warn!(
                                     event = "code_index_reconcile_failed",
