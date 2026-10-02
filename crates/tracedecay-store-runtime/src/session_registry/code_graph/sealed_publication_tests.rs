@@ -1343,6 +1343,66 @@ async fn sealing_keeps_symbol_records_only_in_the_graph_store() {
     );
 }
 
+/// A symbol whose record is longer than 64 KiB, here from a long doc
+/// comment, seals and serves its whole record like any other symbol.
+///
+/// Fails if sealed publication panics or refuses a string column value
+/// longer than `u16::MAX` bytes, or if the served docstring is cut short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symbol_record_over_64_kib_seals_and_serves_whole() {
+    let doc_lines = (0..800)
+        .map(|line| format!("doc line {line:04} {}", "x".repeat(80)))
+        .collect::<Vec<_>>();
+    let mut source = String::new();
+    for line in &doc_lines {
+        writeln!(source, "/// {line}").expect("write doc line");
+    }
+    source.push_str("pub fn long_doc_value() -> usize { 64 }\n");
+    let fixture = sealed_generation_fixture("project.long-record", &source).await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("seal a code graph with a record over 64 KiB");
+    let store =
+        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot,
+            fixture.generation_id.clone(),
+        )
+        .expect("projection store over the sealed snapshot");
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark warming");
+    store
+        .warm_serving_engine()
+        .expect("warm the serving engine");
+    store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("derive the catalog from the sealed projection");
+    let resolved = store
+        .interactive_reader_with_cancellation(
+            &fixture.generation_id,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("interactive reader")
+        .resolve_qualified_name(
+            "src/lib.rs::long_doc_value",
+            None,
+            4,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("resolve a qualified name");
+    let docstrings = resolved
+        .iter()
+        .map(|summary| {
+            summary
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.docstring.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(docstrings, vec![Some(doc_lines.join("\n"))]);
+}
+
 /// Graph reads are latency bounded. A read that reaches a generation whose
 /// graph engine is not open, here stepped down by the production staging
 /// release sweep, gets the typed warming answer at once and leaves the
