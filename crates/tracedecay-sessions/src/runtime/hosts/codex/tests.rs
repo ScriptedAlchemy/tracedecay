@@ -1429,6 +1429,58 @@ mod recent_first_discovery_tests {
         ));
     }
 
+    /// A consumer told to wait for a scan in progress is released when a scan
+    /// finishes; a scan nobody waited on releases nothing, so a refused pass
+    /// subscribed before its own scan is not woken by that scan.
+    #[tokio::test]
+    async fn a_finished_scan_releases_only_consumers_that_waited_on_it() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        write_dated_rollout(home, ("2026", "08", "23"), "release");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let frontier = CodexDiscoveryFrontier::initial();
+        let released = hub.subscribe_scan_release();
+
+        let CodexDiscoveryDelivery::Ready(first) = hub
+            .discover("profile", &source, bounds, frontier)
+            .await
+            .unwrap()
+        else {
+            panic!("the first scan delivers");
+        };
+        assert!(!released.has_changed().unwrap());
+        hub.acknowledge("profile");
+
+        // A consumer joining now replays the source's index, which another
+        // consumer is scanning.
+        hub.register("project", Some(home));
+        let set_index_scanning = |scanning: bool| {
+            hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .entry(source.discovery_key())
+                .or_default()
+                .scanning = scanning;
+        };
+        set_index_scanning(true);
+        assert!(matches!(
+            hub.discover("project", &source, bounds, frontier)
+                .await
+                .unwrap(),
+            CodexDiscoveryDelivery::Waiting
+        ));
+        set_index_scanning(false);
+        hub.discover("profile", &source, bounds, first.next_frontier)
+            .await
+            .unwrap();
+        assert!(released.has_changed().unwrap());
+    }
+
     #[tokio::test]
     async fn unacknowledged_budget_delivery_reuses_the_exact_immutable_generation() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();

@@ -299,8 +299,15 @@ fn transcript_source_contract_failures_are_bounded_and_permanent() {
     }
 }
 
+/// Serializes the tests that turn a startup claim away, since every startup
+/// sweep shares one process-wide release signal.
+static STARTUP_RELEASE_SIGNAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
+    let _signal = STARTUP_RELEASE_SIGNAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let profile = tempfile::tempdir().unwrap().path().to_path_buf();
     let StartupUserIngestClaim::Acquired(first) = StartupUserIngestGuard::claim(profile.clone())
     else {
@@ -327,6 +334,38 @@ fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
         ),
         "a completed sweep should suppress the startup herd during cooldown"
     );
+}
+
+/// A history pass that waits for released capacity is woken when a startup
+/// sweep that turned a pass away finishes, and never by a sweep nobody
+/// waited on, such as the waiting pass's own refused sweep.
+#[test]
+fn a_startup_sweep_releases_capacity_only_to_a_pass_it_turned_away() {
+    let _signal = STARTUP_RELEASE_SIGNAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let profile = tempfile::tempdir().unwrap().path().to_path_buf();
+    let hub = codex::CodexDiscoveryHub::default();
+    let mut signals = super::subscribe_history_capacity_release(&hub);
+    let startup_release = &mut signals[0];
+
+    let StartupUserIngestClaim::Acquired(own) = StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("an uncontended claim must acquire");
+    };
+    drop(own);
+    assert!(!startup_release.has_changed().unwrap());
+
+    let StartupUserIngestClaim::Acquired(holder) = StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("an uncontended claim must acquire");
+    };
+    assert!(matches!(
+        StartupUserIngestGuard::claim(profile),
+        StartupUserIngestClaim::Running
+    ));
+    drop(holder);
+    assert!(startup_release.has_changed().unwrap());
 }
 
 #[test]
