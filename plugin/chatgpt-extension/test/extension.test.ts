@@ -119,6 +119,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     const workspace = byName.get("tracedecay_workspace")!;
     const thread = byName.get("tracedecay_thread_panel")!;
     expect(workspace._meta).toMatchObject({ ui: { resourceUri: UI_RESOURCE_URI }, "openai/ui": { entrypoints: [{ type: "global" }] } });
+    expect(workspace._meta?.["ui/resourceUri"]).toBe(UI_RESOURCE_URI);
     expect(thread._meta).toMatchObject({ ui: { resourceUri: UI_RESOURCE_URI }, "openai/ui": { entrypoints: [{ type: "thread" }] } });
     expect(byName.get("tracedecay_list_projects")!._meta).toMatchObject({ ui: { visibility: ["app"] } });
     for (const tool of tools.tools) expect(tool.annotations?.readOnlyHint ?? tool.name === "search_mentions").toBeTruthy();

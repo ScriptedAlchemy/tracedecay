@@ -41,6 +41,7 @@ try {
       root: packageRoot,
       logLevel: "warn",
       performance: { buildCache: false },
+      tools: { rspack: { output: { asyncChunks: false } } },
       lib: [
         {
           format: "esm",

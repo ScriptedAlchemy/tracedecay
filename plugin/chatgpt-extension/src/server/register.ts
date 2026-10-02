@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import { OpenAIExtensions, type OpenAIMentionItem } from "@openai/mcp-extensions/server";
 import { z } from "zod";
 import { deepLinkPath, type ViewState } from "../shared/view.js";
@@ -35,9 +36,9 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
   });
   const appOnly = { ui: { visibility: ["app"] } };
 
-  const projectId = z.string().min(1).describe("Registered TraceDecay project id, as returned by tracedecay_list_projects");
+  const projectId = z.string().min(1).describe("Registered TraceDecay project id");
 
-  server.registerTool(
+  registerAppTool(server,
     "tracedecay_workspace",
     {
       title: "TraceDecay",
@@ -49,7 +50,7 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
     async (_args, extra) => toolResult(await projectsView(bridge, extra.signal)),
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "tracedecay_thread_panel",
     {
       title: "TraceDecay",
@@ -61,11 +62,11 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
     async (_args, extra) => toolResult(await projectsView(bridge, extra.signal)),
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "tracedecay_list_projects",
     {
       title: "List TraceDecay projects",
-      description: "List the projects registered in the local TraceDecay profile. Only these projects can be explored.",
+      description: "List up to ten recent projects registered in the local TraceDecay profile.",
       inputSchema: z.object({}),
       annotations: readOnly,
       _meta: appOnly,
@@ -73,7 +74,7 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
     async (_args, extra) => toolResult(await projectsView(bridge, extra.signal)),
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "tracedecay_search_code",
     {
       title: "Search TraceDecay code",
@@ -92,7 +93,7 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
     },
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "tracedecay_inspect_symbol",
     {
       title: "Inspect TraceDecay symbol",
