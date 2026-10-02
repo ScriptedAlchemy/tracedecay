@@ -601,6 +601,44 @@ mod tests {
     }
 
     #[test]
+    fn only_session_shards_name_a_session_scope() {
+        let project_id = id::<ProjectId>("project.identity");
+        assert_eq!(
+            StoreShardScopeV1::ProfileSessions.session_scope(),
+            Some(ObservationScopeV1::Profile)
+        );
+        assert_eq!(
+            StoreShardScopeV1::ProjectSessions {
+                project_id: project_id.clone(),
+            }
+            .session_scope(),
+            Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            })
+        );
+
+        for scope in [
+            StoreShardScopeV1::Profile,
+            StoreShardScopeV1::ProfileMemory,
+            StoreShardScopeV1::RemoteNode {
+                node_id: id::<BrainNodeId>("node.identity"),
+            },
+            StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            StoreShardScopeV1::Code {
+                project_id: project_id.clone(),
+                repository_id: id::<RepositoryId>("repository.identity"),
+                scope: CodeShardScopeV1::Worktree {
+                    worktree_id: id::<WorktreeId>("worktree.identity"),
+                },
+            },
+        ] {
+            assert_eq!(scope.session_scope(), None, "{scope:?} holds no sessions");
+        }
+    }
+
+    #[test]
     fn canonical_locator_digest_binds_the_exact_absolute_path() {
         let fixture = host_temp_root("tracedecay-store-locator-fixture");
         let first_path = fixture.join("stores/a/graph-store");
