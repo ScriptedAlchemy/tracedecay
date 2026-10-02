@@ -3,13 +3,11 @@
 //! These tests share one binary because none of them routes a C library's
 //! allocator: `route_c_libraries` swaps SQLite's and tree-sitter's
 //! allocators globally, so any binary that calls it must own its process —
-//! see `c_library_allocator` and `retained_parse_heap`.
+//! see `c_library_allocator` and `retained_parse_heap`. Unlike those two,
+//! nothing here reads the process's RSS, so it runs on every platform the
+//! owner heaps ship on.
 
-#![cfg(all(
-    target_os = "linux",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
-))]
+#![cfg(all(not(feature = "alloc-jemalloc"), not(feature = "hotpath-alloc")))]
 
 // This binary never routes a C library's allocator, so the routing calls
 // below stay unused here; the binaries that own their process use them.
