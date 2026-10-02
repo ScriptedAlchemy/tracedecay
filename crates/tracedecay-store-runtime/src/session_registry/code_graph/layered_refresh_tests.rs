@@ -596,18 +596,21 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         )
         .await
         .expect("retain the child graph runtime");
-    // Work proportional to the edit: of 121 files only the three edited
-    // segments decode, the other 118 reuse the base's recorded inputs, and
-    // of 721 retained references only the 24 the edit can move re-resolve.
-    assert_eq!(
-        layered_report(&child_runtime),
-        Some(CodeGraphLayeredReportV1 {
-            reextracted_files: 3,
-            reused_files: 118,
-            removed_files: 3,
-            resolved_references: 24,
-            delta_rows: (31, 35),
-        })
+    // Work stays local to the output pages affected by the edit. Sealing has
+    // already resolved those pages, so graph projection resolves nothing.
+    let child_report = layered_report(&child_runtime).expect("the child layers over its base");
+    assert_eq!(child_report.resolved_references, 0);
+    assert!(
+        child_report.reextracted_files < child_report.reused_files,
+        "the refresh materialized more changed pages than it reused: {child_report:?}"
+    );
+    assert!(
+        child_report.removed_files < child_report.reused_files,
+        "the refresh hid more changed pages than it reused: {child_report:?}"
+    );
+    assert!(
+        child_report.delta_rows.0 > 0 && child_report.delta_rows.1 > 0,
+        "the edit must produce a nonempty graph delta: {child_report:?}"
     );
     let child = child_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
@@ -650,18 +653,23 @@ async fn small_refreshes_seal_deltas_that_serve_like_their_cold_builds() {
         )
         .await
         .expect("retain the grandchild graph runtime");
-    // Still against the cold base: the three edited files and the added one
-    // decode; the base's versions of those and the deleted file drop. A
-    // changed file set moves module lookups, so every reference re-resolves.
-    assert_eq!(
-        layered_report(&grandchild_runtime),
-        Some(CodeGraphLayeredReportV1 {
-            reextracted_files: 4,
-            reused_files: 117,
-            removed_files: 4,
-            resolved_references: 718,
-            delta_rows: (34, 38),
-        })
+    // Still against the cold base, the cumulative edit remains page-local and
+    // consumes the resolution outputs sealed with the grandchild.
+    let grandchild_report =
+        layered_report(&grandchild_runtime).expect("the grandchild layers over its base");
+    assert_eq!(grandchild_report.resolved_references, 0);
+    assert!(
+        grandchild_report.reextracted_files < grandchild_report.reused_files,
+        "the cumulative refresh materialized more changed pages than it reused: \
+         {grandchild_report:?}"
+    );
+    assert!(
+        grandchild_report.removed_files < grandchild_report.reused_files,
+        "the cumulative refresh hid more changed pages than it reused: {grandchild_report:?}"
+    );
+    assert!(
+        grandchild_report.delta_rows.0 > 0 && grandchild_report.delta_rows.1 > 0,
+        "the cumulative edit must produce a nonempty graph delta: {grandchild_report:?}"
     );
     let grandchild = grandchild_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
@@ -716,17 +724,17 @@ async fn three_file_refresh_report(modules: usize, epoch: u64) -> CodeGraphLayer
     report
 }
 
-/// Fails on a refresh that re-resolves every retained reference of the
-/// corpus: the same three-file edit re-decides the same references whether
-/// the base holds 120 modules or 240.
+/// The same edit materializes the same output-page delta while unrelated
+/// corpus pages grow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_small_refresh_resolves_the_same_references_at_both_base_sizes() {
+async fn a_small_refresh_materializes_the_same_output_pages_at_both_base_sizes() {
     let small = three_file_refresh_report(MODULES, 48).await;
     let large = three_file_refresh_report(MODULES * 2, 49).await;
-    assert_eq!(
-        (small.resolved_references, large.resolved_references),
-        (24, 24)
-    );
+    assert_eq!(small.resolved_references, 0);
+    assert_eq!(large.resolved_references, 0);
+    assert_eq!(small.reextracted_files, large.reextracted_files);
+    assert_eq!(small.removed_files, large.removed_files);
+    assert_eq!(small.delta_rows, large.delta_rows);
 }
 
 const PEAK_PROBE_MODULES: &str = "TRACEDECAY_LAYERED_PEAK_PROBE_MODULES";
