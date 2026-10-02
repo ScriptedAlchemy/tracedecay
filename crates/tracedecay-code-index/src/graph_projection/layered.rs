@@ -195,16 +195,16 @@ struct MaterializedPageDeltaV1 {
     child: Option<PersistedCodeGraphPageV1>,
 }
 
-fn materialize_changed_pages(
+fn for_each_changed_page(
     plan: &ChangedPagePlanV1,
     child: &mut impl CodeGraphPageStoreV1,
     base: &mut impl CodeGraphPageStoreV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<MaterializedPageDeltaV1>, SealedCodeGraphRowsError> {
-    let mut pages = Vec::with_capacity(plan.changed_paths.len());
+    mut visit: impl FnMut(MaterializedPageDeltaV1) -> Result<(), SealedCodeGraphRowsError>,
+) -> Result<(), SealedCodeGraphRowsError> {
     for path in &plan.changed_paths {
         check()?;
-        pages.push(MaterializedPageDeltaV1 {
+        visit(MaterializedPageDeltaV1 {
             base: plan
                 .base
                 .get(path)
@@ -215,9 +215,9 @@ fn materialize_changed_pages(
                 .get(path)
                 .map(|descriptor| child.read_page(descriptor))
                 .transpose()?,
-        });
+        })?;
     }
-    Ok(pages)
+    Ok(())
 }
 
 fn emit_page_delta(
@@ -229,26 +229,36 @@ fn emit_page_delta(
     spill: &mut GraphLayeredRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<CodeGraphLayeredReportV1, SealedCodeGraphRowsError> {
-    let mut child_pages = Vec::new();
-    for changed in materialize_changed_pages(plan, child, base, check)? {
+    let mut endpoint_owners = BTreeMap::new();
+    for_each_changed_page(plan, child, base, check, |changed| {
         if let Some(page) = changed.base {
             let (entities, relations) = owned_page_rows(&page)?;
             spill.hide(entities, relations);
         }
         if let Some(page) = changed.child {
+            for (occurrence, owner) in &page.target_files {
+                if let Some(existing) = endpoint_owners.insert(occurrence.clone(), owner.clone())
+                    && existing != *owner
+                {
+                    return Err(CodeGraphProjectionError::Contract(
+                        "changed code graph pages disagree on an endpoint owner".to_owned(),
+                    )
+                    .into());
+                }
+            }
             let rows =
                 emit_persisted_code_graph_page(projection_identity, generation, &page, check)?;
             spill.push_batch(rows.entities, rows.relations, check)?;
-            child_pages.push(page);
         }
-    }
+        Ok(())
+    })?;
     emit_page_endpoint_stubs(
         projection_identity,
         generation,
         plan,
         child,
         spill,
-        &child_pages,
+        &endpoint_owners,
         check,
     )?;
     reseal_generation_marker(spill, generation, check)?;
@@ -308,7 +318,7 @@ fn emit_page_endpoint_stubs(
     plan: &ChangedPagePlanV1,
     child: &mut impl CodeGraphPageStoreV1,
     spill: &mut GraphLayeredRowSpill,
-    changed_pages: &[PersistedCodeGraphPageV1],
+    endpoint_owners: &BTreeMap<SymbolOccurrenceId, FileOccurrenceId>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), SealedCodeGraphRowsError> {
     let missing = spill
@@ -319,23 +329,13 @@ fn emit_page_endpoint_stubs(
         return Ok(());
     }
     let mut wanted_by_file = BTreeMap::<FileOccurrenceId, BTreeSet<SymbolOccurrenceId>>::new();
-    for page in changed_pages {
-        for edge in &page.edges {
-            check()?;
-            for occurrence in [&edge.from_occurrence, &edge.to_occurrence] {
-                if !missing.contains(&symbol_entity_id(occurrence)?) {
-                    continue;
-                }
-                let owner = page.target_files.get(occurrence).ok_or_else(|| {
-                    CodeGraphProjectionError::Contract(
-                        "changed code graph relation has no endpoint page".to_owned(),
-                    )
-                })?;
-                wanted_by_file
-                    .entry(owner.clone())
-                    .or_default()
-                    .insert(occurrence.clone());
-            }
+    for (occurrence, owner) in endpoint_owners {
+        check()?;
+        if missing.contains(&symbol_entity_id(occurrence)?) {
+            wanted_by_file
+                .entry(owner.clone())
+                .or_default()
+                .insert(occurrence.clone());
         }
     }
     let child_by_occurrence = plan
@@ -593,7 +593,7 @@ mod tests {
     fn changed_reads(unrelated: usize) -> (Vec<String>, Vec<String>) {
         let (mut child, mut base) = stores(unrelated);
         let plan = changed_page_plan(child.pages(), base.pages()).expect("changed page plan");
-        materialize_changed_pages(&plan, &mut child, &mut base, &|| Ok(()))
+        for_each_changed_page(&plan, &mut child, &mut base, &|| Ok(()), |_| Ok(()))
             .expect("materialize changed pages");
         let expected_child = plan
             .changed_paths
