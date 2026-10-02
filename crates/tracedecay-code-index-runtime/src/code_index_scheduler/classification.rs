@@ -15,6 +15,7 @@
 //! batch.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use gix::bstr::ByteSlice;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
@@ -73,6 +74,9 @@ pub struct WorktreeChangeClassificationV1 {
     /// baseline present in the checkout).
     committed_baseline: BTreeSet<String>,
     changes: Vec<ClassifiedChangeV1>,
+    /// Present paths whose Git bytes are not UTF-8, so no `String` above
+    /// names them.
+    non_utf8_paths: BTreeSet<Vec<u8>>,
 }
 
 impl WorktreeChangeClassificationV1 {
@@ -82,15 +86,19 @@ impl WorktreeChangeClassificationV1 {
         let index = repository
             .index_or_empty()
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-        let committed_baseline = index
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                std::str::from_utf8(entry.path(&index).as_ref())
-                    .ok()
-                    .map(str::to_owned)
-            })
-            .collect::<BTreeSet<_>>();
+        let mut committed_baseline = BTreeSet::new();
+        let mut non_utf8_paths = BTreeSet::new();
+        for entry in index.entries() {
+            let path: &[u8] = entry.path(&index).as_ref();
+            match std::str::from_utf8(path) {
+                Ok(path) => {
+                    committed_baseline.insert(path.to_owned());
+                }
+                Err(_) => {
+                    non_utf8_paths.insert(path.to_vec());
+                }
+            }
+        }
 
         let mut changes = Vec::new();
         let status = repository
@@ -115,8 +123,16 @@ impl WorktreeChangeClassificationV1 {
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            let location: &[u8] = item.location().as_ref();
             let path = item.location().to_str_lossy().into_owned();
             if let Some(class) = classify_item(&item) {
+                if std::str::from_utf8(location).is_err() {
+                    if class.presents_content() {
+                        non_utf8_paths.insert(location.to_vec());
+                    } else {
+                        non_utf8_paths.remove(location);
+                    }
+                }
                 changes.push(ClassifiedChangeV1 { path, class });
             }
         }
@@ -124,7 +140,27 @@ impl WorktreeChangeClassificationV1 {
         Ok(Self {
             committed_baseline,
             changes,
+            non_utf8_paths,
         })
+    }
+
+    /// Paths whose Git bytes are not UTF-8, present or not.
+    pub fn non_utf8_paths(&self) -> &BTreeSet<Vec<u8>> {
+        &self.non_utf8_paths
+    }
+
+    /// Paths no logical path can name because their Git bytes are not UTF-8,
+    /// limited to those naming a regular file (through links) under
+    /// `project_root`, the files capture would read.
+    pub fn non_utf8_files(&self, project_root: &Path) -> Vec<Vec<u8>> {
+        self.non_utf8_paths
+            .iter()
+            .filter(|path| {
+                gix::path::try_from_byte_slice(path)
+                    .is_ok_and(|relative| project_root.join(relative).is_file())
+            })
+            .cloned()
+            .collect()
     }
 
     /// Present files worth hashing and considering for (re)indexing: the

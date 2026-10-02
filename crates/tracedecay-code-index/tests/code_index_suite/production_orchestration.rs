@@ -332,6 +332,7 @@ fn request_at_path(
         content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: vec![file.clone()],
+        omitted_sources: Vec::new(),
     };
 
     CodeIndexBuildRequestV1 {
@@ -915,6 +916,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
             content_identity: content_digest(format!("{fast_source}{slow_source}").as_bytes()),
             captured_at: UtcMicros(1_000_000),
             files: vec![fast.clone(), slow.clone()],
+            omitted_sources: Vec::new(),
         },
         captured_files: vec![
             CodeIndexCapturedFileV1 {
@@ -2875,6 +2877,7 @@ fn partitioned_request(
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files,

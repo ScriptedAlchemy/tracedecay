@@ -12,8 +12,9 @@ use tracedecay_application::code_index::open_production_code_index_owner_v1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, validate_code_logical_path,
+    CodeSourceOmissionReasonV1, OmittedCodeSourceV1, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    validate_code_logical_path,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
@@ -79,10 +80,10 @@ pub(super) enum CapturedFileOutcomeV1 {
         file: SanitizedCodeFileV1,
         reason: String,
     },
-    /// A Git path the portable logical-path grammar cannot carry (for example
-    /// a literal backslash, legal on Unix). No snapshot can name it, so it
-    /// leaves the roster instead of failing the whole capture.
-    Unrepresentable(String),
+    /// Raw Git path bytes the portable logical-path grammar cannot carry (a
+    /// literal backslash, a control character, non-UTF-8). No snapshot row
+    /// can name it, so the snapshot records it as an omitted source.
+    Unrepresentable(Vec<u8>),
     Absent,
 }
 
@@ -93,12 +94,8 @@ pub(super) struct CapturedFileRosterV1 {
     pub(super) sanitization_receipts: BTreeSet<SanitizationReceiptId>,
     pub(super) retained_bytes: Vec<Arc<[u8]>>,
     pub(super) retained_reservations: Vec<ResidentMemoryReservationV1>,
-    withheld_sources: Vec<(String, String)>,
-    unrepresentable_paths: Vec<String>,
+    pub(super) omitted_sources: Vec<OmittedCodeSourceV1>,
 }
-
-// Keep privacy diagnostics bounded to one summary record per capture.
-const MAX_REPORTED_WITHHELD_SOURCES: usize = 16;
 
 impl CapturedFileRosterV1 {
     pub(super) fn push(&mut self, outcome: CapturedFileOutcomeV1) {
@@ -114,44 +111,23 @@ impl CapturedFileRosterV1 {
             }
             CapturedFileOutcomeV1::Omitted(file) => self.files.push(file),
             CapturedFileOutcomeV1::Withheld { file, reason } => {
-                self.withheld_sources
-                    .push((file.logical_path.clone(), reason));
+                self.omitted_sources.push(OmittedCodeSourceV1 {
+                    git_path: file.logical_path.as_bytes().to_vec(),
+                    reason: CodeSourceOmissionReasonV1::PrivacyWithheld { detail: reason },
+                });
                 self.files.push(file);
             }
-            CapturedFileOutcomeV1::Unrepresentable(path) => self.unrepresentable_paths.push(path),
+            CapturedFileOutcomeV1::Unrepresentable(git_path) => {
+                self.omitted_sources.push(OmittedCodeSourceV1 {
+                    git_path,
+                    reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+                });
+            }
             CapturedFileOutcomeV1::Absent => {}
         }
     }
 
     pub(super) fn finish(mut self) -> Result<Self, CodeIndexSchedulerErrorV1> {
-        if !self.unrepresentable_paths.is_empty() {
-            let named = self
-                .unrepresentable_paths
-                .iter()
-                .take(MAX_REPORTED_WITHHELD_SOURCES)
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::warn!(
-                skipped = self.unrepresentable_paths.len(),
-                named = %named,
-                "code_index_sources_skipped_unrepresentable_path"
-            );
-        }
-        if !self.withheld_sources.is_empty() {
-            let named = self
-                .withheld_sources
-                .iter()
-                .take(MAX_REPORTED_WITHHELD_SOURCES)
-                .map(|(path, reason)| format!("{path}: {reason}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::warn!(
-                withheld = self.withheld_sources.len(),
-                named = %named,
-                "code_index_sources_withheld_by_privacy"
-            );
-        }
         if self
             .files
             .iter()
@@ -171,8 +147,17 @@ impl CapturedFileRosterV1 {
         });
         self.captured_files
             .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
+        self.omitted_sources
+            .sort_by(|left, right| left.git_path.cmp(&right.git_path));
         Ok(self)
     }
+}
+
+/// The logical path naming `git_path`, or `None` when no snapshot row can.
+pub(super) fn representable_logical_path(git_path: &[u8]) -> Option<&str> {
+    std::str::from_utf8(git_path)
+        .ok()
+        .filter(|path| validate_code_logical_path(path).is_ok())
 }
 
 /// Publish capture progress at a coarse cadence so a large tree does not
@@ -446,7 +431,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_candidate_bytes_with_progress(
         &self,
         registry: &StaticLanguageRegistry,
-        logical_path: &str,
+        git_path: &[u8],
         raw_bytes: &[u8],
         progress: Option<&CaptureProgressV1>,
         explicitly_admitted: bool,
@@ -458,11 +443,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             progress.observe_candidate(raw_bytes.len());
         }
         let result = (|| {
-            if validate_code_logical_path(logical_path).is_err() {
-                return Ok(CapturedFileOutcomeV1::Unrepresentable(
-                    logical_path.to_owned(),
-                ));
-            }
+            let Some(logical_path) = representable_logical_path(git_path) else {
+                return Ok(CapturedFileOutcomeV1::Unrepresentable(git_path.to_vec()));
+            };
             if !explicitly_admitted && self.path_policy.excludes(logical_path) {
                 return self
                     .omitted_source_file(
@@ -578,11 +561,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                     if entry.mode.is_tree() || entry.mode.is_commit() {
                         continue;
                     }
-                    let logical_path = entry.filepath.to_str_lossy();
                     let blob = repository
                         .find_blob(entry.oid)
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-                    visitor(&logical_path, &blob.data)?;
+                    visitor(entry.filepath.as_ref(), &blob.data)?;
                 }
                 Ok(())
             },
@@ -628,24 +610,24 @@ impl CodeIndexWorktreeSchedulerV1 {
         tree: tracedecay_domain::TreeId,
         control: &branch_generations::BranchGenerationReadControlV1,
         visit: impl FnOnce(
-            &mut dyn FnMut(&str, &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+            &mut dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
         ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let progress = CaptureProgressV1::new();
         let mut roster = CapturedFileRosterV1::default();
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
-        visit(&mut |logical_path, raw_bytes| {
+        visit(&mut |git_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
             let outcome = self.capture_candidate_bytes_with_progress(
-                &registry, logical_path, raw_bytes, Some(&progress), false,
+                &registry, git_path, raw_bytes, Some(&progress), false,
             ).map_err(|error| {
                 if self.shutting_down.load(Ordering::Acquire) {
                     CodeIndexSearchUnavailableReasonV1::Cancelled
                 } else if matches!(&error, CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission(_)) {
                     CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
                 } else {
-                    tracing::warn!(error = %error, path = %logical_path, "git_tree_capture_failed");
+                    tracing::warn!(error = %error, path = %git_path.as_bstr(), "git_tree_capture_failed");
                     CodeIndexSearchUnavailableReasonV1::Internal
                 }
             })?;
@@ -658,7 +640,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             sanitization_receipts,
             retained_bytes,
             retained_reservations,
-            ..
+            omitted_sources,
         } = roster
             .finish()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
@@ -696,7 +678,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             changed_paths.extend(files.iter().map(|file| file.logical_path.clone()));
         }
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
-        let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
+        let content_identity =
+            snapshot_content_identity(&files, &sanitization_receipts, &omitted_sources);
         Ok(CapturedSnapshotV1 {
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
                 tree: Some(tree),
@@ -713,6 +696,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 content_identity,
                 captured_at: now_micros(),
                 files,
+                omitted_sources,
             },
             captured_files,
             changed_paths,
@@ -1161,7 +1145,7 @@ mod tests {
         let outcome = scheduler
             .capture_candidate_bytes_with_progress(
                 &super::StaticLanguageRegistry::new(),
-                "malformed.json",
+                b"malformed.json",
                 b"{broken",
                 None,
                 false,
@@ -1651,7 +1635,7 @@ mod tests {
         assert!(matches!(
             scheduler.capture_candidate_bytes_with_progress(
                 &super::StaticLanguageRegistry::new(),
-                "src/lib.rs",
+                b"src/lib.rs",
                 b"pub fn kept() {}",
                 None,
                 false,

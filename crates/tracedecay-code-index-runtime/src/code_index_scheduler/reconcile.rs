@@ -3875,7 +3875,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         ignored_dependencies::checkpoint_if_present(control)?;
         self.capture_candidate_bytes_with_progress(
             registry,
-            logical_path,
+            logical_path.as_bytes(),
             &raw_bytes,
             progress,
             explicitly_admitted,
@@ -4178,10 +4178,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         }
         let mut roster = CapturedFileRosterV1::default();
+        if let Some(active) = reusable_active.as_ref() {
+            let reused_withheld = files
+                .iter()
+                .filter(|file| file.disposition == SnapshotFileDispositionV1::Ignored)
+                .map(|file| file.logical_path.as_bytes())
+                .collect::<BTreeSet<_>>();
+            roster.omitted_sources.extend(
+                active
+                    .snapshot()
+                    .omitted_sources
+                    .iter()
+                    .filter(|source| reused_withheld.contains(source.git_path.as_slice()))
+                    .cloned(),
+            );
+        }
         roster.files = files;
         roster.sanitization_receipts = sanitization_receipts;
         for outcome in outcomes {
             roster.push(outcome?);
+        }
+        for git_path in classification.non_utf8_files(&self.project_root) {
+            roster.push(CapturedFileOutcomeV1::Unrepresentable(git_path));
         }
         let CapturedFileRosterV1 {
             files,
@@ -4189,10 +4207,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             sanitization_receipts,
             retained_bytes,
             retained_reservations,
-            ..
+            omitted_sources,
         } = roster.finish()?;
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
-        let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
+        let content_identity =
+            snapshot_content_identity(&files, &sanitization_receipts, &omitted_sources);
         let captured = CapturedSnapshotV1 {
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
                 tree: self.identity.head_tree().cloned(),
@@ -4208,6 +4227,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 content_identity,
                 captured_at: now_micros(),
                 files,
+                omitted_sources,
             },
             captured_files,
             changed_paths,

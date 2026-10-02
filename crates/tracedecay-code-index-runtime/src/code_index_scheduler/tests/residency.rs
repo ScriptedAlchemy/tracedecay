@@ -216,9 +216,9 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
     worktrees.sort();
     assert_eq!(
         decoded(&alone),
-        [(vec![primary.worktree_id.clone()], true, Some(1_462_329))]
+        [(vec![primary.worktree_id.clone()], true, Some(1_462_353))]
     );
-    assert_eq!(alone.measured_bytes, 1_462_329);
+    assert_eq!(alone.measured_bytes, 1_462_353);
     // Two copies would hold 2,924,658 bytes; the linked worktree adds only
     // the manifest, lineage, and projection evidence it sealed itself.
     assert_eq!(

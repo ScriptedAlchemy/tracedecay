@@ -44,6 +44,8 @@ pub struct SanitizedCodeSnapshotV1 {
     pub content_identity: ContentDigest,
     pub captured_at: UtcMicros,
     pub files: Vec<SanitizedCodeFileV1>,
+    /// Sources the capture saw but does not index, ordered by Git path.
+    pub omitted_sources: Vec<OmittedCodeSourceV1>,
 }
 
 impl SanitizedCodeSnapshotV1 {
@@ -98,8 +100,60 @@ impl SanitizedCodeSnapshotV1 {
                 field: "snapshot file order",
             });
         }
+        if self
+            .omitted_sources
+            .windows(2)
+            .any(|sources| sources[0].git_path >= sources[1].git_path)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "snapshot omitted source order",
+            });
+        }
+        for source in &self.omitted_sources {
+            let logical_path = std::str::from_utf8(&source.git_path).ok();
+            let representable =
+                logical_path.is_some_and(|path| validate_code_logical_path(path).is_ok());
+            let consistent = match &source.reason {
+                CodeSourceOmissionReasonV1::UnrepresentablePath => !representable,
+                CodeSourceOmissionReasonV1::PrivacyWithheld { .. } => logical_path
+                    .filter(|_| representable)
+                    .and_then(|path| {
+                        self.files
+                            .binary_search_by(|file| file.logical_path.as_str().cmp(path))
+                            .ok()
+                    })
+                    .is_some_and(|index| {
+                        self.files[index].disposition == SnapshotFileDispositionV1::Ignored
+                    }),
+            };
+            if !consistent {
+                return Err(DomainError::NonCanonical {
+                    field: "snapshot omitted source reason",
+                });
+            }
+        }
         Ok(())
     }
+}
+
+/// One source a snapshot captured but does not index. The raw Git path
+/// bytes are kept because an unrepresentable path has no logical path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OmittedCodeSourceV1 {
+    pub git_path: Vec<u8>,
+    pub reason: CodeSourceOmissionReasonV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CodeSourceOmissionReasonV1 {
+    /// Not UTF-8, or fails [`validate_code_logical_path`]: no snapshot row
+    /// can name it.
+    UnrepresentablePath,
+    /// The privacy boundary withheld the bytes; the snapshot keeps an
+    /// `Ignored` row under the same path.
+    PrivacyWithheld { detail: String },
 }
 
 /// One sanitized file inside a snapshot.
@@ -443,6 +497,7 @@ mod tests {
                     disposition: SnapshotFileDispositionV1::Present,
                 },
             ],
+            omitted_sources: Vec::new(),
         }
     }
 

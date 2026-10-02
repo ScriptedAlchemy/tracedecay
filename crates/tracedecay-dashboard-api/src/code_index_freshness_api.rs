@@ -201,6 +201,7 @@ mod tests {
                     rebuild_in_flight: false,
                     hook_hint_count: Some(0),
                     coverage: CodeIndexFreshnessCoverageV1::Complete,
+                    omitted_sources: None,
                     progress: None,
                     restore_progress: None,
                     parked: None,

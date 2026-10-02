@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
@@ -140,7 +140,7 @@ fn ready_serving_source(
     Some(ReadyServingSourceV1 {
         reference: freshness.source_reference.as_deref()?,
         revision: freshness.source_revision.as_deref(),
-        current_source_verified: freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
+        current_source_verified: freshness.coverage.covers_indexable_sources()
             && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh),
     })
 }
@@ -647,7 +647,13 @@ fn code_index_freshness_projection(
         return (status, Some(warning));
     }
     if authoritative {
-        (FreshnessLabelV1::Current, None)
+        let warning = freshness.omitted_sources.as_ref().map(|omitted| {
+            format!(
+                "{} captured source file(s) are not indexed; code_index_freshness.worktree.omitted_sources names them and why",
+                omitted.count
+            )
+        });
+        (FreshnessLabelV1::Current, warning)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         let warning = if freshness.restore_progress.is_some() {
             "the sealed lexical artifact is completing bounded authentication before serving"

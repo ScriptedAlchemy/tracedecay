@@ -181,7 +181,20 @@ pub async fn compute_graph_tool(
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("invalid source metadata operation: {error}"),
                 })?;
-            compute_files(&open(operation).await?, request, scope_prefix).await
+            let worktree_omitted_sources = ctx.freshness().await.and_then(|payload| {
+                payload
+                    .worktrees
+                    .into_iter()
+                    .next()
+                    .and_then(|worktree| worktree.omitted_sources)
+            });
+            compute_files(
+                &open(operation).await?,
+                request,
+                scope_prefix,
+                worktree_omitted_sources,
+            )
+            .await
         }
         ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
         ApplicationSurfaceOperation::Search => {

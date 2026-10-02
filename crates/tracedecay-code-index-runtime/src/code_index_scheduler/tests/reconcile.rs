@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
@@ -11,8 +13,9 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
-    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexFreshnessCoverageV1, CodeIndexReadinessTargetV1,
+    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexSourceOmissionReasonV1 as StatusOmissionReasonV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
@@ -20,8 +23,9 @@ use tracedecay_contracts::{
     callable_code_operation,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ProjectId, PublicRetrieverStatus, RefId, RetrieverKind,
-    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, WorktreeId,
+    CodeGenerationId, CodeSourceOmissionReasonV1, CommitId, OmittedCodeSourceV1, ProjectId,
+    PublicRetrieverStatus, RefId, RetrieverKind, SensitivityLevelV1, SnapshotFileDispositionV1,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
@@ -5122,20 +5126,23 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
     registry.shutdown().await;
 }
 
-/// Unix filenames may hold a literal backslash (systemd escapes `-` in unit
-/// names as `\x2d`), which no logical path can carry. Such files leave the
-/// snapshot instead of rejecting it, and the freshness witness skips them the
-/// same way, so an unchanged checkout is not reported as moved.
+/// A Git path no logical path can carry (a literal backslash, legal on Unix;
+/// systemd escapes `-` in unit names as `\x2d`) and a privacy-withheld file
+/// are omitted sources. The sealed snapshot names each by its raw Git path
+/// with the reason, status reports partial coverage with the count while a
+/// `fresh` wait still ends, an unchanged checkout stays fresh, and a newly
+/// added unrepresentable file starts a successor that names it.
 #[cfg(unix)]
 #[tokio::test]
-async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
+async fn omitted_sources_carry_their_reason_into_the_snapshot_and_status() {
     let fixture = GitFixture::new(&[
-        ("src/main.rs", "fn main() {}\n"),
-        ("src/odd\\name.rs", "pub fn odd() {}\n"),
+        ("config/broken.json", "{broken"),
         (
             "deploy/mnt-data\\x2dfiles.mount",
             "[Mount]\nWhat=/dev/sdb\n",
         ),
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/odd\\name.rs", "pub fn odd() {}\n"),
     ]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -5147,20 +5154,96 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
         )
         .await
         .expect("mount daemon-owned scheduler");
+    let withheld = CodeSourceOmissionReasonV1::PrivacyWithheld {
+        detail: "privacy sanitizer quarantined an ambiguous structured document".to_owned(),
+    };
     let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    let seated_paths = seated
-        .generation()
-        .snapshot()
+    let snapshot = seated.generation().snapshot();
+    let rows = snapshot
         .files
         .iter()
-        .map(|file| file.logical_path.as_str())
+        .map(|file| (file.logical_path.as_str(), file.disposition))
         .collect::<Vec<_>>();
-    assert_eq!(seated_paths, ["src/main.rs"]);
+    assert_eq!(
+        rows,
+        [
+            ("config/broken.json", SnapshotFileDispositionV1::Ignored),
+            ("src/main.rs", SnapshotFileDispositionV1::Present),
+        ]
+    );
+    assert_eq!(
+        snapshot.omitted_sources,
+        [
+            OmittedCodeSourceV1 {
+                git_path: b"config/broken.json".to_vec(),
+                reason: withheld.clone(),
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"deploy/mnt-data\\x2dfiles.mount".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/odd\\name.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+        ]
+    );
+    let initial = seated.generation().manifest().generation_id.clone();
     drop(seated);
 
     settle_text_projection(&registry, fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
+    let omitted_status =
+        |freshness: &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1| {
+            freshness.omitted_sources.as_ref().map(|omitted| {
+                (
+                    omitted.count,
+                    omitted
+                        .sources
+                        .iter()
+                        .map(|source| (source.display_path.clone(), source.reason.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+    let status_withheld = StatusOmissionReasonV1::PrivacyWithheld {
+        detail: "privacy sanitizer quarantined an ambiguous structured document".to_owned(),
+    };
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh)
+    );
+    assert_eq!(
+        freshness.coverage,
+        CodeIndexFreshnessCoverageV1::PartialOmittedSources
+    );
+    assert_eq!(
+        omitted_status(&freshness),
+        Some((
+            3,
+            vec![
+                ("config/broken.json".to_owned(), status_withheld.clone()),
+                (
+                    "deploy/mnt-data\\x2dfiles.mount".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/odd\\name.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+            ],
+        ))
+    );
+    assert_eq!(
+        freshness.readiness(CodeIndexReadinessTargetV1::Fresh),
+        CodeIndexReadinessV1::Reached
+    );
+
     let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
@@ -5174,18 +5257,19 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
     let probe_at = tracedecay_contracts::now_micros().0;
     registry.probe_freshness_admission(fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
-
-    let mounted = registry.mounted.lock().await;
-    let scheduler = mounted.get(&canonical).expect("mounted worktree");
-    assert_eq!(
-        scheduler
-            .scheduler
-            .lock()
-            .expect("scheduler")
-            .pending_hint_count(),
-        Some(0),
-        "an unchanged checkout with a skipped path must not become an overflow hint"
-    );
+    {
+        let mounted = registry.mounted.lock().await;
+        let scheduler = mounted.get(&canonical).expect("mounted worktree");
+        assert_eq!(
+            scheduler
+                .scheduler
+                .lock()
+                .expect("scheduler")
+                .pending_hint_count(),
+            Some(0),
+            "an unchanged checkout with omitted sources must not become an overflow hint"
+        );
+    }
     let receipts = registry.event_to_ready_receipts();
     assert!(
         receipts.iter().all(|receipt| {
@@ -5194,9 +5278,61 @@ async fn backslash_paths_are_skipped_and_the_worktree_stays_fresh() {
                 .wake_micros()
                 .is_none_or(|wake_micros| wake_micros < probe_at)
         }),
-        "an unchanged checkout with a skipped path must not reconcile again: {receipts:#?}"
+        "an unchanged checkout with omitted sources must not reconcile again: {receipts:#?}"
     );
-    drop(mounted);
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(initial.clone())
+    );
+
+    fixture.edit("src/late\\added.rs", "pub fn late() {}\n");
+    std::fs::write(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+        "pub fn not_utf8() {}\n",
+    )
+    .expect("write a non-UTF-8 source name");
+    registry.probe_freshness_admission(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted freshness");
+    assert_eq!(
+        omitted_status(&freshness),
+        Some((
+            5,
+            vec![
+                ("config/broken.json".to_owned(), status_withheld),
+                (
+                    "deploy/mnt-data\\x2dfiles.mount".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/late\\added.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/odd\\name.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+                (
+                    "src/\u{fffd}.rs".to_owned(),
+                    StatusOmissionReasonV1::UnrepresentablePath,
+                ),
+            ],
+        ))
+    );
+    assert_eq!(
+        freshness
+            .omitted_sources
+            .as_ref()
+            .and_then(|omitted| omitted.sources.last())
+            .map(|source| source.git_path_bytes.as_slice()),
+        Some(b"src/\xff.rs".as_slice())
+    );
     registry.shutdown().await;
 }
 
