@@ -694,7 +694,14 @@ fn collect_tree_fields(
         }
         DocumentNode::Array(items) => {
             for item in items {
-                collect_tree_fields(item, policy, patterns, sensitive, quarantine_findings);
+                collect_detected_scalars(
+                    item,
+                    "$",
+                    policy,
+                    patterns,
+                    sensitive,
+                    quarantine_findings,
+                );
             }
         }
         DocumentNode::Scalar(_) | DocumentNode::Empty => {}
