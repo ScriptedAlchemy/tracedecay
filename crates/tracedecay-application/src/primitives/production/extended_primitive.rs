@@ -528,6 +528,27 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
                     }
                 };
+                match reader.file_by_logical_path(&request.file, Arc::clone(&cancellation)) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return refused(
+                            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                            "application.file-dependents.file-not-found",
+                            "file is not in the admitted graph",
+                            EvidenceDomain::Graph,
+                            now_observed(),
+                        )
+                        .with_cost(cost.receipt());
+                    }
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Graph,
+                            now_observed(),
+                        )
+                        .with_cost(cost.receipt());
+                    }
+                }
                 let query = GraphQueryManager::new(&reader, cancellation);
                 let dependents = match query.get_file_dependents(&request.file).await {
                     Ok(dependents) => dependents,
@@ -661,6 +682,25 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return graph_read_outcome(&error, EvidenceDomain::Source, now_observed());
                     }
                 };
+                match reader.file_by_logical_path(&request.file, Arc::clone(&cancellation)) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return refused(
+                            PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                            "application.source-outline.file-not-found",
+                            "file is not in the admitted graph",
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
+                    Err(error) => {
+                        return graph_read_outcome(
+                            &map_projection_error(error),
+                            EvidenceDomain::Source,
+                            now_observed(),
+                        );
+                    }
+                }
                 let nodes =
                     match reader.symbols_in_logical_file(&request.file, 100_000, cancellation) {
                         Ok(nodes) => nodes,
