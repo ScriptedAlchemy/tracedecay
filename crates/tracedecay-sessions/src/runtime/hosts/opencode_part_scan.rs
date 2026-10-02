@@ -24,9 +24,10 @@ pub(super) fn scan_part_reference_page(
         .prepare(
             "WITH page AS (
                  SELECT p.rowid AS change_rowid, m.rowid AS message_rowid,
-                        m.id, m.session_id, length(m.data) AS message_bytes
+                        m.id, m.session_id, s.directory, length(m.data) AS message_bytes
                  FROM part p
                  JOIN message m ON m.id = p.message_id
+                 JOIN session s ON s.id = m.session_id
                  WHERE p.rowid > ?2
                  ORDER BY p.rowid
                  LIMIT ?3
@@ -45,7 +46,7 @@ pub(super) fn scan_part_reference_page(
                     CASE WHEN length(page.id) <= ?1 THEN page.id ELSE NULL END AS message_id,
                     CASE WHEN length(page.session_id) <= ?1 THEN page.session_id ELSE NULL END
                         AS session_id,
-                    CASE WHEN length(s.directory) <= ?1 THEN s.directory ELSE NULL END
+                    CASE WHEN length(page.directory) <= ?1 THEN page.directory ELSE NULL END
                         AS directory,
                     page.message_bytes,
                     COALESCE(part_sums.part_bytes, 0) AS part_bytes,
@@ -58,7 +59,6 @@ pub(super) fn scan_part_reference_page(
                           AND ordered.rowid <= page.message_rowid
                     ) AS source_order
              FROM page
-             JOIN session s ON s.id = page.session_id
              LEFT JOIN part_sums ON part_sums.message_id = page.id
              ORDER BY page.change_rowid",
         )
