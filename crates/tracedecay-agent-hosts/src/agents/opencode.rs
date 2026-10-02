@@ -1028,6 +1028,69 @@ mod tests {
         assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
     }
 
+    #[test]
+    fn legacy_mcp_registration_remains_detectable_for_migration() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let config = opencode_config_path(home.path(), &profile);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "mcp": {
+                    "tracedecay": {
+                        "type": "local",
+                        "command": ["tracedecay", "serve"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(OpenCodeIntegration.has_tracedecay(home.path(), &profile));
+
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("opencode.json"), std::fs::read(&config).unwrap())
+            .unwrap();
+        assert!(local_config_has_tracedecay(project.path()));
+    }
+
+    #[test]
+    fn doctor_reports_retired_lsp_registration() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let config = opencode_config_path(home.path(), &profile);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "mcp": {
+                    "servers": {
+                        "tracedecay": {
+                            "type": "local",
+                            "command": ["tracedecay", "serve"]
+                        }
+                    }
+                },
+                "lsp": {
+                    "tracedecay": {
+                        "command": ["tracedecay", "lsp"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_config(&mut counters, home.path(), &profile);
+
+        assert!(counters.checks.iter().any(|check| {
+            check.level == crate::agents::DoctorCheckLevelV1::Issue
+                && check.message.contains("lsp.tracedecay")
+        }));
+    }
+
     /// The profile's `$XDG_CONFIG_HOME` is honored only inside the home being
     /// resolved: otherwise a managed-skill export sweep handed a sandbox home
     /// resolves OpenCode to the operator's real `~/.config/opencode` and
