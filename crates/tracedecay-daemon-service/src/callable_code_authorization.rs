@@ -262,6 +262,9 @@ fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
         Err(CodeGraphReadError::Corrupt { .. }) => {
             hotpath::gauge!("daemon.code_authorization.admit.refused.corrupt").inc(1.0);
         }
+        Err(CodeGraphReadError::Parked { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.parked").inc(1.0);
+        }
     }
 }
 

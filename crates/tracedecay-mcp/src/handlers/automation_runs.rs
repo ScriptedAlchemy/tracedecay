@@ -100,7 +100,9 @@ pub async fn compute_run_view(
     )
     .await
     .map_err(|error| ledger_unavailable("view", error))?
-    .ok_or_else(|| config_error(format!("automation run not found: {}", request.run_id)))?;
+    .ok_or_else(|| {
+        TraceDecayError::not_found(format!("automation run not found: {}", request.run_id))
+    })?;
     Ok(graph_tool_completion(
         GraphToolResultV1::AutomationRunView(Box::new(AutomationRunViewResultV1 {
             status: AutomationReadStatusV1::Ok,
@@ -125,14 +127,14 @@ pub async fn compute_run_artifact_view(
         label = "mcp.automation.artifact_view.load"
     )
     .await?
-    .ok_or_else(|| config_error(format!("automation run not found: {run_id}")))?;
+    .ok_or_else(|| TraceDecayError::not_found(format!("automation run not found: {run_id}")))?;
     let artifact = record
         .artifacts
         .iter()
         .find(|artifact| artifact.kind == kind)
         .cloned()
         .ok_or_else(|| {
-            config_error(format!(
+            TraceDecayError::not_found(format!(
                 "automation run artifact not found: {run_id}/{kind}"
             ))
         })?;

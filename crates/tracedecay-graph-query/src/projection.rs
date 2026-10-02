@@ -14,8 +14,10 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope,
 };
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_domain::{CodeGenerationId, UtcMicros};
+use tracedecay_domain::{ApplicationProblemDetailV1, CodeGenerationId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
+
+const CODE_GRAPH_PARKED_REASON: &str = "code-graph-parked";
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CodeGraphReadError {
@@ -29,6 +31,14 @@ pub enum CodeGraphReadError {
     Refused { detail: String },
     #[error("the exact project code graph requires reset: {detail}")]
     ResetRequired { detail: String },
+    /// The worktree's code index is parked until the operator applies
+    /// `remedy`; no wake retries it, so repeating the read cannot help.
+    #[error("the exact project code index is parked: {cause}; remedy: {remedy}")]
+    Parked {
+        cause: String,
+        remedy: String,
+        retries_on_wake: bool,
+    },
     #[error("the requested code-graph generation is stale: {detail}")]
     Stale { detail: String },
     #[error("the code-graph read was cancelled")]
@@ -295,6 +305,19 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
             authority: "verified code graph".to_owned(),
             reason: detail,
         },
+        CodeGraphReadError::Parked {
+            cause,
+            remedy,
+            retries_on_wake,
+        } => TraceDecayError::project_route_with_detail(
+            CODE_GRAPH_PARKED_REASON,
+            false,
+            ApplicationProblemDetailV1::Parked {
+                cause,
+                remedy,
+                retries_on_wake,
+            },
+        ),
         error => TraceDecayError::ProjectRoute {
             reason_code: match &error {
                 CodeGraphReadError::MissingRegistry => "code-graph-registry-missing",
@@ -308,6 +331,7 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
                 CodeGraphReadError::InvalidRequest { .. } => "code-graph-invalid-request",
                 CodeGraphReadError::Corrupt { .. } => "code-graph-corrupt",
                 CodeGraphReadError::ResetRequired { .. } => "code-graph-reset-required",
+                CodeGraphReadError::Parked { .. } => CODE_GRAPH_PARKED_REASON,
             }
             .to_owned(),
             retryable: matches!(
@@ -325,12 +349,25 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
 
 /// The graph read error a query surfaced through
 /// [`map_code_graph_read_runtime_error`], or `None` when `error` did not come
-/// from a code-graph read. A project-route refusal without a code-graph reason
-/// is an unavailable graph read.
+/// from a code-graph read. A parked route refusal stays parked whatever code
+/// carried it; any other project-route refusal without a code-graph reason is
+/// an unavailable graph read.
 pub fn code_graph_read_error_from_runtime(error: &TraceDecayError) -> Option<CodeGraphReadError> {
     if let Some((_authority, reason)) = error.reset_required_context() {
         return Some(CodeGraphReadError::ResetRequired {
             detail: reason.to_owned(),
+        });
+    }
+    if let Some(ApplicationProblemDetailV1::Parked {
+        cause,
+        remedy,
+        retries_on_wake,
+    }) = error.project_route_typed_detail()
+    {
+        return Some(CodeGraphReadError::Parked {
+            cause: cause.clone(),
+            remedy: remedy.clone(),
+            retries_on_wake: *retries_on_wake,
         });
     }
     let (reason_code, _retryable, detail) = error.project_route_context()?;
