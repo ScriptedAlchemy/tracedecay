@@ -8,6 +8,10 @@ Codex.
 
 - **MCP server** (`.mcp.json`): the `tracedecay` stdio server exposing the code
   graph, search, call-graph, impact, memory, and session-recall tools.
+- **Code explorer** (`tracedecay-explorer`): a local MCP App for project
+  selection, code search, symbol inspection, and bounded graphs. It requires
+  Node.js 20 or later on PATH; invoke `tracedecay_workspace` to open it.
+  Both MCP servers use the resolved TraceDecay binary from installation.
 - **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Codex auto-discovers
@@ -29,7 +33,7 @@ at install time.
 Codex skips newly installed or changed command hooks until they are trusted.
 Run `/hooks` in Codex to review and trust the tracedecay hooks.
 
-Every MCP tool is also available from the shell as `tracedecay tool <name>`
+The graph server's tools are also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
 parameters). The bundled `using-the-cli` skill and injected steering use that
 CLI fallback when MCP transport errors or times out, instead of querying
