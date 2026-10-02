@@ -94,6 +94,12 @@ async fn production_routed_projects_ready_for_first_read() -> ProductionRoutedPr
     .expect("production routed-project composition");
     let target_server = harness.server(&target_root).expect("target project server");
     crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
+    assert!(
+        target_server
+            .wait_for_startup_catch_up(Duration::from_secs(30))
+            .await,
+        "target startup catch-up must settle before the first routed read"
+    );
 
     ProductionRoutedProjects {
         isolation,
@@ -292,14 +298,14 @@ fn files_call_for_session(id: i64, session_id: &str) -> String {
     )
 }
 
-fn search_call_for_session(id: i64, session_id: &str, query: &str) -> String {
+fn search_call_for_project(id: i64, project_id: &str, query: &str) -> String {
     jsonrpc_request(
         json!(id),
         "tools/call",
         json!({
             "name": "tracedecay_search",
             "arguments": {
-                "session_id": session_id,
+                "project_selector": { "project_id": project_id },
                 "query": query,
                 "prefer_symbol": true,
                 "format": "json"
@@ -375,13 +381,11 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
         .server(&target_workspace)
         .expect("target project server");
     let server = projects.server();
-    let session_id = "sess-unhinted-source-edit";
-
-    run_client_connection_with_messages(
-        Arc::clone(&server),
-        vec![workspace_open_for_session(&target_workspace, session_id)],
-    )
-    .await;
+    let target_project_id = projects
+        .harness
+        .project_id(&target_workspace)
+        .await
+        .expect("target project identity");
 
     fs::write(
         target_workspace.join("src/target_only.rs"),
@@ -392,9 +396,9 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
 
     run_client_connection_with_messages(
         Arc::clone(&server),
-        vec![search_call_for_session(
+        vec![search_call_for_project(
             1,
-            session_id,
+            &target_project_id,
             "routed_edit_visible",
         )],
     )
@@ -404,9 +408,9 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
 
     let responses = run_client_connection_with_messages(
         server,
-        vec![search_call_for_session(
+        vec![search_call_for_project(
             2,
-            session_id,
+            &target_project_id,
             "routed_edit_visible",
         )],
     )
