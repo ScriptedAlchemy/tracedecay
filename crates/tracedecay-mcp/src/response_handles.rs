@@ -372,6 +372,7 @@ fn error_class(error: &ResponseHandleError) -> &'static str {
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::HostCliUnavailable { .. } => "host_cli_unavailable",
+        TraceDecayError::ServiceUnitNotOwned { .. } => "service_unit_not_owned",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::ProjectOpen { .. } => "project_open",

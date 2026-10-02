@@ -111,20 +111,17 @@ impl DrainingDaemonFixture {
         let config_home = dir.path().join("config");
         let fake_bin = dir.path().join("bin");
         let home = dir.path().join("home");
-        let profile_dir = dir.path().join("profile");
         std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
         std::fs::create_dir_all(&home).expect("home dir");
-        std::fs::create_dir_all(&profile_dir).expect("profile dir");
-        let profile = ProfileRoot::new(&profile_dir)
-            .with_home(&home)
-            .with_xdg_config_home(&config_home);
+        let profile = ProfileRoot::under_home(&home).with_xdg_config_home(&config_home);
+        std::fs::create_dir_all(profile.data_dir()).expect("profile dir");
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
         let stopped_marker = dir.path().join("systemctl.stopped");
         write_executable_script(
             &systemctl,
             super::tests::bake_script_paths(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+                super::tests::fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
                 &[
                     ("TRACEDECAY_SYSTEMCTL_LOG", &log),
                     ("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped_marker),
@@ -132,8 +129,8 @@ impl DrainingDaemonFixture {
             ),
         )
         .expect("fake systemctl");
-        let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
-        let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+        let runner = ServiceRunner::systemd(&systemctl, &profile).expect("fixture systemd runner");
+        let service_path = config_home.join("systemd/user").join("tracedecay.service");
         std::fs::create_dir_all(service_path.parent().expect("service parent"))
             .expect("service dir");
         let socket_path = dir.path().join("tracedecay.sock");
