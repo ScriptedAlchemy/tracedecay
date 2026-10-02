@@ -254,6 +254,52 @@ fn read_attachment_bytes(
     Ok(encoded)
 }
 
+fn decode_attachment_header(
+    reader: impl Read,
+) -> Result<CodeGraphPageStoreHeaderV1, CodeIndexProductionErrorV1> {
+    serde_json::from_reader(reader).map_err(|error| store_error("header decode", error))
+}
+
+fn verify_attachment_page(
+    file: &mut File,
+    offset: u64,
+    descriptor: &CodeGraphPageDescriptorV1,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| store_error("page verify", error))?;
+    let mut reader = file.take(descriptor.size_bytes);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut verified = 0_u64;
+    while verified < descriptor.size_bytes {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| store_error("page verify", error))?;
+        if read == 0 {
+            return Err(store_error(
+                "page verify",
+                "attachment ends inside the page",
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        verified = verified
+            .checked_add(
+                u64::try_from(read)
+                    .map_err(|_| store_error("page verify", "read length exceeds u64"))?,
+            )
+            .ok_or_else(|| store_error("page verify", "read length overflows u64"))?;
+    }
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())
+        .map_err(|error| store_error("page verify", error))?;
+    if digest != descriptor.page_digest {
+        return Err(store_error(
+            "page verify",
+            "digest does not match its descriptor",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct FileCodeGraphPageStoreV1 {
     generation: CodeGenerationId,
     pages: Vec<CodeGraphPageDescriptorV1>,
@@ -285,9 +331,7 @@ impl FileCodeGraphPageStoreV1 {
         if header_size_u64 > file_size.saturating_sub(16) {
             return Err(store_error("header", "length exceeds the attachment"));
         }
-        let encoded = read_attachment_bytes(&mut file, header_size_u64, "header read")?;
-        let header: CodeGraphPageStoreHeaderV1 = serde_json::from_slice(&encoded)
-            .map_err(|error| store_error("header decode", error))?;
+        let header = decode_attachment_header((&mut file).take(header_size_u64))?;
         if header.revision != CODE_GRAPH_PAGE_STORE_REVISION_V1
             || header.projector_revision != projector_revision
         {
@@ -350,6 +394,7 @@ impl CodeGraphPageStoreV1 for FileCodeGraphPageStoreV1 {
             .filter(|expected| *expected == descriptor)
             .ok_or_else(|| store_error("page read", "descriptor is outside its store"))?;
         let offset = self.offsets[descriptor.file_key as usize];
+        verify_attachment_page(&mut self.file, offset, expected)?;
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(|error| store_error("page read", error))?;
@@ -369,6 +414,25 @@ mod tests {
     use super::*;
 
     const PROJECTOR: &str = "projector.fixture";
+
+    struct InvalidHeaderPrefix {
+        served: bool,
+    }
+
+    impl Read for InvalidHeaderPrefix {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            assert!(
+                !self.served,
+                "header decoding must stop at the invalid prefix"
+            );
+            self.served = true;
+            buffer[0] = b'!';
+            Ok(1)
+        }
+    }
 
     fn fixture_page() -> PersistedCodeGraphPageV1 {
         let occurrence = FileOccurrenceId::new("file.fixture.0").expect("file occurrence");
@@ -465,6 +529,39 @@ mod tests {
                     .to_owned()
             )
             .to_string()
+        );
+    }
+
+    #[test]
+    fn malformed_header_decode_stops_without_materializing_its_declared_tail() {
+        let error = decode_attachment_header(InvalidHeaderPrefix { served: false })
+            .expect_err("an invalid prefix must refuse the header");
+
+        assert!(error.to_string().contains("header decode"));
+    }
+
+    #[test]
+    fn a_corrupt_page_is_authenticated_before_its_decode_allocation() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let path = scratch.path().join("pages");
+        let page = fixture_page();
+        let descriptor = descriptor_with_decode_bytes(&page, |size| size * 2);
+        write_store(&path, &descriptor);
+        let mut bytes = std::fs::read(&path).expect("read page store");
+        *bytes.last_mut().expect("store has page bytes") ^= 1;
+        std::fs::write(&path, bytes).expect("corrupt page bytes");
+
+        let mut store = FileCodeGraphPageStoreV1::open(&path, PROJECTOR)
+            .expect("open page store")
+            .expect("current page store revision");
+        let error = store
+            .read_page(&descriptor)
+            .expect_err("a corrupt page must not decode");
+
+        assert!(
+            error
+                .to_string()
+                .contains("page verify: digest does not match")
         );
     }
 }
