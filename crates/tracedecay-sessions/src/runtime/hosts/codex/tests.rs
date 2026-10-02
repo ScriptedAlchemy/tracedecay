@@ -1865,12 +1865,15 @@ mod recent_first_discovery_tests {
         let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
         // Write the target mid-corpus: tmpfs lists newest entries first and
         // btrfs oldest first, so either end would land in the first slice.
+        // Distractor names also sort before the target so ordered enumeration
+        // (NTFS) only reaches it past the first retained slice; the loop below
+        // must then continue across calls on every platform.
         for index in 0..4_100 {
             if index == 2_050 {
                 std::fs::write(&expected, b"{}\n").unwrap();
             }
             std::fs::write(
-                directory.join(format!("rollout-distractor-{index:04}.jsonl")),
+                directory.join(format!("rollout-1999-12-31-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();
