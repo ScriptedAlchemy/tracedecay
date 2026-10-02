@@ -367,18 +367,17 @@ pub(crate) fn edge_order(
         ))
 }
 
+type EdgeEvidenceV1 = (
+    Vec<CanonicalRelationEdgeV1>,
+    Vec<CodeIndexEdgeAbstentionV1>,
+    Vec<CodeIndexUnresolvedReferenceV1>,
+);
+
 /// `files`' edge evidence resolved whole, with the interfaces whose
 /// implementors the seal cannot decide.
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
-) -> Result<
-    (
-        Vec<CanonicalRelationEdgeV1>,
-        Vec<CodeIndexEdgeAbstentionV1>,
-        Vec<CodeIndexUnresolvedReferenceV1>,
-    ),
-    CodeIndexProductionErrorV1,
->
+) -> Result<EdgeEvidenceV1, CodeIndexProductionErrorV1>
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
@@ -551,10 +550,11 @@ where
             picks,
         )
     })?;
-    let satisfaction = selection
-        .is_none()
-        .then(|| go_satisfaction(files, &modules))
-        .unwrap_or_default();
+    let satisfaction = if selection.is_none() {
+        go_satisfaction(files, &modules)
+    } else {
+        Default::default()
+    };
     drop((by_simple_name, rust_files, typescript_modules, modules));
     let mut edges = Vec::with_capacity(
         per_file
