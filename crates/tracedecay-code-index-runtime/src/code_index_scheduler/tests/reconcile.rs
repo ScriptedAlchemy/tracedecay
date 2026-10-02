@@ -3512,7 +3512,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
-    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")
         .expect("serving swap gate stays armed");
@@ -3554,17 +3554,27 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
     );
 
     release_swap.send(()).expect("release serving swap");
-    let reached = registry
-        .wait_for_readiness(
-            fixture.path(),
-            CodeIndexReadinessTargetV1::Ready,
-            Duration::from_secs(10),
-        )
-        .await
-        .expect("readiness wait");
-    let CodeIndexReadinessWaitReadV1::Reached { reading } = reached else {
-        panic!("ready after the graph tail: {reached:?}");
-    };
+    let reading = wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "ready after the graph tail seats the generation",
+        || async {
+            let reading = registry
+                .dashboard_freshness_read(fixture.path())
+                .await
+                .ok()??;
+            let seated_generation = registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                .map(|seat| seat.generation().manifest().generation_id.clone());
+            (reading.readiness(CodeIndexReadinessTargetV1::Ready) == CodeIndexReadinessV1::Reached
+                && seated_generation.as_ref().map(CodeGenerationId::as_str)
+                    == reading.latest_generation_id.as_deref())
+            .then_some(reading)
+        },
+    )
+    .await;
     assert_eq!(
         reading.staleness_state,
         Some(CodeIndexStalenessStateV1::Fresh)
@@ -5927,19 +5937,19 @@ async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_
         )
         .await
         .expect("remount worktree over the retained store");
-    let mut signals = OwnerSignals::subscribe(&restarted, fixture.path()).await;
-    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(latest) = restarted.latest_complete_fresh(fixture.path()).await
-                && latest.generation().manifest().generation_id != sealed_id
-            {
-                break latest;
-            }
-            signals.changed().await;
-        }
-    })
-    .await
-    .expect("a restart over changed bytes with equal stat metadata must rebuild");
+    let rebuilt = wait_for_owner(
+        &restarted,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "a restart over changed bytes with equal stat metadata must rebuild",
+        || async {
+            restarted
+                .latest_complete_fresh(fixture.path())
+                .await
+                .filter(|latest| latest.generation().manifest().generation_id != sealed_id)
+        },
+    )
+    .await;
     let served = rebuilt
         .lexical()
         .iter()
@@ -8538,6 +8548,7 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler");
+    let scheduler_probe = Arc::clone(&scheduler);
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {
@@ -8549,25 +8560,27 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
-    let outcome = registry
-        .exact_occurrence(
-            RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request,
-        )
-        .await;
-    let elapsed = started.elapsed();
+    let outcome = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await
+    })
+    .await
+    .expect("expired query should answer while the scheduler lock is held");
+    assert!(
+        scheduler_probe.try_lock().is_err(),
+        "expired query should not wait for the held scheduler lock"
+    );
     release_tx.send(()).expect("release scheduler lock");
     lock_thread.join().expect("scheduler lock thread joins");
 
     assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "expired query waited {elapsed:?} for scheduler work"
-    );
     registry.shutdown().await;
 }
 
