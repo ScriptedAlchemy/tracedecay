@@ -777,11 +777,8 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
 }
 
-/// Session search returns every matching workflow fact its observation's
-/// transcript row does not already carry. A message beside two tasks surfaces
-/// all three, while a goal fact whose objective is its row's text surfaces once.
 #[tokio::test]
-async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
+async fn search_returns_one_row_per_observation_without_losing_workflow_text() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -846,9 +843,10 @@ async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
         hits,
         [
             ("goal", "release goal ships"),
-            ("message", "release summary names the owner"),
-            ("task", "release task alpha"),
-            ("task", "release task beta"),
+            (
+                "message",
+                "release summary names the owner\n\nrelease task alpha\n\nrelease task beta",
+            ),
         ]
         .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
     );
