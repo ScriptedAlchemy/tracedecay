@@ -204,7 +204,71 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    assert_eq!(ingest["messages_upserted"], 2, "ingest: {ingest}");
+    assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
+    let response = answer_tool(
+        &fixture,
+        "tracedecay_lcm_load_session",
+        json!({"provider": "cursor", "session_id": "cursor-session"}),
+    )
+    .await;
+    let session = &response["outcome"]["value"]["payload"];
+    assert_eq!(session["status"], "ok", "canonical session: {response}");
+    let mut messages = session["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("canonical session messages: {session}"))
+        .iter()
+        .map(|message| {
+            let canonical_content: Value =
+                serde_json::from_str(message["content"].as_str().expect("message content"))
+                    .expect("Cursor content blocks");
+            let content = if canonical_content.is_array() {
+                canonical_content
+            } else {
+                canonical_content["facts"]
+                    .as_array()
+                    .and_then(|facts| {
+                        facts.iter().find_map(|fact| {
+                            (fact["kind"] == "message").then(|| fact["content"].clone())
+                        })
+                    })
+                    .unwrap_or_else(|| panic!("canonical message content: {message}"))
+            };
+            json!({
+                "provider": message["provider"],
+                "session_id": message["session_id"],
+                "role": message["role"],
+                "content": content,
+            })
+        })
+        .collect::<Vec<_>>();
+    messages.sort_by(|left, right| {
+        left["role"]
+            .as_str()
+            .expect("message role")
+            .cmp(right["role"].as_str().expect("message role"))
+    });
+    assert_eq!(
+        Value::Array(messages),
+        json!([
+            {
+                "provider": "cursor",
+                "session_id": "cursor-session",
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "tracedecay_context",
+                    "input": {"task": "billing ingestion"},
+                }],
+            },
+            {
+                "provider": "cursor",
+                "session_id": "cursor-session",
+                "role": "user",
+                "content": [{"type": "text", "text": "Where is billing ingestion?"}],
+            },
+        ]),
+        "canonical session: {session}"
+    );
     assert_eq!(
         ingest["hint_outcomes"],
         json!({
