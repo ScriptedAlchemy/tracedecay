@@ -10,7 +10,6 @@ use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_p
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
 use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
-use super::host_ownership::HostAnalyzerOwnership;
 pub use super::launch::command_available;
 use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, AnalyzerLaunchResolver};
 use super::settings::CodeDiagnosticsSettings;
@@ -229,7 +228,6 @@ pub struct DiagnosticBroker {
     backfill: BTreeMap<String, BackfillProgress>,
     settings_unavailable: Option<SettingsUnavailable>,
     refresh_capacity: BrokerRefreshCapacity,
-    host_analyzer_ownership: HostAnalyzerOwnership,
 }
 
 impl DiagnosticBroker {
@@ -239,12 +237,6 @@ impl DiagnosticBroker {
         settings: CodeDiagnosticsSettings,
     ) -> Self {
         let project_root = project_root.into();
-        // The host owns its analyzers. Reading the project's own OpenCode
-        // registration here is what turns `duplicateAnalyzerAvoidance` from a
-        // recorded intention into an enforced one: every analyzer this broker
-        // could start goes through the gates below.
-        let host_analyzer_ownership =
-            HostAnalyzerOwnership::from_opencode_project_root(&project_root);
         Self {
             project_root,
             adapters,
@@ -261,7 +253,6 @@ impl DiagnosticBroker {
             backfill: BTreeMap::new(),
             settings_unavailable: None,
             refresh_capacity: BrokerRefreshCapacity::new(),
-            host_analyzer_ownership,
         }
     }
 
@@ -272,66 +263,6 @@ impl DiagnosticBroker {
         self.settings_unavailable = Some(SettingsUnavailable {
             reason: reason.into(),
         });
-    }
-
-    /// Adopts a host's declared analyzer ownership, tearing down any analyzer
-    /// this broker already started for a language the host now retains.
-    ///
-    /// The daemon calls this with the home-level `OpenCode` registration; the
-    /// project-level one is already read at construction. Adopting mid-session
-    /// has to drop the warm clients, otherwise install/repair would leave the
-    /// second analyzer running for the rest of the session and the "exactly one
-    /// analyzer per language" claim would only hold for new brokers.
-    pub fn adopt_host_analyzer_ownership(&mut self, ownership: HostAnalyzerOwnership) {
-        self.host_analyzer_ownership = ownership;
-        for language in self.host_retained_languages() {
-            let owner = self
-                .host_retained_analyzer(&language)
-                .unwrap_or_default()
-                .to_owned();
-            self.remove_language_clients(&language);
-            self.clear_language(&language);
-            self.engine_overrides
-                .insert(language.clone(), EngineState::Disabled);
-            self.engine_errors.insert(
-                language.clone(),
-                host_retained_analyzer_reason(&owner, &language),
-            );
-        }
-    }
-
-    /// The host analyzer ownership this broker currently enforces.
-    ///
-    /// Callers that learn about a second declaration level (the daemon reads
-    /// the home-level `OpenCode` registration) union it with this one and adopt
-    /// the result, so one level never silently revokes the other.
-    pub fn host_analyzer_ownership(&self) -> &HostAnalyzerOwnership {
-        &self.host_analyzer_ownership
-    }
-
-    /// The host-owned analyzer that already covers `language`, if any.
-    ///
-    /// The host declares ownership per file extension; adapters are per
-    /// language, so one retained extension retains the whole adapter.
-    pub fn host_retained_analyzer(&self, language: &str) -> Option<&str> {
-        if !self.host_analyzer_ownership.is_engaged() {
-            return None;
-        }
-        let adapter = self
-            .adapters
-            .iter()
-            .find(|adapter| adapter.language == language)?;
-        self.host_analyzer_ownership
-            .retained_owner_for_extensions(adapter.extensions.iter().map(String::as_str))
-    }
-
-    /// Every adapter language the host already runs an analyzer for.
-    pub fn host_retained_languages(&self) -> Vec<String> {
-        self.adapters
-            .iter()
-            .filter(|adapter| self.host_retained_analyzer(&adapter.language).is_some())
-            .map(|adapter| adapter.language.clone())
-            .collect()
     }
 
     pub fn new_for_test(
@@ -412,12 +343,6 @@ impl DiagnosticBroker {
         // process, and a textually different spelling of the same root would
         // mint a second one.
         let workspace_root = self.validate_semantic_scope(&workspace_root, &root_uri)?;
-        if self.host_retained_analyzer(language).is_some() {
-            // Semantic requests share the same stdio client slot as refreshes,
-            // so answering one here would start the very analyzer process the
-            // host already owns.
-            return Ok(None);
-        }
         let adapter = self
             .adapter_for(language)
             .ok_or_else(|| TraceDecayError::Config {
@@ -492,7 +417,6 @@ impl DiagnosticBroker {
         let languages =
             super::activity::active_languages_for_files(&self.project_root, &self.adapters, files);
         self.update_project_languages(languages);
-        let host_retained: BTreeSet<String> = self.host_retained_languages().into_iter().collect();
         let admitted: Vec<(String, String)> = self
             .adapters
             .iter()
@@ -512,18 +436,9 @@ impl DiagnosticBroker {
         admitted
             .into_iter()
             .map(|(language, command)| {
-                // A host-retained language stays admitted so graph-backed
-                // TraceDecay findings still project, but it is never reported
-                // as mountable: mounting is what starts the second analyzer
-                // process. A proxy whose toolchain lacks the analyzer is
-                // equally unmountable, mounting it would be the install
-                // attempt, and the refusal is recorded as the language's
-                // typed `Unavailable` state here, because project-open may
-                // never run a refresh that would otherwise record it.
-                let analyzer_available = !host_retained.contains(&language)
-                    && self
-                        .resolve_launch(&language, &command, &project_root)
-                        .is_ok();
+                let analyzer_available = self
+                    .resolve_launch(&language, &command, &project_root)
+                    .is_ok();
                 AdmittedLspProvider {
                     language,
                     command,
@@ -572,19 +487,6 @@ impl DiagnosticBroker {
             self.engine_errors.remove(language);
             self.remove_language_clients(language);
             self.clear_language(language);
-            return Ok(None);
-        }
-        if let Some(owner) = self.host_retained_analyzer(language).map(str::to_owned) {
-            // The host already runs an analyzer for this language. Preparing a
-            // refresh is the only path that spawns one, so refusing here is
-            // what keeps exactly one analyzer per language.
-            self.engine_overrides
-                .insert(language.to_string(), EngineState::Disabled);
-            self.engine_errors.insert(
-                language.to_string(),
-                host_retained_analyzer_reason(&owner, language),
-            );
-            self.remove_language_clients(language);
             return Ok(None);
         }
         let adapter = self
@@ -990,18 +892,11 @@ impl DiagnosticBroker {
                 let command = self
                     .settings
                     .command_for(&adapter.language, &adapter.command);
-                let host_owner = self.host_retained_analyzer(&adapter.language);
                 let state = self
                     .engine_overrides
                     .get(&adapter.language)
                     .copied()
                     .unwrap_or_else(|| {
-                        if host_owner.is_some() {
-                            // Reported before any refresh is attempted, so the
-                            // operator sees the retained analyzer rather than an
-                            // `Available` engine TraceDecay will never start.
-                            return EngineState::Disabled;
-                        }
                         default_state(
                             enabled,
                             self.project_languages.contains(&adapter.language),
@@ -1023,27 +918,12 @@ impl DiagnosticBroker {
                     enabled,
                     state,
                     install_options: adapter.install_options.clone(),
-                    last_error: self
-                        .engine_errors
-                        .get(&adapter.language)
-                        .cloned()
-                        .or_else(|| {
-                            host_owner.map(|owner| {
-                                host_retained_analyzer_reason(owner, &adapter.language)
-                            })
-                        }),
+                    last_error: self.engine_errors.get(&adapter.language).cloned(),
                     last_diagnostic_update,
                 }
             })
             .collect()
     }
-}
-
-/// Operator-facing reason a language reports `Disabled` while the host owns it.
-fn host_retained_analyzer_reason(owner: &str, language: &str) -> String {
-    format!(
-        "host analyzer '{owner}' already owns '{language}'; TraceDecay stays projection-only for it"
-    )
 }
 
 fn default_state(enabled: bool, active: bool, command: &str) -> EngineState {

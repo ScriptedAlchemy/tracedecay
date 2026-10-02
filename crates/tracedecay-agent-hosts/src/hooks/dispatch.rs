@@ -33,8 +33,7 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 use super::daemon_ports::{
-    DaemonAdmissionPort, DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort,
-    DaemonOpenCodeLspUpdatePort, now_utc,
+    DaemonAdmissionPort, DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort, now_utc,
 };
 
 pub(crate) enum HookDispatch {
@@ -258,6 +257,9 @@ pub fn project_and_worktree_locators_for_scope(scope: &ResolvedScope) -> ([u8; 1
 #[derive(Default, Deserialize)]
 struct NativeIdentityFields {
     id: Option<String>,
+    /// Present only on OpenCode's `execute.after` tool hook, where the
+    /// top-level `id` is the tool call rather than a stream event.
+    tool: Option<String>,
     #[serde(alias = "sessionID")]
     session_id: Option<String>,
     conversation_id: Option<String>,
@@ -273,7 +275,7 @@ struct NativeIdentityFields {
     #[serde(alias = "callID")]
     call_id: Option<String>,
     edits: Option<Vec<serde_json::Value>>,
-    properties: Option<NativeIdentityProperties>,
+    data: Option<NativeIdentityData>,
     input: Option<NativeIdentityInput>,
     tool_input: Option<NativeIdentityToolInput>,
     output: Option<NativeIdentityOutput>,
@@ -282,19 +284,18 @@ struct NativeIdentityFields {
     receipt: Option<NativeIdentityReceipt>,
 }
 
+/// OpenCode's V2 stream envelope keeps the session under `data`.
 #[derive(Default, Deserialize)]
-struct NativeIdentityProperties {
+struct NativeIdentityData {
     #[serde(alias = "sessionID")]
     session_id: Option<String>,
-    file: Option<String>,
 }
 
+/// OpenCode's V2 tool hook carries the tool's own input; edit and write name
+/// their target as `path`.
 #[derive(Default, Deserialize)]
 struct NativeIdentityInput {
-    #[serde(alias = "sessionID")]
-    session_id: Option<String>,
-    #[serde(alias = "callID")]
-    call_id: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -341,14 +342,9 @@ impl NativeIdentityFields {
             .as_deref()
             .or(self.conversation_id.as_deref())
             .or_else(|| {
-                self.properties
+                self.data
                     .as_ref()
-                    .and_then(|properties| properties.session_id.as_deref())
-            })
-            .or_else(|| {
-                self.input
-                    .as_ref()
-                    .and_then(|input| input.session_id.as_deref())
+                    .and_then(|data| data.session_id.as_deref())
             })
             .or_else(|| {
                 self.route
@@ -362,11 +358,6 @@ impl NativeIdentityFields {
             .as_deref()
             .or(self.tool_call_id.as_deref())
             .or(self.call_id.as_deref())
-            .or_else(|| {
-                self.input
-                    .as_ref()
-                    .and_then(|input| input.call_id.as_deref())
-            })
             .or_else(|| {
                 self.extra
                     .as_ref()
@@ -388,11 +379,7 @@ impl NativeIdentityFields {
             .as_deref()
             .or(self.tool_call_id.as_deref())
             .or(self.call_id.as_deref())
-            .or_else(|| {
-                self.input
-                    .as_ref()
-                    .and_then(|input| input.call_id.as_deref())
-            })
+            .or_else(|| self.tool.as_ref().and(self.id.as_deref()))
             .or_else(|| {
                 self.extra
                     .as_ref()
@@ -408,7 +395,7 @@ impl NativeIdentityFields {
     fn file_path(&self) -> Option<&str> {
         self.file_path
             .as_deref()
-            .or_else(|| self.properties.as_ref()?.file.as_deref())
+            .or_else(|| self.input.as_ref()?.path.as_deref())
             .or_else(|| {
                 let tool_input = self.tool_input.as_ref()?;
                 tool_input
@@ -631,30 +618,6 @@ pub(crate) async fn dispatch_opencode_tool_after(
         &delivery,
     )
     .await
-}
-
-#[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_lsp_updated")]
-pub(crate) async fn dispatch_opencode_lsp_updated(
-    runtime: &HookRuntimeV1,
-    event_json: &str,
-    project_root: &Path,
-    telemetry: Option<&HookTimingSpan>,
-) -> HookDispatch {
-    if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_err() {
-        return unavailable();
-    }
-    let Ok(event) = serde_json::from_str::<serde_json::Value>(event_json) else {
-        return unavailable();
-    };
-    let port = DaemonOpenCodeLspUpdatePort::new(runtime, project_root, telemetry);
-    if port.submit_updated_event(&event).await {
-        HookDispatch::Handled {
-            guidance: None,
-            disposition: HookTransportDispositionV1::Accepted,
-        }
-    } else {
-        unavailable()
-    }
 }
 
 struct PreparedBoundHook {
