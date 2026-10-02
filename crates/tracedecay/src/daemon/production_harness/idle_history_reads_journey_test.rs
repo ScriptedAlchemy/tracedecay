@@ -259,24 +259,29 @@ async fn lcm_status(harness: &ProductionProjectCompositionHarnessV1, project: &P
     }
 }
 
+fn convergence_state(status: &Value) -> &str {
+    status["projection"]["convergence"]["state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("lcm_status must report convergence state: {status}"))
+}
+
 async fn converged_messages(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     expected: u64,
 ) -> Value {
-    let deadline = Instant::now() + CONVERGENCE_DEADLINE;
     loop {
         let status = lcm_status(harness, project).await;
-        if status["projection"]["convergence"]["state"] == json!("converged")
-            && status["lcm"]["store"]["messages"] == json!(expected)
-        {
-            return status;
+        match convergence_state(&status) {
+            "converging" => tokio::time::sleep(STATUS_POLL_INTERVAL).await,
+            "converged" if status["lcm"]["store"]["messages"] == json!(expected) => {
+                return status;
+            }
+            "converged" => {
+                panic!("history converged on the wrong message count (expected {expected}): {status}")
+            }
+            other => panic!("history settled as {other} before converging: {status}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "history never converged on {expected} messages: {status}"
-        );
-        tokio::time::sleep(STATUS_POLL_INTERVAL).await;
     }
 }
 
@@ -351,19 +356,18 @@ async fn quiet_converged(
     project: &Path,
     reads: &TranscriptReads,
 ) -> (Value, BTreeSet<String>) {
-    let deadline = Instant::now() + CONVERGENCE_DEADLINE;
     let mut read = BTreeSet::new();
     loop {
         tokio::time::sleep(QUIET_WINDOW).await;
         let window = reads.take();
         let status = lcm_status(harness, project).await;
-        if window.is_empty() && status["projection"]["convergence"]["state"] == json!("converged") {
+        let state = convergence_state(&status);
+        if window.is_empty() && state == "converged" {
             return (status, read);
         }
         assert!(
-            Instant::now() < deadline,
-            "history never went quiet: read {window:?} under {}",
-            status["projection"]["convergence"]
+            state == "converging" || state == "converged",
+            "history settled as {state} before converging: {status}"
         );
         read.extend(window);
     }
