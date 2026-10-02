@@ -609,16 +609,20 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     .unwrap();
 
     let rejected = open_project_session_db(&project).await.unwrap();
+    let malformed_len = std::fs::metadata(&path).unwrap().len();
     let malformed = try_ingest_claude_source(&rejected, &source, &project)
         .await
         .expect("malformed complete frame must defer, not fail the pass");
-    assert_eq!(malformed.messages_upserted, 0);
+    // The complete malformed frame is skipped and scanning continues: the
+    // valid suffix lands and the cursor reaches end of file.
+    assert_eq!(malformed.messages_upserted, 1);
     assert_eq!(
         claude_observation_cursor(&rejected, &path).await,
-        Some(prefix_offset)
+        Some(malformed_len)
     );
-    assert_eq!(rejected.session_message_count().await.unwrap(), 2);
-    assert!(rejected.get_session_message("claude", "u4").await.is_none());
+    assert_eq!(rejected.session_message_count().await.unwrap(), 3);
+    assert!(rejected.get_session_message("claude", "u3").await.is_none());
+    assert!(rejected.get_session_message("claude", "u4").await.is_some());
     drop(rejected);
 
     let repaired = serde_json::json!({
@@ -635,7 +639,8 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     let recovered = try_ingest_claude_source(&retry, &source, &project)
         .await
         .unwrap();
-    assert_eq!(recovered.messages_upserted, 2);
+    // Only the repaired frame upserts; the suffix was already ingested.
+    assert_eq!(recovered.messages_upserted, 1);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
     assert!(retry.get_session_message("claude", "u4").await.is_some());
