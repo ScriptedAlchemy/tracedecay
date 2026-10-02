@@ -684,12 +684,13 @@ async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
             reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
         }],
     };
-    let served = omitted.clone();
-    let reader: CodeIndexFreshnessReader =
+    let reader_for = |generation: &str| -> CodeIndexFreshnessReader {
+        let generation = generation.to_owned();
+        let served = omitted.clone();
         std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
             let freshness = CodeIndexWorktreeFreshnessV1 {
                 worktree_root: worktree_root.display().to_string(),
-                latest_generation_id: Some("generation.mcp-verified-graph-fixture.1".to_owned()),
+                latest_generation_id: Some(generation.clone()),
                 staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
                 rebuild_in_flight: false,
                 hook_hint_count: Some(0),
@@ -698,16 +699,18 @@ async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
                 ..Default::default()
             };
             Box::pin(async move { Ok(Some(freshness)) })
-        });
-    let with_reader = || {
+        })
+    };
+    let options_for = |generation: &str| {
         crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
             &cg,
             crate::mcp::tools::handlers::ToolCallRegistryOptions {
-                code_index_freshness_reader: Some(reader.clone()),
+                code_index_freshness_reader: Some(reader_for(generation)),
                 ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
             },
         )
     };
+    let with_reader = || options_for("generation.mcp-verified-graph-fixture.1");
 
     let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
@@ -736,6 +739,20 @@ async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
     assert!(
         text.contains("\"src/\u{fffd}.rs\" (unrepresentable path)"),
         "{text}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        options_for("generation.mcp-verified-graph-fixture.2"),
+    )
+    .await
+    .expect("files renders while a newer generation is latest");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert!(
+        payload.get("worktree_omitted_sources").is_none(),
+        "omissions recorded for another generation never annotate this listing: {payload}"
     );
 
     let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
