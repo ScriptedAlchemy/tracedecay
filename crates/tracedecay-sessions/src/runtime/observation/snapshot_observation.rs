@@ -403,7 +403,7 @@ fn append_tool_invocation_facts(
     // Snapshot providers derive `tool_names` from native exposed tool-call records.
     // This fallback preserves that evidence without inventing arguments; payload
     // shapers must supply `tool_calls` when typed arguments are available.
-    for (index, name) in native
+    for name in native
         .get("tool_names")
         .and_then(Value::as_str)
         .into_iter()
