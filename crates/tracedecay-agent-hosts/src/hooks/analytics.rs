@@ -539,18 +539,16 @@ fn record_hook_invoked_named(
 }
 
 /// The session a hook payload names: a top-level session or conversation key
-/// (Claude, Codex, Cursor, Kimi, Pi), else the nested session OpenCode's event
-/// bus (`properties`), tool callback (`input`), and Hermes (`route`) carry.
+/// (Claude, Codex, Cursor, Kimi, Pi, OpenCode's tool hook), else the nested
+/// session OpenCode's event stream (`data`) and Hermes (`route`) carry.
 fn payload_session_id(parsed: &Value) -> Option<String> {
     const NESTED_SESSION_KEYS: &[&str] = &["sessionID", "session_id", "sessionId"];
     super::event_session_id(parsed)
         .or_else(|| super::text_field(parsed, &["sessionID"]))
         .or_else(|| {
-            ["properties", "input", "route"]
-                .into_iter()
-                .find_map(|container| {
-                    super::text_field(parsed.get(container)?, NESTED_SESSION_KEYS)
-                })
+            ["data", "route"].into_iter().find_map(|container| {
+                super::text_field(parsed.get(container)?, NESTED_SESSION_KEYS)
+            })
         })
 }
 

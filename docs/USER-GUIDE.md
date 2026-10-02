@@ -1107,6 +1107,37 @@ authority and follow the daemon's typed remediation or reset instructions. Do
 not copy or edit database files, bypass the daemon, or reopen the authority
 until remediation completes or the daemon explicitly recreates the final store.
 
+#### Scoped resets: `tracedecay wipe --stale --yes`
+
+`tracedecay doctor` lists each store the daemon holds in its reset-required
+state as a pending operator action with the command that resets it. When that
+command is `tracedecay wipe --stale --yes`, the reset deletes exactly the
+stores the daemon reports and nothing else; the daemon recreates each one
+empty. Nothing is migrated or backed up. The stores it resets on their own:
+
+| Store | Files deleted | What is lost |
+|---|---|---|
+| profile authority | `~/.tracedecay/global.db` (`-wal`, `-shm`) | the project registry, usage accounting, and remote-deletion records |
+| profile sessions | `~/.tracedecay/user-sessions.db` family | projectless session history and stored profile configuration |
+| project sessions `<id>` | `~/.tracedecay/projects/<id>/sessions.db` family | that project's session history and stored configuration |
+| profile / project hook admissions | the Hook V2 admission ledgers | pending hook admissions |
+
+A profile authority reset keeps every project store (code index, graph,
+sessions, memory) byte-identical. The registry it recreates is empty, so the
+reset prints one `tracedecay init <path>` command per project store whose root
+still exists; each project's store records its own root and identity, so
+`init` registers it again and keeps serving its existing code generation. A
+git checkout also registers itself again the first time a command runs in it.
+A session store written by the same release can carry the same refused table;
+the daemon names it when `init` first opens that project, and the same command
+resets it. While the profile authority is reset-required, project commands
+refuse with this reset instead of serving: project routing resolves
+enrollment, linked worktrees, and remote-deletion records through the
+registry.
+
+A store `wipe --stale` cannot reset on its own names `tracedecay wipe --all
+--yes`, which deletes every profile store, including project code indexes.
+
 ---
 
 ## Configuration Files
