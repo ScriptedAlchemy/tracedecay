@@ -506,7 +506,7 @@ pub enum LcmError {
         actual_to: Option<i64>,
     },
     LifecycleStateNotFound,
-    /// LCM rows were written to a store that holds no sessions.
+    /// An LCM write targeted a store that holds no sessions.
     NotASessionStore,
     Cancelled,
     DeadlineExceeded,
