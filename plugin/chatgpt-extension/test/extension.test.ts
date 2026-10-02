@@ -159,6 +159,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     try {
       expect(packaged.getServerVersion()?.name).toBe("tracedecay-chatgpt-extension");
       const tools = await packaged.listTools();
+      expect(tools.tools.find((tool) => tool.name === "tracedecay_workspace")?._meta?.["ui/resourceUri"]).toBe(UI_RESOURCE_URI);
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         "search_mentions",
         "tracedecay_inspect_symbol",
