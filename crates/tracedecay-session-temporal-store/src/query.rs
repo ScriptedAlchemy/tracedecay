@@ -16,7 +16,6 @@ use crate::sql::{
     retire_superseded_versions_sql,
 };
 
-pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";
 pub(super) const PERSIST_OPERATION: &str = "persist session temporal projection batch";
 pub(super) const ACTIVATE_OPERATION: &str = "activate session temporal generation";
 
@@ -117,47 +116,6 @@ fn decode_generation(row: &Row, operation: &'static str) -> SessionStoreResult<G
         state: row.get(0).map_err(|error| storage(operation, error))?,
         frozen_watermarks_json: row.get(1).map_err(|error| storage(operation, error))?,
     })
-}
-
-pub(super) async fn read_active_generation(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    session_id: &SessionId,
-    operation: &'static str,
-) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
-    let mut rows = conn
-        .query(
-            "SELECT generation
-             FROM session_temporal_generations
-             WHERE session_id = ?1 AND state = 'active'",
-            params![session_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage(operation, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(operation, error))?
-    else {
-        return Ok(None);
-    };
-    let value: i64 = row.get(0).map_err(|error| storage(operation, error))?;
-    decode_generation_i64(value, operation).map(Some)
-}
-
-pub(super) async fn require_active_generation(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    session_id: &SessionId,
-    expected: SessionProjectionGenerationV1,
-    operation: &'static str,
-) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
-    let actual = read_active_generation(conn, session_id, operation).await?;
-    match actual {
-        Some(actual) if actual == expected => Ok(Some(actual)),
-        Some(actual) => Err(SessionStoreError::StaleGeneration { expected, actual }),
-        None => Err(SessionStoreError::MissingGeneration {
-            generation: expected,
-        }),
-    }
 }
 
 /// Refuses a second open candidate: generation `G` reads every row numbered

@@ -255,6 +255,9 @@ impl<'a> PendingTranscript<'a> {
         {
             return Ok(None);
         }
+        if witness.is_none() && hub.path_recorded_converged(consumer, path) {
+            return Ok(None);
+        }
         Ok(Some(Self {
             convergence: witness.map(|witness| (hub, consumer, witness)),
         }))
@@ -1005,6 +1008,19 @@ impl CodexDiscoveryHub {
             }
             return Ok(CodexDiscoveryDelivery::Waiting);
         }
+    }
+
+    /// Whether `consumer` already recorded `path` converged. Used when the
+    /// file's change time is still inside the coarse timestamp quantum and
+    /// cannot yet mint a fresh witness, but an earlier pass already proved
+    /// the bytes unchanged.
+    fn path_recorded_converged(&self, consumer: &str, path: &Path) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .consumers
+            .get(consumer)
+            .is_some_and(|state| state.converged.contains_key(path))
     }
 
     /// Whether `consumer` already finished `path` while it had exactly

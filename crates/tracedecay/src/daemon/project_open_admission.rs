@@ -1073,31 +1073,34 @@ pub(super) fn project_server_requirement(
     match classify_mcp_method(&request.method) {
         McpMethod::HookEvent => ProjectServerRequirement::RegisteredHostIngest,
         McpMethod::ToolsCall => match projectless_tool_call(request.params.as_ref()) {
-            Ok((tool_name, arguments))
-                if tool_name
-                    == tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime
-                        .mcp_tool_name() =>
-            {
-                hook_runtime_requirement(arguments.as_object())
+            Ok((tool_name, arguments)) => {
+                match tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(
+                    tool_name,
+                ) {
+                    Some(operation) => graph_tool_requirement(
+                        operation,
+                        arguments.as_object().unwrap_or(&serde_json::Map::new()),
+                    ),
+                    None => ProjectServerRequirement::Core,
+                }
             }
-            _ => ProjectServerRequirement::Core,
+            Err(_) => ProjectServerRequirement::Core,
         },
         _ => ProjectServerRequirement::Core,
     }
 }
 
-/// The server a hook call needs: the full one whose session stores it
-/// records evidence in, or the core one for an action that records none.
-pub(super) fn hook_runtime_requirement(
-    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+/// The server a tool call needs: the full one when the call declares the
+/// project session stores only that server mounts, or the core one.
+pub(super) fn graph_tool_requirement(
+    operation: tracedecay_tool_catalog::ApplicationSurfaceOperation,
+    arguments: &serde_json::Map<String, serde_json::Value>,
 ) -> ProjectServerRequirement {
-    match arguments {
-        Some(arguments)
-            if !tracedecay_contracts::retrieval::hook_runtime_needs_session_stores(arguments) =>
-        {
-            ProjectServerRequirement::Core
+    match tracedecay_mcp::handlers::graph_tool::graph_tool_owner_stores(operation, arguments) {
+        tracedecay_tool_catalog::OwnerStoresV1::ProjectGraph => ProjectServerRequirement::Core,
+        tracedecay_tool_catalog::OwnerStoresV1::ProjectSessions => {
+            ProjectServerRequirement::RegisteredHostIngest
         }
-        _ => ProjectServerRequirement::RegisteredHostIngest,
     }
 }
 
