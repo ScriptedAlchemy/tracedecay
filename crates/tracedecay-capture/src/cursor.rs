@@ -236,7 +236,7 @@ fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObserva
                         .cloned()
                         .unwrap_or(Value::Null),
                 });
-                if is_subagent_dispatch_tool(&name) {
+                if is_subagent_dispatch_tool(name) {
                     facts.push(CanonicalObservationFactV1::Workflow {
                         evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
                         reference: item.get("id").and_then(Value::as_str).map(str::to_string),
