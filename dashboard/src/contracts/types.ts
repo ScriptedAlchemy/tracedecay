@@ -914,6 +914,7 @@ export type CodeIndexConvergenceParkedV1 = {
 export type CodeIndexFreshnessCoverageV1 = "complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved";
 
 export type CodeIndexFreshnessPayloadV1 = {
+  mount_failure?: CodeIndexMountFailureV1 | null | undefined;
   note: string;
   worktrees: Array<CodeIndexWorktreeFreshnessV1>;
 };
@@ -924,6 +925,11 @@ export type CodeIndexGenerationRecoveryV1 = {
   incompatibilities: Array<string>;
   incompatible_generation_id: string;
   serving: CodeIndexGenerationRecoveryServingV1;
+};
+
+export type CodeIndexMountFailureV1 = {
+  message: string;
+  remediation: string;
 };
 
 export type CodeIndexRestoreProgressV1 = {

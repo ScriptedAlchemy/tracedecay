@@ -4196,6 +4196,16 @@
     },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
+        "mount_failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexMountFailureV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "note": {
           "type": "string"
         },
@@ -4243,6 +4253,22 @@
         "incompatible_generation_id",
         "incompatibilities",
         "serving"
+      ],
+      "type": "object"
+    },
+    "CodeIndexMountFailureV1": {
+      "description": "Safe operator-facing status for a failed code-index mount.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "remediation"
       ],
       "type": "object"
     },

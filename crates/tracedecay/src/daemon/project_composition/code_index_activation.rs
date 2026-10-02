@@ -546,6 +546,36 @@ mod tests {
         .expect("pre-mount reconcile must mount the scheduler and flush the overflow request");
     }
 
+    #[tokio::test]
+    async fn freshness_reader_publishes_a_failed_mount_without_private_detail() {
+        let repository = repository();
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
+        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+            &root,
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            Arc::new(|| Box::pin(async { Err("/private/operator/path".to_owned()) })),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        let reader = super::super::project_dashboard_freshness_reader(
+            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+            Arc::clone(&activation),
+        );
+
+        assert!(activation.activate_for_root(&root));
+        while !activation.mount_failed() {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            reader(root).await,
+            Err(
+                tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed
+            )
+        );
+    }
+
     /// A linked worktree under the default `sync.watch_linked_worktrees = false`
     /// carries `LinkedWorktreeDisabled` automatic admission, which is the
     /// filesystem-watcher policy. `tracedecay init` inside that worktree still

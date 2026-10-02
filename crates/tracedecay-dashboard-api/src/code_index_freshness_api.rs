@@ -13,7 +13,8 @@
 use axum::Json;
 use axum::extract::State;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
+    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1,
+    CodeIndexStalenessStateV1,
 };
 
 use super::DashboardState;
@@ -44,15 +45,17 @@ async fn project_code_index_freshness(
         None => Ok(None),
     };
     let read = match read {
-        Err(_) => {
-            return DashboardEnvelopeV1::unavailable(
-                scope_from_state(state),
-                CodeIndexFreshnessPayloadV1 {
-                    worktrees: Vec::new(),
-                    note: "code-index freshness read failed".to_owned(),
-                },
-                "code-index freshness read failed",
-            );
+        Err(failure) => {
+            let payload = CodeIndexFreshnessPayloadV1::from_read_failure(failure);
+            let reason = payload.note.clone();
+            return match failure {
+                CodeIndexFreshnessReadFailureV1::ReadFailed => {
+                    DashboardEnvelopeV1::unavailable(scope_from_state(state), payload, reason)
+                }
+                CodeIndexFreshnessReadFailureV1::MountFailed => {
+                    DashboardEnvelopeV1::error(scope_from_state(state), payload, reason)
+                }
+            };
         }
         Ok(read) => read,
     };
@@ -159,8 +162,8 @@ mod tests {
     use super::*;
     use crate::read_model::DashboardDomainStateV1;
     use tracedecay_contracts::code_index_freshness::{
-        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
-        CodeIndexWorktreeFreshnessV1,
+        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessReadFailureV1,
+        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
@@ -224,6 +227,30 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Absent);
+    }
+
+    #[tokio::test]
+    async fn failed_mount_is_an_error_with_operator_remediation() {
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|_| {
+            Box::pin(async { Err(CodeIndexFreshnessReadFailureV1::MountFailed) })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Error);
+        let failure = envelope
+            .payload
+            .mount_failure
+            .expect("the failed mount remains visible");
+        assert_eq!(
+            failure.message,
+            "the code-index scheduler could not mount for this project"
+        );
+        assert_eq!(
+            failure.remediation,
+            "run `tracedecay sync` to retry the code-index mount"
+        );
     }
 
     #[tokio::test]

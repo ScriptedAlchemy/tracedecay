@@ -137,6 +137,7 @@ pub struct CodeIndexActivationV1 {
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
+    mount_failed: Arc<AtomicBool>,
     hint_sink: CodeIndexActivationHintSinkV1,
     retirement: Arc<CodeIndexActivationRetirementV1>,
     #[cfg(test)]
@@ -182,6 +183,7 @@ impl CodeIndexActivationV1 {
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
+            mount_failed: Arc::new(AtomicBool::new(false)),
             hint_sink,
             retirement: Arc::new(CodeIndexActivationRetirementV1::new()),
             #[cfg(test)]
@@ -207,6 +209,11 @@ impl CodeIndexActivationV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Whether the last mount attempt failed and no later attempt mounted.
+    pub fn mount_failed(&self) -> bool {
+        self.mount_failed.load(Ordering::Acquire)
     }
 
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
@@ -293,6 +300,7 @@ impl CodeIndexActivationV1 {
         let state = Arc::clone(&self.state);
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
+        let mount_failed = Arc::clone(&self.mount_failed);
         let hint_sink = Arc::clone(&self.hint_sink);
         runtime.spawn(hotpath::future!(
             async move {
@@ -305,7 +313,9 @@ impl CodeIndexActivationV1 {
                         .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
-                if let Err(error) = mount().await {
+                let mounted = mount().await;
+                mount_failed.store(mounted.is_err(), Ordering::Release);
+                if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
                     hotpath::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
@@ -723,6 +733,40 @@ mod tests {
         wait_until(|| linked_activation.is_mounted()).await;
         assert_eq!(primary_mounts.load(Ordering::SeqCst), 1);
         assert_eq!(linked_mounts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_mount_stays_visible_until_a_retry_mounts() {
+        let repository = repository();
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&mount_attempts);
+        let activation = CodeIndexActivationV1::new(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            Arc::new(move || {
+                let attempts = Arc::clone(&attempts);
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("private mount detail".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                })
+            }),
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        );
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.mount_failed() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(activation.activate_for_root(repository.path()));
+        while !activation.is_mounted() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!activation.mount_failed());
     }
 
     #[tokio::test]
