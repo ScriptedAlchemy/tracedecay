@@ -174,9 +174,12 @@ fn resident_engine_bytes_is_recomputed_after_hibernation_and_reopen() {
     let db = GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
         .unwrap();
     drop(db.read_guard().unwrap());
-    let _before_hibernate = db.resident_engine_bytes().unwrap().unwrap();
+    db.resident_engine_bytes().unwrap().unwrap();
     db.hibernate_if_lazy().unwrap();
     assert_eq!(db.resident_engine_bytes().unwrap(), None);
+    // A measurement left over from the closed engine must not survive the
+    // reopen; the same file reopens to the same figure, so plant a stale one.
+    *db.inner.engine_usage_bytes.lock().unwrap() = Some(u64::MAX);
 
     drop(db.read_guard().unwrap());
     let reopened = db.resident_engine_bytes().unwrap().unwrap();
