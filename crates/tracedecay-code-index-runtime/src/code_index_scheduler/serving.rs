@@ -859,25 +859,6 @@ pub(super) enum TextHeadOpenOutcomeV1 {
     BuildCloneSuccessor(Box<CodeTextCloneSuccessorBuildV1>),
 }
 
-fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
-    match error {
-        CodeLexicalArtifactErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
-        ) => RetrievalPortError::Cancelled,
-        CodeLexicalArtifactErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
-        ) => RetrievalPortError::BudgetExceeded,
-        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
-        CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Unreserved(_)
-        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
-        CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
-            RetrievalPortError::AuthorityUnavailable(detail)
-        }
-    }
-}
-
 pub(super) fn map_sealed_page_source_error(
     error: CodeIndexProductionErrorV1,
 ) -> RetrievalPortError {
@@ -2456,9 +2437,9 @@ impl LatestCodeTextGenerationV1 {
             ) => {
                 self.text_artifact_store
                     .discard_incompatible_staging(&staging_path, control)?;
-                open_builder().map_err(map_text_artifact_error)?
+                open_builder().map_err(RetrievalPortError::from)?
             }
-            Err(error) => return Err(map_text_artifact_error(error)),
+            Err(error) => return Err(RetrievalPortError::from(error)),
         };
         let source_position = match builder.next_cursor() {
             Ok(Some(cursor)) => CloneSuccessorSourcePositionV1::Revalidating(cursor),
@@ -2470,10 +2451,10 @@ impl LatestCodeTextGenerationV1 {
                 drop(builder);
                 self.text_artifact_store
                     .discard_incompatible_staging(&staging_path, control)?;
-                builder = open_builder().map_err(map_text_artifact_error)?;
+                builder = open_builder().map_err(RetrievalPortError::from)?;
                 CloneSuccessorSourcePositionV1::Appending
             }
-            Err(error) => return Err(map_text_artifact_error(error)),
+            Err(error) => return Err(RetrievalPortError::from(error)),
         };
         Ok(Box::new(CodeTextCloneSuccessorBuildV1 {
             builder: Some(builder),
@@ -2555,7 +2536,7 @@ impl LatestCodeTextGenerationV1 {
                 store.withdraw_unavailable_descriptor(&descriptor, false)?;
                 Ok(None)
             }
-            Err(error) => Err(map_text_artifact_error(error)),
+            Err(error) => Err(RetrievalPortError::from(error)),
         }
     }
 
@@ -2632,8 +2613,8 @@ impl LatestCodeTextGenerationV1 {
                 CodeLexicalArtifactWriterRevisionV1::V14,
             )
         }
-        .map_err(map_text_artifact_error)?;
-        let mut progress = builder.progress().map_err(map_text_artifact_error)?;
+        .map_err(RetrievalPortError::from)?;
+        let mut progress = builder.progress().map_err(RetrievalPortError::from)?;
         if let Some(cursor) = progress.next_cursor.as_ref() {
             match source.restore_cursor_classified(cursor, control) {
                 Ok(()) => {}
@@ -2649,8 +2630,8 @@ impl LatestCodeTextGenerationV1 {
                         builder_budget,
                         CodeLexicalArtifactWriterRevisionV1::V14,
                     )
-                    .map_err(map_text_artifact_error)?;
-                    progress = builder.progress().map_err(map_text_artifact_error)?;
+                    .map_err(RetrievalPortError::from)?;
+                    progress = builder.progress().map_err(RetrievalPortError::from)?;
                 }
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::Production(error)) => {
                     return Err(map_sealed_page_source_error(error));
@@ -2871,11 +2852,11 @@ impl LatestCodeTextGenerationV1 {
                         );
                         return Ok(false);
                     }
-                    return Err(map_text_artifact_error(error));
+                    return Err(RetrievalPortError::from(error));
                 }
                 Ok(Err(error)) => {
                     self.publish_text_artifact_block(&error);
-                    return Err(map_text_artifact_error(error));
+                    return Err(RetrievalPortError::from(error));
                 }
                 Err(error) => return Err(map_sealed_page_source_error(error)),
             };
@@ -2983,7 +2964,7 @@ impl LatestCodeTextGenerationV1 {
             Ok(step) => step,
             Err(error) => {
                 self.publish_text_artifact_block(&error);
-                return Err(map_text_artifact_error(error));
+                return Err(RetrievalPortError::from(error));
             }
         };
         let finalization_phase = match finalized {
@@ -2999,7 +2980,7 @@ impl LatestCodeTextGenerationV1 {
                 let progress = artifact_build
                     .builder
                     .progress()
-                    .map_err(map_text_artifact_error)?;
+                    .map_err(RetrievalPortError::from)?;
                 self.publish_text_progress_boundary(
                     artifact_build,
                     &progress,
@@ -3016,7 +2997,7 @@ impl LatestCodeTextGenerationV1 {
         let progress = artifact_build
             .builder
             .progress()
-            .map_err(map_text_artifact_error)?;
+            .map_err(RetrievalPortError::from)?;
         self.publish_text_progress_boundary(
             artifact_build,
             &progress,
@@ -3078,7 +3059,7 @@ impl LatestCodeTextGenerationV1 {
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
             control,
         )
-        .map_err(map_text_artifact_error)?;
+        .map_err(RetrievalPortError::from)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
         let prior = reader.verified_artifact().clone();
         // Match the cold-open path: install owners first, then publish Ready.
@@ -3144,7 +3125,7 @@ impl LatestCodeTextGenerationV1 {
                 RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
             })?
             .finish(source_receipt, control)
-            .map_err(map_text_artifact_error)?;
+            .map_err(RetrievalPortError::from)?;
         drop(build.builder.take());
         drop(build.build_reservation.take());
         let descriptor = self.text_artifact_store.publish_with_prior(
@@ -3169,7 +3150,7 @@ impl LatestCodeTextGenerationV1 {
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
             control,
         )
-        .map_err(map_text_artifact_error)?;
+        .map_err(RetrievalPortError::from)?;
         self.install_artifact_owners(reader, reader_reservation)?;
         Ok(true)
     }
@@ -3201,7 +3182,7 @@ impl LatestCodeTextGenerationV1 {
                     RetrievalPortError::Contract("clone-successor builder is missing".to_owned())
                 })?
                 .append_page(page, control)
-                .map_err(map_text_artifact_error)?;
+                .map_err(RetrievalPortError::from)?;
             return Ok(true);
         };
         let target = target.clone();
@@ -3221,7 +3202,7 @@ impl LatestCodeTextGenerationV1 {
             self.rebuild_clone_successor(build, control)?;
             return Ok(false);
         }
-        verification.map_err(map_text_artifact_error)?;
+        verification.map_err(RetrievalPortError::from)?;
         if page.next_cursor().next_page_ordinal() == target.next_page_ordinal() {
             if page.next_cursor() != &target {
                 self.rebuild_clone_successor(build, control)?;
@@ -3252,7 +3233,7 @@ impl LatestCodeTextGenerationV1 {
             self.text_projection_metadata()?,
             CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
         )
-        .map_err(map_text_artifact_error)?;
+        .map_err(RetrievalPortError::from)?;
         build.source = self
             .text_artifact_store
             .open_sealed_source(&build.sealed_identity, control)?;

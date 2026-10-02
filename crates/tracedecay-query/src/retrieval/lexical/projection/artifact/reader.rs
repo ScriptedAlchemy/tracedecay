@@ -1143,7 +1143,7 @@ impl LexicalPostingReadPort for CodeLexicalArtifactReaderV1 {
             crate::hotpath_metrics::Residency::Rebuilding.record("query.lane.lexical.residency");
             return Ok(RetrieverOutcome::Stale(self.receipt.freshness().clone()));
         }
-        let connection = self.lock_connection().map_err(map_query_artifact_error)?;
+        let connection = self.lock_connection().map_err(RetrievalPortError::from)?;
         let outcome = ArtifactQueryV1::new(
             &connection,
             &self.metadata,
@@ -1190,7 +1190,7 @@ where
         let connection = self
             .reader
             .lock_connection()
-            .map_err(map_query_artifact_error)?;
+            .map_err(RetrievalPortError::from)?;
         let outcome = ArtifactQueryV1::new(
             &connection,
             &self.reader.metadata,
@@ -1536,7 +1536,7 @@ fn visit_lexical_rows(
             | LexicalArtifactLayoutV1::V14
             | LexicalArtifactLayoutV1::V15
             | LexicalArtifactLayoutV1::V16 => {
-                lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
+                lookup_term_ids(connection, terms).map_err(RetrievalPortError::from)?
             }
         };
         let v11_ids = assigned_ids.values().copied().collect::<Vec<_>>();
@@ -1655,7 +1655,7 @@ fn visit_lexical_rows(
                     entries.reserve(encoded.len());
                     for (field, term, frequency) in encoded {
                         entries.push((
-                            field_from_code(field).map_err(map_query_artifact_error)?,
+                            field_from_code(field).map_err(RetrievalPortError::from)?,
                             term,
                             usize::try_from(frequency).map_err(contract_error)?,
                         ));
@@ -1949,7 +1949,7 @@ fn intersect_ngram_shards(
             .remaining_shards
             .checked_sub(1)
             .ok_or(RetrievalPortError::BudgetExceeded)?;
-        let mut shard = decode_ngram_bitmap(layout, &encoded).map_err(map_query_artifact_error)?;
+        let mut shard = decode_ngram_bitmap(layout, &encoded).map_err(RetrievalPortError::from)?;
         if i64::try_from(shard.len()).map_err(contract_error)? != cardinality {
             return Err(RetrievalPortError::Contract(
                 "lexical artifact ngram shard cardinality changed after verification".to_owned(),
@@ -2119,7 +2119,7 @@ impl<'a> ArtifactQueryV1<'a> {
             |_, chunk_id, bytes, _| {
                 let row = self
                     .decode_row(&chunk_id, &bytes)
-                    .map_err(map_query_artifact_error)?;
+                    .map_err(RetrievalPortError::from)?;
                 for (phrase, frequency) in &mut phrase_frequencies {
                     if matches_phrase(&row, phrase) {
                         *frequency += 1;
@@ -2148,7 +2148,7 @@ impl<'a> ArtifactQueryV1<'a> {
             |document, chunk_id, bytes, frequencies| {
                 let row = self
                     .decode_row(&chunk_id, &bytes)
-                    .map_err(map_query_artifact_error)?;
+                    .map_err(RetrievalPortError::from)?;
                 let score = self.score_row(
                     &row,
                     &prepared,
@@ -2323,7 +2323,7 @@ impl<'a> ArtifactQueryV1<'a> {
             .query_row([i64::from(document)], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(map_query_sql_error)?;
         self.decode_row(&chunk_id, &bytes)
-            .map_err(map_query_artifact_error)
+            .map_err(RetrievalPortError::from)
     }
 
     fn decode_row(
@@ -2374,7 +2374,7 @@ impl<'a> ArtifactQueryV1<'a> {
         match self.layout {
             LexicalArtifactLayoutV1::V10 => {
                 let subtoken_field =
-                    encode_field(LexicalFieldV1::Subtoken).map_err(map_query_artifact_error)?;
+                    encode_field(LexicalFieldV1::Subtoken).map_err(RetrievalPortError::from)?;
                 for term in whole_terms {
                     let frequency = stats.whole_term_documents(&term);
                     sources.push((
@@ -2405,7 +2405,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in whole_terms {
                     if let Some(term_id) =
-                        lookup_term_id(self.connection, &term).map_err(map_query_artifact_error)?
+                        lookup_term_id(self.connection, &term).map_err(RetrievalPortError::from)?
                     {
                         sources.push((
                             stats.whole_term_documents(&term),
@@ -2418,7 +2418,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 }
                 for subtoken in subtokens {
                     if let Some(term_id) = lookup_term_id(self.connection, &subtoken)
-                        .map_err(map_query_artifact_error)?
+                        .map_err(RetrievalPortError::from)?
                     {
                         sources.push((
                             stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken),
@@ -2469,7 +2469,7 @@ impl<'a> ArtifactQueryV1<'a> {
             match self.layout {
                 LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
                     let field =
-                        encode_exact_field(literal.field).map_err(map_query_artifact_error)?;
+                        encode_exact_field(literal.field).map_err(RetrievalPortError::from)?;
                     sources.push(DocumentQueryV1::exact(
                         field,
                         literal.canonical_bytes.clone(),
@@ -2656,7 +2656,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V15
                 | LexicalArtifactLayoutV1::V16 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
-                        .map_err(map_query_artifact_error)?
+                        .map_err(RetrievalPortError::from)?
                 }
             };
             let total: i64 = row.get(1).map_err(map_query_sql_error)?;
@@ -2706,7 +2706,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 | LexicalArtifactLayoutV1::V15
                 | LexicalArtifactLayoutV1::V16 => {
                     let assigned = lookup_term_ids(self.connection, terms)
-                        .map_err(map_query_artifact_error)?;
+                        .map_err(RetrievalPortError::from)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();
                     if !term_ids.is_empty() {
                         let placeholders = std::iter::repeat_n("?", term_ids.len())
@@ -2731,7 +2731,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
                             let field =
                                 field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
-                                    .map_err(map_query_artifact_error)?;
+                                    .map_err(RetrievalPortError::from)?;
                             let term_id: i64 = row.get(1).map_err(map_query_sql_error)?;
                             let Some(term) = id_to_term.get(&term_id) else {
                                 continue;
@@ -3542,21 +3542,6 @@ fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(format!("lexical artifact read failed: {error}"))
 }
 
-fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
-    match error {
-        CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
-        CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
-        CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
-        CodeLexicalArtifactErrorV1::Unreserved(_)
-        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
-        CodeLexicalArtifactErrorV1::Corrupt(error)
-        | CodeLexicalArtifactErrorV1::Io(error)
-        | CodeLexicalArtifactErrorV1::Missing(error) => {
-            RetrievalPortError::AuthorityUnavailable(error)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cmp::Reverse;
@@ -3579,7 +3564,7 @@ mod tests {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
         CodeLexicalArtifactReaderV1, DocumentQueryV1, LexicalArtifactLayoutV1, NGRAM_NORMALIZED,
         charge_ngram_encoded_shard_bytes, configure_reader_window, encode_ngram_candidate_json,
-        ensure_ngram_candidate_cardinality, map_query_artifact_error, ngram_bitmap_candidates,
+        ensure_ngram_candidate_cardinality, ngram_bitmap_candidates,
         ngram_document_query, query_ngrams, retain_bounded, term_frequency, union_document_queries,
         visit_document_ids, visit_lexical_rows,
     };
@@ -4042,15 +4027,15 @@ mod tests {
     #[test]
     fn typed_artifact_availability_never_becomes_an_empty_result() {
         assert!(matches!(
-            map_query_artifact_error(CodeLexicalArtifactErrorV1::Missing(
+            crate::retrieval::ports::RetrievalPortError::from(CodeLexicalArtifactErrorV1::Missing(
                 "sealed artifact is absent".to_owned()
             )),
             crate::retrieval::ports::RetrievalPortError::AuthorityUnavailable(_)
         ));
         assert_eq!(
-            map_query_artifact_error(CodeLexicalArtifactErrorV1::Unreserved(
-                "reader has no cache reservation".to_owned()
-            )),
+            crate::retrieval::ports::RetrievalPortError::from(
+                CodeLexicalArtifactErrorV1::Unreserved("reader has no cache reservation".to_owned())
+            ),
             crate::retrieval::ports::RetrievalPortError::BudgetExceeded
         );
     }

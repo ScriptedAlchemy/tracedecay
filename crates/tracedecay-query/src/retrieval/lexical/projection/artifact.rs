@@ -10,6 +10,8 @@ use thiserror::Error;
 pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 
+use crate::retrieval::ports::RetrievalPortError;
+
 mod builder;
 mod clone_census;
 mod clone_successor;
@@ -143,6 +145,97 @@ pub enum CodeLexicalArtifactErrorV1 {
     Interrupted(CodeIndexInterruptionV1),
     #[error("lexical artifact contract violation: {0}")]
     Contract(String),
+}
+
+/// The one disposition of an artifact failure at the retrieval-port boundary.
+///
+/// Build and query paths share this so a corrupt artifact is deterministic
+/// (parked, never retried as warming) wherever it is observed, and a deadline
+/// is a budget failure rather than a caller cancellation.
+impl From<CodeLexicalArtifactErrorV1> for RetrievalPortError {
+    fn from(error: CodeLexicalArtifactErrorV1) -> Self {
+        match error {
+            CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
+                Self::Cancelled
+            }
+            CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
+            | CodeLexicalArtifactErrorV1::Unreserved(_)
+            | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => Self::BudgetExceeded,
+            CodeLexicalArtifactErrorV1::Incompatible(_) => Self::IncompatibleProjection,
+            CodeLexicalArtifactErrorV1::Corrupt(detail)
+            | CodeLexicalArtifactErrorV1::Contract(detail) => Self::Contract(detail),
+            CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
+                Self::AuthorityUnavailable(detail)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod disposition_tests {
+    use super::*;
+
+    fn port(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
+        RetrievalPortError::from(error)
+    }
+
+    #[test]
+    fn corrupt_artifact_is_deterministic_on_every_path() {
+        let ported = port(CodeLexicalArtifactErrorV1::Corrupt("page 7 checksum".to_owned()));
+        assert_eq!(
+            ported,
+            RetrievalPortError::Contract("page 7 checksum".to_owned())
+        );
+        assert!(ported.is_deterministic_contract());
+    }
+
+    #[test]
+    fn deadline_is_a_budget_failure_not_a_cancellation() {
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Interrupted(
+                CodeIndexInterruptionV1::DeadlineExceeded,
+            )),
+            RetrievalPortError::BudgetExceeded
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            )),
+            RetrievalPortError::Cancelled
+        );
+    }
+
+    #[test]
+    fn remaining_variants_keep_their_disposition() {
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Incompatible("rev".to_owned())),
+            RetrievalPortError::IncompatibleProjection
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Contract("mode".to_owned())),
+            RetrievalPortError::Contract("mode".to_owned())
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Unreserved("pool".to_owned())),
+            RetrievalPortError::BudgetExceeded
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::BatchTooLarge {
+                limit: CodeLexicalArtifactBatchLimitV1::PreparedRows,
+                required: 2,
+                maximum: 1,
+            }),
+            RetrievalPortError::BudgetExceeded
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Io("disk".to_owned())),
+            RetrievalPortError::AuthorityUnavailable("disk".to_owned())
+        );
+        assert_eq!(
+            port(CodeLexicalArtifactErrorV1::Missing("db".to_owned())),
+            RetrievalPortError::AuthorityUnavailable("db".to_owned())
+        );
+    }
 }
 
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeLexicalArtifactErrorV1> {
