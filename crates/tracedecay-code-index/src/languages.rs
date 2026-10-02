@@ -279,7 +279,7 @@ impl StaticLanguageRegistry {
             let extractor_revision = match language.as_str() {
                 "rust" => 19,
                 "typescript" => 12,
-                "go" => 9,
+                "go" => 10, // Go v10 records method sets for seal-time satisfaction.
                 "java" | "svelte" | "astro" => 8,
                 "ruby" | "protobuf" | "python" => 7,
                 "sql" | "dart" | "kotlin" | "csharp" => 6,

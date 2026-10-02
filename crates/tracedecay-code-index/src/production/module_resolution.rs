@@ -676,6 +676,14 @@ impl<'a> ModuleImportIndexV1<'a> {
             .collect()
     }
 
+    /// The indexed project directory Go import path `import_path` names.
+    pub(super) fn go_project_package_dir(&self, import_path: &str) -> Option<String> {
+        match self.go_package_dir(import_path) {
+            TargetV1::ModuleDir(dir) => Some(dir),
+            _ => None,
+        }
+    }
+
     /// The project directory an import path names through the longest
     /// `go.mod` module path it starts with. Without a `go.mod`, a path whose
     /// tail names a source directory is project code the seal cannot place.

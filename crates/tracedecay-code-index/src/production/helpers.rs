@@ -14,6 +14,7 @@ use crate::chunks::{
     rust_type_path_alias_for_trait_impl_method, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
+use crate::production::go_satisfaction::go_satisfaction;
 use crate::production::module_resolution::{ModuleImportIndexV1, is_module_import_language};
 use crate::production::typescript_resolution::{
     ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
@@ -366,10 +367,16 @@ pub(crate) fn edge_order(
         ))
 }
 
+/// `files`' edge evidence resolved whole, with the interfaces whose
+/// implementors the seal cannot decide.
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
 ) -> Result<
-    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
+    (
+        Vec<CanonicalRelationEdgeV1>,
+        Vec<CodeIndexEdgeAbstentionV1>,
+        Vec<CodeIndexUnresolvedReferenceV1>,
+    ),
     CodeIndexProductionErrorV1,
 >
 where
@@ -378,8 +385,12 @@ where
     // Resolution's whole-set indexes are gone before the per-file copies are
     // made, and the one exact-capacity vector never regrows, so the peak is
     // the edges this returns plus one sort buffer.
-    let cross_file = resolve_cross_file_references(files)?;
-    Ok(edge_evidence(files, cross_file))
+    let CrossFileResolutionV1 {
+        edges,
+        implementor_gaps,
+    } = resolve_cross_file_references(files)?;
+    let (edges, abstentions) = edge_evidence(files, edges);
+    Ok((edges, abstentions, implementor_gaps))
 }
 
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
@@ -421,10 +432,13 @@ where
 /// through [`ModuleImportIndexV1`]. Other bare names have no cross-file
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
+///
+/// Go types implement interfaces implicitly, so the whole-set pass also
+/// decides Go interface satisfaction from every Go method set.
 #[hotpath::measure(label = "code_index.seal.resolve")]
 pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
-) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
@@ -448,7 +462,14 @@ pub(crate) fn resolve_selected_cross_file_references<T>(
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
-    resolve_references(files, Some(selection))
+    resolve_references(files, Some(selection)).map(|resolution| resolution.edges)
+}
+
+/// A whole-set resolution: the cross-file edges, and one row per interface
+/// whose implementors the seal cannot decide.
+pub(crate) struct CrossFileResolutionV1 {
+    pub(crate) edges: Vec<CanonicalRelationEdgeV1>,
+    pub(crate) implementor_gaps: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// `selection`'s references, or every retained reference, as `(file index,
@@ -479,7 +500,7 @@ where
 fn resolve_references<T>(
     files: &[T],
     selection: Option<&ReferenceSelectionV1>,
-) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
@@ -530,16 +551,30 @@ where
             picks,
         )
     })?;
+    let satisfaction = selection
+        .is_none()
+        .then(|| go_satisfaction(files, &modules))
+        .unwrap_or_default();
     drop((by_simple_name, rust_files, typescript_modules, modules));
-    let mut edges = Vec::with_capacity(per_file.iter().map(Vec::len).sum());
+    let mut edges = Vec::with_capacity(
+        per_file
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_add(satisfaction.edges.len()),
+    );
     for file_edges in per_file {
         edges.extend(file_edges);
     }
+    edges.extend(satisfaction.edges);
     hotpath::measure_block!("code_index.seal.edge_materialization", {
         edges.sort_by(edge_order);
         edges.dedup();
     });
-    Ok(edges)
+    Ok(CrossFileResolutionV1 {
+        edges,
+        implementor_gaps: satisfaction.gaps,
+    })
 }
 
 /// Retained call sites whose import binding names project code the seal

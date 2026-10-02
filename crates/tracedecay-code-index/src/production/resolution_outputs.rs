@@ -27,14 +27,18 @@ pub(super) fn resolve_files(
     SealedCodeGraphRowsError,
 > {
     check()?;
-    let cross_file_edges = resolve_cross_file_references(files)?;
+    let resolution = resolve_cross_file_references(files)?;
+    let cross_file_edges = resolution.edges;
     let mut edges = files
         .iter()
         .flat_map(|file| file.artifacts.edges.iter())
         .cloned()
         .collect::<Vec<_>>();
     edges.extend(cross_file_edges.iter().cloned());
-    let unresolved_calls = unresolved_calls_for_edges(files, &edges, check)?;
+    let mut unresolved_calls = unresolved_calls_for_edges(files, &edges, check)?;
+    unresolved_calls.extend(resolution.implementor_gaps);
+    unresolved_calls.sort();
+    unresolved_calls.dedup();
     Ok((cross_file_edges, unresolved_calls))
 }
 

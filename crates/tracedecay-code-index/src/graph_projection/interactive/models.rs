@@ -223,6 +223,19 @@ pub(super) struct CatalogSymbol {
     pub(super) incoming: u64,
 }
 
+impl CatalogSymbol {
+    /// The symbol's call sites the seal could not bind. The rest of
+    /// `unresolved_calls` are interfaces whose implementors it could not
+    /// decide.
+    pub(super) fn unresolved_call_sites(
+        &self,
+    ) -> impl Iterator<Item = &CodeIndexUnresolvedReferenceV1> {
+        self.unresolved_calls
+            .iter()
+            .filter(|reference| reference.kind == RelationEdgeKindV1::Calls)
+    }
+}
+
 /// A map frozen from the `BTreeMap` it was built in: its entries sorted by
 /// key in one exactly sized allocation. It answers the same lookups and
 /// ordered walks without B-tree nodes, so the catalog knows its own bytes.
@@ -398,7 +411,7 @@ impl CatalogBuilder {
     }
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
-        for reference in &record.unresolved_calls {
+        for reference in record.unresolved_call_sites() {
             let sources = self
                 .unresolved_call_sources
                 .entry(unresolved_callee_name(&reference.reference_name).to_owned())

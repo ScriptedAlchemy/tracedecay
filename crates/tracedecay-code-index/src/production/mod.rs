@@ -63,6 +63,7 @@ use super::{
 mod canonical_json;
 mod clone_rows;
 mod file_evidence_rows;
+mod go_satisfaction;
 mod helpers;
 mod module_resolution;
 mod projection_rows;
@@ -104,7 +105,9 @@ pub(crate) use graph_build_bound::{layered_page_graph_build_bound, sealed_page_g
 mod changed_resolution;
 mod graph_page_store;
 mod graph_pages;
-use changed_resolution::{GraphResolutionOutputsV1, edge_evidence_over_parent};
+use changed_resolution::{
+    GraphResolutionOutputsV1, edge_evidence_over_parent, whole_graph_outputs,
+};
 #[cfg(test)]
 pub(crate) use graph_page_store::CodeGraphPageBuildFootprintV1;
 pub(crate) use graph_page_store::{
@@ -2228,19 +2231,7 @@ where
                     (Some(parent), Some(shared)) => {
                         edge_evidence_over_parent(&staged.files, parent, shared)
                     }
-                    _ => {
-                        let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
-                        let unresolved = resolution_outputs::unresolved_calls_for_edges(
-                            &staged.files,
-                            &edges,
-                            &|| Ok(()),
-                        )?;
-                        Ok(GraphResolutionOutputsV1 {
-                            edges,
-                            abstentions,
-                            unresolved_calls: unresolved,
-                        })
-                    }
+                    _ => whole_graph_outputs(&staged.files),
                 }
             )?;
             let GraphResolutionOutputsV1 {

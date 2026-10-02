@@ -11,6 +11,7 @@
 use std::mem::size_of;
 use std::sync::Arc;
 
+use tracedecay_code_extraction::{GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ChangedCodeChunkV1, CodeChunkProjectionReceiptV1, CodeSearchChunkV1,
     ExactTechnicalTermV1, ProjectionKeyV1, SanitizedCodeFileV1,
@@ -20,8 +21,8 @@ use super::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1, FileGenerationArtifactsV1,
 };
 use crate::chunks::{
-    CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
-    CodeSearchEligibilityV1,
+    CodeIndexEdgeAbstentionV1, CodeIndexGoMethodSetRowV1, CodeIndexImportEvidenceV1,
+    CodeIndexUnresolvedReferenceV1, CodeSearchEligibilityV1,
 };
 use crate::lineage::{LineageSymbolRecordV1, SymbolLineageCandidateV1};
 
@@ -178,6 +179,41 @@ pub(crate) fn unresolved_heap_bytes(reference: &CodeIndexUnresolvedReferenceV1) 
         .as_str()
         .len()
         .saturating_add(reference.reference_name.capacity())
+}
+
+fn go_method_set_heap_bytes(row: &CodeIndexGoMethodSetRowV1) -> usize {
+    fn type_bytes(ty: &GoTypeV1) -> usize {
+        vec_bytes(ty, ty.capacity(), |token| match token {
+            GoTypeTokenV1::Text(text) | GoTypeTokenV1::Local(text) => text.capacity(),
+            GoTypeTokenV1::Qualified { package, name } => {
+                package.capacity().saturating_add(name.capacity())
+            }
+        })
+    }
+    fn signature_bytes(method: &GoMethodSignatureV1) -> usize {
+        method
+            .name
+            .capacity()
+            .saturating_add(vec_bytes(
+                &method.params,
+                method.params.capacity(),
+                type_bytes,
+            ))
+            .saturating_add(vec_bytes(
+                &method.results,
+                method.results.capacity(),
+                type_bytes,
+            ))
+    }
+    let row_bytes = match &row.row {
+        GoMethodSetRowV1::Receiver { type_name, method } => {
+            type_name.capacity().saturating_add(signature_bytes(method))
+        }
+        GoMethodSetRowV1::InterfaceMethod { method } => signature_bytes(method),
+        GoMethodSetRowV1::Embeds { embedded } => type_bytes(embedded),
+        GoMethodSetRowV1::GenericInterface | GoMethodSetRowV1::NamedType => 0,
+    };
+    row.occurrence.as_str().len().saturating_add(row_bytes)
 }
 
 fn lineage_heap_bytes(candidate: &SymbolLineageCandidateV1) -> usize {
@@ -383,6 +419,11 @@ pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             &artifacts.callable_arities,
             artifacts.callable_arities.capacity(),
             |row| row.occurrence.as_str().len(),
+        ))
+        .saturating_add(vec_bytes(
+            &artifacts.go_method_sets,
+            artifacts.go_method_sets.capacity(),
+            go_method_set_heap_bytes,
         ))
         .saturating_add(exact_authority_bytes)
 }

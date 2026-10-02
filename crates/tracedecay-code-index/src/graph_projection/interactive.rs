@@ -475,7 +475,7 @@ impl CodeGraphInteractiveReader {
                 }
                 for call in symbol
                     .into_iter()
-                    .flat_map(|symbol| &symbol.unresolved_calls)
+                    .flat_map(CatalogSymbol::unresolved_call_sites)
                 {
                     if models::unresolved_callee_name(&call.reference_name) != metadata.simple_name
                     {
@@ -511,7 +511,7 @@ impl CodeGraphInteractiveReader {
                 .get(&source.0)
                 .and_then(|occurrence| catalog.symbols.get(occurrence))
                 .into_iter()
-                .flat_map(|symbol| &symbol.unresolved_calls)
+                .flat_map(CatalogSymbol::unresolved_call_sites)
             {
                 match call.unmodeled_import {
                     Some(shape) => {
@@ -522,6 +522,26 @@ impl CodeGraphInteractiveReader {
             }
         }
         Ok(gaps)
+    }
+
+    /// Whether the seal could not decide the implementor set of any of
+    /// `interfaces`: a Go interface embedding a type it could not bind, a
+    /// generic interface, or an empty method set.
+    pub fn has_undecided_implementors(
+        &self,
+        interfaces: &[SymbolOccurrenceId],
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(cancellation)?;
+        Ok(interfaces.iter().any(|interface| {
+            catalog.symbols.get(interface).is_some_and(|symbol| {
+                symbol
+                    .unresolved_calls
+                    .iter()
+                    .any(|gap| gap.kind == RelationEdgeKindV1::Implements)
+            })
+        }))
     }
 
     /// Lists the symbols bound to one file occurrence.

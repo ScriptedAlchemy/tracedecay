@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, EdgeAuthorityV1, FileOccurrenceId, NodeKind, SourceSpan,
-    SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, EdgeAuthorityV1, FileOccurrenceId, NodeKind, RelationEdgeKindV1,
+    SourceSpan, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::GraphDbError;
 
@@ -25,11 +25,13 @@ use crate::chunks::{
 };
 use crate::graph_projection::unresolved_call_limitations;
 
+use super::go_satisfaction::{GoSatisfactionV1, go_satisfaction};
 use super::helpers::unresolved_import_calls;
 use super::helpers::{
     collect_edge_evidence, edge_evidence, edge_order, resolve_selected_cross_file_references,
     selected_references,
 };
+use super::module_resolution::ModuleImportIndexV1;
 use super::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
 };
@@ -54,6 +56,11 @@ pub(super) struct ChangedSitesV1<'f> {
     /// Those sites and the edited files' sites before the edit: where the
     /// parent's outputs no longer hold.
     moved: HashSet<SiteV1<'f>>,
+    /// The Go symbols of `files` and of the edited files before the edit.
+    go_symbols: HashSet<&'f SymbolOccurrenceId>,
+    /// Go interface satisfaction decided afresh, when a Go file was edited.
+    /// Otherwise no method set changed and the parent's decisions hold.
+    satisfaction: Option<GoSatisfactionV1>,
 }
 
 impl<'f> ChangedSitesV1<'f> {
@@ -105,7 +112,34 @@ impl<'f> ChangedSitesV1<'f> {
                     before.artifacts.unresolved_references.iter().map(site)
                 }))
                 .collect();
-        Some(Self { selection, moved })
+        let go_symbols = files
+            .iter()
+            .chain(edited.iter().map(|(_, before)| before))
+            .filter(|file| file.extraction.language.as_str() == "go")
+            .flat_map(|file| {
+                file.artifacts
+                    .symbols
+                    .iter()
+                    .map(|symbol| &symbol.occurrence)
+            })
+            .collect();
+        let satisfaction = edited
+            .iter()
+            .any(|(index, _)| files[*index].extraction.language.as_str() == "go")
+            .then(|| go_satisfaction(files, &ModuleImportIndexV1::new(files)));
+        Some(Self {
+            selection,
+            moved,
+            go_symbols,
+            satisfaction,
+        })
+    }
+
+    /// Go emits no `Implements` reference of its own, so every `Implements`
+    /// edge from a Go symbol is a satisfaction edge.
+    fn is_satisfaction(&self, edge: &CanonicalRelationEdgeV1) -> bool {
+        edge.kind == RelationEdgeKindV1::Implements
+            && self.go_symbols.contains(&edge.from_occurrence)
     }
 
     /// References re-decided at the moved sites.
@@ -122,7 +156,14 @@ impl<'f> ChangedSitesV1<'f> {
         parent_edges: impl Iterator<Item = &'e CanonicalRelationEdgeV1>,
     ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1> {
         let resolved = resolve_selected_cross_file_references(files, &self.selection)?;
+        let (satisfied, parent_edges) =
+            parent_edges.partition::<Vec<_>, _>(|edge| self.is_satisfaction(edge));
+        let satisfied = match &self.satisfaction {
+            Some(satisfaction) => satisfaction.edges.clone(),
+            None => satisfied.into_iter().cloned().collect(),
+        };
         let mut edges = parent_edges
+            .into_iter()
             .filter(|edge| {
                 !self
                     .moved
@@ -130,6 +171,7 @@ impl<'f> ChangedSitesV1<'f> {
             })
             .cloned()
             .chain(resolved)
+            .chain(satisfied)
             .collect::<Vec<_>>();
         edges.sort_by(edge_order);
         edges.dedup();
@@ -169,11 +211,19 @@ impl<'f> ChangedSitesV1<'f> {
             check,
         )
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        let mut unresolved = parent_unresolved
+        let (parent_gaps, parent_unresolved) = parent_unresolved
             .iter()
+            .partition::<Vec<_>, _>(|reference| reference.kind == RelationEdgeKindV1::Implements);
+        let gaps = match &self.satisfaction {
+            Some(satisfaction) => satisfaction.gaps.clone(),
+            None => parent_gaps.into_iter().cloned().collect(),
+        };
+        let mut unresolved = parent_unresolved
+            .into_iter()
             .filter(|reference| !self.moved.contains(&site(reference)))
             .cloned()
             .chain(rederived)
+            .chain(gaps)
             .collect::<Vec<_>>();
         unresolved.sort();
         unresolved.dedup();
@@ -221,14 +271,7 @@ pub(super) fn edge_evidence_over_parent(
         .as_ref()
         .and_then(|(edited, _)| ChangedSitesV1::new(files, edited))
     else {
-        let (edges, abstentions) = collect_edge_evidence(files)?;
-        let unresolved =
-            super::resolution_outputs::unresolved_calls_for_edges(files, &edges, &|| Ok(()))?;
-        return Ok(GraphResolutionOutputsV1 {
-            edges,
-            abstentions,
-            unresolved_calls: unresolved,
-        });
+        return whole_graph_outputs(files);
     };
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("code_index.build.references_resolved").inc(sites.resolved_references() as u64);
@@ -247,6 +290,23 @@ pub(super) fn edge_evidence_over_parent(
         edges,
         abstentions,
         unresolved_calls: unresolved,
+    })
+}
+
+/// `files`' graph resolution outputs derived from scratch.
+pub(super) fn whole_graph_outputs(
+    files: &[Arc<FileGenerationArtifactsV1>],
+) -> Result<GraphResolutionOutputsV1, CodeIndexProductionErrorV1> {
+    let (edges, abstentions, implementor_gaps) = collect_edge_evidence(files)?;
+    let mut unresolved_calls =
+        super::resolution_outputs::unresolved_calls_for_edges(files, &edges, &|| Ok(()))?;
+    unresolved_calls.extend(implementor_gaps);
+    unresolved_calls.sort();
+    unresolved_calls.dedup();
+    Ok(GraphResolutionOutputsV1 {
+        edges,
+        abstentions,
+        unresolved_calls,
     })
 }
 
