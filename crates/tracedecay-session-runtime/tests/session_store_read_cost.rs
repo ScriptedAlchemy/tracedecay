@@ -519,6 +519,10 @@ async fn refresh_until_idle(
     panic!("temporal refresh did not settle within {MAX_REFRESH_PASSES} passes");
 }
 
+/// Each probe starts from emptied connection caches, so the comparison counts
+/// the pages one message touches rather than how much of each store the
+/// caches still hold after seeding: a cache that holds the whole base store
+/// but only part of the grown one would otherwise read as growth.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
     let _measured = MEASURED.lock().await;
@@ -537,6 +541,7 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
         usize::try_from(BASE_SESSIONS).unwrap()
     );
     let probe_timestamp = SEED_TIMESTAMP + 10_000_000;
+    database.release_connection_memory().await.unwrap();
     let before = process_read_bytes();
     probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp).await;
     assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
@@ -547,6 +552,7 @@ async fn streamed_message_refresh_reads_do_not_scale_with_the_session_store() {
         refresh_until_idle(&database, &refresh).await,
         usize::try_from(GROWN_SESSIONS - BASE_SESSIONS).unwrap()
     );
+    database.release_connection_memory().await.unwrap();
     let before = process_read_bytes();
     probe_one_message(&facade, project, &scope, &mut probed, probe_timestamp + 1).await;
     assert_eq!(refresh_until_idle(&database, &refresh).await, 1);
