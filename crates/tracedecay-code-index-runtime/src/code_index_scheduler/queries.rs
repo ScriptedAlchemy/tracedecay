@@ -4066,6 +4066,114 @@ mod tests {
         registry.shutdown().await;
     }
 
+    async fn exact_occurrences(
+        files: &[(&str, &str)],
+        literal: &str,
+        path_prefix: Option<&str>,
+    ) -> RetrievalPortOutcome<CodeQueryPage<ExactOccurrenceRecord>> {
+        let fixture = GitFixture::new(files);
+        let store = tempfile::tempdir().expect("isolated store");
+        let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+        let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+        let generation = latest.metadata().manifest().generation_id.clone();
+        let operation = callable_code_operation(CallableCodeOperationKind::ExactOccurrence)
+            .expect("exact operation");
+        let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+        let request = ExactOccurrenceRequest::new(
+            literal,
+            None,
+            CodeQueryScope::new(generation, path_prefix.map(str::to_owned))
+                .expect("exact generation scope"),
+            query_meta(),
+        )
+        .expect("exact request");
+        let outcome = registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await;
+        registry.shutdown().await;
+        outcome
+    }
+
+    #[tokio::test]
+    async fn exact_identifier_definition_only_page_is_not_complete() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "src/lib.rs",
+                    "mod user;\npub fn shared_probe_target() {}\n\
+                     pub fn local_caller() { shared_probe_target(); }\n",
+                ),
+                (
+                    "src/user.rs",
+                    "use crate::shared_probe_target;\n\
+                     pub fn remote_caller() { shared_probe_target(); }\n",
+                ),
+            ],
+            "shared_probe_target",
+            None,
+        )
+        .await;
+        let (RetrievalPortOutcome::Completed(evidence) | RetrievalPortOutcome::Partial(evidence)) =
+            &outcome
+        else {
+            panic!("an exact read over a sealed generation must answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert!(
+            !page.items.is_empty(),
+            "the definition must match: {page:?}"
+        );
+        let found_use = page
+            .items
+            .iter()
+            .any(|item| item.occurrence.path == "src/user.rs");
+        if !found_use {
+            assert_eq!(
+                evidence.coverage.completeness,
+                CoverageCompleteness::Partial,
+                "a page missing the use in src/user.rs must not claim complete coverage: {evidence:?}"
+            );
+            assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+        }
+        if evidence.coverage.completeness == CoverageCompleteness::Complete {
+            assert_eq!(page.total, Some(page.items.len() as u64));
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_path_scope_counts_only_in_scope_matches() {
+        let outcome = exact_occurrences(
+            &[
+                (
+                    "a/lib.rs",
+                    "pub fn a_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+                (
+                    "b/lib.rs",
+                    "pub fn b_runner() { run(\"--probe-scope-flag\"); }\n",
+                ),
+            ],
+            "--probe-scope-flag",
+            Some("b"),
+        )
+        .await;
+        let RetrievalPortOutcome::Completed(evidence) = &outcome else {
+            panic!("an in-scope flag match is the whole scoped answer: {outcome:?}");
+        };
+        let page = evidence.payload.as_ref().expect("exact page");
+        assert_eq!(page.items.len(), 1, "{page:?}");
+        assert_eq!(page.items[0].occurrence.path, "b/lib.rs");
+        assert_eq!(page.total, Some(1));
+        assert_eq!(evidence.coverage.eligible, Some(1));
+        assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+    }
+
     #[test]
     fn generation_resolution_wait_reserves_outer_settlement_margin() {
         assert_eq!(
