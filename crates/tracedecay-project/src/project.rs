@@ -294,6 +294,6 @@ impl TraceDecayOpenOptions {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "project open requires an explicit profile root".to_owned(),
             })?;
-        tracedecay_daemon_identity::canonical_identity_path(profile_root)
+        tracedecay_daemon_identity::authority::canonical_identity_path(profile_root)
     }
 }
