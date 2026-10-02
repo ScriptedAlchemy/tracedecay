@@ -523,9 +523,9 @@ pub(super) struct CodeGraphRowBatch<'a> {
     pub(super) bindings: Option<&'a BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>>,
 }
 
-pub(super) struct EmittedRows {
-    pub(super) entities: Vec<GraphEntity>,
-    pub(super) relations: Vec<GraphGenerationRelation>,
+pub(crate) struct EmittedRows {
+    pub(crate) entities: Vec<GraphEntity>,
+    pub(crate) relations: Vec<GraphGenerationRelation>,
 }
 
 pub(super) fn build_projection(
