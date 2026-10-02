@@ -27,6 +27,7 @@ mod pi;
 mod provider_contract;
 mod restart_atomicity;
 mod session_ingest;
+mod sessions_for_catch_up;
 mod source_identity;
 mod vibe;
 mod workflow_ingest;
