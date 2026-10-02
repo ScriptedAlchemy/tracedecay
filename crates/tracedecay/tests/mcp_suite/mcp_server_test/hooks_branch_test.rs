@@ -297,16 +297,15 @@ fn files_call_for_session(id: i64, session_id: &str) -> String {
     )
 }
 
-fn search_call_for_session(id: i64, session_id: &str, query: &str) -> String {
+fn exact_symbol_call_for_session(id: i64, session_id: &str, name: &str) -> String {
     jsonrpc_request(
         json!(id),
         "tools/call",
         json!({
-            "name": "tracedecay_search",
+            "name": "tracedecay_find_exact_symbol",
             "arguments": {
                 "session_id": session_id,
-                "query": query,
-                "prefer_symbol": true,
+                "name": name,
                 "format": "json"
             }
         }),
@@ -395,7 +394,7 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
         loop {
             let responses = run_client_connection_with_messages(
                 Arc::clone(&server),
-                vec![search_call_for_session(
+                vec![exact_symbol_call_for_session(
                     1,
                     session_id,
                     "routed_edit_visible",
@@ -405,13 +404,13 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
             let response = response_with_id(&responses, json!(1));
             let payload: Value = serde_json::from_str(successful_tool_text(
                 &response,
-                "routed search after unhinted edit",
+                "routed exact-symbol read after unhinted edit",
             ))
-            .expect("routed search JSON");
-            if payload["results"].as_array().is_some_and(|results| {
-                results
+            .expect("routed exact-symbol JSON");
+            if payload["matches"].as_array().is_some_and(|matches| {
+                matches
                     .iter()
-                    .any(|result| result["display"]["name"] == "routed_edit_visible")
+                    .any(|symbol| symbol["name"] == "routed_edit_visible")
             }) {
                 break payload;
             }
