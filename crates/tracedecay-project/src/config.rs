@@ -648,9 +648,7 @@ fn validate_registered_configuration_database(
     // verbatim spelling on Windows, a symlink-resolved name on macOS) where the
     // target root is the spelling the caller built, so ownership is a
     // canonical-path question, not a spelling equality.
-    if is_project_sessions
-        && registered_owner_matches_target(database, target)?
-    {
+    if is_project_sessions && registered_owner_matches_target(database, target)? {
         return Ok(());
     }
     Err(config_error(

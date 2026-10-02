@@ -239,8 +239,7 @@ async fn backfill_attributes_branch_switch_and_commits() {
     let (_base, repo, main_shas, feature_shas) = build_repo();
     // The stored worktree is the repo's canonical name; the fixture's own
     // spelling can be an alias (an 8.3 TEMP root on Windows).
-    let worktree =
-        normalize_worktree(&repo.canonicalize().unwrap().to_string_lossy());
+    let worktree = normalize_worktree(&repo.canonicalize().unwrap().to_string_lossy());
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
 
     // HEAD held main until +300, switched to feature at +300, back to main at

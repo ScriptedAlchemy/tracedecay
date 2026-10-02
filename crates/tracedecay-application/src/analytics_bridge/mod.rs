@@ -356,7 +356,7 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hook_row_to_analytics_event, RegisteredGlobalDb};
+    use super::{RegisteredGlobalDb, hook_row_to_analytics_event};
 
     fn aliased_root() -> (tempfile::TempDir, String, std::path::PathBuf) {
         let root = tempfile::tempdir().expect("project root");
