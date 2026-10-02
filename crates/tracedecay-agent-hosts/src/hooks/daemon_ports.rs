@@ -2,8 +2,8 @@
 //!
 //! These ports own the `daemon_hook_action` JSON. The native Hook dispatch core
 //! consumes typed ports ([`AsyncHookAdmissionPortV1`],
-//! [`AsyncHookFeedbackDeliveryPortV1`], and the `OpenCode` LSP submit port) and
-//! never issues those action strings itself.
+//! [`AsyncHookFeedbackDeliveryPortV1`]) and never issues those action strings
+//! itself.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -12,9 +12,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
 use tracedecay_contracts::retrieval::{
-    ContextScoutStoreStatusV1, HookRuntimeAcceptedV1, HookRuntimeDispositionV1,
-    HookRuntimeResultV1, HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1,
-    HookV2AdmitRequestV1, HookV2NoticeDeliveryResultV1,
+    ContextScoutStoreStatusV1, HookRuntimeDispositionV1, HookRuntimeResultV1,
+    HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
+    HookV2NoticeDeliveryResultV1,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
@@ -376,48 +376,6 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutDeliveryReceiptHookV1>
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move { self.post_receipt(&feedback.receipt, deadline).await })
-    }
-}
-
-/// Daemon-backed `OpenCode` LSP update submission.
-pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
-    runtime: &'a HookRuntimeV1,
-    project_root: &'a Path,
-    telemetry: Option<&'a HookTimingSpan>,
-}
-
-impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
-    pub(crate) fn new(
-        runtime: &'a HookRuntimeV1,
-        project_root: &'a Path,
-        telemetry: Option<&'a HookTimingSpan>,
-    ) -> Self {
-        Self {
-            runtime,
-            project_root,
-            telemetry,
-        }
-    }
-
-    #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.opencode_lsp_submit")]
-    pub(crate) async fn submit_updated_event(&self, event: &serde_json::Value) -> bool {
-        let response = super::daemon_hook_action(
-            self.runtime,
-            Some(self.project_root),
-            HookRuntimeSurfaceRequestV1::OpencodeLspUpdated {
-                event: event.clone(),
-            },
-            self.telemetry,
-        )
-        .await;
-        response.is_ok_and(|response| {
-            matches!(
-                HookRuntimeResultV1::deserialize(&response),
-                Ok(HookRuntimeResultV1::OpencodeLspUpdated {
-                    status: HookRuntimeAcceptedV1::Accepted,
-                })
-            )
-        })
     }
 }
 

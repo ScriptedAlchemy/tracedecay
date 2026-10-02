@@ -287,11 +287,13 @@ fn replays(root: &str) -> Vec<Replay> {
         Replay {
             subcommand: "hook-opencode-event",
             agent: "opencode",
-            hook_name: "session.idle",
+            hook_name: "session.execution.succeeded",
             session: "ses_opencode_s1",
             stdin: Some(json!({
-                "type": "session.idle",
-                "properties": { "sessionID": "ses_opencode_s1" },
+                "id": "evt_opencode_s1",
+                "created": 0,
+                "type": "session.execution.succeeded",
+                "data": { "sessionID": "ses_opencode_s1" },
             })),
             tool_input_env: None,
         },

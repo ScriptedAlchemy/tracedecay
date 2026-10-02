@@ -7806,12 +7806,14 @@ export const RequestCostReceiptV1Schema: z.ZodObject<{
   adjacency_queries: z.ZodType<number, z.ZodTypeDef, unknown>;
   adjacency_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
   bytes_hydrated: z.ZodType<number, z.ZodTypeDef, unknown>;
+  catalog_symbols: z.ZodType<number, z.ZodTypeDef, unknown>;
   point_reads: z.ZodType<StorePointReadsV1, z.ZodTypeDef, unknown>;
   wall_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
 }, "strict"> = z.object({
   adjacency_queries: z.number().int().safe().min(0),
   adjacency_rows: z.number().int().safe().min(0),
   bytes_hydrated: z.number().int().safe().min(0),
+  catalog_symbols: z.number().int().safe().min(0),
   point_reads: z.lazy(() => StorePointReadsV1Schema),
   wall_micros: z.number().int().safe().min(0),
 }).strict();

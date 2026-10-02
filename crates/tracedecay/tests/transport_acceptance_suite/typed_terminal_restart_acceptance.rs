@@ -40,6 +40,8 @@ use crate::common;
 mod reset_required_serving;
 /// A pre-log hook admission ledger is refused until its scoped reset.
 mod stale_hook_admission_reset;
+/// A released profile authority resets alone and its projects register again.
+mod stale_profile_authority_reset;
 /// Stale session stores refuse only sessions until their scoped reset.
 mod stale_sessions_store_reset;
 /// The HTTP, MCP-host, and Rust SDK legs of this same journey.

@@ -116,10 +116,10 @@ const STALE_MESSAGE: &str = "source edit failed before the effect";
 const INSERT_OPERATION: &str = "use-case.application.source-edit.insert-at-symbol";
 
 const AMBIGUOUS_SHARED: &str =
-    "symbol 'shared' is ambiguous (2 matches); pass a fully qualified name";
+    "config error: symbol 'shared' is ambiguous (2 matches); pass a fully qualified name";
 const MISSING_SYMBOL: &str = "symbol 'missing_fn' not found";
 const MISSING_CONTENT: &str = "missing required parameter: content";
-const BAD_POSITION: &str = "position must be \"before\" or \"after\", got \"beside\"";
+const BAD_POSITION: &str = "config error: position must be \"before\" or \"after\", got \"beside\"";
 const MISSING_PREVIEW: &str = "source edit apply requires a fresh idempotency_key and the expected_state returned by a preview";
 
 fn write_pair(project: &Path) {
@@ -215,7 +215,7 @@ fn assert_pre_effect_refusal(response: &JsonRpcResponse, detail: &str) {
     let body = failure_body(response);
     assert_eq!(
         body["message"],
-        format!("source edit failed before the effect: config error: {detail}")
+        format!("source edit failed before the effect: {detail}")
     );
     assert_eq!(body["success"], false);
     assert_eq!(body["failed"], true);

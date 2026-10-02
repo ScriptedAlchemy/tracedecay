@@ -202,9 +202,9 @@ pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
 pub use hook_runtime_surface::{
     ContextScoutStoreStatusV1, HermesReceiptStatusV1, HookCompactionResultV1,
     HookIngestAdmissionV1, HookIngestTranscriptRequestV1, HookIngestTranscriptResultV1,
-    HookRuntimeAcceptedV1, HookRuntimeDispositionV1, HookRuntimeResultV1,
-    HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
-    HookV2NoticeDeliveryResultV1, HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
+    HookRuntimeDispositionV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+    HookV2AdmissionResultV1, HookV2AdmitRequestV1, HookV2NoticeDeliveryResultV1,
+    HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
 };
 pub use owner_effect_surface::{
     AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1, AdminSyncSurfaceRequestV1,
