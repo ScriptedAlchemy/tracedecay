@@ -1,0 +1,302 @@
+import {
+  createClient,
+  TraceDecayAuthenticationError,
+  TraceDecayDisconnectedError,
+  TraceDecayProblemError,
+  TraceDecayProtocolError,
+  TraceDecayTransportError,
+  type TraceDecayClient,
+} from "@tracedecay/sdk";
+import type {
+  OperationApplicationCodeCalleesResult,
+  OperationApplicationCodeCallersResult,
+  OperationApplicationCodeSymbolSearchResult,
+  OperationApplicationImpactResult,
+  OperationApplicationNodeResult,
+  OperationApplicationSearchResult,
+  OperationApplicationStatusResult,
+  PublicCodeProject,
+} from "@tracedecay/sdk";
+import type { DaemonState, Failure, ProjectRef } from "../shared/view.js";
+import { httpBaseUrl, probeDaemon, readDaemonAuthority, type AuthorityLookup, type DaemonAuthorityRecord } from "./authority.js";
+import { classifyCode, DaemonFailure, ServeSession, toFailure } from "./serve-client.js";
+
+export type BridgeOptions = {
+  readonly binary: string;
+  readonly profileRoot: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cwd: string;
+};
+
+type ProjectHandle = {
+  readonly project: ProjectRef;
+  readonly session: ServeSession;
+  readonly client: TraceDecayClient;
+  /** Daemon process run the HTTP token belongs to; a restart invalidates it. */
+  readonly process_run_id: string;
+};
+
+/**
+ * The only path from the extension to TraceDecay data. Registry reads go
+ * through a project-less `tracedecay serve`; project reads go through a
+ * `tracedecay serve --path <root>` session whose root comes from the daemon's
+ * own project registry, so an unregistered project id can never reach a
+ * project session. HTTP reads carry the daemon authority token, which stays
+ * in this process.
+ */
+export class DaemonBridge {
+  readonly #options: BridgeOptions;
+  #registry: ServeSession | null = null;
+  readonly #projects = new Map<string, ProjectHandle>();
+
+  constructor(options: BridgeOptions) {
+    this.#options = options;
+  }
+
+  async authority(): Promise<AuthorityLookup> {
+    return readDaemonAuthority(this.#options.profileRoot);
+  }
+
+  async daemonState(): Promise<DaemonState> {
+    const lookup = await this.authority();
+    if (lookup.kind !== "available") return { state: "disconnected", failure: lookup.failure };
+    const unreachable = await probeDaemon(lookup.record);
+    if (unreachable !== null) return { state: "disconnected", failure: unreachable };
+    return {
+      state: "connected",
+      profile_root: lookup.record.profile_root,
+      version: lookup.record.version,
+      pid: lookup.record.pid,
+    };
+  }
+
+  async #requireAuthority(): Promise<DaemonAuthorityRecord> {
+    const lookup = await this.authority();
+    if (lookup.kind !== "available") throw new DaemonFailure(lookup.failure);
+    return lookup.record;
+  }
+
+  #registrySession(): ServeSession {
+    if (this.#registry === null || this.#registry.closed) {
+      this.#registry = new ServeSession({
+        binary: this.#options.binary,
+        projectRoot: null,
+        env: this.#options.env,
+        cwd: this.#options.cwd,
+      });
+    }
+    return this.#registry;
+  }
+
+  async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
+    await this.#requireAuthority();
+    const client = createClient({
+      baseUrl: "http://127.0.0.1",
+      projectId: "registry",
+      token: "unused-registry-reads-use-mcp",
+      mcp: {
+        callTool: (toolName, request, options) =>
+          this.#registrySession().callJson(toolName, asRecord(request), options.signal),
+      },
+    });
+    const listed = await runSdk(() => client.operations.project_list({}, { ...(signal === undefined ? {} : { signal }) }));
+    return listed.projects.map(projectRef);
+  }
+
+  async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
+    const existing = this.#projects.get(projectId);
+    if (existing !== undefined) return existing.project;
+    const projects = await this.listProjects(signal);
+    const match = projects.find((project) => project.project_id === projectId);
+    if (match === undefined) {
+      throw new DaemonFailure({
+        kind: "denied",
+        code: "project_not_registered",
+        message: `Project ${projectId} is not registered in this TraceDecay profile; only registered projects can be explored.`,
+      });
+    }
+    return match;
+  }
+
+  async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
+    const record = await this.#requireAuthority();
+    const cached = this.#projects.get(projectId);
+    if (cached !== undefined) {
+      if (!cached.session.closed && cached.process_run_id === record.process_run_id) return cached;
+      this.#projects.delete(projectId);
+      await cached.session.close();
+    }
+    const project = await this.resolveProject(projectId, signal);
+    const baseUrl = httpBaseUrl(record);
+    if (baseUrl === null) {
+      throw new DaemonFailure({
+        kind: "unavailable",
+        code: "http_application_endpoint_absent",
+        message: "The daemon has not published its HTTP application endpoint yet.",
+      });
+    }
+    const session = new ServeSession({
+      binary: this.#options.binary,
+      projectRoot: project.project_root,
+      env: this.#options.env,
+      cwd: project.project_root,
+    });
+    const client = createClient({
+      baseUrl,
+      projectId: project.project_id,
+      token: record.auth_token,
+      mcp: {
+        callTool: (toolName, request, options) => session.callJson(toolName, asRecord(request), options.signal),
+      },
+    });
+    const handle: ProjectHandle = { project, session, client, process_run_id: record.process_run_id };
+    this.#projects.set(projectId, handle);
+    return handle;
+  }
+
+  async status(projectId: string, signal?: AbortSignal): Promise<OperationApplicationStatusResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() => client.operations.status({}, optional(signal)));
+  }
+
+  async search(projectId: string, query: string, limit: number, signal?: AbortSignal): Promise<OperationApplicationSearchResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() => client.operations.search({ query, limit, prefer_symbol: true }, optional(signal)));
+  }
+
+  async node(projectId: string, nodeId: string, signal?: AbortSignal): Promise<OperationApplicationNodeResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() => client.operations.node({ node_id: nodeId }, optional(signal)));
+  }
+
+  async impact(projectId: string, nodeId: string, maxDepth: number, signal?: AbortSignal): Promise<OperationApplicationImpactResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() => client.operations.impact({ node_id: nodeId, max_depth: maxDepth }, optional(signal)));
+  }
+
+  async callers(projectId: string, nodeId: string, depth: number, signal?: AbortSignal): Promise<OperationApplicationCodeCallersResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() =>
+      client.operations.code_callers(
+        { node_id: nodeId, maximum_depth: depth, meta: { order: "stable_identity", projection: "summary" } },
+        optional(signal),
+      ),
+    ).then(payloadOf);
+  }
+
+  async callees(
+    projectId: string,
+    nodeId: string,
+    generation: string,
+    depth: number,
+    signal?: AbortSignal,
+  ): Promise<OperationApplicationCodeCalleesResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() =>
+      client.operations.code_callees(
+        {
+          node_id: nodeId,
+          maximum_depth: depth,
+          scope: { generation },
+          meta: { order: "stable_identity", projection: "summary" },
+        },
+        optional(signal),
+      ),
+    ).then(payloadOf);
+  }
+
+  async symbolSearch(projectId: string, query: string, signal?: AbortSignal): Promise<OperationApplicationCodeSymbolSearchResult> {
+    const { client } = await this.#handle(projectId, signal);
+    return runSdk(() =>
+      client.operations.code_symbol_search(
+        {
+          query,
+          lazy_index_ignored_dependencies: false,
+          scope: {},
+          meta: { order: "relevance", projection: "summary" },
+        },
+        optional(signal),
+      ),
+    ).then(payloadOf);
+  }
+
+  async close(): Promise<void> {
+    const sessions = [...this.#projects.values()].map((handle) => handle.session);
+    if (this.#registry !== null) sessions.push(this.#registry);
+    this.#projects.clear();
+    this.#registry = null;
+    await Promise.all(sessions.map((session) => session.close()));
+  }
+}
+
+function optional(signal: AbortSignal | undefined): { signal?: AbortSignal } {
+  return signal === undefined ? {} : { signal };
+}
+
+function asRecord(request: unknown): Record<string, unknown> {
+  if (typeof request === "object" && request !== null && !Array.isArray(request)) {
+    return request as Record<string, unknown>;
+  }
+  throw new DaemonFailure({ kind: "invalid_request", code: "non_object_request", message: "MCP tool requests must be objects" });
+}
+
+type HttpSuccess<T> = { outcome: { outcome: string; value: { payload: T | null } } };
+
+function payloadOf<T>(envelope: HttpSuccess<T>): T {
+  const payload = envelope.outcome.value.payload;
+  if (payload === null) {
+    throw new DaemonFailure({
+      kind: "unavailable",
+      code: "empty_payload",
+      message: `the daemon returned a ${envelope.outcome.outcome} outcome without a payload`,
+    });
+  }
+  return payload;
+}
+
+async function runSdk<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new DaemonFailure(failureFromSdk(error), { cause: error });
+  }
+}
+
+export function failureFromSdk(error: unknown): Failure {
+  if (error instanceof DaemonFailure) return error.failure;
+  if (error instanceof TraceDecayProblemError) {
+    const kind = error.problem.kind;
+    const code = `${kind}/${error.problem.code}`;
+    return { kind: problemKind(kind, error.status), code, message: error.problem.message };
+  }
+  if (error instanceof TraceDecayAuthenticationError) {
+    return { kind: "protocol", code: "daemon_authentication", message: error.message };
+  }
+  if (error instanceof TraceDecayDisconnectedError) {
+    return { kind: "disconnected", code: "daemon_disconnected", message: error.message };
+  }
+  if (error instanceof TraceDecayTransportError) {
+    if (error.cause !== undefined) return toFailure(error.cause);
+    return { kind: "disconnected", code: "transport", message: error.message };
+  }
+  if (error instanceof TraceDecayProtocolError) {
+    return { kind: "protocol", code: error.name, message: error.message };
+  }
+  return toFailure(error);
+}
+
+function problemKind(kind: string, status: number): Failure["kind"] {
+  if (kind === "not_found_or_not_authorized" || status === 403) return "denied";
+  if (status === 404) return "not_found";
+  return classifyCode(kind);
+}
+
+export function projectRef(project: PublicCodeProject): ProjectRef {
+  return {
+    project_id: project.project_id,
+    label: project.label,
+    project_root: project.project_root,
+    head_branch: project.head_branch ?? null,
+    default_branch: project.default_branch ?? null,
+  };
+}

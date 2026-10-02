@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tracedecay",
+  "version": "0.0.0",
+  "description": "TraceDecay semantic code intelligence: daemon-owned code graph MCP server, agent skills, and a ChatGPT code explorer app with exact repository, worktree, commit, and generation provenance.",
+  "author": {
+    "name": "ScriptedAlchemy"
+  },
+  "homepage": "https://github.com/ScriptedAlchemy/tracedecay",
+  "repository": "https://github.com/ScriptedAlchemy/tracedecay",
+  "license": "MIT",
+  "keywords": ["code-graph", "mcp", "code-search", "call-graph", "impact-analysis", "code-health"],
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json",
+      "interface": {
+        "displayName": "TraceDecay",
+        "shortDescription": "Explore code with exact provenance",
+        "longDescription": "Search a registered TraceDecay project, inspect symbols with callers, callees, impact, and a bounded call graph, and hand the selected evidence to ChatGPT with exact repository, worktree, branch, commit, and generation provenance. Read-only: every answer comes from the local TraceDecay daemon that already indexes your checkout.",
+        "developerName": "ScriptedAlchemy",
+        "category": "Developer Tools",
+        "capabilities": ["Interactive", "Read"],
+        "composerIcon": "./chatgpt-extension/assets/icon.svg",
+        "logo": "./chatgpt-extension/assets/icon.svg",
+        "defaultPrompt": [
+          "Use TraceDecay to find who calls this function and what breaks if it changes.",
+          "Open the TraceDecay code explorer for my project."
+        ]
+      }
+    }
+  }
+}
