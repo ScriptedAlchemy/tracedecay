@@ -171,6 +171,7 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | TOOL_ARGUMENTS_INVALID
         | "project_required"
         | "project_not_enrolled"
+        | "project_route_invalid_selector"
         | "unknown_tool"
         | "session_sync_wrong_scope"
         | CURSOR_PARAMETER_CHANGED_CODE

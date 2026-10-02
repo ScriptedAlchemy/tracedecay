@@ -564,11 +564,12 @@ pub fn render_settled_route_refusal(
 /// route refusal is the same typed tool result `tracedecay tool --json`
 /// prints. A retryable refusal and an effect whose commit is unknown stay
 /// JSON-RPC errors, the transient and indeterminate states callers retry on
-/// or inspect.
+/// or inspect. The refusal text honors the `format` in `args`.
 pub fn tool_refusal_response(
     id: Value,
     tool_name: &str,
     error: &TraceDecayError,
+    args: &Value,
 ) -> tracedecay_mcp::JsonRpcResponse {
     let settled = error
         .project_route_context()
@@ -584,7 +585,7 @@ pub fn tool_refusal_response(
                 tool_name,
                 request_id,
                 error,
-                &Value::Null,
+                args,
             )
         })
         .and_then(Result::ok);
