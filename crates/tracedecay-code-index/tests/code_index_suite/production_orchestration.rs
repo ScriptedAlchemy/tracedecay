@@ -3011,8 +3011,8 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_311,
     ),
     (
-        "sha256:5300546439346f41ef6249536d6468df024e4c89991d588da17c40e6e8e31fb4",
-        2_889,
+        "sha256:4b9bb46f8c50d82584cf3c78e6166c7c0013352c751cf989de0655403161af31",
+        9_594,
     ),
 ];
 
