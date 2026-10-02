@@ -1456,19 +1456,6 @@ mod tests {
         assert!(admission.observations().is_empty());
     }
 
-    fn wait_until_change_settled(path: &std::path::Path) {
-        for _ in 0..100_000 {
-            let metadata = std::fs::metadata(path).unwrap();
-            if crate::runtime::source::jsonl_change_token_settled(
-                crate::runtime::source::jsonl_file_change_token(&metadata),
-            ) {
-                return;
-            }
-            std::thread::yield_now();
-        }
-        panic!("change time did not settle: {}", path.display());
-    }
-
     /// The pass that admits a session's transcripts finishes `state.json` in
     /// that same pass. A following pass must not open it to rediscover agents
     /// whose wires it can already skip.
@@ -1482,8 +1469,8 @@ mod tests {
             .and_then(std::path::Path::parent)
             .unwrap()
             .join("state.json");
-        wait_until_change_settled(&state);
-        wait_until_change_settled(&path);
+        crate::runtime::source::spin_until_jsonl_change_settled(&state);
+        crate::runtime::source::spin_until_jsonl_change_settled(&path);
 
         let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
         hub.register("kimi-project", None);
