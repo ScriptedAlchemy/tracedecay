@@ -71,7 +71,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@50341b006f8afd2a193e5d90f450d0644e4974ed
+        uses: ScriptedAlchemy/cargo-hauler@34d512901e8b47ca4741befa2b40f533ba2b541b
         with:
           mode: route
           token: ${{ github.token }}
