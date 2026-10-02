@@ -1118,6 +1118,7 @@ impl PartitionedSegmentEncoderV1 {
     fn encode_generation_evidence(
         &mut self,
         generation: &CodeIndexPublishedGenerationV1,
+        reusable_graph_page_digests: &BTreeSet<ManifestDigest>,
         mut publish: impl FnMut(
             SealedGenerationSegmentPublicationV1<'_>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
@@ -1153,11 +1154,13 @@ impl PartitionedSegmentEncoderV1 {
                     "sealed code graph page length exceeds u64".to_owned(),
                 )
             })?;
-            publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                file_key: page.file_key,
-                page_digest: &page.page_digest,
-                bytes: &page.encoded,
-            })?;
+            if !reusable_graph_page_digests.contains(&page.page_digest) {
+                publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    file_key: page.file_key,
+                    page_digest: &page.page_digest,
+                    bytes: &page.encoded,
+                })?;
+            }
             graph_page_descriptors.push(PartitionedCodeGraphPageDescriptorV1 {
                 file_key: page.file_key,
                 file_occurrence_id: page.file_occurrence_id,
@@ -2069,6 +2072,16 @@ impl CodeIndexPublishedGenerationV1 {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
+        let reusable_graph_page_digests = parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .code_graph_pages
+                    .iter()
+                    .map(|page| page.page_digest.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let file_keys = snapshot_file_keys(
             self.snapshot
                 .files
@@ -2180,7 +2193,7 @@ impl CodeIndexPublishedGenerationV1 {
         }
         file_segments.sort_by_key(|segment| segment.file_key);
         let (generation_evidence, code_graph_pages) = PartitionedSegmentEncoderV1::default()
-            .encode_generation_evidence(self, &mut publish_segment)?;
+            .encode_generation_evidence(self, &reusable_graph_page_digests, &mut publish_segment)?;
         let statistics = self.generation_statistics()?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
