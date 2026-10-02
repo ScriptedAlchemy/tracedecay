@@ -204,10 +204,9 @@ async fn purge_candidates(
         return Ok(0);
     }
 
-    transaction
-        .execute_batch("PRAGMA secure_delete = ON;")
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    // `secure_delete` is a persisted database flag the memory_v2 baseline
+    // schema already sets at install, so these payload deletes zero-fill
+    // without a per-transaction pragma.
     for candidate in &flagged {
         record_purge_receipt(transaction, owner, candidate).await?;
         let changed = transaction

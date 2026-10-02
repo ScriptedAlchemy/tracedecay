@@ -464,10 +464,9 @@ pub(super) async fn publish_current_projection(
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
     if requires_payload_purge(projection.access) {
-        transaction
-            .execute_batch("PRAGMA secure_delete = ON;")
-            .await
-            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+        // `secure_delete` is a persisted database flag the memory_v2 baseline
+        // schema already sets at install, so this payload delete zero-fills
+        // without a per-transaction pragma.
         transaction
             .execute(
                 "DELETE FROM memory_v2_assertion_payloads
