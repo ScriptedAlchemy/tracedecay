@@ -283,6 +283,7 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::Unavailable { .. }
             | GraphDbError::SourceCommitmentsUnavailable { .. }
             | GraphDbError::SealedRevisionIncompatible { .. }
+            | GraphDbError::SealSuperseded
             | GraphDbError::SealedStoreImmutable { .. }
             | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
         },
