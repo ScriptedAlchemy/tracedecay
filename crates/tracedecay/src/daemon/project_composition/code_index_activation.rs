@@ -598,28 +598,31 @@ mod tests {
 
     /// `tracedecay sync` retries a failed mount while the retained failure
     /// flag stays published. A readiness wait that begins during that retry
-    /// must keep waiting for the mount the retry may land inside its own
-    /// budget; reporting the stale flag as unreachable would deny a wait
-    /// the settlement it exists to observe.
-    #[tokio::test]
+    /// must observe the retry's settlement instead of reporting the stale
+    /// failure immediately.
+    #[tokio::test(start_paused = true)]
     async fn readiness_wait_started_during_mount_retry_waits_for_settlement() {
         let repository = repository();
         let root =
             canonical_existing_identity(repository.path()).expect("canonical repository root");
         let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let retry_started = Arc::new(tokio::sync::Notify::new());
         let release_retry = Arc::new(tokio::sync::Notify::new());
         let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
             let mount_attempts = Arc::clone(&mount_attempts);
+            let retry_started = Arc::clone(&retry_started);
             let release_retry = Arc::clone(&release_retry);
             Arc::new(move || {
                 let mount_attempts = Arc::clone(&mount_attempts);
+                let retry_started = Arc::clone(&retry_started);
                 let release_retry = Arc::clone(&release_retry);
                 Box::pin(async move {
                     if mount_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         return Err("the first mount failed".to_owned());
                     }
+                    retry_started.notify_one();
                     release_retry.notified().await;
-                    Ok(())
+                    Err("the retry mount failed".to_owned())
                 })
             })
         };
@@ -632,6 +635,7 @@ mod tests {
         ));
         let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
         let waiter = super::super::project_readiness_waiter(registry, Arc::clone(&activation));
+        let mut mount_failure = activation.subscribe_mount_failure();
 
         assert_eq!(
             activation
@@ -639,54 +643,51 @@ mod tests {
                 .await,
             CodeIndexDemandAdmissionV1::Queued
         );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !activation.mount_failed() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the first mount attempt must fail and publish the flag");
+        while !*mount_failure.borrow_and_update() {
+            mount_failure
+                .changed()
+                .await
+                .expect("the activation owns the mount-failure publication");
+        }
 
         // The operator retry: a second mount attempt is in flight while the
         // retained failure is still published.
+        let retry_started_observation = retry_started.notified();
         assert_eq!(
             activation
                 .admit(&root, CodeIndexDemandV1::OperatorReconcile)
                 .await,
             CodeIndexDemandAdmissionV1::Queued
         );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while mount_attempts.load(Ordering::SeqCst) < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the explicit retry must start a second mount attempt");
+        retry_started_observation.await;
         assert!(activation.mount_in_progress());
         assert!(activation.mount_failed());
 
-        let waited = tokio::spawn(waiter(
+        let mut waited = Box::pin(waiter(
             root,
             tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
-            std::time::Duration::from_millis(250),
+            std::time::Duration::from_secs(1),
         ));
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
+        std::future::poll_fn(|context| {
+            assert!(
+                waited.as_mut().poll(context).is_pending(),
+                "the retained failure must not settle readiness while a retry is in flight"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+
         release_retry.notify_one();
-        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), waited)
-            .await
-            .expect("the readiness wait must join")
-            .expect("the readiness wait task must not panic")
-            .expect("the readiness authority stays typed");
+        let waited = waited.await.expect("the readiness authority stays typed");
         assert!(
             matches!(
                 waited,
-                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
-                    ..
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                    reason
                 }
+                if reason == "code_index_mount_failed"
             ),
-            "a wait started during an in-flight mount retry must hold for the settlement and the scheduler's own signals, not report the retained failure as unreachable"
+            "the wait must classify the retry's failed settlement"
         );
     }
 
