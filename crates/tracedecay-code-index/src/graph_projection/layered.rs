@@ -2,27 +2,24 @@
 //!
 //! Sealing records one content-addressed output page per snapshot file after
 //! canonical resolution. A refresh compares those descriptors with the cold
-//! base, reads only pages whose output changed, and reads an unchanged target
-//! page only when a new relation needs its endpoint row. Page ownership makes
-//! every hide local, including placeholders shared by several source files.
+//! base and reads only pages whose output changed. Exact endpoint rows for
+//! relations into unchanged pages come from the graph base's point-readable
+//! canonical row sidecar. Page ownership makes every hide local, including
+//! placeholders shared by several source files.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
-use tracedecay_domain::{FileOccurrenceId, SymbolOccurrenceId};
 use tracedecay_graph_db::{
     GraphDbError, GraphEntityId, GraphLayeredRowSpill, GraphProjectionIdentity,
     GraphProjectorRevision, GraphRelationId, LayeredGraphGeneration,
 };
 
-use super::builder::{
-    CodeGraphRowBatch, CodeGraphRowContext, edge_relation_id, emit_code_graph_rows,
-    emit_persisted_code_graph_page, file_symbol_relation_id, group_unresolved_calls,
-};
+use super::builder::{edge_relation_id, emit_persisted_code_graph_page, file_symbol_relation_id};
 use super::schema::{file_entity_id, file_import_relation_id_with, import_entity_id};
 use super::{
-    CURRENT_GENERATION_ENTITY, CodeGraphProjectionError, SealedCodeGraphRowsError, SymbolRecordV1,
+    CURRENT_GENERATION_ENTITY, CodeGraphProjectionError, SealedCodeGraphRowsError,
     code_graph_generation_id, code_graph_manifest_identity, current_generation_entity, projection,
-    symbol_entity, symbol_entity_id,
+    symbol_entity_id,
 };
 use crate::production::{
     CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, FileCodeGraphPageStoreV1,
@@ -106,8 +103,8 @@ pub fn build_layered_code_graph_rows(
     let plan = changed_page_plan(child.pages(), base.pages())?;
     // Every layered generation is a delta since the same cold base, so the
     // delta grows with each refresh until a cold build replaces the base.
-    let changed_files = plan.changed_paths.len();
-    let child_files = child.pages().len();
+    let changed_files = plan.changed.len();
+    let child_files = plan.child_files;
     if changed_files.saturating_mul(LAYERED_MAX_CHANGED_FILE_SHARE_DENOMINATOR) > child_files {
         return Ok(Err(CodeGraphLayeredDeclineV1::ChangedFileShare {
             changed: changed_files,
@@ -146,47 +143,87 @@ pub fn build_layered_code_graph_rows(
 }
 
 struct ChangedPagePlanV1 {
-    child: BTreeMap<String, CodeGraphPageDescriptorV1>,
-    base: BTreeMap<String, CodeGraphPageDescriptorV1>,
-    changed_paths: BTreeSet<String>,
+    changed: Vec<ChangedPageV1>,
+    child_files: usize,
 }
 
-fn pages_by_path(
+struct ChangedPageV1 {
+    child: Option<CodeGraphPageDescriptorV1>,
+    base: Option<CodeGraphPageDescriptorV1>,
+}
+
+fn require_canonical_pages(
     pages: &[CodeGraphPageDescriptorV1],
-) -> Result<BTreeMap<String, CodeGraphPageDescriptorV1>, CodeGraphProjectionError> {
-    let mut by_path = BTreeMap::new();
-    for page in pages {
-        if by_path
-            .insert(page.logical_path.clone(), page.clone())
-            .is_some()
-        {
-            return Err(CodeGraphProjectionError::Contract(
-                "code graph page store repeats a logical path".to_owned(),
-            ));
-        }
+) -> Result<(), CodeGraphProjectionError> {
+    if pages
+        .windows(2)
+        .any(|pair| pair[0].logical_path >= pair[1].logical_path)
+    {
+        return Err(CodeGraphProjectionError::Contract(
+            "code graph pages are not in canonical logical-path order".to_owned(),
+        ));
     }
-    Ok(by_path)
+    Ok(())
 }
 
 fn changed_page_plan(
     child: &[CodeGraphPageDescriptorV1],
     base: &[CodeGraphPageDescriptorV1],
 ) -> Result<ChangedPagePlanV1, CodeGraphProjectionError> {
-    let child = pages_by_path(child)?;
-    let base = pages_by_path(base)?;
-    let changed_paths = child
-        .keys()
-        .chain(base.keys())
-        .filter(|path| {
-            child.get(*path).map(|page| &page.page_digest)
-                != base.get(*path).map(|page| &page.page_digest)
-        })
-        .cloned()
-        .collect();
+    require_canonical_pages(child)?;
+    require_canonical_pages(base)?;
+    let (mut child_position, mut base_position) = (0, 0);
+    let mut changed = Vec::new();
+    while child_position < child.len() || base_position < base.len() {
+        match (child.get(child_position), base.get(base_position)) {
+            (Some(child_page), Some(base_page)) => {
+                match child_page.logical_path.cmp(&base_page.logical_path) {
+                    std::cmp::Ordering::Less => {
+                        changed.push(ChangedPageV1 {
+                            child: Some(child_page.clone()),
+                            base: None,
+                        });
+                        child_position += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        changed.push(ChangedPageV1 {
+                            child: None,
+                            base: Some(base_page.clone()),
+                        });
+                        base_position += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if child_page.page_digest != base_page.page_digest {
+                            changed.push(ChangedPageV1 {
+                                child: Some(child_page.clone()),
+                                base: Some(base_page.clone()),
+                            });
+                        }
+                        child_position += 1;
+                        base_position += 1;
+                    }
+                }
+            }
+            (Some(child_page), None) => {
+                changed.push(ChangedPageV1 {
+                    child: Some(child_page.clone()),
+                    base: None,
+                });
+                child_position += 1;
+            }
+            (None, Some(base_page)) => {
+                changed.push(ChangedPageV1 {
+                    child: None,
+                    base: Some(base_page.clone()),
+                });
+                base_position += 1;
+            }
+            (None, None) => break,
+        }
+    }
     Ok(ChangedPagePlanV1 {
-        child,
-        base,
-        changed_paths,
+        changed,
+        child_files: child.len(),
     })
 }
 
@@ -202,17 +239,17 @@ fn for_each_changed_page(
     check: &dyn Fn() -> Result<(), GraphDbError>,
     mut visit: impl FnMut(MaterializedPageDeltaV1) -> Result<(), SealedCodeGraphRowsError>,
 ) -> Result<(), SealedCodeGraphRowsError> {
-    for path in &plan.changed_paths {
+    for changed in &plan.changed {
         check()?;
         visit(MaterializedPageDeltaV1 {
-            base: plan
+            base: changed
                 .base
-                .get(path)
+                .as_ref()
                 .map(|descriptor| base.read_page(descriptor))
                 .transpose()?,
-            child: plan
+            child: changed
                 .child
-                .get(path)
+                .as_ref()
                 .map(|descriptor| child.read_page(descriptor))
                 .transpose()?,
         })?;
@@ -229,55 +266,33 @@ fn emit_page_delta(
     spill: &mut GraphLayeredRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<CodeGraphLayeredReportV1, SealedCodeGraphRowsError> {
-    let mut endpoint_owners = BTreeMap::new();
     for_each_changed_page(plan, child, base, check, |changed| {
         if let Some(page) = changed.base {
             let (entities, relations) = owned_page_rows(&page)?;
             spill.hide(entities, relations);
         }
         if let Some(page) = changed.child {
-            for (occurrence, owner) in &page.target_files {
-                if let Some(existing) = endpoint_owners.insert(occurrence.clone(), owner.clone())
-                    && existing != *owner
-                {
-                    return Err(CodeGraphProjectionError::Contract(
-                        "changed code graph pages disagree on an endpoint owner".to_owned(),
-                    )
-                    .into());
-                }
-            }
             let rows =
                 emit_persisted_code_graph_page(projection_identity, generation, &page, check)?;
             spill.push_batch(rows.entities, rows.relations, check)?;
         }
         Ok(())
     })?;
-    emit_page_endpoint_stubs(
-        projection_identity,
-        generation,
-        plan,
-        child,
-        spill,
-        &endpoint_owners,
-        check,
-    )?;
+    let missing_endpoints = spill.missing_endpoints();
+    spill.copy_base_endpoints(missing_endpoints, check)?;
     reseal_generation_marker(spill, generation, check)?;
+    let reextracted_files = plan
+        .changed
+        .iter()
+        .filter(|page| page.child.is_some())
+        .count();
     Ok(CodeGraphLayeredReportV1 {
-        reextracted_files: plan
-            .changed_paths
-            .iter()
-            .filter(|path| plan.child.contains_key(*path))
-            .count(),
-        reused_files: plan.child.len().saturating_sub(
-            plan.changed_paths
-                .iter()
-                .filter(|path| plan.child.contains_key(*path))
-                .count(),
-        ),
+        reextracted_files,
+        reused_files: plan.child_files.saturating_sub(reextracted_files),
         removed_files: plan
-            .changed_paths
+            .changed
             .iter()
-            .filter(|path| plan.base.contains_key(*path))
+            .filter(|page| page.base.is_some())
             .count(),
         resolved_references: 0,
         delta_rows: (0, 0),
@@ -310,105 +325,6 @@ fn owned_page_rows(
         relations.push(edge_relation_id(edge)?);
     }
     Ok((entities, relations))
-}
-
-fn emit_page_endpoint_stubs(
-    projection_identity: &GraphProjectionIdentity,
-    generation: &tracedecay_domain::CodeGenerationId,
-    plan: &ChangedPagePlanV1,
-    child: &mut impl CodeGraphPageStoreV1,
-    spill: &mut GraphLayeredRowSpill,
-    endpoint_owners: &BTreeMap<SymbolOccurrenceId, FileOccurrenceId>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), SealedCodeGraphRowsError> {
-    let missing = spill
-        .missing_endpoints()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let mut wanted_by_file = BTreeMap::<FileOccurrenceId, BTreeSet<SymbolOccurrenceId>>::new();
-    for (occurrence, owner) in endpoint_owners {
-        check()?;
-        if missing.contains(&symbol_entity_id(occurrence)?) {
-            wanted_by_file
-                .entry(owner.clone())
-                .or_default()
-                .insert(occurrence.clone());
-        }
-    }
-    let child_by_occurrence = plan
-        .child
-        .values()
-        .map(|page| (page.file_occurrence_id.clone(), page))
-        .collect::<BTreeMap<_, _>>();
-    for (owner, wanted) in wanted_by_file {
-        let descriptor = child_by_occurrence.get(&owner).ok_or_else(|| {
-            CodeGraphProjectionError::Contract(
-                "code graph relation endpoint page is outside the child".to_owned(),
-            )
-        })?;
-        let page = child.read_page(descriptor)?;
-        let files = BTreeMap::from([(&page.file.file_occurrence_id, &page.file)]);
-        let bound = page
-            .bindings
-            .keys()
-            .chain(page.symbols.iter().map(|symbol| &symbol.occurrence))
-            .cloned()
-            .collect::<HashSet<_>>();
-        let unresolved_by_source = group_unresolved_calls(&page.unresolved_calls, check)?;
-        let symbols = page
-            .symbols
-            .iter()
-            .filter(|symbol| wanted.contains(&symbol.occurrence))
-            .cloned()
-            .collect::<Vec<_>>();
-        let bindings = page
-            .bindings
-            .iter()
-            .filter(|(occurrence, _)| wanted.contains(*occurrence))
-            .map(|(occurrence, binding)| (occurrence.clone(), binding.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let rows = emit_code_graph_rows(
-            &CodeGraphRowContext {
-                projection: projection_identity,
-                generation,
-                files: Some(&files),
-                bound: &bound,
-                unresolved_by_source: &unresolved_by_source,
-            },
-            &CodeGraphRowBatch {
-                files: &[],
-                imports: &[],
-                chunks: &[],
-                symbols: &symbols,
-                edges: &[],
-                bindings: Some(&bindings),
-            },
-            check,
-        )?;
-        let mut entities = rows.entities;
-        for occurrence in wanted
-            .iter()
-            .filter(|occurrence| page.owned_placeholders.contains(*occurrence))
-        {
-            entities.push(symbol_entity(
-                symbol_entity_id(occurrence)?,
-                SymbolRecordV1 {
-                    occurrence: occurrence.clone(),
-                    binding: None,
-                    metadata: None,
-                    unresolved_calls: unresolved_by_source
-                        .get(occurrence)
-                        .cloned()
-                        .unwrap_or_default(),
-                },
-            )?);
-        }
-        spill.push_batch(entities, Vec::new(), check)?;
-    }
-    Ok(())
 }
 
 /// Replaces the generation marker, which counts every entity, itself
@@ -565,6 +481,8 @@ mod tests {
             base_pages.insert(path.clone(), stored.clone());
             child_pages.insert(path, stored);
         }
+        base_descriptors.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        child_descriptors.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
         let generation =
             CodeGenerationId::new("generation.v1.fixture.00000001.aaaaaaaa").expect("generation");
         let readable = BTreeSet::from([changed_path.to_owned()]);
@@ -596,14 +514,14 @@ mod tests {
         for_each_changed_page(&plan, &mut child, &mut base, &|| Ok(()), |_| Ok(()))
             .expect("materialize changed pages");
         let expected_child = plan
-            .changed_paths
+            .changed
             .iter()
-            .filter(|path| plan.child.contains_key(*path))
+            .filter(|page| page.child.is_some())
             .count();
         let expected_base = plan
-            .changed_paths
+            .changed
             .iter()
-            .filter(|path| plan.base.contains_key(*path))
+            .filter(|page| page.base.is_some())
             .count();
         assert_eq!(child.reads.len(), expected_child);
         assert_eq!(base.reads.len(), expected_base);

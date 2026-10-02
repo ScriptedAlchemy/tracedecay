@@ -36,9 +36,11 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
-use crate::generation::{GraphRowDigestSum, RowLanes, recovered_digest_from_row_sum};
+use crate::generation::{
+    GraphRowDigestSum, RowLanes, read_spilled_entity, recovered_digest_from_row_sum,
+};
 use crate::projection_read::{IdentityScope, query_identity_page};
-use crate::row_index::{ROW_INDEX_FILE, RowIndex};
+use crate::row_index::{ENTITY_ROW_OFFSETS_FILE, EntityRowOffsets, ROW_INDEX_FILE, RowIndex};
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_label, relation_projection_label,
@@ -59,6 +61,8 @@ use crate::{
 pub(crate) const LAYERED_BASE_CONTAINER_FILE: &str = "base.grafeo";
 pub(crate) const LAYERED_BASE_ATTACHMENT_FILE: &str = "base.attachment";
 pub(crate) const LAYERED_BASE_ROW_INDEX_FILE: &str = "base.rows.index";
+pub(crate) const LAYERED_BASE_ENTITY_ROWS_FILE: &str = "base.entities.rows";
+pub(crate) const LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE: &str = "base.entity-rows.offsets";
 pub(crate) const LAYERED_HIDDEN_FILE: &str = "hidden.json";
 /// A flat generation's producer attachment, sealed beside its container.
 pub(crate) const GENERATION_ATTACHMENT_FILE: &str = "attachment";
@@ -126,6 +130,8 @@ pub enum GraphSealedBaseAbsenceV1 {
     NoAttachment,
     /// The artifact carries no row index to derive a delta's digest from.
     NoRowIndex,
+    /// The artifact carries no point-readable canonical entity rows.
+    NoEntityRows,
     /// The row index does not record the rows the base's row sum holds.
     RowIndexMismatch,
 }
@@ -135,6 +141,8 @@ pub(crate) struct SealedBaseFilesV1 {
     pub(crate) container: PathBuf,
     pub(crate) attachment: PathBuf,
     pub(crate) row_index: PathBuf,
+    pub(crate) entity_rows: PathBuf,
+    pub(crate) entity_row_offsets: PathBuf,
 }
 
 impl SealedBaseFilesV1 {
@@ -145,6 +153,8 @@ impl SealedBaseFilesV1 {
             crate::sealed_store::SEALED_STORE_DATABASE_FILE,
             GENERATION_ATTACHMENT_FILE,
             ROW_INDEX_FILE,
+            crate::generation::ENTITIES_FILE,
+            ENTITY_ROW_OFFSETS_FILE,
         )
     }
 
@@ -155,6 +165,8 @@ impl SealedBaseFilesV1 {
             LAYERED_BASE_CONTAINER_FILE,
             LAYERED_BASE_ATTACHMENT_FILE,
             LAYERED_BASE_ROW_INDEX_FILE,
+            LAYERED_BASE_ENTITY_ROWS_FILE,
+            LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE,
         )
     }
 
@@ -163,6 +175,8 @@ impl SealedBaseFilesV1 {
         container: &str,
         attachment: &str,
         row_index: &str,
+        entity_rows: &str,
+        entity_row_offsets: &str,
     ) -> Result<Self, GraphSealedBaseAbsenceV1> {
         let attachment = directory.join(attachment);
         if !attachment.is_file() {
@@ -172,10 +186,17 @@ impl SealedBaseFilesV1 {
         if !row_index.is_file() {
             return Err(GraphSealedBaseAbsenceV1::NoRowIndex);
         }
+        let entity_rows = directory.join(entity_rows);
+        let entity_row_offsets = directory.join(entity_row_offsets);
+        if !entity_rows.is_file() || !entity_row_offsets.is_file() {
+            return Err(GraphSealedBaseAbsenceV1::NoEntityRows);
+        }
         Ok(Self {
             container: directory.join(container),
             attachment,
             row_index,
+            entity_rows,
+            entity_row_offsets,
         })
     }
 }
@@ -199,6 +220,8 @@ struct SealedBaseInner {
     /// Every base row's digest, for the point lookups that derive a delta's
     /// digest; the base graph itself is never opened.
     index: RowIndex,
+    entity_rows: PathBuf,
+    entity_row_offsets: EntityRowOffsets,
 }
 
 impl std::fmt::Debug for GraphSealedBaseV1 {
@@ -232,7 +255,15 @@ impl GraphSealedBaseV1 {
             }
             Err(error) => return Err(error),
         };
+        let entity_row_offsets = match EntityRowOffsets::open(&files.entity_row_offsets) {
+            Ok(offsets) => offsets,
+            Err(GraphDbError::Corrupt { .. }) => {
+                return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
+            }
+            Err(error) => return Err(error),
+        };
         if index.row_counts() != (entities as u64, relations as u64)
+            || entity_row_offsets.entities() != entities as u64
             || index.row_sum(check)? != row_sum
         {
             return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
@@ -248,6 +279,8 @@ impl GraphSealedBaseV1 {
                 container: files.container,
                 attachment: files.attachment,
                 index,
+                entity_rows: files.entity_rows,
+                entity_row_offsets,
             }),
         }))
     }
@@ -335,6 +368,11 @@ impl GraphLayeredRowSpill {
                 &base.inner.index.path().to_path_buf(),
                 LAYERED_BASE_ROW_INDEX_FILE,
             ),
+            (&base.inner.entity_rows, LAYERED_BASE_ENTITY_ROWS_FILE),
+            (
+                &base.inner.entity_row_offsets.path().to_path_buf(),
+                LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE,
+            ),
         ] {
             std::fs::hard_link(source, spill.directory().join(name))
                 .map_err(|error| layered_io("base file pin", error))?;
@@ -411,6 +449,38 @@ impl GraphLayeredRowSpill {
     /// a delta that still misses one.
     pub fn missing_endpoints(&mut self) -> Vec<GraphEntityId> {
         self.spill.missing_endpoints()
+    }
+
+    /// Copies exact unchanged endpoint rows from the pinned cold base without
+    /// opening its graph engine or materializing the endpoint owners' pages.
+    pub fn copy_base_endpoints(
+        &mut self,
+        endpoints: impl IntoIterator<Item = GraphEntityId>,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(), GraphDbError> {
+        let mut entities = Vec::new();
+        for endpoint in endpoints {
+            check()?;
+            let indexed = self
+                .base
+                .inner
+                .index
+                .entity(endpoint.as_str())?
+                .ok_or_else(|| {
+                    GraphDbError::invalid(format!(
+                        "layered relation endpoint `{endpoint}` is absent from its base"
+                    ))
+                })?;
+            let (offset, length) = self.base.inner.entity_row_offsets.row(indexed.ordinal)?;
+            entities.push(read_spilled_entity(
+                &self.base.inner.entity_rows,
+                offset,
+                length,
+                &endpoint,
+                indexed.lanes,
+            )?);
+        }
+        self.spill.push_batch(entities, Vec::new(), check)
     }
 
     /// Merges the delta and derives the layered generation's row sum and
@@ -678,6 +748,8 @@ impl LayeredGraphGeneration {
             LAYERED_BASE_CONTAINER_FILE,
             LAYERED_BASE_ATTACHMENT_FILE,
             LAYERED_BASE_ROW_INDEX_FILE,
+            LAYERED_BASE_ENTITY_ROWS_FILE,
+            LAYERED_BASE_ENTITY_ROW_OFFSETS_FILE,
         ] {
             std::fs::hard_link(pinned.join(file), staging.join(file))
                 .map_err(|error| layered_io("base link", error))?;

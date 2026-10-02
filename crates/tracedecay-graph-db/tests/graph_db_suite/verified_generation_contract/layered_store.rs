@@ -336,14 +336,8 @@ fn publish_layered(
             .filter(|identity| !child_relations.contains(*identity))
             .cloned(),
     );
-    // The producer carries every endpoint its relations reach: the base's
-    // own row where nothing changed.
-    let stubs = spill
-        .missing_endpoints()
-        .iter()
-        .map(|identity| (*parent_entities[identity]).clone())
-        .collect::<Vec<_>>();
-    spill.push_batch(stubs, Vec::new(), &|| Ok(())).unwrap();
+    let missing = spill.missing_endpoints();
+    spill.copy_base_endpoints(missing, &|| Ok(())).unwrap();
     let layered = spill.finish(child.identity(), &|| Ok(())).unwrap();
     let delta = layered.delta_row_counts();
     (
@@ -870,17 +864,8 @@ fn layered_seal_peak_probe() {
         .push_batch(delta.entities, delta.relations, &|| Ok(()))
         .unwrap();
     spill.hide(delta.hidden_entities, delta.hidden_relations);
-    let stubs = spill
-        .missing_endpoints()
-        .iter()
-        .map(|identity| {
-            symbol(
-                identity.as_str()["entity:".len()..].parse().unwrap(),
-                "parent",
-            )
-        })
-        .collect::<Vec<_>>();
-    spill.push_batch(stubs, Vec::new(), &|| Ok(())).unwrap();
+    let missing = spill.missing_endpoints();
+    spill.copy_base_endpoints(missing, &|| Ok(())).unwrap();
     let layered = spill.finish(child.identity(), &|| Ok(())).unwrap();
     let commit = publish_rows(
         &graph,
