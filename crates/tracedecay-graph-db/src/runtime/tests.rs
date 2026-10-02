@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 
-use super::sync_wal;
+use super::{GraphDb, sync_wal};
+use crate::location::PersistentGraphStoreState;
 use crate::recovery::set_projection_quarantine;
 use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
@@ -124,6 +125,68 @@ fn scalar_batch(value: &str) -> GraphWriteBatch {
         Arc::new(NeverCancelled),
     )
     .unwrap()
+}
+
+#[test]
+fn resident_engine_bytes_remeasures_after_a_write() {
+    let db = memory_db();
+    let first = db.resident_engine_bytes().unwrap().unwrap();
+    assert_eq!(db.resident_engine_bytes().unwrap(), Some(first));
+
+    for index in 0..32 {
+        let value = format!("{index}-{}", "x".repeat(900));
+        db.apply_unverified(scalar_batch(&value)).unwrap();
+    }
+
+    let measured = db.resident_engine_bytes().unwrap().unwrap();
+    let guard = db.inner.database.read().unwrap();
+    let database = guard.as_ref().unwrap();
+    let fresh = u64::try_from(database.memory_usage().total_bytes)
+        .unwrap_or(u64::MAX)
+        .max(db.inner.engine_heap_bytes())
+        .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
+    assert!(
+        measured > first,
+        "memory usage did not grow: {first} -> {measured}"
+    );
+    assert_eq!(measured, fresh);
+}
+
+#[test]
+fn resident_engine_bytes_is_recomputed_after_hibernation_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.grafeo");
+    let options = || GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.clone()),
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::WalSync,
+        cancellation: Arc::new(NeverCancelled),
+    };
+
+    let owner = GraphDbOwner::open(options()).unwrap();
+    owner
+        .issue_lease()
+        .unwrap()
+        .apply_unverified(scalar_batch("seed"))
+        .unwrap();
+    owner.close().unwrap();
+
+    let db = GraphDb::open_lazy_with_store_state(options(), PersistentGraphStoreState::Existing)
+        .unwrap();
+    drop(db.read_guard().unwrap());
+    let _before_hibernate = db.resident_engine_bytes().unwrap().unwrap();
+    db.hibernate_if_lazy().unwrap();
+    assert_eq!(db.resident_engine_bytes().unwrap(), None);
+
+    drop(db.read_guard().unwrap());
+    let reopened = db.resident_engine_bytes().unwrap().unwrap();
+    let guard = db.read_guard().unwrap();
+    let database = guard.as_ref().unwrap();
+    let fresh = u64::try_from(database.memory_usage().total_bytes)
+        .unwrap_or(u64::MAX)
+        .max(db.inner.engine_heap_bytes())
+        .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
+    assert_eq!(reopened, fresh);
 }
 
 #[test]

@@ -94,6 +94,7 @@ pub(crate) struct Inner {
     /// pages it occupied when the open returned. Declared after `database`,
     /// so dropping the engine empties the heap before the heap is deleted.
     engine_heap: Mutex<Option<(OwnerHeapV1, u64)>>,
+    engine_usage_bytes: Mutex<Option<u64>>,
 }
 
 /// Keeps one graph database's native engine resident for as long as the
@@ -202,6 +203,10 @@ impl Inner {
         self.label_keys.invalidate();
         self.adjacency_ids.invalidate();
         self.projection_approvals.invalidate();
+        *self
+            .engine_usage_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Heap bytes the store-epoch caches hold. They are derived from the open
@@ -313,6 +318,7 @@ impl GraphDb {
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
                 engine_heap: Mutex::new(None),
+                engine_usage_bytes: Mutex::new(None),
             }),
         });
         graph.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::Open);
@@ -348,6 +354,7 @@ impl GraphDb {
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
                 engine_heap: Mutex::new(None),
+                engine_usage_bytes: Mutex::new(None),
             }),
         }))
     }
@@ -1475,21 +1482,25 @@ impl GraphDb {
         }
     }
 
-    /// Heap bytes the resident engine holds, or `None` when it is not
-    /// resident: its compact base (tables, id maps, property indexes), the
-    /// overlay store, indexes, versions, caches and string pools, and the
-    /// store-epoch caches derived from it. A sealed
-    /// generation's column bodies stay in the mapped container, which is
-    /// file-backed page cache rather than heap, so they are not charged.
+    /// Resident engine heap bytes, or `None` when the engine is not resident.
+    /// The engine figure is measured once per store epoch because row writes
+    /// hold the database write lock and invalidate the memo. Derived cache
+    /// bytes are added fresh on every call.
     pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
         self.inner
             .database
             .read()
             .map(|database| {
                 database.as_ref().map(|database| {
-                    let engine = u64::try_from(database.memory_usage().total_bytes)
-                        .unwrap_or(u64::MAX)
-                        .max(self.inner.engine_heap_bytes());
+                    let mut usage = self
+                        .inner
+                        .engine_usage_bytes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let usage = *usage.get_or_insert_with(|| {
+                        u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
+                    });
+                    let engine = usage.max(self.inner.engine_heap_bytes());
                     engine.saturating_add(
                         u64::try_from(self.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX),
                     )
@@ -1703,6 +1714,7 @@ impl GraphDb {
         // consult a proof before it is tied to the container this engine
         // opened.
         self.inner.markers.bind(opened.identity);
+        self.inner.invalidate_store_epoch_caches();
         *database = Some(opened.database);
         *self
             .inner
