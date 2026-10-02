@@ -781,7 +781,7 @@ async fn latest_goal_state_filters_provider_session_and_status() {
 /// transcript row does not already carry. A message beside two tasks surfaces
 /// all three, while a goal fact whose objective is its row's text surfaces once.
 #[tokio::test]
-async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
+async fn search_keeps_typed_workflow_facts_beside_their_transcript_row() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -806,7 +806,7 @@ async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
         vec![
             CanonicalObservationFactV1::Message {
                 role: CanonicalMessageRoleV1::Assistant,
-                content: json!({"text": "release summary names the owner"}),
+                content: json!({"text": "release summary repeats release task alpha"}),
                 model: None,
                 timestamp: Some(1_750_000_001),
             },
@@ -846,7 +846,7 @@ async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
         hits,
         [
             ("goal", "release goal ships"),
-            ("message", "release summary names the owner"),
+            ("message", "release summary repeats release task alpha"),
             ("task", "release task alpha"),
             ("task", "release task beta"),
         ]

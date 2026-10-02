@@ -726,10 +726,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     !transcript_observations
                         .get(observation_id)
                         .is_some_and(|&index| {
-                            transcript_results[index]
-                                .message
-                                .text
-                                .contains(&fact.message.text)
+                            let goal = &transcript_results[index].message;
+                            fact.message.kind.as_deref() == Some("goal")
+                                && goal.kind.as_deref() == Some("goal")
+                                && goal.text == fact.message.text
                         })
                 })
                 .map(|(_, fact)| fact)
