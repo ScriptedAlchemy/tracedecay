@@ -199,6 +199,8 @@ fn release_abandoned_lock(locked: &Handle, lock_name: &str) {
     }
 }
 
+/// Brackets one read of a host file. The snapshot carries the bytes and every
+/// comparison compares them, so an equal identity is never a proof by itself.
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HostFileObjectIdentity {
