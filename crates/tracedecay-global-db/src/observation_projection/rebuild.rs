@@ -435,8 +435,26 @@ async fn prepare_predecessor_projection_rebuild(
         .map_err(|error| storage("begin predecessor projection convergence", error))?;
     let mut predecessor_rows = transaction
         .query(
-            "SELECT 1 FROM observation_projection_provenance
-             WHERE projector_version IN (?1, ?2) LIMIT 1",
+            "SELECT 1
+             WHERE EXISTS (
+                SELECT 1 FROM observation_projection_provenance
+                WHERE projector_version IN (?1, ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM observation_workflow_facts
+                WHERE projector_version IN (?1, ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM observation_projection_dispositions
+                WHERE projector_version IN (?1, ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM observation_projection_checkpoints
+                WHERE projector_version IN (?1, ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM observation_projection_aliases
+                WHERE projector_version IN (?1, ?2)
+             ) OR EXISTS (
+                SELECT 1 FROM observation_projection_rebuilds
+                WHERE projector_version IN (?1, ?2)
+             )",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
