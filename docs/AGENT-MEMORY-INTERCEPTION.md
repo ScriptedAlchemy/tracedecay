@@ -365,7 +365,7 @@ construction:
   automation is disabled ("N sessions ingested, 0 reflected").
 
 Pointers: `crates/tracedecay-automation-runtime/src/automation/config.rs` (defaults/validation),
-`crates/tracedecay-automation-runtime/src/automation/runner.rs::run_session_reflector_with_backend`,
+`crates/tracedecay-automation-runtime/src/automation/runner/session_reflector.rs::run_session_reflector_with_backend`,
 dashboard curation UI (concurrent work in `dashboard/`, coordinate, don't
 touch).
 
