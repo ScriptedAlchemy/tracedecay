@@ -297,6 +297,20 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        for evidence in manifest["generation"]["file_evidence"]
+            .as_array()
+            .expect("file evidence descriptors")
+        {
+            components.insert(
+                evidence["segment_digest"]
+                    .as_str()
+                    .expect("file evidence digest")
+                    .to_owned(),
+                evidence["segment_size_bytes"]
+                    .as_u64()
+                    .expect("file evidence size"),
+            );
+        }
         components.insert(
             manifest["generation"]["generation_evidence"]["segment_digest"]
                 .as_str()

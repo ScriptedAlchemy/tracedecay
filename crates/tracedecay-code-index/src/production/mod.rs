@@ -62,9 +62,8 @@ use super::{
 
 mod canonical_json;
 mod clone_rows;
-mod edge_rows;
+mod file_evidence_rows;
 mod helpers;
-mod lineage_rows;
 mod module_resolution;
 mod projection_rows;
 mod typescript_resolution;
@@ -2961,3 +2960,7 @@ mod arc_share_sequence_tests;
 #[cfg(test)]
 #[path = "changed_resolution_tests.rs"]
 mod changed_resolution_tests;
+
+#[cfg(test)]
+#[path = "file_evidence_tests.rs"]
+mod file_evidence_tests;
