@@ -1654,6 +1654,42 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     assert!(error.to_string().contains("stop"));
 }
 
+/// A Linux host without systemd (a container) has no managed unit, so
+/// maintenance that only quiesces an installed unit must not need `systemctl`;
+/// a lifecycle command that drives the unit still reports it missing.
+#[cfg(target_os = "linux")]
+#[test]
+fn maintenance_without_an_installed_unit_does_not_need_systemctl() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("profile");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let profile = ProfileRoot::new(&data_dir).with_xdg_config_home(dir.path().join("config"));
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&empty_bin).expect("empty bin dir");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&empty_bin);
+
+    assert_eq!(
+        super::quiesce_installed_service_before_lease(&profile, TEST_BUILD_VERSION)
+            .expect("quiesce without a unit"),
+        DaemonServiceState::Missing
+    );
+    assert_eq!(
+        super::verify_installed_service_quiesced_under_lease(&profile)
+            .expect("verify without a unit"),
+        DaemonServiceState::Missing
+    );
+    let error = ServiceRunner::current_for_installed_unit()
+        .expect("deferred runner")
+        .stop(TEST_BUILD_VERSION)
+        .expect_err("driving the service manager still needs systemctl");
+    assert!(
+        error
+            .to_string()
+            .contains("host CLI `systemctl` is unavailable"),
+        "{error}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_installed_service_preserves_existing_socket_path() {
