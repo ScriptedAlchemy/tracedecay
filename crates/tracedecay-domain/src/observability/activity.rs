@@ -46,7 +46,6 @@ impl ActivityObservedV1 {
                     | "tool_lifecycle"
                     | "saved_edit"
                     | "test_lifecycle"
-                    | "opencode_lsp_updated"
             ),
             // These are the exact ids emitted by session ingestion and native
             // host-history producers. Host installation ids such as `kimi`

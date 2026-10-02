@@ -1054,11 +1054,26 @@ fn reaching_the_high_watermark_runs_pressure_reclaimers_with_the_measurement() {
 
 #[test]
 fn post_reclaim_observation_replaces_pressure_state_without_reentering_reclaimers() {
-    let (authority, pressure) = pressure_authority();
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let after_reclaim = 1;
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: after_reclaim,
+                unreclaimable_bytes: after_reclaim,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
     let calls = Arc::new(Mutex::new(0_u64));
     let callback_calls = Arc::clone(&calls);
     let callback_pressure = Arc::downgrade(&pressure);
-    let after_reclaim = pressure.low_watermark_bytes();
     let _registration = pressure
         .register_pressure_reclaimer(
             10,
@@ -1067,7 +1082,7 @@ fn post_reclaim_observation_replaces_pressure_state_without_reentering_reclaimer
                 callback_pressure
                     .upgrade()
                     .expect("pressure authority remains live")
-                    .publish_post_reclaim_observed_resident_bytes(after_reclaim);
+                    .sample_for_checkpoint();
                 4096
             }),
         )
@@ -1146,6 +1161,46 @@ fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_releas
         }
         _ => assert_eq!(trim.released_bytes(), 0),
     }
+}
+
+#[test]
+fn allocator_trim_readmits_growth_when_memory_recovers_inside_checkpoint_throttle() {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let measured = Arc::new(AtomicU64::new(PRESSURE_TEST_LIMIT_BYTES));
+    let sampled = Arc::clone(&measured);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("allocator trim registration");
+    let owner = key("project-a", "worktree-a", "generation-a", "canonical");
+
+    pressure.sample_for_checkpoint();
+    let refused = authority
+        .reserve(owner.clone(), growth_request())
+        .expect_err("a process at its limit refuses growth");
+    assert!(refused.is_observed_over_budget());
+
+    measured.store(64 * 1024 * 1024, Ordering::Release);
+    pressure.publish_observed_resident_bytes(PRESSURE_TEST_LIMIT_BYTES);
+
+    let _admitted = authority
+        .reserve(owner, growth_request())
+        .expect("growth is admitted once the trim measures recovered memory");
+    assert_eq!(authority.snapshot().used_bytes, 16 * 1024 * 1024);
 }
 
 #[test]
@@ -1415,12 +1470,7 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
 
     let started = Instant::now();
     for _ in 0..200_000 {
-        assert!(
-            !pressure
-                .sample_for_checkpoint()
-                .expect("checkpoint state")
-                .is_over_budget()
-        );
+        assert!(!pressure.sample_for_checkpoint().is_over_budget());
     }
     let elapsed = started.elapsed();
     let reads_taken = reads.load(Ordering::Acquire);
@@ -1434,10 +1484,7 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
     observed.store(limit.get(), Ordering::Release);
     std::thread::sleep(RESIDENT_MEMORY_CHECKPOINT_SAMPLE_INTERVAL_V1);
     assert!(
-        pressure
-            .sample_for_checkpoint()
-            .expect("checkpoint state")
-            .is_over_budget(),
+        pressure.sample_for_checkpoint().is_over_budget(),
         "a checkpoint past the interval must read the grown process"
     );
     assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
@@ -1508,4 +1555,54 @@ fn headroom_is_the_ceiling_less_the_larger_of_ledger_and_measurement() {
         "the latch holds until the low watermark"
     );
     drop((charged, in_flight));
+}
+
+#[test]
+fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
+    let limit = bytes(1024 * 1024 * 1024 * 1024);
+    let sample = Arc::new(Mutex::new(ProcessResidentSampleV1 {
+        resident_bytes: 1,
+        unreclaimable_bytes: 1,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: Some(limit.get()),
+    }));
+    let sampled = Arc::clone(&sample);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || Some(*sampled.lock().expect("sample"))),
+    ));
+    let _reclaimer = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("register allocator reclaimer");
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(pressure.measure_admission_bytes(), limit.get());
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::OverBudget { .. }
+    ));
+    assert!(matches!(
+        authority.reserve(
+            key("project", "worktree", "generation", "graph"),
+            growth_request()
+        ),
+        Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
+    ));
+
+    sample.lock().expect("sample").cgroup_committed_bytes = Some(1);
+    assert_eq!(pressure.measure_admission_bytes(), 1);
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::Nominal { .. }
+    ));
+    assert!(
+        authority
+            .reserve(
+                key("project", "worktree", "generation", "graph"),
+                growth_request()
+            )
+            .is_ok()
+    );
 }

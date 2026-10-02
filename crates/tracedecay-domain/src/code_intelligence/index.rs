@@ -44,6 +44,8 @@ pub struct SanitizedCodeSnapshotV1 {
     pub content_identity: ContentDigest,
     pub captured_at: UtcMicros,
     pub files: Vec<SanitizedCodeFileV1>,
+    /// Sources the capture saw but does not index, ordered by Git path.
+    pub omitted_sources: Vec<OmittedCodeSourceV1>,
 }
 
 impl SanitizedCodeSnapshotV1 {
@@ -98,8 +100,60 @@ impl SanitizedCodeSnapshotV1 {
                 field: "snapshot file order",
             });
         }
+        if self
+            .omitted_sources
+            .windows(2)
+            .any(|sources| sources[0].git_path >= sources[1].git_path)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "snapshot omitted source order",
+            });
+        }
+        for source in &self.omitted_sources {
+            let logical_path = std::str::from_utf8(&source.git_path).ok();
+            let representable =
+                logical_path.is_some_and(|path| validate_code_logical_path(path).is_ok());
+            let consistent = match &source.reason {
+                CodeSourceOmissionReasonV1::UnrepresentablePath => !representable,
+                CodeSourceOmissionReasonV1::PrivacyWithheld { .. } => logical_path
+                    .filter(|_| representable)
+                    .and_then(|path| {
+                        self.files
+                            .binary_search_by(|file| file.logical_path.as_str().cmp(path))
+                            .ok()
+                    })
+                    .is_some_and(|index| {
+                        self.files[index].disposition == SnapshotFileDispositionV1::Ignored
+                    }),
+            };
+            if !consistent {
+                return Err(DomainError::NonCanonical {
+                    field: "snapshot omitted source reason",
+                });
+            }
+        }
         Ok(())
     }
+}
+
+/// One source a snapshot captured but does not index. The raw Git path
+/// bytes are kept because an unrepresentable path has no logical path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OmittedCodeSourceV1 {
+    pub git_path: Vec<u8>,
+    pub reason: CodeSourceOmissionReasonV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CodeSourceOmissionReasonV1 {
+    /// Not UTF-8, or fails [`validate_code_logical_path`]: no snapshot row
+    /// can name it.
+    UnrepresentablePath,
+    /// The privacy boundary withheld the bytes; the snapshot keeps an
+    /// `Ignored` row under the same path.
+    PrivacyWithheld { detail: String },
 }
 
 /// One sanitized file inside a snapshot.
@@ -443,6 +497,7 @@ mod tests {
                     disposition: SnapshotFileDispositionV1::Present,
                 },
             ],
+            omitted_sources: Vec::new(),
         }
     }
 
@@ -567,6 +622,68 @@ mod tests {
         assert_eq!(
             noncanonical_path.validate().unwrap_err().to_string(),
             "snapshot logical path is not canonical"
+        );
+    }
+
+    fn snapshot_with_omitted_sources() -> SanitizedCodeSnapshotV1 {
+        let mut snapshot = snapshot();
+        snapshot.files[1].disposition = SnapshotFileDispositionV1::Ignored;
+        snapshot.omitted_sources = vec![
+            OmittedCodeSourceV1 {
+                git_path: b"src/b.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::PrivacyWithheld {
+                    detail: "quarantined".to_owned(),
+                },
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/odd\\name.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+            OmittedCodeSourceV1 {
+                git_path: b"src/\xff.rs".to_vec(),
+                reason: CodeSourceOmissionReasonV1::UnrepresentablePath,
+            },
+        ];
+        snapshot
+    }
+
+    #[test]
+    fn omitted_sources_must_be_ordered_and_carry_a_reason_their_path_supports() {
+        snapshot_with_omitted_sources()
+            .validate()
+            .expect("canonical omitted sources");
+
+        let mut duplicate = snapshot_with_omitted_sources();
+        duplicate
+            .omitted_sources
+            .push(duplicate.omitted_sources[2].clone());
+        assert_eq!(
+            duplicate.validate().unwrap_err().to_string(),
+            "snapshot omitted source order is not canonical"
+        );
+
+        let mut representable = snapshot_with_omitted_sources();
+        representable.omitted_sources[1].git_path = b"src/odd_name.rs".to_vec();
+        assert_eq!(
+            representable.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a path a row could name is not unrepresentable"
+        );
+
+        let mut withheld_present = snapshot_with_omitted_sources();
+        withheld_present.files[1].disposition = SnapshotFileDispositionV1::Present;
+        assert_eq!(
+            withheld_present.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source cannot also be indexed"
+        );
+
+        let mut withheld_without_row = snapshot_with_omitted_sources();
+        withheld_without_row.omitted_sources[0].git_path = b"src/absent.rs".to_vec();
+        assert_eq!(
+            withheld_without_row.validate().unwrap_err().to_string(),
+            "snapshot omitted source reason is not canonical",
+            "a withheld source keeps its ignored row"
         );
     }
 

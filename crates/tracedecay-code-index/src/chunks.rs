@@ -2260,6 +2260,9 @@ fn resolve_file_references(
     };
     let mut resolved = Vec::new();
     let mut retained = Vec::new();
+    // A receiver call is gap evidence only; one site per caller and callee
+    // spelling is all of it, so a minified loop does not retain thousands.
+    let mut typescript_receiver_calls = HashSet::new();
     for reference in unresolved {
         let candidates = if reference.reference_name.contains("::") {
             by_file_relative_name.get(reference.reference_name.as_str())
@@ -2365,7 +2368,14 @@ fn resolve_file_references(
                     &by_node_id,
                     &imported_locals,
                     &rust_root_modules,
-                ) {
+                ) && !(typescript
+                    && typescript_member_call_path(&candidate.reference_name)
+                        .is_some_and(|(head, _)| !imported_locals.contains(head))
+                    && !typescript_receiver_calls.insert((
+                        candidate.from_occurrence.clone(),
+                        candidate.reference_name.clone(),
+                    )))
+                {
                     retained.push(candidate);
                 }
             }
@@ -2394,8 +2404,8 @@ fn resolve_file_references(
 /// The retained cross-file form of one reference the file could not bind, or
 /// `None` when the reference can never bind cross-file: blocklisted names,
 /// relation kinds outside the canonical graph contract, and references whose
-/// enclosing symbol is not uniquely identified. Rust receiver calls remain as
-/// limitation evidence; Python, Go, Java, and Ruby qualified calls remain for
+/// enclosing symbol is not uniquely identified. Rust and TypeScript receiver
+/// calls remain as limitation evidence; Python, Go, Java, and Ruby qualified calls remain for
 /// import-module binding at sealing; a dotted name never grants edge
 /// authority by itself.
 fn cross_file_reference_candidate(
@@ -2408,9 +2418,6 @@ fn cross_file_reference_candidate(
     rust_root_modules: &HashSet<&str>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
     let rust = reference.file_path.ends_with(".rs");
-    let receiver_call = reference.reference_kind == EdgeKind::Calls
-        && rust
-        && reference.reference_name.contains('.');
     let typescript = typescript_family_path(&reference.file_path);
     let module_import = module_import_language_path(&reference.file_path);
     let explicitly_imported = (typescript || module_import)
@@ -2421,6 +2428,14 @@ fn cross_file_reference_candidate(
         && reference.reference_kind == EdgeKind::Calls
         && typescript_member_call_path(&reference.reference_name)
             .is_some_and(|(head, _)| imported_locals.contains(head));
+    // A call on a local, `this`, or global receiver binds nothing by name,
+    // so it stays as limitation evidence.
+    let receiver_call = reference.reference_kind == EdgeKind::Calls
+        && reference.reference_name.contains('.')
+        && (rust
+            || (typescript
+                && typescript_member_call_path(&reference.reference_name)
+                    .is_some_and(|(head, _)| !imported_locals.contains(head))));
     // A qualified call in an import-module language binds at sealing
     // through the file's imports, its package, or its loaded files; one the
     // seal cannot bind remains a disclosed caller gap.
@@ -3141,6 +3156,7 @@ mod tests {
                 content_identity: content_digest(bytes),
                 captured_at: UtcMicros(1_000_000),
                 files: vec![file.clone()],
+                omitted_sources: Vec::new(),
             })
             .expect("snapshot capability");
         intake

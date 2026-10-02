@@ -136,8 +136,8 @@ impl SourceEditFileAuthority {
 
     pub fn read_to_string(&self, label: &str) -> Result<(String, Handle)> {
         let (bytes, identity) = self.read_optional_with_identity()?;
-        let bytes = bytes.ok_or_else(|| TraceDecayError::Config {
-            message: format!("failed to read {label}: file was not found"),
+        let bytes = bytes.ok_or_else(|| {
+            TraceDecayError::not_found(format!("failed to read {label}: file was not found"))
         })?;
         let source = String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
             message: format!("failed to read {label}: {error}"),

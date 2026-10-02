@@ -192,7 +192,10 @@ fn run_codex_app_server_prompt(
     config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
     thread_source: &str,
     response_schema: Option<&Value>,
-) -> std::result::Result<tracedecay_automation_runtime::ports::codex_app_server::Summary, String> {
+) -> std::result::Result<
+    tracedecay_automation_runtime::ports::codex_app_server::Summary,
+    tracedecay_automation_runtime::automation::backend::AgentTaskError,
+> {
     let config =
         tracedecay_sessions::runtime::hosts::codex_app_server::CodexAppServerSummaryConfig {
             codex_bin: config.codex_bin.to_string_lossy().into_owned(),
@@ -220,7 +223,12 @@ fn run_codex_app_server_prompt(
                 model: summary.model,
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            tracedecay_automation_runtime::automation::backend::AgentTaskError::new(
+                error.class,
+                error.message,
+            )
+        })
 }
 
 fn resolve_project_root_with_identity<'a>(

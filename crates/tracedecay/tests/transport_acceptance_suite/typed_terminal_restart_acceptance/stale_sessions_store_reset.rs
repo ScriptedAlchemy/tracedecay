@@ -716,7 +716,7 @@ fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
 }
 
 /// One `tracedecay doctor --json` run: exit code, document, and stderr.
-fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+pub(super) fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
     let doctor = tracedecay_command_with_home(home)
         .args(["doctor", "--json"])
         .current_dir(project)

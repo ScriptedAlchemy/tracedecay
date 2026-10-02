@@ -10,6 +10,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_tool_catalog::OwnerStoresV1;
 
 use crate::HookOrchestrationAdmissionV1;
 use crate::context_scout::ContextScoutAddressV1;
@@ -29,8 +30,6 @@ pub enum HookRuntimeSurfaceRequestV1 {
         envelope: Value,
         feedback_notice: Value,
     },
-    /// Record an `OpenCode` `lsp.updated` event.
-    OpencodeLspUpdated { event: Value },
     /// Land a host transcript in the owning session store.
     IngestTranscript(HookIngestTranscriptRequestV1),
     /// Codex `PostCompact` pressure evidence.
@@ -55,12 +54,15 @@ pub enum HookRuntimeSurfaceRequestV1 {
     HookV2ProfileAdmit { admission: Value },
 }
 
-/// Whether a hook call records session evidence, so it needs the session
-/// stores only the project's full server mounts. Resetting the local counter
-/// is the one action that does not; anything else, including a request that
-/// does not decode, waits for them.
-pub fn hook_runtime_needs_session_stores(arguments: &serde_json::Map<String, Value>) -> bool {
-    arguments.get("action").and_then(Value::as_str) != Some("reset_counter")
+impl HookRuntimeSurfaceRequestV1 {
+    /// The stores this action runs on. Every hook action records session
+    /// evidence in the session stores except resetting the local counter.
+    pub fn owner_stores(&self) -> OwnerStoresV1 {
+        match self {
+            Self::ResetCounter {} => OwnerStoresV1::ProjectGraph,
+            _ => OwnerStoresV1::ProjectSessions,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -107,19 +109,12 @@ pub enum HookRuntimeResultV1 {
     HookV2Admit(HookV2AdmissionResultV1),
     HookV2DeliveryReceipt { status: ContextScoutStoreStatusV1 },
     HookV2FeedbackNoticeDelivery(HookV2NoticeDeliveryResultV1),
-    OpencodeLspUpdated { status: HookRuntimeAcceptedV1 },
     IngestTranscript(Box<HookIngestTranscriptResultV1>),
     CodexCompact(HookCompactionResultV1),
     ClaudeCompact(HookCompactionResultV1),
     CursorCompact(HookCompactionResultV1),
     HermesReceipt { status: HermesReceiptStatusV1 },
     HookV2ProfileAdmit(HookV2ProfileAdmissionResultV1),
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookRuntimeAcceptedV1 {
-    Accepted,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

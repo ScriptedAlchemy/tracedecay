@@ -14,6 +14,7 @@ default = []
 [dependencies]
 aho-corasick = "1.1.5"
 hotpath.workspace = true
+jsonc-parser = "0.33.2"
 percent-encoding = "2"
 # The engine `regex` wraps, with the features `regex` enables by default. Used
 # directly for its explicit search caches (see `rules.rs`).

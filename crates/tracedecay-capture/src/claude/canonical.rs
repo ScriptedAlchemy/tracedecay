@@ -107,7 +107,6 @@ fn normalize_record(
         append_message_facts(
             &mut facts,
             message,
-            stable_record_id.as_str(),
             record_kind == "assistant" && !is_api_error_placeholder(native, message),
             authored_message,
         );
@@ -384,7 +383,6 @@ fn append_tool_use_result_facts(
 fn append_message_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
     message: &Value,
-    message_id: &str,
     provider_usage_allowed: bool,
     mut authored_message: Option<CanonicalObservationFactV1>,
 ) {
@@ -450,7 +448,7 @@ fn append_message_facts(
         }
         return;
     };
-    for (index, block) in blocks.iter().enumerate() {
+    for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 // Visible text is aggregated into one Message for compatibility,
@@ -470,15 +468,12 @@ fn append_message_facts(
                 let invocation_id = block
                     .get("id")
                     .and_then(Value::as_str)
-                    .and_then(provider_observation_id)
-                    .or_else(|| ObservationId::new(format!("{message_id}:tool:{index}")).ok());
-                if let Some(invocation_id) = invocation_id {
-                    facts.push(CanonicalObservationFactV1::ToolInvocation {
-                        invocation_id,
-                        name: name.to_owned(),
-                        arguments: block.get("input").cloned().unwrap_or(Value::Null),
-                    });
-                }
+                    .and_then(provider_observation_id);
+                facts.push(CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name: name.to_owned(),
+                    arguments: block.get("input").cloned().unwrap_or(Value::Null),
+                });
                 append_task_lifecycle_fact(name, block.get("input"), facts);
             }
             Some("tool_result") => facts.push(CanonicalObservationFactV1::ToolResult {

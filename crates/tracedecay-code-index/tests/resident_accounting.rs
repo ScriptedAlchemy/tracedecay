@@ -184,6 +184,7 @@ fn request(files: usize) -> CodeIndexBuildRequestV1 {
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(1_000_000),
             files: snapshot_files,
+            omitted_sources: Vec::new(),
         },
         captured_files: captured,
         changed_files: BTreeSet::new(),
@@ -223,6 +224,11 @@ fn seal(generation: &CodeIndexPublishedGenerationV1) -> (Vec<u8>, BTreeMap<Strin
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     evidence.extend_from_slice(bytes);
@@ -319,6 +325,7 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
         &mut |request, buffer| read_segment(&segments, request, buffer),
         &revision,
         spill,
+        &mut |_| Ok(()),
         &|| Ok(()),
     )
     .expect("sealed graph builds");

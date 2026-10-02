@@ -6,10 +6,10 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
-use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
-use tracedecay_hooks::{
-    HookDeliveryReceiptWriterV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1,
+use tracedecay_hooks::delivery_spool::{
+    HookDeliveryReceiptOutcomeV1, HookDeliveryReceiptRefusalV1,
 };
+use tracedecay_hooks::{NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1};
 
 use crate::cli::Commands;
 
@@ -301,16 +301,6 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 /// row, enrolled-layout lookup, decode, and spool-root creation that precede
 /// admission must not spend the budget an uncontended spool lock would then
 /// be refused for. The response hooks' output write waits the same way.
-fn open_delivery_receipt_spool(
-    data_root: &Path,
-    host: NativeHostIdentityV1,
-) -> Result<HookDeliveryReceiptWriterV1, HookDeliverySpoolError> {
-    HookDeliveryReceiptWriterV1::open_within(
-        tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
-        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    )
-}
-
 struct PreparedNativeCapture {
     outcome: NativeHookCaptureOutcomeV1,
     /// The spooled event's data root and material, retained for its delivery
@@ -455,11 +445,11 @@ pub(crate) fn run_native_capture(
         return refused("hook response could not be written to stdout");
     }
     drop(stdout);
-    let receipt_retained = match &prepared.delivery {
-        Some((data_root, material)) => retain_delivery_receipt(data_root, source, *material),
-        None => true,
-    };
-    telemetry.note_capture_outcome(&prepared.outcome, receipt_retained);
+    let receipt = prepared
+        .delivery
+        .as_ref()
+        .map(|(data_root, material)| retain_delivery_receipt(data_root, source, *material));
+    telemetry.note_capture_outcome(&prepared.outcome, receipt.as_ref());
     match prepared.outcome {
         NativeHookCaptureOutcomeV1::Captured
         | NativeHookCaptureOutcomeV1::Unsupported
@@ -487,19 +477,22 @@ fn retain_delivery_receipt(
     data_root: &Path,
     source: NativeHookCaptureSourceV1,
     material: tracedecay_hooks::NativeEnvelopeMaterialV1,
-) -> bool {
-    let Some(delivered_at) = current_time() else {
-        return false;
+) -> HookDeliveryReceiptOutcomeV1 {
+    let Some(settlement) = current_time()
+        .and_then(|delivered_at| native_hook_delivery_settlement(source, material, delivered_at))
+    else {
+        return HookDeliveryReceiptOutcomeV1::Refused {
+            reason: HookDeliveryReceiptRefusalV1::IdentityUnavailable,
+        };
     };
-    let Some(settlement) = native_hook_delivery_settlement(source, material, delivered_at) else {
-        return false;
-    };
-    let Ok(receipt) = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) else {
-        return false;
-    };
-    open_delivery_receipt_spool(data_root, source.host())
-        .and_then(|writer| writer.retain(&receipt))
-        .is_ok()
+    match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
+        Ok(receipt) => HookDeliveryReceiptOutcomeV1::retain(
+            tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, source.host()),
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+            &receipt,
+        ),
+        Err(error) => Err(error).into(),
+    }
 }
 
 /// The one exit-1 site of the capture fast path. A successful hook is silent

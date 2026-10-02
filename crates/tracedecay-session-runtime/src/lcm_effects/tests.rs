@@ -3261,8 +3261,7 @@ fn canonical_record_for_scope(envelope: Value, scope: ObservationScopeV1) -> Can
     .unwrap();
     let message = derive_canonical_projection(&observation)
         .unwrap()
-        .messages()
-        .next()
+        .message()
         .expect("canonical record projects a message")
         .message()
         .clone();

@@ -704,6 +704,7 @@ mod tests {
                 content_identity: crate::chunks::content_digest(bytes),
                 captured_at: UtcMicros(1_000_000),
                 files: vec![file.clone()],
+                omitted_sources: Vec::new(),
             })
             .expect("snapshot capability");
         intake
@@ -765,12 +766,13 @@ mod tests {
         // calls through block-scoped `use` declarations; v16 qualifies calls
         // through inline-module and glob `use` declarations; v17 gives
         // `const`/`static` initializers their calls; v18 binds calls inside
-        // macro arguments and in-file `self::`/`super::`/`crate::` paths. The revision is
+        // macro arguments and in-file `self::`/`super::`/`crate::` paths; v19
+        // spells `Self::f` calls by the enclosing type. The revision is
         // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v18");
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v19");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:93171e1e4ff104d8313cc8efc2a2358897105973ca620bc67a610004aa4ba213"
+            "sha256:a7b83b20e50fa6b58097b0c9026926bce329361f9dd60747eb7af05011d3d778"
         );
     }
 

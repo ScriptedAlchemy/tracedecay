@@ -127,7 +127,11 @@ import type {
   CodeIndexFreshnessPayloadV1,
   CodeIndexGenerationRecoveryServingV1,
   CodeIndexGenerationRecoveryV1,
+  CodeIndexMountFailureV1,
+  CodeIndexOmittedSourcesV1,
+  CodeIndexOmittedSourceV1,
   CodeIndexRestoreProgressV1,
+  CodeIndexSourceOmissionReasonV1,
   CodeIndexStalenessStateV1,
   CodeIndexWorkerLimitingReasonV1,
   CodeIndexWorkerSelectionV1,
@@ -1059,7 +1063,7 @@ export const AdmitWorkSynthesisCommandSchema: z.ZodObject<{
 /** Strongly typed canonical identity: `AgentInstanceId`. */
 export const AgentInstanceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
 
-export const AgentTaskFailureClassSchema: z.ZodEnum<["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]> = z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]);
+export const AgentTaskFailureClassSchema: z.ZodType<"denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large", z.ZodTypeDef, unknown> = z.union([z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]), z.literal("input_too_large")]);
 
 export const AgentTaskKindSchema: z.ZodEnum<["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
 
@@ -2376,6 +2380,9 @@ export const CodeGraphServingReadinessV1Schema: z.ZodType<CodeGraphServingReadin
 }), z.object({
   reason: z.string(),
   state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("warming"),
 })]);
 
 /** A typed reason an otherwise active generation cannot make durable progress. */
@@ -2470,12 +2477,14 @@ while the ladder would otherwise say ready.
 
 `Unobserved` is only the constructed default. A projected read never emits
 it, so an absent observation cannot be mistaken for `complete`. */
-export const CodeIndexFreshnessCoverageV1Schema: z.ZodEnum<["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]> = z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]);
+export const CodeIndexFreshnessCoverageV1Schema: z.ZodType<"complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources", z.ZodTypeDef, unknown> = z.union([z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]), z.literal("partial_omitted_sources")]);
 
 export const CodeIndexFreshnessPayloadV1Schema: z.ZodObject<{
+  mount_failure: z.ZodOptional<z.ZodType<CodeIndexMountFailureV1 | null, z.ZodTypeDef, unknown>>;
   note: z.ZodType<string, z.ZodTypeDef, unknown>;
   worktrees: z.ZodType<Array<CodeIndexWorktreeFreshnessV1>, z.ZodTypeDef, unknown>;
 }> = z.object({
+  mount_failure: z.union([z.lazy(() => CodeIndexMountFailureV1Schema), z.null()]).optional(),
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
 });
@@ -2493,6 +2502,34 @@ export const CodeIndexGenerationRecoveryV1Schema: z.ZodObject<{
   incompatibilities: z.array(z.string()),
   incompatible_generation_id: z.string(),
   serving: z.lazy(() => CodeIndexGenerationRecoveryServingV1Schema),
+});
+
+/** Safe operator-facing status for a failed code-index mount. */
+export const CodeIndexMountFailureV1Schema: z.ZodObject<{
+  message: z.ZodType<string, z.ZodTypeDef, unknown>;
+  remediation: z.ZodType<string, z.ZodTypeDef, unknown>;
+}> = z.object({
+  message: z.string(),
+  remediation: z.string(),
+});
+
+/** Sources a sealed snapshot captured but does not index. */
+export const CodeIndexOmittedSourcesV1Schema: z.ZodObject<{
+  count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  sources: z.ZodType<Array<CodeIndexOmittedSourceV1>, z.ZodTypeDef, unknown>;
+}> = z.object({
+  count: z.number().int().safe().min(0),
+  sources: z.array(z.lazy(() => CodeIndexOmittedSourceV1Schema)),
+});
+
+export const CodeIndexOmittedSourceV1Schema: z.ZodObject<{
+  display_path: z.ZodType<string, z.ZodTypeDef, unknown>;
+  git_path_bytes: z.ZodType<Array<number>, z.ZodTypeDef, unknown>;
+  reason: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown>;
+}> = z.object({
+  display_path: z.string(),
+  git_path_bytes: z.array(z.number().int().min(0).max(255)),
+  reason: z.lazy(() => CodeIndexSourceOmissionReasonV1Schema),
 });
 
 /** Bounded authentication work required to restore one immutable lexical
@@ -2515,6 +2552,13 @@ export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
   authenticated_total: z.number().int().safe().min(0),
   generation_id: z.string(),
 });
+
+export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  detail: z.string(),
+  kind: z.literal("privacy_withheld"),
+}), z.object({
+  kind: z.literal("unrepresentable_path"),
+})]);
 
 /** Closed staleness ladder for one mounted worktree.
 
@@ -2576,6 +2620,7 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   last_reconcile_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   latest_generation_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  omitted_sources: z.ZodOptional<z.ZodType<CodeIndexOmittedSourcesV1 | null, z.ZodTypeDef, unknown>>;
   parked: z.ZodType<CodeIndexConvergenceParkedV1 | null, z.ZodTypeDef, unknown>;
   progress: z.ZodType<CodeIndexBuildProgressV1 | null, z.ZodTypeDef, unknown>;
   rebuild_in_flight: z.ZodType<boolean, z.ZodTypeDef, unknown>;
@@ -2596,6 +2641,7 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
+  omitted_sources: z.union([z.lazy(() => CodeIndexOmittedSourcesV1Schema), z.null()]).optional(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   rebuild_in_flight: z.boolean(),
@@ -7775,12 +7821,14 @@ export const RequestCostReceiptV1Schema: z.ZodObject<{
   adjacency_queries: z.ZodType<number, z.ZodTypeDef, unknown>;
   adjacency_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
   bytes_hydrated: z.ZodType<number, z.ZodTypeDef, unknown>;
+  catalog_symbols: z.ZodType<number, z.ZodTypeDef, unknown>;
   point_reads: z.ZodType<StorePointReadsV1, z.ZodTypeDef, unknown>;
   wall_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
 }, "strict"> = z.object({
   adjacency_queries: z.number().int().safe().min(0),
   adjacency_rows: z.number().int().safe().min(0),
   bytes_hydrated: z.number().int().safe().min(0),
+  catalog_symbols: z.number().int().safe().min(0),
   point_reads: z.lazy(() => StorePointReadsV1Schema),
   wall_micros: z.number().int().safe().min(0),
 }).strict();

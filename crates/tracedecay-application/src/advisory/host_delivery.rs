@@ -669,8 +669,9 @@ where
 
 fn path_for_registration(route: HostRegistrationRouteV1) -> AdvisoryHostDeliveryPathV1 {
     match route {
-        HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp
-        | HostRegistrationRouteV1::OpenCodeCustomLsp => AdvisoryHostDeliveryPathV1::CustomLsp,
+        HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp => {
+            AdvisoryHostDeliveryPathV1::CustomLsp
+        }
         HostRegistrationRouteV1::CursorNativeDiagnostics => {
             AdvisoryHostDeliveryPathV1::CursorNativeDiagnostics
         }

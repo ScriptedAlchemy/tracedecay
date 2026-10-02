@@ -272,6 +272,7 @@ fn build_fixture() -> Fixture {
         content_identity: content_digest(&sources[0].1),
         captured_at: UtcMicros(1_000_000),
         files: sources.iter().map(|(file, _)| file.clone()).collect(),
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,
@@ -324,6 +325,11 @@ fn build_fixture() -> Fixture {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     evidence_pack.extend_from_slice(bytes);

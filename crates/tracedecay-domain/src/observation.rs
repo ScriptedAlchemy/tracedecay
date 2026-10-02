@@ -1923,7 +1923,8 @@ pub enum CanonicalObservationFactV1 {
         timestamp: Option<i64>,
     },
     ToolInvocation {
-        invocation_id: ObservationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<ObservationId>,
         name: String,
         arguments: Value,
     },
@@ -2072,9 +2073,11 @@ impl CanonicalObservationFactV1 {
                 name,
                 ..
             } => {
-                invocation_id
-                    .validate()
-                    .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                if let Some(invocation_id) = invocation_id {
+                    invocation_id
+                        .validate()
+                        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                }
                 validate_canonical_label(name)?;
             }
             Self::ToolResult {
@@ -2614,10 +2617,11 @@ pub fn classify_observation_collision(
 ///
 /// The compatibility is deliberately directional and field-bounded. It first
 /// binds both payloads to the same native record identity, then permits only
-/// the exact source-context fields those providers formerly synthesized and,
+/// the exact source-context fields those providers formerly synthesized, the
+/// Codex tool-invocation `arguments` that earlier capture dropped to null, and,
 /// for Cursor, the physical evidence range. Any authored fact, role, content,
-/// native timestamp, or unrelated relation still differs after normalization
-/// and therefore remains an identity collision.
+/// non-null arguments, native timestamp, or unrelated relation still differs
+/// after normalization and therefore remains an identity collision.
 pub fn is_canonical_payload_revision_replay(
     existing: &DurableObservationV1,
     candidate: &DurableObservationV1,
@@ -2706,6 +2710,11 @@ fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bo
                 for key in ["project_path", "location_path", "transcript_path"] {
                     changed |= replace_with_current_field(existing_fact, current_fact, key);
                 }
+            }
+            Some("tool_invocation")
+                if existing_fact.get("arguments").is_none_or(Value::is_null) =>
+            {
+                changed |= replace_with_current_field(existing_fact, current_fact, "arguments");
             }
             Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
                 changed |= replace_with_current_field(existing_fact, current_fact, "model");

@@ -177,7 +177,7 @@ mod savings_api;
 mod session_authority;
 pub use session_authority::{
     DashboardSessionAuthoritiesV1, DashboardSessionAuthorityStateV1, DashboardSessionMountV1,
-    DashboardSessionResolutionV1, DashboardSessionResolveFuture, DashboardSessionResolverV1,
+    DashboardSessionResolutionV1,
 };
 mod snapshot_cache;
 use tracedecay_session_memory::provider_pricing as savings_pricing;
@@ -431,9 +431,9 @@ pub struct DashboardState {
     /// Whether the session authorities above are mounted, still opening, or
     /// unavailable for this state.
     pub session_authority: DashboardSessionAuthorityStateV1,
-    /// Present only while [`Self::session_authority`] is opening; the
-    /// active-project gateway re-asks it until the authorities mount.
-    pub(crate) session_resolver: Option<DashboardSessionResolverV1>,
+    /// Present only while [`Self::session_authority`] is opening; the daemon
+    /// sends the project's resolution here once its publication finishes.
+    pub(crate) session_mount: Option<tokio::sync::watch::Receiver<DashboardSessionResolutionV1>>,
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
@@ -530,7 +530,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
-    opening_project_sessions: Option<DashboardSessionResolverV1>,
+    opening_project_sessions: Option<tokio::sync::watch::Receiver<DashboardSessionResolutionV1>>,
 }
 
 #[cfg(feature = "test-transport")]
@@ -564,16 +564,18 @@ impl DashboardHostAdmissionTestAuthorityV1 {
     }
 
     /// Composes the dashboard as the daemon does for a project that is still
-    /// opening: the session authorities mount only once `resolver` answers
-    /// ready.
+    /// opening: the session authorities mount once `publication` resolves.
     #[must_use]
-    pub fn with_opening_project_sessions(mut self, resolver: DashboardSessionResolverV1) -> Self {
-        self.opening_project_sessions = Some(resolver);
+    pub fn with_opening_project_sessions(
+        mut self,
+        publication: tokio::sync::watch::Receiver<DashboardSessionResolutionV1>,
+    ) -> Self {
+        self.opening_project_sessions = Some(publication);
         self
     }
 
-    /// The session authorities this runtime admits, as the resolver of an
-    /// opening project hands them over.
+    /// The session authorities this runtime admits, as an opening project's
+    /// publication hands them over.
     pub fn project_session_authorities(&self) -> DashboardSessionAuthoritiesV1 {
         DashboardSessionAuthoritiesV1 {
             project_sessions: self.project_sessions.clone(),
@@ -771,7 +773,7 @@ impl DashboardState {
         self.lcm_read_authority = authorities.lcm_read_authority;
         self.git_correlation_read_authority = authorities.git_correlation_read_authority;
         self.session_authority = DashboardSessionAuthorityStateV1::Ready;
-        self.session_resolver = None;
+        self.session_mount = None;
     }
 }
 
@@ -871,16 +873,16 @@ async fn build_state_inner(
     } = composition;
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
-    let (session_authorities, session_authority, session_resolver) = match project_sessions {
+    let (session_authorities, session_authority, session_mount) = match project_sessions {
         DashboardSessionMountV1::Ready(authorities) => (
             Some(authorities),
             DashboardSessionAuthorityStateV1::Ready,
             None,
         ),
-        DashboardSessionMountV1::Opening(resolver) => (
+        DashboardSessionMountV1::Opening(publication) => (
             None,
             DashboardSessionAuthorityStateV1::Opening,
-            Some(resolver),
+            Some(publication),
         ),
         DashboardSessionMountV1::Unavailable => {
             (None, DashboardSessionAuthorityStateV1::Unavailable, None)
@@ -953,7 +955,7 @@ async fn build_state_inner(
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
         session_authority,
-        session_resolver,
+        session_mount,
         lcm_read_authority,
         git_correlation_read_authority,
         delivery_read_authority,
@@ -1174,7 +1176,7 @@ where
                 .and_then(|authority| authority.code_read_authority.clone()),
             project_sessions: match test_authority {
                 Some(authority) => match &authority.opening_project_sessions {
-                    Some(resolver) => DashboardSessionMountV1::Opening(Arc::clone(resolver)),
+                    Some(publication) => DashboardSessionMountV1::Opening(publication.clone()),
                     None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
                 },
                 None => DashboardSessionMountV1::Unavailable,
@@ -1961,12 +1963,7 @@ async fn active_api_gateway(
     State(runtime): State<projects::DashboardRuntime>,
     req: Request<Body>,
 ) -> Response {
-    forward_project_request(
-        runtime.project_api_router(),
-        runtime.active_state().await,
-        req,
-    )
-    .await
+    forward_project_request(runtime.project_api_router(), runtime.active_state(), req).await
 }
 
 async fn project_scoped_api_gateway(
@@ -2005,11 +2002,23 @@ async fn project_scoped_api_gateway(
 
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
-        Err(err) if projects::is_registry_unavailable_error(&err) => {
-            return projects::registry_unavailable_response(&runtime.active_state().await, &err)
-                .into_response();
+        Err(projects::SelectedProjectError::RegistryNotMounted) => {
+            return projects::registry_unavailable_response(
+                &runtime.active_state(),
+                "tracedecay project registry is unavailable".to_owned(),
+            )
+            .into_response();
         }
-        Err(err) => {
+        Err(projects::SelectedProjectError::Failed(err))
+            if projects::is_registry_unavailable_error(&err) =>
+        {
+            return projects::registry_unavailable_response(
+                &runtime.active_state(),
+                err.to_string(),
+            )
+            .into_response();
+        }
+        Err(projects::SelectedProjectError::Failed(err)) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({
@@ -2046,7 +2055,6 @@ async fn project_scoped_api_gateway(
                 match selected_project_application_runtime(
                     runtime
                         .active_state()
-                        .await
                         .application_invocation_executor
                         .as_ref(),
                     &project_graph.store_layout.project_root,
@@ -2771,7 +2779,7 @@ mod authority_tests {
                 lcm_db_path: layout.sessions_db_path.display().to_string(),
                 lcm_scope: "unavailable".to_owned(),
                 session_authority: crate::DashboardSessionAuthorityStateV1::Unavailable,
-                session_resolver: None,
+                session_mount: None,
                 lcm_read_authority: None,
                 git_correlation_read_authority: None,
                 delivery_read_authority: None,

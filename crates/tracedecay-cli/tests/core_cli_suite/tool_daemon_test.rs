@@ -1131,8 +1131,10 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
         &workspace_path,
         "hook-opencode-event",
         &json!({
-            "type": "session.idle",
-            "properties": {"sessionID": "ses_opencode"},
+            "id": "evt_opencode",
+            "created": 0,
+            "type": "session.execution.succeeded",
+            "data": {"sessionID": "ses_opencode"},
         }),
     );
     assert_eq!(opencode.status.code(), Some(0), "{opencode:?}");
@@ -1141,8 +1143,12 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
         &workspace_path,
         "hook-opencode-tool-after",
         &json!({
-            "input": {"tool": "edit", "sessionID": "ses_tool", "callID": "call-1"},
-            "output": {"title": "edit"},
+            "tool": "edit",
+            "sessionID": "ses_tool",
+            "id": "call-1",
+            "input": {"path": "src/lib.rs"},
+            "status": "completed",
+            "result": {"content": []},
         }),
     );
     assert_eq!(tool_after.status.code(), Some(0), "{tool_after:?}");
@@ -1166,7 +1172,7 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
             attribution(
                 "hook_invoked",
                 "opencode",
-                "session.idle",
+                "session.execution.succeeded",
                 json!("ses_opencode"),
                 Value::Null
             ),
@@ -1252,22 +1258,79 @@ fn delivery_receipt_refusal_after_the_event_spooled_is_not_a_failed_capture() {
 
     assert_capture_transport_response("stop spooled without receipt", &output, 0);
     assert_eq!(native_capture_pending_records(&data_root, host), 1);
-    let completed = hook_row_attribution(&hook_analytics_rows(
-        &data_root.join("hook_analytics.jsonl"),
-    ))
-    .into_iter()
-    .filter(|row| row.0 == "hook_completed")
-    .collect::<Vec<_>>();
     assert_eq!(
-        completed,
+        completed_capture_rows(&data_root),
         vec![attribution(
             "hook_completed",
             "cursor",
             "stop",
             json!("conv-receipt"),
-            json!("hook_v2_spooled_delivery_receipt_unavailable"),
+            json!("hook_v2_spooled_delivery_receipt_failed_unsafe_path"),
         )]
     );
+}
+
+#[test]
+fn a_full_delivery_receipt_spool_refuses_the_receipt_of_a_spooled_event() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_receipt_full");
+    let receipt_root = tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host);
+    drop(
+        tracedecay_hooks::HookDeliveryReceiptWriterV1::open_within(
+            &receipt_root,
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+        )
+        .unwrap(),
+    );
+    for index in 0..1_024_u32 {
+        std::fs::write(
+            receipt_root.join(format!("{index:032x}.delivery.v1.json")),
+            b"{}",
+        )
+        .unwrap();
+    }
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-receipt-full",
+            "generation_id": "gen-receipt-full",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop spooled with a full receipt spool", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+    assert_eq!(
+        completed_capture_rows(&data_root),
+        vec![attribution(
+            "hook_completed",
+            "cursor",
+            "stop",
+            json!("conv-receipt-full"),
+            json!("hook_v2_spooled_delivery_receipt_refused_full"),
+        )]
+    );
+}
+
+fn completed_capture_rows(data_root: &Path) -> Vec<(String, String, String, Value, Value)> {
+    hook_row_attribution(&hook_analytics_rows(
+        &data_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_completed")
+    .collect()
 }
 
 /// Connects an authenticated project client and completes `initialize`,

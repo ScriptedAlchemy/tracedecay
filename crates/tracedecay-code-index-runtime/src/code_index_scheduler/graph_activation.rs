@@ -13,7 +13,8 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
 };
 use crate::code_graph_seat::{
-    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+    CodeGraphBuildAdmissionV1, CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1,
+    CodeGraphSeatRuntimePortV1,
 };
 use crate::code_index::graph_projection::{CodeGraphProjectionError, CodeGraphProjectionStore};
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
@@ -520,6 +521,7 @@ impl CodeGraphActivationAuthorityV1 {
         worktree_id: &WorktreeId,
         latest: &LatestCodeTextGenerationV1,
         replay_binding: CodeGraphReplayBindingV1,
+        admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
         cancellation: Arc<AtomicBool>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         if self.policy() == CodeGraphActivationPolicyV1::RefusedByConfiguration {
@@ -546,8 +548,11 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                tokio::task::spawn_blocking(move || {
-                    retained.publish_verified_snapshot(cancellation).map(drop)
+                tokio::task::spawn_blocking(move || match admission {
+                    Some(admission) => retained
+                        .publish_verified_snapshot_admitted(cancellation, admission)
+                        .map(drop),
+                    None => retained.publish_verified_snapshot(cancellation).map(drop),
                 })
                 .await
                 .map_err(|error| {

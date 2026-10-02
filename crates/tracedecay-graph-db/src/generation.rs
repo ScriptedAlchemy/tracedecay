@@ -58,6 +58,7 @@ pub use replay::{
 pub(crate) use replay::{
     checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
 };
+pub(crate) use spill::{ENTITIES_FILE, read_spilled_entity};
 pub use spill::{
     GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,
     GraphSpillRowFootprint, SpilledGraphGeneration,
@@ -1781,6 +1782,16 @@ fn write_row_frame(
 ) -> Result<RowLanes, GraphDbError> {
     let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
     writer.add_row_frame(&[&tag_len, tag.as_bytes(), &byte_len, bytes])
+}
+
+pub(crate) fn row_frame_lanes(tag: &str, bytes: &[u8]) -> Result<RowLanes, GraphDbError> {
+    let (tag_len, byte_len) = frame_length_headers(tag, bytes)?;
+    Ok(GraphRowDigestSum::frame_lanes(&[
+        &tag_len,
+        tag.as_bytes(),
+        &byte_len,
+        bytes,
+    ]))
 }
 
 fn write_canonical_row_frame<T: Serialize + ?Sized>(

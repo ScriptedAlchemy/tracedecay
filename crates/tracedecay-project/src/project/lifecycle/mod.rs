@@ -15,7 +15,7 @@ use crate::project_store_runtime::join_standalone_session_registry;
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
@@ -492,14 +492,6 @@ impl TraceDecay {
         Ok(())
     }
 
-    /// Refuses a read-only store that is not at the one schema shape this
-    /// binary creates. There is no upgrade path to name: the store was written
-    /// by an incompatible binary, so the only remedy is a fresh one.
-    #[hotpath::measure(label = "lifecycle.ensure_schema", future = true)]
-    pub async fn ensure_schema_current(&self) -> Result<()> {
-        Self::ensure_database_schema_current(&self.db).await
-    }
-
     /// Opens an existing `TraceDecay` project at the given root.
     ///
     /// If branch metadata exists, resolves the current git branch's published
@@ -596,12 +588,13 @@ impl TraceDecay {
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         if !db_path.exists() {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                     db_path.display()
                 ),
-            });
+            ));
         }
 
         // Registered mounts perform the exact final-schema admission. Project
@@ -790,12 +783,13 @@ impl TraceDecay {
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         if !db_path.exists() {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                     db_path.display()
                 ),
-            });
+            ));
         }
 
         let db = Self::mount_project_graph(
@@ -1128,6 +1122,30 @@ mod tests {
             read_only.context_scout_owner().is_none(),
             "read-only TraceDecay has no Context Scout owner"
         );
+    }
+
+    #[tokio::test]
+    async fn project_open_accepts_a_normalized_alias_of_the_profile_authority() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        std::fs::create_dir_all(profile.join("nested")).expect("create profile alias component");
+        let profile_alias = profile.join("nested").join("..");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile_alias.clone()),
+            global_db_path: Some(profile_alias.join("global.db")),
+        };
+
+        let opened = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("normalized alias opens the exact registered profile shard");
+
+        assert_eq!(
+            opened.profile_root().expect("opened profile root"),
+            profile.canonicalize().expect("canonical profile root")
+        );
+        opened.close();
     }
 
     #[tokio::test]

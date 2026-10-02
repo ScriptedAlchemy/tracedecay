@@ -381,10 +381,10 @@ pub(super) async fn execute_portable_daemon_invocation(
     };
     let requirement = match &request.payload {
         DaemonInvocationPayload::GraphTool {
-            surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime,
+            surface_operation,
             arguments,
             ..
-        } => super::project_open_admission::hook_runtime_requirement(Some(arguments)),
+        } => super::project_open_admission::graph_tool_requirement(*surface_operation, arguments),
         _ => ProjectServerRequirement::Core,
     };
     if request.requires_project() {
@@ -924,10 +924,16 @@ fn project_open_refusal_response(
             tracedecay_contracts::ApplicationProblem::invalid_request(reason_code, detail),
         );
     }
-    DaemonInvocationResponse::problem(
-        request_id,
-        project_open_problem(error, workflow_application, git_operation),
-    )
+    let problem = project_open_problem(error, workflow_application, git_operation);
+    if problem == DaemonInvocationProblem::ResetRequired
+        && let Some(detail) = tracedecay_mcp::reset_required_detail(error)
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::from_detail(detail),
+        );
+    }
+    DaemonInvocationResponse::problem(request_id, problem)
 }
 
 fn project_open_problem(

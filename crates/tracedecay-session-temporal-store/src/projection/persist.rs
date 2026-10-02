@@ -44,7 +44,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
-    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
     checkpoint_relation_rebuild_control(control)?;
     let generation = read_generation(
@@ -112,7 +111,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         batch_digest.as_str(),
         &coverage,
         committed_at.0,
-        baseline,
     )
     .await?;
     SessionTemporalProjectionBatchReceiptV1::applied(
@@ -123,12 +121,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         batch.assertions().len(),
         committed_at,
     )
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ProjectionProgressBaseline {
-    Empty,
-    SeededFromActive,
 }
 
 struct CanonicalOccurrenceProjection {
@@ -186,14 +178,12 @@ async fn canonical_occurrence_projection(
     let projection = derive_canonical_projection(&observation)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let envelope = observation_envelope(&observation)?;
-    let mut outputs = projection.messages().cloned().collect::<Vec<_>>();
-    outputs.sort_unstable_by_key(SessionMessageProjection::output_ordinal);
-    if outputs.len() != output_count
-        || outputs
-            .iter()
-            .enumerate()
-            .any(|(ordinal, output)| usize::try_from(output.output_ordinal()).ok() != Some(ordinal))
-    {
+    let outputs = projection
+        .message()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if outputs.len() != output_count {
         return Err(storage_message(
             PERSIST_OPERATION,
             "canonical observation effect output authority disagrees with its projection",

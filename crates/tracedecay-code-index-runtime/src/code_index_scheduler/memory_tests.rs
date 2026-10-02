@@ -15,7 +15,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 
-use super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
+use super::publication_store::ActiveGenerationDecodeChargeV1;
 use super::tests::OwnerSignals;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
@@ -680,7 +680,7 @@ fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
         ..
     } = scheduler
         .publication
-        .active_generation_charge(ActiveGenerationWorkV1::Decode)
+        .active_generation_charge()
         .expect("decode charge")
     else {
         panic!("the cold index measured the generation it published");

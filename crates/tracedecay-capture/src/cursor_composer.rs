@@ -154,22 +154,21 @@ fn normalize_composer_bubble_record(
             tool.get("toolCallId")
                 .or_else(|| tool.get("id"))
                 .and_then(Value::as_str),
-            &stable_record_id,
         );
-        let name = tool
+        if let Some(name) = tool
             .get("name")
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("tool")
-            .to_string();
-        facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: invocation_id.clone(),
-            name,
-            arguments: Value::Null,
-        });
+        {
+            facts.push(CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: invocation_id.clone(),
+                name: name.to_owned(),
+                arguments: Value::Null,
+            });
+        }
         if tool.get("result").is_some_and(|result| !result.is_null()) {
             facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(invocation_id),
+                invocation_id,
                 content: Value::Null,
                 success: tool
                     .get("status")
@@ -473,10 +472,8 @@ fn normalize_composer_envelope_record(
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
+fn composer_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|native_id| ObservationId::new(native_id).ok())
 }
 
 /// Exact allowlist for `toolFormerData.status` → `ToolResult.success`.

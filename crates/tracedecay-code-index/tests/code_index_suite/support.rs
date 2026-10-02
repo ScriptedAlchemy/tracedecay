@@ -70,6 +70,7 @@ pub fn validated_rust_file(source: &[u8]) -> ReceiptBoundCodeFileV1 {
             content_identity: content_digest(source),
             captured_at: UtcMicros(1_000_000),
             files: vec![file.clone()],
+            omitted_sources: Vec::new(),
         })
         .expect("snapshot capability");
     intake
@@ -104,6 +105,13 @@ impl PartitionedSealV1 {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                         bytes, ..
@@ -189,6 +197,7 @@ impl PartitionedSealV1 {
             &mut |request, buffer| self.read_segment(request, buffer),
             revision,
             spill,
+            &mut |_| Ok(()),
             check,
         )?;
         Ok(spilled.materialize(&|| Ok(()))?)

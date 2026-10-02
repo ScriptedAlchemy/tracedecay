@@ -19,7 +19,7 @@ use tracedecay_domain::{
     RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
     RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark,
-    WorktreeId,
+    WorktreeId, is_canonical_payload_revision_replay,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -1417,6 +1417,74 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
             );
         }
     }
+}
+
+/// Codex capture used to drop every `response_item` tool-call `arguments` to
+/// null, so a rewritten rollout now carries the real arguments for the same
+/// observation id. The revision normalizer adopts them only when the retained
+/// payload has none; a retained non-null value or any other authored change
+/// stays an identity collision.
+#[test]
+fn canonical_payload_revision_adopts_only_dropped_codex_tool_arguments() {
+    let base = canonical_revision_observation(
+        "codex",
+        1,
+        41,
+        42,
+        "receipt.codex.tool-args.base",
+        false,
+        "stable authored content",
+    );
+    let with_tool_invocation = |receipt_id: &str, name: &str, arguments: serde_json::Value| {
+        mutate_observation_payload(&base, receipt_id, |payload| {
+            payload["facts"].as_array_mut().unwrap().push(json!({
+                "kind": "tool_invocation",
+                "invocation_id": "call-merge",
+                "name": name,
+                "arguments": arguments,
+            }));
+        })
+    };
+
+    let stored_dropped = with_tool_invocation(
+        "receipt.codex.tool-args.dropped",
+        "exec_command",
+        serde_json::Value::Null,
+    );
+    let current_captured = with_tool_invocation(
+        "receipt.codex.tool-args.captured",
+        "exec_command",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_captured
+    ));
+
+    let stored_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-a",
+        "exec_command",
+        json!({"cmd": "a"}),
+    );
+    let current_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-b",
+        "exec_command",
+        json!({"cmd": "b"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_authored,
+        &current_authored
+    ));
+
+    let current_renamed = with_tool_invocation(
+        "receipt.codex.tool-args.renamed",
+        "apply_patch",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_renamed
+    ));
 }
 
 #[tokio::test]
