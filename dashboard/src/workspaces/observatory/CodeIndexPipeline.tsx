@@ -126,6 +126,8 @@ export function graphServingLabel(
       return 'pending';
     case 'ready':
       return 'ready';
+    case 'warming':
+      return `warming · ${graph.reason}`;
     case 'refused':
       return `refused · ${graph.reason}`;
     case 'unavailable':

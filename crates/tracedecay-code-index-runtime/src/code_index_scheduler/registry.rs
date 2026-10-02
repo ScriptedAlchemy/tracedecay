@@ -1288,7 +1288,10 @@ fn dashboard_generation_is_ready(
     code_graph_serving: &Option<CodeGraphServingReadinessV1>,
 ) -> bool {
     if graph_activation_enabled {
-        text_ready && matches!(code_graph_serving, Some(CodeGraphServingReadinessV1::Ready))
+        text_ready
+            && code_graph_serving
+                .as_ref()
+                .is_some_and(CodeGraphServingReadinessV1::is_activated)
     } else {
         latest.is_some() || text_ready
     }

@@ -3911,6 +3911,23 @@
           "type": "object"
         },
         {
+          "description": "The verified graph projection is installed, but the engine or catalog\nits reads need is not resident: it is still being built, or it was\nreleased for memory. Graph reads answer the retryable warming state\nand restore it.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "warming",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
           "description": "The verified graph projection is installed for interactive reads.",
           "properties": {
             "state": {

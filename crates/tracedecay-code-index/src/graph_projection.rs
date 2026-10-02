@@ -16,15 +16,13 @@ use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId,
     GraphRelationKind, GraphServingEnginePin, GraphWatermark, MAX_VERIFIED_GENERATION_RELATIONS,
-    SourceGeneration, VerifiedGraphSnapshot,
+    NeverCancelled, SourceGeneration, VerifiedGraphSnapshot,
 };
 
 mod builder;
@@ -361,6 +359,17 @@ pub struct CodeGraphProjectionStore {
     rewarm_failure: Arc<Mutex<Option<String>>>,
 }
 
+/// Whether the resident state an activated store's reads need is in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeGraphServingWarmthV1 {
+    Warm,
+    /// Reads answer the typed warming state for this reason until the
+    /// engine or catalog is resident again.
+    Warming(String),
+    /// Catalog reads fail with this error for the store's lifetime.
+    Failed(String),
+}
+
 /// Outcome of [`CodeGraphProjectionStore::release_serving_engine`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGraphEngineReleaseV1 {
@@ -439,9 +448,41 @@ impl CodeGraphProjectionStore {
     }
 
     /// Drop a ready interactive catalog; the next catalog read rebuilds it
-    /// from the durable projection.
+    /// from the durable projection in the background.
     pub fn release_interactive_catalog(&self) -> CodeGraphCatalogReleaseV1 {
         self.interactive_catalog.release()
+    }
+
+    /// What a graph read would find right now: warm, or the warming state it
+    /// would answer because the engine or the catalog is not resident.
+    pub fn serving_warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {
+        if self.snapshot.serving_engine_resident()? {
+            return self.interactive_catalog.warmth();
+        }
+        if !self.released.load(AtomicOrdering::Acquire) {
+            return Ok(CodeGraphServingWarmthV1::Warming(
+                "code graph engine is warming in the background".to_owned(),
+            ));
+        }
+        let failure = self
+            .rewarm_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Ok(CodeGraphServingWarmthV1::Warming(
+            match (failure, self.rewarming.load(AtomicOrdering::Acquire)) {
+                (_, true) => "code graph engine is re-warming in the background".to_owned(),
+                (Some(failure), false) => {
+                    format!(
+                        "code graph engine re-warm failed; the next graph read retries it: {failure}"
+                    )
+                }
+                (None, false) => {
+                    "code graph engine was released for memory; the next graph read re-warms it"
+                        .to_owned()
+                }
+            },
+        ))
     }
 
     /// Unpin the engine and close it if no reader holds it. The durable
@@ -506,6 +547,14 @@ impl CodeGraphProjectionStore {
                     .map(|error| error.to_string());
                 if failure.is_none() {
                     store.released.store(false, AtomicOrdering::Release);
+                    // A catalog released beside the engine re-warms now, not
+                    // on the read after the engine is back.
+                    if let Ok(reader) = store.interactive_reader_with_cancellation(
+                        &store.generation,
+                        Arc::new(NeverCancelled),
+                    ) {
+                        reader.rewarm_released_catalog();
+                    }
                 }
                 *store
                     .rewarm_failure

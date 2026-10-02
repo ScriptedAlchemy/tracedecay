@@ -870,6 +870,10 @@ export type CodeGraphServingReadinessV1 =
   | {
     reason: string;
     state: "unavailable";
+  }
+  | {
+    reason: string;
+    state: "warming";
   };
 
 export type CodeIndexBuildBlockedReasonV1 = "artifact_store_unavailable" | "publication_authority_corrupt" | "resident_memory" | "retry_backoff" | "source_unavailable";
