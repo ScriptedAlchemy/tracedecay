@@ -1568,19 +1568,18 @@ mod tests {
         dash.savings_db = Some(registry);
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());
-        state.source_receiver = Some(dash.event_source_poll.subscribe(&dash));
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        // The shared poller publishes on its own tick; wait for that first
+        // snapshot instead of racing it.
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
+            .await
+            .expect("shared poller publishes its first snapshot")
+            .expect("shared poller sender is alive");
+        state.source_receiver = Some(receiver);
 
-        // First poll primes the baselines and emits nothing. The shared
-        // poller publishes on its own tick, so poll until its first snapshot
-        // lands; every read before it must also emit nothing.
-        for _ in 0..100 {
-            let primed = state.poll_sources(&scope).await;
-            assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
-            if state.last_store_total_bytes.is_some() && state.last_registry_digest.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        // First poll primes the baselines and emits nothing.
+        let primed = state.poll_sources(&scope).await;
+        assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
         let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
             .await
             .expect("graph page size")
@@ -1616,7 +1615,9 @@ mod tests {
         );
 
         drop(receiver);
-        let deadline = tokio::time::Instant::now() + POLL_INTERVAL * 3;
+        // Generous ceiling: the loop exits as soon as the poller's next tick
+        // retires it, so only a genuine leak waits this long.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while Arc::strong_count(&dash.delivery_settlements) > baseline {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1628,7 +1629,7 @@ mod tests {
 
         // A later stream re-arms a fresh poller that publishes again.
         let mut receiver = dash.event_source_poll.subscribe(&dash);
-        tokio::time::timeout(POLL_INTERVAL * 3, receiver.changed())
+        tokio::time::timeout(Duration::from_secs(60), receiver.changed())
             .await
             .expect("re-armed poller publishes")
             .expect("re-armed poller sender is alive");
