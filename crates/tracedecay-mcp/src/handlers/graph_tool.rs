@@ -9,13 +9,15 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
-use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_contracts::retrieval::{
-    DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1,
-    StatusResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
+    RetrieveResultV1, StatusResultV1,
 };
+use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, OwnerStoreDeclarationV1, OwnerStoresV1,
+};
 
 use crate::handlers::analysis::{compute_analysis_report, render_circular_md};
 use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search};
@@ -34,6 +36,7 @@ use crate::handlers::health::{
     compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
     compute_test_risk, render_dsm_md,
 };
+use crate::handlers::hook_runtime::decode_hook_runtime_request;
 use crate::handlers::info::{
     compute_config, compute_files, compute_port_order, compute_port_status, compute_todos,
     render_files_md, render_registry_listing_md, render_status_md,
@@ -47,6 +50,32 @@ use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation 
 use crate::tools::response_trailers::ResponseTrailer;
 use crate::tools::{render, renderers};
 use crate::{McpToolContext, ToolResult};
+
+/// The stores the project's owner needs mounted to answer `operation` with
+/// `arguments`, as the operation declares them in the tool catalog or, for an
+/// operation that multiplexes actions, as the requested action declares them.
+/// A request whose action does not decode declares nothing, so it waits for
+/// every store and the full owner's decode refuses it.
+pub fn graph_tool_owner_stores(
+    operation: ApplicationSurfaceOperation,
+    arguments: &serde_json::Map<String, Value>,
+) -> OwnerStoresV1 {
+    let action = match operation.owner_stores() {
+        OwnerStoreDeclarationV1::Every(stores) => return stores,
+        OwnerStoreDeclarationV1::PerAction => Value::Object(arguments.clone()),
+    };
+    let declared = match operation {
+        ApplicationSurfaceOperation::AdminCli => {
+            decode_primitive_request::<AdminCliSurfaceRequestV1>(&action, operation.mcp_tool_name())
+                .map(|request| request.owner_stores())
+        }
+        ApplicationSurfaceOperation::HookRuntime => {
+            decode_hook_runtime_request(&action).map(|request| request.owner_stores())
+        }
+        _ => return OwnerStoresV1::ProjectSessions,
+    };
+    declared.unwrap_or(OwnerStoresV1::ProjectSessions)
+}
 
 /// Computes one graph-tool operation's typed result on the owner's side.
 ///
