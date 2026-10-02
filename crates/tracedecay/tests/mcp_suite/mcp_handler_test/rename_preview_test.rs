@@ -92,6 +92,7 @@ async fn symbol_id(server: &McpServer, name: &str) -> String {
 
 fn expected_preview(reserve_id: &str, checkout_id: &str, new_name: Option<&str>) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "read_only": true,
         "note": PREVIEW_NOTE,
         "symbol": "reserve_stock",
@@ -192,6 +193,7 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
     assert_eq!(
         tool_json(&missing),
         json!({
+            "freshness": {"state": "fresh"},
             "status": "not_found",
             "reason_code": "node_not_found",
             "node_id": "nonexistent_id_12345",

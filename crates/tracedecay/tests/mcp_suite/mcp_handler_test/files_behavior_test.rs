@@ -31,6 +31,7 @@ const GREETING_RS: &str = "pub fn hello() -> i32 {\n    7\n}\n";
 const README_MD: &str = "not indexed\n";
 
 const GROUPED_ALL: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 3
 **layout:** grouped
@@ -44,6 +45,7 @@ src/
 ";
 
 const FLAT_ALL: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 3
 **layout:** flat
@@ -56,6 +58,7 @@ const FLAT_ALL: &str = "\
 ";
 
 const GROUPED_SRC: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 2
 **layout:** grouped
@@ -68,6 +71,7 @@ src/
 ";
 
 const GROUPED_GREETING: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -78,6 +82,7 @@ const GROUPED_GREETING: &str = "\
 ";
 
 const GROUPED_LIB: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -88,6 +93,7 @@ const GROUPED_LIB: &str = "\
 ";
 
 const GROUPED_CARGO: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 1
 **layout:** grouped
@@ -98,6 +104,7 @@ const GROUPED_CARGO: &str = "\
 ";
 
 const EMPTY_GROUPED: &str = "\
+freshness: fresh
 ## Files
 **indexed files:** 0
 **layout:** grouped
@@ -274,7 +281,7 @@ fn file(path: &str, symbols: u64, bytes: u64) -> Value {
 }
 
 fn listing(count: u64, layout: &str, files: Value) -> Value {
-    json!({"count": count, "layout": layout, "files": files})
+    json!({"count": count, "layout": layout, "files": files, "freshness": {"state": "fresh"}})
 }
 
 async fn call_json(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
@@ -301,7 +308,8 @@ async fn call_markdown(fixture: &ProductionCompositionFixture, arguments: Value)
         .and_then(|items| {
             items.iter().find_map(|item| {
                 let text = item.get("text").and_then(Value::as_str)?;
-                text.starts_with("## Files\n").then_some(text)
+                text.starts_with("freshness: fresh\n## Files\n")
+                    .then_some(text)
             })
         })
         .unwrap_or_else(|| panic!("missing files markdown in {result}"))

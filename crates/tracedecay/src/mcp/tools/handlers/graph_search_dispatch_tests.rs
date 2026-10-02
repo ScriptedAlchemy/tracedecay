@@ -476,11 +476,16 @@ async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() 
         (
             "tracedecay_find_exact_symbol",
             json!({"name": "SparseLexicalWidget"}),
+            false,
         ),
-        ("tracedecay_node", json!({"node_id": "node.absent-widget"})),
+        (
+            "tracedecay_node",
+            json!({"node_id": "node.absent-widget"}),
+            true,
+        ),
     ];
 
-    for (tool_name, args) in reads {
+    for (tool_name, args, not_found) in reads {
         let markdown =
             crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
                 &cg,
@@ -491,12 +496,25 @@ async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() 
             .await
             .expect("unsettled graph read renders");
         let text = response_text(&markdown);
-        assert!(
-            text.starts_with(
-                "freshness: possibly_stale\nindexing: state=verifying rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n"
-            ),
-            "{tool_name} opens with the worktree verdict search reports: {text}"
-        );
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["status"], "not_found", "{text}");
+            assert_eq!(
+                (
+                    &body["freshness"]["state"],
+                    &body["freshness"]["indexing"]["staleness_state"]
+                ),
+                (&json!("possibly_stale"), &json!("verifying")),
+                "{tool_name} not-found carries the verdict search reports: {text}"
+            );
+        } else {
+            assert!(
+                text.starts_with(
+                    "freshness: possibly_stale\nindexing: state=verifying rebuild_in_flight=false served_generation=generation.mcp-verified-graph-fixture.1 latest_generation=generation.mcp-verified-graph-fixture.1\n"
+                ),
+                "{tool_name} opens with the worktree verdict search reports: {text}"
+            );
+        }
         assert_eq!(
             markdown.structured_result().expect("typed result")["freshness"]["state"],
             "possibly_stale",
@@ -536,10 +554,15 @@ async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() 
             .await
             .expect("settled graph read renders");
         let text = response_text(&settled);
-        assert!(
-            text.starts_with("freshness: fresh\n") && !text.contains("indexing:"),
-            "{tool_name} on a settled worktree opens with the fresh verdict: {text}"
-        );
+        if not_found {
+            let body: Value = serde_json::from_str(&text).expect("not-found JSON in every format");
+            assert_eq!(body["freshness"], json!({"state": "fresh"}), "{text}");
+        } else {
+            assert!(
+                text.starts_with("freshness: fresh\n") && !text.contains("indexing:"),
+                "{tool_name} on a settled worktree opens with the fresh verdict: {text}"
+            );
+        }
         assert_eq!(
             settled.structured_result().expect("typed result")["freshness"]["state"],
             "fresh",

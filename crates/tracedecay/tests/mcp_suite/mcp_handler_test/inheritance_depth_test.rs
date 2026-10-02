@@ -291,6 +291,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
             .await,
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "result_count": 4,
             "ranking": [
                 {"name": "Apex", "kind": "trait", "file": "src/hierarchy.rs", "line": 4, "depth": 3},
@@ -306,6 +307,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
                 .await,
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "result_count": 3,
             "ranking": [
                 {"name": "Peak", "kind": "trait", "file": "src/wide.rs", "line": 3, "depth": 2},
@@ -318,7 +320,10 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
     let missing = json_body(
         &call_inheritance_depth(&project, json!({"format": "json", "path": "src/hierarchy"})).await,
     );
-    assert_eq!(missing, json!({"result_count": 0, "ranking": []}));
+    assert_eq!(
+        missing,
+        json!({"freshness": {"state": "fresh"}, "result_count": 0, "ranking": []})
+    );
 
     expect_ranking(
         &json_body(
@@ -329,6 +334,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
             .await,
         ),
         json!({
+            "freshness": {"state": "fresh"},
             "result_count": 1,
             "ranking": [
                 {"name": "Apex", "kind": "trait", "file": "src/hierarchy.rs", "line": 4, "depth": 3}
@@ -343,7 +349,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
             )
             .await,
         ),
-        json!({"result_count": 0, "ranking": []}),
+        json!({"freshness": {"state": "fresh"}, "result_count": 0, "ranking": []}),
     );
 
     let markdown_response =
@@ -352,6 +358,7 @@ async fn inheritance_depth_ranks_literal_extends_depths() {
     assert_eq!(
         strip_id_lines(markdown),
         "\
+freshness: fresh
 **result_count:** 4
 
 ## ranking
@@ -387,6 +394,7 @@ async fn inheritance_depth_default_limit_keeps_ten_deepest() {
     expect_ranking(
         &json_body(&call_inheritance_depth(&project, json!({"format": "json"})).await),
         json!({
+            "freshness": {"state": "fresh"},
             "result_count": 10,
             "ranking": [
                 {"name": "T011", "kind": "trait", "file": "src/long.rs", "line": 12, "depth": 11},
@@ -405,6 +413,7 @@ async fn inheritance_depth_default_limit_keeps_ten_deepest() {
     expect_ranking(
         &json_body(&call_inheritance_depth(&project, json!({"format": "json", "limit": 12})).await),
         json!({
+            "freshness": {"state": "fresh"},
             "result_count": 12,
             "ranking": [
                 {"name": "T011", "kind": "trait", "file": "src/long.rs", "line": 12, "depth": 11},

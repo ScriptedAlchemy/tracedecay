@@ -94,7 +94,7 @@ async fn file_inspections_refuse_arguments_outside_their_typed_request() {
             json!({"path": "src", "layout": "flat", "format": "json"}),
         )
         .await,
-        r#"{"count":1,"files":[{"bytes":32,"path":"src/lib.rs","symbols":1}],"layout":"flat"}"#
+        r#"{"count":1,"files":[{"bytes":32,"path":"src/lib.rs","symbols":1}],"freshness":{"state":"fresh"},"layout":"flat"}"#
     );
     assert_refused(
         &fixture,

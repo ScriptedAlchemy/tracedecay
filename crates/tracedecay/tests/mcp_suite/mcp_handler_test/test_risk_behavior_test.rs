@@ -57,6 +57,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&default_report),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
                 risk_item("narrow", 5, 1, 0, false, "none", None, 3.17),
@@ -73,6 +74,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&missing_file),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [],
             "summary": {
                 "total_functions": 0,
@@ -105,6 +107,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&limited),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
             ],
@@ -115,6 +118,7 @@ async fn tracedecay_test_risk_ranks_the_next_untested_symbol() {
     assert_eq!(
         observable(&with_tested),
         json!({
+            "freshness": {"state": "fresh"},
             "risks": [
                 risk_item("wide", 1, 4, 0, false, "none", None, 7.92),
                 risk_item("narrow", 5, 1, 0, false, "none", None, 3.17),

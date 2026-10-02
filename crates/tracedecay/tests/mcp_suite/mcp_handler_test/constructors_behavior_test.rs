@@ -174,6 +174,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         report,
         json!({
+            "freshness": {"state": "fresh"},
             "struct": "BuildOptions",
             "candidate_count": 1,
             "resolution_status": "unverified",
@@ -195,6 +196,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         first_only,
         json!({
+            "freshness": {"state": "fresh"},
             "struct": "BuildOptions",
             "candidate_count": 1,
             "resolution_status": "unverified",
@@ -215,6 +217,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         clamped,
         json!({
+            "freshness": {"state": "fresh"},
             "struct": "BuildOptions",
             "candidate_count": 1,
             "resolution_status": "unverified",
@@ -235,6 +238,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         missing,
         json!({
+            "freshness": {"state": "fresh"},
             "found": false,
             "struct": "MissingWidget",
             "message": "No struct, class, or case-class named 'MissingWidget' found.",
@@ -249,6 +253,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         function_is_not_a_struct,
         json!({
+            "freshness": {"state": "fresh"},
             "found": false,
             "struct": "explicit",
             "message": "No struct, class, or case-class named 'explicit' found.",
@@ -263,6 +268,7 @@ async fn constructors_reports_literal_sites_and_denies_a_missing_struct() {
     assert_eq!(
         ambiguous,
         json!({
+            "freshness": {"state": "fresh"},
             "struct": "Options",
             "candidate_count": 2,
             "resolution_status": "unverified",

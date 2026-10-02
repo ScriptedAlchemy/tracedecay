@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    AdminCliSurfaceRequestV1, DerivesResultV1, NodeResultV1, RenamePreviewPrimitiveOutcomeV1,
-    RetrieveResultV1, StatusResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, NodeResultV1, PrimitiveSearchFreshnessV1,
+    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
 };
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -30,7 +30,8 @@ use crate::handlers::git::{
 use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
     compute_impact, compute_node, compute_redundancy, compute_rename_preview, compute_search,
-    compute_signature, compute_similar, not_found_tool_result, render_context, render_search,
+    compute_signature, compute_similar, freshness_lines, not_found_tool_result, render_context,
+    render_search,
 };
 use crate::handlers::grep::{compute_grep, render_grep};
 use crate::handlers::health::{
@@ -434,7 +435,15 @@ pub fn render_graph_tool(
             .with_semantic_error(true)
             .with_failure_message(message);
     }
-    rendered = rendered.with_structured_result(result.result_value()?);
+    let mut structured = result.result_value()?;
+    if git_tool_failure_message(&result).is_none()
+        && let Some(freshness) = code_graph
+            .as_ref()
+            .and_then(|served| served.worktree.as_ref())
+    {
+        open_with_worktree_freshness(&mut rendered, &mut structured, args, freshness)?;
+    }
+    rendered = rendered.with_structured_result(structured);
     ResponseTrailer {
         touched_files: &touched_files,
         code_graph: code_graph.as_ref(),
@@ -445,6 +454,33 @@ pub fn render_graph_tool(
         Some(analytics) => rendered.with_internal_analytics(analytics.ledger_value()),
         None => rendered,
     })
+}
+
+/// Opens a graph read with the worktree verdict search opens with: the
+/// `freshness:` lines in markdown, a `freshness` key in a JSON object body
+/// and in the structured result. A not-found body is JSON in every format,
+/// so it takes the key rather than lines that would break its parse.
+fn open_with_worktree_freshness(
+    rendered: &mut ToolResult,
+    structured: &mut Value,
+    args: &Value,
+    freshness: &PrimitiveSearchFreshnessV1,
+) -> Result<()> {
+    let verdict = serde_json::to_value(freshness)?;
+    if let Some(Value::String(text)) = rendered.value.pointer_mut("/content/0/text") {
+        match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(mut body)) => {
+                body.insert("freshness".to_owned(), verdict.clone());
+                *text = Value::Object(body).to_string();
+            }
+            _ if !render::wants_json(args) => text.insert_str(0, &freshness_lines(freshness)),
+            _ => {}
+        }
+    }
+    if let Value::Object(object) = structured {
+        object.insert("freshness".to_owned(), verdict);
+    }
+    Ok(())
 }
 
 /// Renders a result through a markdown renderer that reads its JSON value.
@@ -520,6 +556,7 @@ mod tests {
             &json!({"format": "json"}),
             todos_completion(Some(ServedCodeGraphGenerationV1 {
                 generation: "generation.render.stale".to_owned(),
+                worktree: None,
                 freshness: CodeGraphReadFreshnessV1::LastCompleteStale {
                     sealed_at: UtcMicros(0),
                     rebuild_in_flight: false,
@@ -690,6 +727,7 @@ mod tests {
             &json!({"format": "json"}),
             todos_completion(Some(ServedCodeGraphGenerationV1 {
                 generation: "generation.render.current".to_owned(),
+                worktree: None,
                 freshness: CodeGraphReadFreshnessV1::Current,
             })),
         )

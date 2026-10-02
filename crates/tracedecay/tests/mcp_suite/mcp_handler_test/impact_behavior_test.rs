@@ -139,6 +139,7 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     assert_eq!(
         untouched,
         json!({
+            "freshness": {"state": "fresh"},
             "node_count": 0,
             "complete": true,
             "unavailable_fields": ["edge_count"],
@@ -155,6 +156,7 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     assert_eq!(
         unknown,
         json!({
+            "freshness": {"state": "fresh"},
             "node_count": 0,
             "complete": true,
             "unavailable_fields": ["edge_count"],
