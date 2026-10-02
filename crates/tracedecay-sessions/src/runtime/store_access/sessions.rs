@@ -720,8 +720,19 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
         let mut workflow_results: Vec<SessionMessageSearchResult> = Vec::new();
         let mut workflow_observations: BTreeMap<String, usize> = BTreeMap::new();
-        for (observation_id, fact) in
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?
+        let anchored_observations = transcript_observations
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for (observation_id, fact) in search_workflow_facts(
+            &snapshot,
+            provider,
+            project_key,
+            query,
+            fetch_limit,
+            &anchored_observations,
+        )
+        .await?
         {
             if let Some(&index) = transcript_observations.get(&observation_id) {
                 append_observation_text(
@@ -911,6 +922,7 @@ async fn search_workflow_facts(
     project_key: Option<&str>,
     query: &str,
     limit: usize,
+    anchored_observations: &[&str],
 ) -> tracedecay_domain::errors::Result<Vec<(String, SessionMessageSearchResult)>> {
     const OPERATION: &str = "search registered workflow facts";
     let terms = query
@@ -958,11 +970,43 @@ async fn search_workflow_facts(
     }
     let matching_predicate = term_predicates.join(" OR ");
     let _ = write!(sql, " AND ({matching_predicate})");
+    // An observation qualifies on its own only when every term appears in at
+    // least one of its facts (master's AND, lifted from fact to observation,
+    // the unit a search row now stands for). Observations the transcript
+    // search already returned are anchored: any term-matching fact of theirs
+    // only enriches that existing row.
+    let every_term = term_predicates
+        .iter()
+        .map(|predicate| format!("SUM({predicate}) > 0"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let _ = write!(
+        sql,
+        " GROUP BY w.provider, w.observation_id HAVING ({every_term})"
+    );
+    if !anchored_observations.is_empty() {
+        let mut anchored_params = Vec::with_capacity(anchored_observations.len());
+        for observation_id in anchored_observations {
+            query_params.push(Value::Text((*observation_id).to_owned()));
+            anchored_params.push(format!("?{}", query_params.len()));
+        }
+        let _ = write!(
+            sql,
+            " OR w.observation_id IN ({})",
+            anchored_params.join(", ")
+        );
+    }
+    // The row leads with the observation's fact that matches the most terms,
+    // so its metadata names the item the query asked for.
+    let matched_terms = term_predicates
+        .iter()
+        .map(|predicate| format!("({predicate})"))
+        .collect::<Vec<_>>()
+        .join(" + ");
     query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
-        " GROUP BY w.provider, w.observation_id
-          ORDER BY item_order_missing, first_item_order,
+        " ORDER BY item_order_missing, first_item_order,
                    (latest_timestamp IS NULL) ASC, latest_timestamp DESC,
                    latest_sequence DESC, first_fact_ordinal
           LIMIT ?{}
@@ -985,7 +1029,7 @@ async fn search_workflow_facts(
         ORDER BY matched.item_order_missing, matched.first_item_order,
                  (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
                  matched.latest_sequence DESC, matched.first_fact_ordinal,
-                 CASE WHEN ({matching_predicate}) THEN 0 ELSE 1 END,
+                 ({matched_terms}) DESC,
                  CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END, w.item_order,
                  (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
                  w.fact_ordinal",
