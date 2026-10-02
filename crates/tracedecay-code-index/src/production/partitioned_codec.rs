@@ -1358,14 +1358,15 @@ fn decode_generation_evidence(
             "sealed generation evidence payload decoding failed: {error}"
         ))
     };
-    let mut evidence = (&mut reader).take(descriptor.evidence_size_bytes);
-    let decoded = hotpath::measure_block!(
-        "code_index.restore.evidence_stream",
-        serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut evidence)
-            .map_err(decoding_failure)
-    );
-    let unread = evidence.limit();
-    drop(evidence);
+    let (decoded, unread) = {
+        let mut evidence = (&mut reader).take(descriptor.evidence_size_bytes);
+        let decoded = hotpath::measure_block!(
+            "code_index.restore.evidence_stream",
+            serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut evidence)
+                .map_err(decoding_failure)
+        );
+        (decoded, evidence.limit())
+    };
     if let Some(error) = reader.take_read_error() {
         return Err(error);
     }
