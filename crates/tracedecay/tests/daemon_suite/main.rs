@@ -44,6 +44,8 @@ mod socket_lifecycle_test;
 mod stale_client_resilience_test;
 #[cfg(unix)]
 mod store_shutdown_checkpoint_test;
+#[cfg(unix)]
+mod unhinted_worktree_change_test;
 mod workflow_handoff_test;
 
 #[test]

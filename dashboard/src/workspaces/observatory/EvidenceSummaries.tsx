@@ -24,7 +24,13 @@ import {
   retentionBacklogReading,
   shareStagingReading,
 } from './analyticsControls.ts';
-import { codeIndexPhaseLabel, codeIndexProgressPercentage, formatDurationMicros, graphServingLabel } from './CodeIndexPipeline.tsx';
+import {
+  CodeIndexMountFailureNotice,
+  codeIndexPhaseLabel,
+  codeIndexProgressPercentage,
+  formatDurationMicros,
+  graphServingLabel,
+} from './CodeIndexPipeline.tsx';
 import { cloneIndexState } from './cloneIndexModel.ts';
 import { doctorEvidencePresentation, doctorFamilyLabel } from './doctorModel.ts';
 import { BlockedBody, EvidenceChip } from './EvidencePanel.tsx';
@@ -409,6 +415,7 @@ export function PipelineBody({
 }) {
   const payload = envelopePayload(freshness.result);
   if (!payload) return <BlockedBody summary={summary} />;
+  if (payload.mount_failure) return <CodeIndexMountFailureNotice failure={payload.mount_failure} />;
   if (payload.worktrees.length === 0) {
     return (
       <p className="text-body text-text-muted" data-evidence-blocked="empty">

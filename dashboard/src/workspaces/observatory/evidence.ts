@@ -590,8 +590,9 @@ export function pipelineSummary(read: EvidenceRead<CodeIndexFreshnessPayloadV1>)
             : grade;
     return {
       state,
-      stateDetail:
-        worktrees.length === 0
+      stateDetail: payload.mount_failure
+        ? `${payload.mount_failure.message} · ${payload.mount_failure.remediation}`
+        : worktrees.length === 0
           ? 'no mounted code-index worktree'
           : building > 0
             ? `${building} of ${worktrees.length} worktrees building${blocked > 0 ? ` · ${blocked} blocked` : ''}`

@@ -98,17 +98,6 @@ pub(super) const AUTHORITY_SCHEMA: &str = "
     );
 ";
 
-/// Delete guards on the anchor identity and alias tables.
-///
-/// A scoped observation-authority reset drops exactly these two inside its
-/// maintenance transaction, removes the anchors the reset observation stream
-/// bound, and reinstalls every guard from
-/// [`RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL`] before it commits.
-pub const RETRIEVAL_ANCHOR_DELETE_GUARD_TRIGGERS: &[&str] = &[
-    "retrieval_anchors_immutable_delete",
-    "retrieval_anchor_aliases_immutable_delete",
-];
-
 /// Idempotent DDL for every retrieval-anchor immutability trigger; the single
 /// authority both schema installation and scoped maintenance reinstall from.
 pub const RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL: &str = "

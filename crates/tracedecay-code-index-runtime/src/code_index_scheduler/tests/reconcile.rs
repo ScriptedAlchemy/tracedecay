@@ -1154,7 +1154,7 @@ fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v18")
+        Some("extractor.rust.v19")
     );
 }
 
@@ -1747,6 +1747,7 @@ fn sealed_segment_graph_store(
         &projector_revision,
         tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)
             .expect("row spill"),
+        &mut |_| Ok(()),
         &|| Ok(()),
     )
     .expect("code graph rows")

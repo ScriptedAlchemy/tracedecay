@@ -24,6 +24,7 @@ const INTERRUPTION_DEADLINE: u8 = 2;
 #[cfg(test)]
 mod interruption_tests;
 mod support;
+mod writer_publication;
 
 use support::{RecoveryRuntimeProbeV1, authority_key};
 
@@ -165,7 +166,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             project_id: project_id.clone(),
             target_binding: binding,
             authority_key: authority_key.clone(),
-            expected: current,
+            expected: Some(current),
             replacement: replacement.clone(),
             installed_at,
         };

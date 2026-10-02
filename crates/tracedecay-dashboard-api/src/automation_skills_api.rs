@@ -13,9 +13,9 @@ use super::{
     automation_authority_error_response, exact_automation_authority,
 };
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, list_managed_skills,
-    load_managed_skill, managed_skill_dir, managed_skill_root,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillReadError,
+    ManagedSkillSource, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
+    list_managed_skills, load_managed_skill, managed_skill_dir, managed_skill_root,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage_for,
@@ -78,7 +78,15 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     let profile_root = profile_root(&state)?;
     let skill = load_managed_skill(profile_root, &id)
         .await
-        .map_err(|err| not_found_or_internal(&err))?;
+        .map_err(|err| match err {
+            ManagedSkillReadError::InvalidId(_) => {
+                json_error(StatusCode::BAD_REQUEST, err.to_string())
+            }
+            ManagedSkillReadError::NotFound { .. } => {
+                json_error(StatusCode::NOT_FOUND, err.to_string())
+            }
+            ManagedSkillReadError::Failed(_) => internal_error(err),
+        })?;
     skill_payload_with_deployment(profile_root, skill, None).await
 }
 
@@ -162,8 +170,8 @@ async fn skill_payload_with_deployment(
     skill: ManagedSkill,
     deployment: Option<ManagedSkillDeploymentReceipt>,
 ) -> ApiResult {
-    let skill_dir = managed_skill_dir(profile_root, &skill.metadata.id)
-        .map_err(|err| bad_request_or_internal(&err))?;
+    let skill_dir =
+        managed_skill_dir(profile_root, &skill.metadata.id).map_err(|err| internal_error(&err))?;
     let usage_summary = summarize_skill_usage_for(profile_root, &skill)
         .await
         .map_err(|err| internal_error(&err))?;
@@ -202,47 +210,6 @@ fn automation_authority(
 
 fn profile_root(state: &DashboardState) -> std::result::Result<&std::path::Path, JsonError> {
     Ok(automation_authority(state)?.profile_root())
-}
-
-fn bad_request_or_internal(err: &impl ToString) -> JsonError {
-    client_error_or_internal(err, false, true)
-}
-
-fn not_found_or_internal(err: &impl ToString) -> JsonError {
-    client_error_or_internal(err, true, false)
-}
-
-fn client_error_or_internal(
-    err: &impl ToString,
-    allow_not_found: bool,
-    allow_bad_request: bool,
-) -> JsonError {
-    let message = err.to_string();
-    if allow_not_found && is_not_found(&message) {
-        json_error(StatusCode::NOT_FOUND, message)
-    } else if allow_bad_request && is_bad_request(&message) {
-        json_error(StatusCode::BAD_REQUEST, message)
-    } else {
-        internal_error(message)
-    }
-}
-
-fn is_not_found(message: &str) -> bool {
-    message.contains("No such file") || message.contains("not found")
-}
-
-fn is_bad_request(message: &str) -> bool {
-    message.contains("unsafe")
-        || message.contains("cannot be empty")
-        || message.contains("duplicate")
-        || message.contains("conflicts with")
-        || message.contains("exceeds")
-        || message.contains("must be under")
-        || message.contains("must name a file")
-        || message.contains("failed to parse")
-        || message.contains("base_checksum")
-        || message.contains("stale")
-        || message.contains("does not change")
 }
 
 #[cfg(test)]

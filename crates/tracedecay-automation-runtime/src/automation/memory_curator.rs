@@ -8,8 +8,9 @@ use tracedecay_domain::{
 
 use super::artifacts::sha256_json;
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
-    BackendRetryPolicy, run_agent_task_with_retry_report,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
+    runtime_failure_class,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
@@ -271,7 +272,7 @@ async fn run_memory_curator_for_store_with_publication(
             Ok(response) => response,
             Err(err) => {
                 let record = finalizer
-                    .append_backend_fallback_record(evidence_hash, err.to_string(), &retry_report)
+                    .append_backend_fallback_record(evidence_hash, &err, &retry_report)
                     .await?;
                 return Ok(MemoryCuratorAutomationRun {
                     run_id: record.run_id.clone(),
@@ -309,6 +310,7 @@ async fn run_memory_curator_for_store_with_publication(
                     evidence_hash,
                     None,
                     error.to_string(),
+                    AgentTaskFailureClass::Permanent,
                     &retry_report,
                 )
                 .await?;
@@ -349,11 +351,12 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        error.failure_class(),
                         &retry_report,
                     )
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
-                    error,
+                    error: error.into(),
                     ledger_record: Box::new(ledger_record),
                 });
             }
@@ -395,6 +398,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        runtime_failure_class(&error),
                         &retry_report,
                     )
                     .await?;
@@ -453,6 +457,7 @@ async fn run_memory_curator_for_store_with_publication(
                         evidence_hash,
                         None,
                         error.to_string(),
+                        runtime_failure_class(&error),
                         &retry_report,
                         applied_ops,
                         None,

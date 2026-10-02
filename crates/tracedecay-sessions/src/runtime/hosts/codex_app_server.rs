@@ -20,12 +20,42 @@ use serde_json::{Value, json};
 use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_contracts::automation::AgentTaskFailureClass;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{WorkApprovalPolicy, WorkEgressPolicy, WorkFilesystemPolicy};
 use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_lcm::LcmSummaryRequest;
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
+
+/// One failed Codex app-server run, classified where the failure was
+/// observed: the spawn, the deadline, the stdio pipes, an unparsable frame,
+/// or the error code the app-server reported.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct CodexAppServerError {
+    pub class: AgentTaskFailureClass,
+    pub message: String,
+}
+
+impl CodexAppServerError {
+    fn new(class: AgentTaskFailureClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<CodexAppServerError> for TraceDecayError {
+    fn from(error: CodexAppServerError) -> Self {
+        Self::Config {
+            message: error.message,
+        }
+    }
+}
+
+type Result<T> = std::result::Result<T, CodexAppServerError>;
 
 #[derive(Default)]
 struct ActiveCodexChildren {
@@ -277,13 +307,12 @@ fn run_prompt_with_optional_execution(
             execution.cancellation.register(process_group);
         }
 
-        let stdout = child
-            .child
-            .stdout
-            .take()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "codex app-server stdout was not available".to_string(),
-            })?;
+        let stdout = child.child.stdout.take().ok_or_else(|| {
+            CodexAppServerError::new(
+                AgentTaskFailureClass::Unavailable,
+                "codex app-server stdout was not available",
+            )
+        })?;
         let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
         let stdout_reader = std::thread::spawn(move || {
             let mut frames =
@@ -341,13 +370,12 @@ fn run_codex_protocol(
     timeout: Duration,
 ) -> Result<CodexAppServerSummary> {
     hotpath::measure_block!("sessions.hosts.codex_app_server.protocol", {
-        let mut stdin = child
-            .child
-            .stdin
-            .take()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "codex app-server stdin was not available".to_string(),
-            })?;
+        let mut stdin = child.child.stdin.take().ok_or_else(|| {
+            CodexAppServerError::new(
+                AgentTaskFailureClass::Unavailable,
+                "codex app-server stdin was not available",
+            )
+        })?;
         let deadline = Instant::now() + timeout.min(config.timeout);
         send_json(
             &mut stdin,
@@ -378,10 +406,13 @@ fn run_codex_protocol(
             .pointer("/result/thread/id")
             .or_else(|| thread_response.pointer("/result/id"))
             .and_then(Value::as_str)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "codex app-server thread/start response lacked a thread id: {thread_response}"
-                ),
+            .ok_or_else(|| {
+                CodexAppServerError::new(
+                    AgentTaskFailureClass::MalformedOutput,
+                    format!(
+                        "codex app-server thread/start response lacked a thread id: {thread_response}"
+                    ),
+                )
             })?
             .to_string();
 
@@ -425,9 +456,10 @@ fn run_codex_protocol(
         let text = strip_reasoning_tags(&summary.text);
         let text = text.trim();
         if text.is_empty() {
-            return Err(TraceDecayError::Config {
-                message: "codex app-server returned an empty summary".to_string(),
-            });
+            return Err(CodexAppServerError::new(
+                AgentTaskFailureClass::MalformedOutput,
+                "codex app-server returned an empty summary",
+            ));
         }
         summary.text = text.to_string();
         Ok(summary)
@@ -442,12 +474,16 @@ fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Chil
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.shutdown_guards > 0 {
-            return Err(TraceDecayError::Config {
-                message: "codex app-server shutdown is in progress".to_string(),
-            });
+            return Err(CodexAppServerError::new(
+                AgentTaskFailureClass::Unavailable,
+                "codex app-server shutdown is in progress",
+            ));
         }
-        let child = command.spawn().map_err(|err| TraceDecayError::Config {
-            message: format!("failed to start `{codex_bin}` app-server: {err}"),
+        let child = command.spawn().map_err(|err| {
+            CodexAppServerError::new(
+                AgentTaskFailureClass::Unavailable,
+                format!("failed to start `{codex_bin}` app-server: {err}"),
+            )
         })?;
         active.process_groups.insert(child.id());
         drop(active);
@@ -498,9 +534,10 @@ fn codex_work_policy(execution: &CodexAppServerWorkExecution<'_>) -> Result<Code
         WorkApprovalPolicy::OnRequest => "on-request",
     };
     if execution.egress == WorkEgressPolicy::Allowlisted {
-        return Err(TraceDecayError::Config {
-            message: "Codex app-server cannot enforce a Work egress allowlist".to_owned(),
-        });
+        return Err(CodexAppServerError::new(
+            AgentTaskFailureClass::Denied,
+            "Codex app-server cannot enforce a Work egress allowlist",
+        ));
     }
     let (sandbox, sandbox_policy) = match execution.filesystem {
         WorkFilesystemPolicy::ReadOnly => (
@@ -592,9 +629,61 @@ fn terminate_process_tree(_process_group: u32) {}
 
 #[hotpath::measure(label = "sessions.hosts.codex_app_server.send")]
 fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
-    writeln!(stdin, "{value}")?;
-    stdin.flush()?;
-    Ok(())
+    writeln!(stdin, "{value}")
+        .and_then(|()| stdin.flush())
+        .map_err(|error| {
+            CodexAppServerError::new(
+                AgentTaskFailureClass::Disconnected,
+                format!("codex app-server stdin closed: {error}"),
+            )
+        })
+}
+
+fn parse_frame(line: &str) -> Result<Value> {
+    serde_json::from_str(line).map_err(|error| {
+        CodexAppServerError::new(
+            AgentTaskFailureClass::MalformedOutput,
+            format!("codex app-server sent an unparsable frame: {error}"),
+        )
+    })
+}
+
+/// The failure class of a JSON-RPC error or a failed turn's `TurnError`, read
+/// from the codes the app-server reports (`data.input_error_code`,
+/// `codexErrorInfo`), never from the human-readable message.
+fn reported_failure_class(error: &Value) -> AgentTaskFailureClass {
+    if error
+        .pointer("/data/input_error_code")
+        .and_then(Value::as_str)
+        == Some("input_too_large")
+    {
+        return AgentTaskFailureClass::InputTooLarge;
+    }
+    match error.get("codexErrorInfo") {
+        Some(Value::String(code)) => match code.as_str() {
+            "contextWindowExceeded" => AgentTaskFailureClass::InputTooLarge,
+            "usageLimitExceeded"
+            | "rateLimitExceeded"
+            | "serverOverloaded"
+            | "flexUnavailable"
+            | "internalServerError" => AgentTaskFailureClass::Retryable,
+            "unauthorized" | "cyberPolicy" | "misalignmentPolicyViolation" | "tooManyDenials" => {
+                AgentTaskFailureClass::Denied
+            }
+            _ => AgentTaskFailureClass::Permanent,
+        },
+        Some(Value::Object(info)) if info.contains_key("responseStreamDisconnected") => {
+            AgentTaskFailureClass::Disconnected
+        }
+        Some(Value::Object(info))
+            if info.contains_key("httpConnectionFailed")
+                || info.contains_key("responseStreamConnectionFailed")
+                || info.contains_key("responseTooManyFailedAttempts") =>
+        {
+            AgentTaskFailureClass::Retryable
+        }
+        _ => AgentTaskFailureClass::Permanent,
+    }
 }
 
 #[hotpath::measure(label = "sessions.hosts.codex_app_server.wait")]
@@ -605,14 +694,15 @@ fn wait_for_response(
 ) -> Result<Value> {
     loop {
         let line = recv_line(line_rx, deadline)?;
-        let value: Value = serde_json::from_str(&line)?;
+        let value = parse_frame(&line)?;
         if value.get("id").and_then(Value::as_i64) != Some(id) {
             continue;
         }
         if let Some(error) = value.get("error") {
-            return Err(TraceDecayError::Config {
-                message: format!("codex app-server request {id} failed: {error}"),
-            });
+            return Err(CodexAppServerError::new(
+                reported_failure_class(error),
+                format!("codex app-server request {id} failed: {error}"),
+            ));
         }
         return Ok(value);
     }
@@ -628,14 +718,15 @@ fn wait_for_turn_summary(
         let mut model = None;
         loop {
             let line = recv_line(line_rx, deadline)?;
-            let value: Value = serde_json::from_str(&line)?;
+            let value = parse_frame(&line)?;
             if model.is_none() {
                 model = find_model_id(&value);
             }
             if let Some(error) = value.get("error") {
-                return Err(TraceDecayError::Config {
-                    message: format!("codex app-server turn failed: {error}"),
-                });
+                return Err(CodexAppServerError::new(
+                    reported_failure_class(error),
+                    format!("codex app-server turn failed: {error}"),
+                ));
             }
             match value.get("method").and_then(Value::as_str) {
                 Some("item/agentMessage/delta") => {
@@ -656,9 +747,10 @@ fn wait_for_turn_summary(
                             .pointer("/params/turn/error")
                             .cloned()
                             .unwrap_or_else(|| json!("unknown app-server turn failure"));
-                        return Err(TraceDecayError::Config {
-                            message: format!("codex app-server turn failed: {error}"),
-                        });
+                        return Err(CodexAppServerError::new(
+                            reported_failure_class(&error),
+                            format!("codex app-server turn failed: {error}"),
+                        ));
                     }
                     let provider_request_id = value
                         .pointer("/params/turn/id")
@@ -684,20 +776,33 @@ fn recv_line(
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .unwrap_or_default();
+    let timed_out = || {
+        CodexAppServerError::new(
+            AgentTaskFailureClass::Timeout,
+            "timed out waiting for codex app-server",
+        )
+    };
     if remaining.is_zero() {
-        return Err(TraceDecayError::Config {
-            message: "timed out waiting for codex app-server".to_string(),
-        });
+        return Err(timed_out());
     }
     match line_rx.recv_timeout(remaining) {
         Ok(Ok(line)) => Ok(line),
-        Ok(Err(err)) => Err(err.into()),
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(TraceDecayError::Config {
-            message: "timed out waiting for codex app-server".to_string(),
-        }),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(TraceDecayError::Config {
-            message: "codex app-server closed stdout before completing".to_string(),
-        }),
+        Ok(Err(err)) => {
+            let class = if err.kind() == std::io::ErrorKind::InvalidData {
+                AgentTaskFailureClass::MalformedOutput
+            } else {
+                AgentTaskFailureClass::Disconnected
+            };
+            Err(CodexAppServerError::new(
+                class,
+                format!("codex app-server stdout failed: {err}"),
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(timed_out()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CodexAppServerError::new(
+            AgentTaskFailureClass::Disconnected,
+            "codex app-server closed stdout before completing",
+        )),
     }
 }
 
@@ -1104,7 +1209,12 @@ mod tests {
             &launch_receipt,
         );
 
-        assert!(result.is_err());
+        assert_eq!(
+            result
+                .map(|summary| summary.text)
+                .map_err(|error| error.class),
+            Err(AgentTaskFailureClass::Unavailable)
+        );
         assert_eq!(launch_receipt.started_at(), None);
     }
 
@@ -1134,11 +1244,14 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert_eq!(
-            error.to_string(),
-            format!(
-                "config error: failed to start `{}` app-server: Text file busy (os error 26)",
-                executable.display()
-            )
+            error,
+            CodexAppServerError {
+                class: AgentTaskFailureClass::Unavailable,
+                message: format!(
+                    "failed to start `{}` app-server: Text file busy (os error 26)",
+                    executable.display()
+                ),
+            }
         );
         assert_eq!(launch_receipt.started_at(), None);
         assert!(
@@ -1177,7 +1290,13 @@ mod tests {
         )
         .expect_err("unresponsive app-server must time out");
 
-        assert!(error.to_string().contains("timed out waiting"));
+        assert_eq!(
+            error,
+            CodexAppServerError {
+                class: AgentTaskFailureClass::Timeout,
+                message: "timed out waiting for codex app-server".to_owned(),
+            }
+        );
         assert!(
             launch_receipt.started_at().is_some(),
             "the timeout path must have crossed the exact child-launch boundary"

@@ -89,32 +89,33 @@ pub const PRE_LEDGER_PENDING_WORK_DIR: &str = "hook-v2-pending-work";
 /// Members of the pre-log ledger shape, which this binary refuses for reset.
 const PRE_LOG_MEMBERS: [&str; 2] = ["admissions.v1.bin", "admission-work-completions.v1.json"];
 
-/// Ledger roots this process refused for reset and has not opened since. The
-/// daemon's reset census reads them; only a reset removes the old shape.
-static RESET_REQUIRED_ROOTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-
-/// Records that the admission state at `root` was refused for reset
-/// (`required`), or opened.
-pub fn record_hook_admission_reset(root: &Path, required: bool) {
-    let mut roots = RESET_REQUIRED_ROOTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if required {
-        roots.insert(root.to_path_buf());
-    } else {
-        roots.remove(root);
-    }
-}
-
-/// Admission state roots under `under` currently refused for reset.
-pub fn hook_admission_reset_required_roots(under: &Path) -> Vec<PathBuf> {
-    RESET_REQUIRED_ROOTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .filter(|root| root.starts_with(under))
-        .cloned()
-        .collect()
+/// Hook admission state under the data root `root` (a profile root or one
+/// project shard) that this binary refuses for reset, read from what is on
+/// disk: each host ledger that still holds the pre-log shape, and each host's
+/// pre-ledger pending-work spool. A daemon that never opened a ledger still
+/// reports it, so the reset census is right from the first status read.
+pub fn hook_admission_reset_required_roots(root: &Path) -> Vec<PathBuf> {
+    let hosts = |directory: &str| {
+        fs::read_dir(root.join(directory))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()
+    };
+    let holds_pre_log = |ledger: &PathBuf| {
+        PRE_LOG_MEMBERS
+            .iter()
+            .any(|member| fs::symlink_metadata(ledger.join(member)).is_ok())
+    };
+    let mut roots = [PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR]
+        .into_iter()
+        .flat_map(hosts)
+        .filter(holds_pre_log)
+        .chain(hosts(PRE_LEDGER_PENDING_WORK_DIR))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
 }
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
@@ -342,7 +343,6 @@ impl HookAdmissionLedgerV1 {
         let writer_lock = acquire_writer_lock(&root)?;
         for member in PRE_LOG_MEMBERS {
             if validate_member(&root.join(member))? {
-                record_hook_admission_reset(&root, true);
                 return Err(HookAdmissionLedgerError::ResetRequired);
             }
         }
@@ -404,7 +404,6 @@ impl HookAdmissionLedgerV1 {
             dropped_overflow_records,
             truncated_tail_bytes,
         };
-        record_hook_admission_reset(&ledger.root, false);
         hotpath::gauge!("hooks.admission.live_records").set(report.live_records);
         hotpath::gauge!("hooks.admission.pending_work").set(report.pending_work);
         hotpath::gauge!("hooks.admission.open.dropped_expired").set(report.dropped_expired_records);

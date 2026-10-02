@@ -7,8 +7,10 @@
 //! version, the digest chain (`message_output_digest`,
 //! `PayloadReferenceV1::for_payload`, `canonical_json_bytes`,
 //! `serialize_canonical`), the two digested record structs, and the canonical
-//! observation envelope's serialization are byte-identical across all of those
-//! tags and this tree.
+//! observation envelope's serialization are byte-identical across those tags.
+//! This tree writes `claude-session-message-v6`; retained v5 ownership is
+//! rebuilt before ordinary projection so the projector-version change cannot
+//! be mistaken for a rendering disagreement.
 //!
 //! | shipped tags                     | projector version           | digest chain | digested records |
 //! | -------------------------------- | --------------------------- | ------------ | ---------------- |

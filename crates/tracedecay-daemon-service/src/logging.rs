@@ -11,8 +11,10 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use std::path::Path;
 
 #[cfg(unix)]
-use tracedecay_daemon_control::SERVICE_NAME;
+use tracedecay_daemon_control::systemd_unit_name;
 use tracedecay_domain::errors::TraceDecayError;
+#[cfg(unix)]
+use tracedecay_runtime_core::config::ProfileRoot;
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::DAEMON_LOG_MARKER;
 use tracedecay_runtime_core::logging::format_daemon_log_line;
@@ -300,10 +302,10 @@ fn unquote(s: &str) -> String {
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.logging.watcher_events")]
 pub fn recent_watcher_events(
-    profile_root: &Path,
+    profile: &ProfileRoot,
     max_lines: usize,
 ) -> HashMap<String, WatcherEvent> {
-    let text = read_daemon_log_tail(profile_root, max_lines);
+    let text = read_daemon_log_tail(profile, max_lines);
     let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
     for line in text.lines() {
         if let Some(ev) = parse_watcher_log_line(line) {
@@ -317,9 +319,9 @@ pub fn recent_watcher_events(
 /// Best-effort read of the tail of the daemon log across service runners.
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.logging.read_tail")]
-fn read_daemon_log_tail(profile_root: &Path, max_lines: usize) -> String {
+fn read_daemon_log_tail(profile: &ProfileRoot, max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
-    let err_log = profile_root.join("daemon.err.log");
+    let err_log = profile.data_dir().join("daemon.err.log");
     if let Ok(contents) = std::fs::read_to_string(&err_log) {
         let lines: Vec<&str> = contents.lines().collect();
         let start = lines.len().saturating_sub(max_lines);
@@ -330,7 +332,7 @@ fn read_daemon_log_tail(profile_root: &Path, max_lines: usize) -> String {
         .args([
             "--user",
             "-u",
-            SERVICE_NAME,
+            &systemd_unit_name(profile),
             "--no-pager",
             "-n",
             &max_lines.to_string(),

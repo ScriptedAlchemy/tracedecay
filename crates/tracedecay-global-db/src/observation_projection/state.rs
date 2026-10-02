@@ -5,8 +5,9 @@ use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadD
 use tracedecay_store::{
     EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4, SPAWNED_SESSIONS_KEY,
-    SessionMessageProjection, SessionMessageRecord, SessionRecord, message_output_digest,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SPAWNED_SESSIONS_KEY, SessionMessageProjection,
+    SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
 use tracedecay_lcm::raw::stored_message_record_select_columns;
@@ -761,12 +762,15 @@ pub(super) async fn has_other_projector_output_owner(
         .query(
             "SELECT 1 FROM observation_projection_provenance
              WHERE output_provider = ?1 AND output_message_id = ?2
-               AND projector_version <> ?3 AND projector_version <> ?4
+               AND projector_version <> ?3
+               AND projector_version <> ?4
+               AND projector_version <> ?5
              LIMIT 1",
             params![
                 message.provider.as_str(),
                 message.message_id.as_str(),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
             ],
         )
@@ -786,7 +790,8 @@ async fn message_projection(
     message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
     if let Some(projection) = super::apply::derive_projection(observation)?
-        .messages()
+        .message()
+        .into_iter()
         .find(|projection| {
             projection.message().provider == provider
                 && projection.message().message_id == message_id
@@ -797,7 +802,8 @@ async fn message_projection(
     }
     derive_projection_with_alias(conn, observation)
         .await?
-        .messages()
+        .message()
+        .into_iter()
         .find(|projection| {
             projection.message().provider == provider
                 && projection.message().message_id == message_id
@@ -1217,7 +1223,8 @@ pub(in super::super) async fn resolve_output_projection(
     let owner_projection = match derived {
         Some((observation_id, effect)) if observation_id == authority.canonical_observation_id => {
             effect
-                .messages()
+                .message()
+                .into_iter()
                 .find(|candidate| {
                     candidate.message().provider == message.provider
                         && candidate.message().message_id == message.message_id

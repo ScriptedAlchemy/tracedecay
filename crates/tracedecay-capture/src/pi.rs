@@ -128,7 +128,7 @@ fn normalize_pi_entry(
                     .get("role")
                     .and_then(Value::as_str)
                     .ok_or_else(invalid)?;
-                append_message(&mut facts, message, role, &stable_record_id)?;
+                append_message(&mut facts, message, role)?;
                 relations = relations.with_message_id(stable_record_id.clone());
                 format!("message.{role}")
             }
@@ -198,7 +198,6 @@ fn append_message(
     facts: &mut Vec<CanonicalObservationFactV1>,
     message: &Value,
     role: &str,
-    stable_record_id: &ObservationId,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     let timestamp = message.get("timestamp").and_then(timestamp_secs);
     let model = message
@@ -263,17 +262,13 @@ fn append_message(
             });
         }
         "bashExecution" => {
-            // A user-run `!` command, not a model tool call: the invocation id
-            // is rooted in the record id so it is never served as the host's.
-            let invocation_id = ObservationId::new(format!("{}:tool:0", stable_record_id.as_str()))
-                .map_err(|_| invalid())?;
             facts.push(CanonicalObservationFactV1::ToolInvocation {
-                invocation_id: invocation_id.clone(),
+                invocation_id: None,
                 name: "bash".to_owned(),
                 arguments: serde_json::json!({ "command": message.get("command") }),
             });
             facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(invocation_id),
+                invocation_id: None,
                 content: message.get("output").cloned().unwrap_or(Value::Null),
                 success: message
                     .get("exitCode")
@@ -348,7 +343,7 @@ fn append_tool_call(
         });
     }
     facts.push(CanonicalObservationFactV1::ToolInvocation {
-        invocation_id,
+        invocation_id: Some(invocation_id),
         name: name.to_owned(),
         arguments,
     });

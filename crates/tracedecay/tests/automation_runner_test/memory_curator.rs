@@ -17,11 +17,9 @@ impl AgentTaskBackend for TransientThenJsonBackend {
     {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= 2 {
-            return Err(
-                tracedecay_automation::backend::AgentTaskError::from_backend_message(
-                    "timed out waiting for transient test backend",
-                ),
-            );
+            return Err(tracedecay_automation::backend::AgentTaskError::Timeout {
+                reason: "timed out waiting for transient test backend".to_owned(),
+            });
         }
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),

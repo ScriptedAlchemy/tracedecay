@@ -84,7 +84,7 @@ const FILE_OCCURRENCE_ID_MARKER: &str = "$tracedecay:f";
 const SYMBOL_OCCURRENCE_ID_MARKER_PREFIX: &str = "$tracedecay:s:";
 const GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1: usize = 256 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PartitionedFileSegmentDescriptorV1 {
     file_key: u32,
@@ -137,7 +137,20 @@ struct PartitionedEvidencePageDescriptorV1 {
 struct PartitionedGenerationEvidenceDescriptorV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
+    /// Prefix containing the typed generation evidence JSON.
+    evidence_size_bytes: u64,
     pages: Vec<PartitionedEvidencePageDescriptorV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PartitionedCodeGraphPageDescriptorV1 {
+    pub(crate) file_key: u32,
+    pub(crate) file_occurrence_id: FileOccurrenceId,
+    pub(crate) logical_path: String,
+    pub(crate) page_digest: ManifestDigest,
+    pub(crate) size_bytes: u64,
+    pub(crate) build_footprint: super::graph_page_store::CodeGraphPageBuildFootprintV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +163,11 @@ pub struct SealedGenerationSegmentIdentityV1 {
 pub enum SealedGenerationSegmentPublicationV1<'a> {
     File {
         digest: &'a ManifestDigest,
+        bytes: &'a [u8],
+    },
+    CodeGraphPage {
+        file_key: u32,
+        page_digest: &'a ManifestDigest,
         bytes: &'a [u8],
     },
     GenerationEvidencePage {
@@ -191,6 +209,7 @@ struct PartitionedPublishedGenerationRefV1<'a> {
     coverage: CoverageSummaryV1,
     capability: &'a CodeIndexCapabilityManifestV1,
     generation_evidence: &'a PartitionedGenerationEvidenceDescriptorV1,
+    code_graph_pages: &'a [PartitionedCodeGraphPageDescriptorV1],
 }
 
 #[derive(Deserialize)]
@@ -209,6 +228,7 @@ struct PartitionedPublishedGenerationV1 {
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
     generation_evidence: PartitionedGenerationEvidenceDescriptorV1,
+    code_graph_pages: Vec<PartitionedCodeGraphPageDescriptorV1>,
 }
 
 #[derive(Serialize)]
@@ -247,6 +267,8 @@ struct PartitionedSegmentIdentityGenerationV1 {
     snapshot: PartitionedSegmentIdentitySnapshotV1,
     file_segments: Vec<PartitionedFileSegmentIdentityV1>,
     generation_evidence: PartitionedEvidenceSegmentIdentityV1,
+    #[serde(default)]
+    code_graph_pages: Vec<PartitionedCodeGraphPageIdentityV1>,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +279,7 @@ struct PartitionedSegmentIdentitySnapshotV1 {
 #[derive(Deserialize)]
 struct PartitionedSnapshotFileIdentityV1 {
     file_occurrence_id: FileOccurrenceId,
+    logical_path: String,
     disposition: SnapshotFileDispositionV1,
 }
 
@@ -287,6 +310,15 @@ struct PartitionedEvidencePageIdentityV1 {
     page_size_bytes: u64,
 }
 
+#[derive(Deserialize)]
+struct PartitionedCodeGraphPageIdentityV1 {
+    file_key: u32,
+    file_occurrence_id: FileOccurrenceId,
+    logical_path: String,
+    page_digest: ManifestDigest,
+    size_bytes: u64,
+}
+
 /// The stored file segment envelope. Encoding writes the two fields directly
 /// (rule 2) and decoding borrows the payload without parsing it into a tree.
 #[derive(Deserialize)]
@@ -314,6 +346,7 @@ struct PartitionedGenerationEvidenceV1 {
     #[serde(deserialize_with = "deserialize_evidence_projection_receipt")]
     projection_receipt: PersistedBatchReceiptV1,
     cross_file_edges: PersistedCrossFileEdgesV1,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// The generation evidence stream decodes on one thread, so each of its
@@ -351,6 +384,7 @@ struct PartitionedGenerationEvidenceRefV1<'a> {
     projection_request: PersistedProjectionRequestRefV1<'a>,
     projection_receipt: PersistedBatchReceiptRefV1<'a>,
     cross_file_edges: PersistedCrossFileEdgesV1,
+    unresolved_calls: &'a [CodeIndexUnresolvedReferenceV1],
 }
 
 impl<'a> PartitionedGenerationEvidenceRefV1<'a> {
@@ -382,6 +416,7 @@ impl<'a> PartitionedGenerationEvidenceRefV1<'a> {
                 generation.projection.receipt(),
             )?,
             cross_file_edges: PersistedCrossFileEdgesV1::compact(&generation.edges, &symbols)?,
+            unresolved_calls: &generation.unresolved_calls,
         })
     }
 }
@@ -643,6 +678,7 @@ where
 
     fn finish(
         &mut self,
+        evidence_size_bytes: u64,
     ) -> Result<PartitionedGenerationEvidenceDescriptorV1, CodeIndexProductionErrorV1> {
         self.flush_page().map_err(|error| {
             self.publish_error.take().unwrap_or_else(|| {
@@ -669,8 +705,13 @@ where
         Ok(PartitionedGenerationEvidenceDescriptorV1 {
             segment_digest,
             segment_size_bytes: self.segment_size_bytes,
+            evidence_size_bytes,
             pages: std::mem::take(&mut self.descriptors),
         })
+    }
+
+    fn position(&self) -> u64 {
+        self.segment_size_bytes
     }
 
     fn take_publish_error(&mut self) -> Option<CodeIndexProductionErrorV1> {
@@ -1077,10 +1118,17 @@ impl PartitionedSegmentEncoderV1 {
     fn encode_generation_evidence(
         &mut self,
         generation: &CodeIndexPublishedGenerationV1,
+        reusable_graph_page_digests: &BTreeSet<ManifestDigest>,
         mut publish: impl FnMut(
             SealedGenerationSegmentPublicationV1<'_>,
         ) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<PartitionedGenerationEvidenceDescriptorV1, CodeIndexProductionErrorV1> {
+    ) -> Result<
+        (
+            PartitionedGenerationEvidenceDescriptorV1,
+            Vec<PartitionedCodeGraphPageDescriptorV1>,
+        ),
+        CodeIndexProductionErrorV1,
+    > {
         // File encoding needs two reusable buffers. Release their owned
         // capacities before evidence starts so the evidence phase retains only
         // one bounded page plus its compact content-address descriptors.
@@ -1097,7 +1145,33 @@ impl PartitionedSegmentEncoderV1 {
                 "sealed generation evidence serialization failed: {error}"
             ))
         })?;
-        writer.finish()
+        let evidence_size_bytes = writer.position();
+        let evidence_descriptor = writer.finish(evidence_size_bytes)?;
+        let mut graph_page_descriptors = Vec::new();
+        generation.for_each_sealed_code_graph_page(|page| {
+            let size_bytes = u64::try_from(page.encoded.len()).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed code graph page length exceeds u64".to_owned(),
+                )
+            })?;
+            if !reusable_graph_page_digests.contains(&page.page_digest) {
+                publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    file_key: page.file_key,
+                    page_digest: &page.page_digest,
+                    bytes: &page.encoded,
+                })?;
+            }
+            graph_page_descriptors.push(PartitionedCodeGraphPageDescriptorV1 {
+                file_key: page.file_key,
+                file_occurrence_id: page.file_occurrence_id,
+                logical_path: page.logical_path,
+                page_digest: page.page_digest,
+                size_bytes,
+                build_footprint: page.build_footprint,
+            });
+            Ok(())
+        })?;
+        Ok((evidence_descriptor, graph_page_descriptors))
     }
 }
 
@@ -1286,17 +1360,24 @@ fn decode_generation_evidence(
             "sealed generation evidence payload decoding failed: {error}"
         ))
     };
-    let decoded = hotpath::measure_block!(
-        "code_index.restore.evidence_stream",
-        serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut reader)
-            .map_err(decoding_failure)
-    );
+    let (decoded, unread) = {
+        let mut evidence = (&mut reader).take(descriptor.evidence_size_bytes);
+        let decoded = hotpath::measure_block!(
+            "code_index.restore.evidence_stream",
+            serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut evidence)
+                .map_err(decoding_failure)
+        );
+        (decoded, evidence.limit())
+    };
     if let Some(error) = reader.take_read_error() {
         return Err(error);
     }
-    let evidence = decoded?;
-    reader.finish()?;
-    Ok(evidence)
+    if unread != 0 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence ended before its manifest boundary".to_owned(),
+        ));
+    }
+    decoded
 }
 
 /// Validate the descriptor layout shared by the authenticated full-manifest
@@ -1373,6 +1454,46 @@ where
     Ok(())
 }
 
+fn validate_code_graph_page_layout<'a, I, J>(
+    pages: I,
+    snapshot_files: J,
+) -> Result<(), CodeIndexProductionErrorV1>
+where
+    I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId, &'a str, u64)>,
+    J: ExactSizeIterator<Item = (usize, &'a FileOccurrenceId, &'a str)>,
+{
+    if pages.len() != snapshot_files.len() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed code graph page count does not match its snapshot".to_owned(),
+        ));
+    }
+    for (
+        (file_key, page_occurrence, page_path, size_bytes),
+        (snapshot_key, snapshot_occurrence, snapshot_path),
+    ) in pages.zip(snapshot_files)
+    {
+        let snapshot_key = u32::try_from(snapshot_key).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed code graph page key exceeds u32".to_owned(),
+            )
+        })?;
+        if file_key != snapshot_key
+            || page_occurrence != snapshot_occurrence
+            || page_path != snapshot_path
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed code graph pages are not canonically keyed".to_owned(),
+            ));
+        }
+        if size_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed code graph page segment is empty".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<PartitionedPublishedGenerationV1, CodeIndexProductionErrorV1> {
@@ -1444,6 +1565,22 @@ fn parse_partitioned_manifest(
             .pages
             .iter()
             .map(|page| (page.page_ordinal, page.page_size_bytes)),
+    )?;
+    validate_code_graph_page_layout(
+        generation.code_graph_pages.iter().map(|page| {
+            (
+                page.file_key,
+                &page.file_occurrence_id,
+                page.logical_path.as_str(),
+                page.size_bytes,
+            )
+        }),
+        generation
+            .snapshot
+            .files
+            .iter()
+            .enumerate()
+            .map(|(key, file)| (key, &file.file_occurrence_id, file.logical_path.as_str())),
     )?;
     Ok(generation)
 }
@@ -1759,7 +1896,6 @@ pub(super) const FILE_WINDOW_FILES_PER_WORKER_V1: usize = 4;
 /// rows are the caller's to drop before the next window is read.
 pub struct SealedGenerationFileWindowsV1 {
     generation: PartitionedPublishedGenerationV1,
-    scope: FileScopeIdentityV1,
 }
 
 impl std::fmt::Debug for SealedGenerationFileWindowsV1 {
@@ -1777,8 +1913,7 @@ impl SealedGenerationFileWindowsV1 {
     /// file segments. No segment is read.
     pub fn open(manifest_bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
         let generation = parse_partitioned_manifest(manifest_bytes)?;
-        let scope = FileScopeIdentityV1::of(&generation.manifest, &generation.snapshot);
-        Ok(Self { generation, scope })
+        Ok(Self { generation })
     }
 
     #[must_use]
@@ -1796,102 +1931,55 @@ impl SealedGenerationFileWindowsV1 {
         &self.generation.manifest
     }
 
-    /// Every segmented snapshot file with the digest of its segment, in
-    /// manifest order.
-    pub(super) fn segmented_files(
-        &self,
-    ) -> impl Iterator<Item = Result<(&SanitizedCodeFileV1, &ManifestDigest), CodeIndexProductionErrorV1>>
-    {
-        self.generation.file_segments.iter().map(|descriptor| {
-            self.generation
-                .snapshot
-                .files
-                .get(descriptor.file_key as usize)
-                .map(|file| (file, &descriptor.segment_digest))
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation file key is outside its snapshot".to_owned(),
-                    )
-                })
-        })
+    pub(crate) fn code_graph_pages(&self) -> &[PartitionedCodeGraphPageDescriptorV1] {
+        &self.generation.code_graph_pages
     }
 
-    /// Decodes, in manifest order, every file segment `select` admits by its
-    /// file occurrence and segment digest, handing each window's files to
-    /// `visit` with the snapshot record and segment digest each was sealed
-    /// from.
-    pub(super) fn for_each_file_window<E>(
+    pub(crate) fn read_code_graph_page(
         &self,
+        descriptor: &PartitionedCodeGraphPageDescriptorV1,
         read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
-        select: impl Fn(&FileOccurrenceId, &ManifestDigest) -> bool,
-        mut visit: impl FnMut(
-            Vec<(
-                &SanitizedCodeFileV1,
-                ManifestDigest,
-                PersistedFileGenerationArtifactsV1,
-            )>,
-        ) -> Result<(), E>,
-    ) -> Result<(), E>
-    where
-        E: From<CodeIndexProductionErrorV1>,
-    {
-        let selected = self
+    ) -> Result<super::graph_pages::PersistedCodeGraphPageV1, CodeIndexProductionErrorV1> {
+        let expected = self
             .generation
-            .file_segments
-            .iter()
-            .filter(|descriptor| select(&descriptor.file_occurrence_id, &descriptor.segment_digest))
-            .cloned()
-            .collect::<Vec<_>>();
-        let descriptors = selected.as_slice();
-        let window_files = crate::parallelism::indexing_workers()
-            .max(1)
-            .saturating_mul(FILE_WINDOW_FILES_PER_WORKER_V1);
-        let mut buffers = vec![Vec::new(); window_files];
-        let mut start = 0;
-        while start < descriptors.len() {
-            let pending = &descriptors[start..];
-            let read = read_segment_window(
-                pending,
-                &mut buffers,
-                LEXICAL_FILE_PREFETCH_BYTES_V1,
-                |descriptor, segment| {
-                    read_segment(
-                        SealedGenerationSegmentReadV1::Whole {
-                            digest: &descriptor.segment_digest,
-                            size_bytes: descriptor.segment_size_bytes,
-                        },
-                        segment,
-                    )
-                },
-            )?;
-            let window = &pending[..read];
-            let decoded = decode_segment_window(
-                window,
-                &buffers[..read],
-                &self.generation.manifest.generation_id,
-                &self.generation.manifest.snapshot_digest,
-                &self.scope,
-            )?;
-            let files = window
-                .iter()
-                .zip(decoded)
-                .map(|(descriptor, page)| {
-                    self.generation
-                        .snapshot
-                        .files
-                        .get(descriptor.file_key as usize)
-                        .map(|file| (file, descriptor.segment_digest.clone(), page))
-                        .ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "sealed generation file key is outside its snapshot".to_owned(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            start += read;
-            visit(files)?;
+            .code_graph_pages
+            .get(descriptor.file_key as usize)
+            .filter(|expected| *expected == descriptor)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed code graph page descriptor is outside its generation".to_owned(),
+                )
+            })?;
+        let mut encoded = Vec::new();
+        read_segment(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &expected.page_digest,
+                size_bytes: expected.size_bytes,
+            },
+            &mut encoded,
+        )?;
+        verify_segment_identity(
+            &encoded,
+            &expected.page_digest,
+            expected.size_bytes,
+            "sealed code graph page length exceeds u64",
+            "sealed code graph page byte size does not match its manifest",
+            "sealed code graph page digest does not match its manifest",
+        )?;
+        let page: super::graph_pages::PersistedCodeGraphPageV1 = serde_json::from_slice(&encoded)
+            .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed code graph page decoding failed: {error}"
+            ))
+        })?;
+        if page.file.file_occurrence_id != expected.file_occurrence_id
+            || page.file.logical_path != expected.logical_path
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed code graph page identity does not match its descriptor".to_owned(),
+            ));
         }
-        Ok(())
+        Ok(page)
     }
 }
 
@@ -1982,6 +2070,16 @@ impl CodeIndexPublishedGenerationV1 {
                             .map(|file| (&file.file_occurrence_id, (file, descriptor)))
                     })
                     .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let reusable_graph_page_digests = parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .code_graph_pages
+                    .iter()
+                    .map(|page| page.page_digest.clone())
+                    .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
         let file_keys = snapshot_file_keys(
@@ -2094,8 +2192,8 @@ impl CodeIndexPublishedGenerationV1 {
             }
         }
         file_segments.sort_by_key(|segment| segment.file_key);
-        let generation_evidence = PartitionedSegmentEncoderV1::default()
-            .encode_generation_evidence(self, &mut publish_segment)?;
+        let (generation_evidence, code_graph_pages) = PartitionedSegmentEncoderV1::default()
+            .encode_generation_evidence(self, &reusable_graph_page_digests, &mut publish_segment)?;
         let statistics = self.generation_statistics()?;
         let generation = PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -2109,6 +2207,7 @@ impl CodeIndexPublishedGenerationV1 {
             coverage: self.coverage,
             capability: &self.capability,
             generation_evidence: &generation_evidence,
+            code_graph_pages: &code_graph_pages,
         };
         let generation_bytes = hotpath::measure_block!(
             "code_index.sealed_encode.manifest_serialize",
@@ -2197,7 +2296,7 @@ impl CodeIndexPublishedGenerationV1 {
         )?;
         probe.sample();
         let files = &content.files;
-        let (lineage, projection_request, projection_receipt, cross_file_edges) =
+        let (lineage, projection_request, projection_receipt, cross_file_edges, unresolved_calls) =
             hotpath::measure_block!("code_index.restore.evidence_expand", {
                 let symbols =
                     occurrence_roster(files.iter().flat_map(|file| file.artifacts.symbols.iter()));
@@ -2212,7 +2311,13 @@ impl CodeIndexPublishedGenerationV1 {
                     .lineage
                     .expand(&generation.manifest.generation_id, &symbols)?;
                 let cross_file_edges = evidence.cross_file_edges.expand(&symbols)?;
-                Ok::<_, CodeIndexProductionErrorV1>((lineage, request, receipt, cross_file_edges))
+                Ok::<_, CodeIndexProductionErrorV1>((
+                    lineage,
+                    request,
+                    receipt,
+                    cross_file_edges,
+                    evidence.unresolved_calls,
+                ))
             })?;
         probe.sample();
         assemble_published_generation(
@@ -2229,6 +2334,7 @@ impl CodeIndexPublishedGenerationV1 {
                 projection_request,
                 projection_receipt,
                 cross_file_edges,
+                unresolved_calls,
             },
             probe,
         )
@@ -2265,6 +2371,12 @@ impl CodeIndexPublishedGenerationV1 {
             digest: generation.generation_evidence.segment_digest,
             size_bytes: generation.generation_evidence.segment_size_bytes,
         });
+        identities.extend(generation.code_graph_pages.into_iter().map(|page| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: page.page_digest,
+                size_bytes: page.size_bytes,
+            }
+        }));
         Ok(identities)
     }
 
@@ -2321,7 +2433,29 @@ impl CodeIndexPublishedGenerationV1 {
                 .iter()
                 .map(|page| (page.page_ordinal, page.page_size_bytes)),
         )?;
-        let mut identities = Vec::with_capacity(generation.file_segments.len().saturating_add(1));
+        validate_code_graph_page_layout(
+            generation.code_graph_pages.iter().map(|page| {
+                (
+                    page.file_key,
+                    &page.file_occurrence_id,
+                    page.logical_path.as_str(),
+                    page.size_bytes,
+                )
+            }),
+            generation
+                .snapshot
+                .files
+                .iter()
+                .enumerate()
+                .map(|(key, file)| (key, &file.file_occurrence_id, file.logical_path.as_str())),
+        )?;
+        let mut identities = Vec::with_capacity(
+            generation
+                .file_segments
+                .len()
+                .saturating_add(generation.code_graph_pages.len())
+                .saturating_add(1),
+        );
         for segment in generation.file_segments {
             identities.push(SealedGenerationSegmentIdentityV1 {
                 digest: segment.segment_digest,
@@ -2332,6 +2466,12 @@ impl CodeIndexPublishedGenerationV1 {
             digest: generation.generation_evidence.segment_digest,
             size_bytes: generation.generation_evidence.segment_size_bytes,
         });
+        identities.extend(generation.code_graph_pages.into_iter().map(|page| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: page.page_digest,
+                size_bytes: page.size_bytes,
+            }
+        }));
         Ok(Some(identities))
     }
 
@@ -2373,7 +2513,26 @@ impl CodeIndexPublishedGenerationV1 {
                 ))
             })
         })?;
-        evidence.finish()
+        evidence.finish()?;
+        for descriptor in &generation.code_graph_pages {
+            segment.clear();
+            read_segment(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &descriptor.page_digest,
+                    size_bytes: descriptor.size_bytes,
+                },
+                &mut segment,
+            )?;
+            verify_segment_identity(
+                &segment,
+                &descriptor.page_digest,
+                descriptor.size_bytes,
+                "sealed code graph page length exceeds u64",
+                "sealed code graph page byte size does not match its manifest",
+                "sealed code graph page digest does not match its manifest",
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -2392,8 +2551,16 @@ mod tests {
                 "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
                 "snapshot": {
                     "files": [
-                        { "file_occurrence_id": FIXTURE_FILE, "disposition": "present" },
-                        { "file_occurrence_id": "file.partitioned.missing", "disposition": "present" }
+                        {
+                            "file_occurrence_id": FIXTURE_FILE,
+                            "logical_path": "src/lib.rs",
+                            "disposition": "present"
+                        },
+                        {
+                            "file_occurrence_id": "file.partitioned.missing",
+                            "logical_path": "src/missing.rs",
+                            "disposition": "present"
+                        }
                     ]
                 },
                 "file_segments": [{
@@ -3057,15 +3224,18 @@ mod tests {
                     assert_eq!(segment_size_bytes, expected.len() as u64);
                     assert_eq!(page_count as usize, published_pages.len());
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())
         };
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         serde_json::to_writer(&mut writer, &evidence).expect("paged evidence encode");
-        let descriptor = writer.finish().expect("paged evidence finish");
+        let descriptor = writer
+            .finish(u64::try_from(expected.len()).expect("evidence length"))
+            .expect("paged evidence finish");
         drop(writer);
 
         assert_eq!(pack, expected, "page boundaries must not move a byte");
@@ -3206,8 +3376,9 @@ mod tests {
                 SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
                     commits += 1;
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())
@@ -3263,15 +3434,19 @@ mod tests {
                 SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
                     commits += 1;
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())
         };
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         serde_json::to_writer(&mut writer, &evidence).expect("large paged evidence encode");
-        let descriptor = writer.finish().expect("large paged evidence finish");
+        let evidence_size_bytes = writer.position();
+        let descriptor = writer
+            .finish(evidence_size_bytes)
+            .expect("large paged evidence finish");
         let peak_page_capacity = writer.peak_page_capacity;
         let peak_retained_owned_bytes = writer.peak_retained_owned_bytes;
         drop(writer);

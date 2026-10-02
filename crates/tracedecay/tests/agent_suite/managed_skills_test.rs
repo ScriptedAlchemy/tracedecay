@@ -1,10 +1,10 @@
 use tracedecay_automation_runtime::automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillExt, ManagedSkillProvenance,
-    ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
-    ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_update, archive_managed_skill,
-    create_managed_skill, disable_managed_skill, list_managed_skills, load_managed_skill,
-    managed_skill_dir, restore_managed_skill, save_managed_skill, set_managed_skill_pinned,
-    set_managed_skill_state, update_managed_skill,
+    ManagedSkillReadError, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_update,
+    archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
+    load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
+    set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
@@ -398,8 +398,8 @@ async fn managed_skill_record_without_timestamps_is_refused_unchanged() {
     let error = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap_err();
-    let TraceDecayError::Config { message } = error else {
-        panic!("a record without timestamps must be a typed Config refusal: {error:?}");
+    let ManagedSkillReadError::Failed(TraceDecayError::Config { message }) = error else {
+        panic!("a record without timestamps is a store refusal, not a missing skill: {error:?}");
     };
     assert!(
         message.contains("missing field `created_at`"),

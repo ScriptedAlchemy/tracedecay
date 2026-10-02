@@ -438,6 +438,11 @@ fn encode_once(
             SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+            }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 evidence_pack.extend_from_slice(bytes);
             }

@@ -1213,6 +1213,19 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .await;
     assert_eq!(status(&unauthenticated), StatusCode::UNAUTHORIZED);
     assert!(runtime.remote_recovery_authority(&node_id).await.is_none());
+    let unauthenticated_publication = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/writer-authority",
+        None,
+        Some(&origin),
+        "{}",
+    )
+    .await;
+    assert_eq!(
+        status(&unauthenticated_publication),
+        StatusCode::UNAUTHORIZED
+    );
 
     let authenticated = request_path_body(
         &service,

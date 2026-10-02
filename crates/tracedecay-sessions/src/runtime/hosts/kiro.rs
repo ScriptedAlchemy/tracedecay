@@ -41,7 +41,7 @@ use crate::runtime::snapshot_observation::canonical_snapshot_envelope;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
     SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
-    non_durable_snapshot_record, read_snapshot_text_bounded,
+    insert_snapshot_location, non_durable_snapshot_record, read_snapshot_text_bounded,
 };
 use crate::runtime::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
@@ -846,7 +846,11 @@ pub fn normalize_kiro_snapshot_observations(
         .map(|message| {
             let order = u64::try_from(message.ordinal)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-            let payload = snapshot_native_payload(KiroSnapshotMessage {
+            let metadata = message
+                .metadata_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok());
+            let mut payload = snapshot_native_payload(KiroSnapshotMessage {
                 session_id: &message.session_id,
                 message_id: &message.message_id,
                 role: &message.role,
@@ -855,9 +859,11 @@ pub fn normalize_kiro_snapshot_observations(
                 text: &message.text,
                 kind: message.kind.as_deref(),
                 model: message.model.as_deref(),
-            })
-            .to_string()
-            .into_bytes();
+            });
+            if let Some(map) = payload.as_object_mut() {
+                insert_snapshot_location(map, metadata.as_ref(), KIRO_LOCATION_KEYS);
+            }
+            let payload = payload.to_string().into_bytes();
             Ok(KiroSnapshotObservationRecord {
                 session_id: message.session_id.clone(),
                 native_record_id: message.message_id.clone(),

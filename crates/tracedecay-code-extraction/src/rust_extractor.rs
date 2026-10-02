@@ -1875,19 +1875,21 @@ impl RustExtractor {
                             // Receiver spelling is not target authority. The field
                             // node owns the member identity and exact token site,
                             // independently of comments or whitespace after `.`.
-                            let (callee_name, position) = receiver.map_or_else(
-                                || (state.node_text(callee).to_owned(), child.start_position()),
-                                |(value, field)| {
-                                    (
-                                        format!(
-                                            "{}.{}",
-                                            state.node_text(value),
-                                            state.node_text(field)
-                                        ),
-                                        field.start_position(),
-                                    )
-                                },
-                            );
+                            let (callee_name, position) = match receiver {
+                                Some((value, field)) => (
+                                    format!(
+                                        "{}.{}",
+                                        state.node_text(value),
+                                        state.node_text(field)
+                                    ),
+                                    field.start_position(),
+                                ),
+                                None => (
+                                    Self::self_path_callee(state, member_callee)
+                                        .unwrap_or_else(|| state.node_text(callee).to_owned()),
+                                    child.start_position(),
+                                ),
+                            };
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
                                 reference_name: callee_name,
@@ -1960,6 +1962,24 @@ impl RustExtractor {
                 }
             }
         }
+    }
+
+    /// `Type::function` for a `Self::function(..)` callee inside an impl or
+    /// trait, the only spelling of that path the resolver can bind.
+    fn self_path_callee(state: &ExtractionState<'_>, callee: TsNode<'_>) -> Option<String> {
+        if callee.kind() != "scoped_identifier" {
+            return None;
+        }
+        let path = callee.child_by_field_name("path")?;
+        let name = callee.child_by_field_name("name")?;
+        if state.node_text(path) != "Self" {
+            return None;
+        }
+        Some(format!(
+            "{}::{}",
+            Self::enclosing_receiver_type(state)?,
+            state.node_text(name)
+        ))
     }
 
     /// `Type::method` for a `binding.method(..)` callee whose binding has one

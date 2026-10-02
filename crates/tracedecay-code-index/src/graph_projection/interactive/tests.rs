@@ -1135,7 +1135,13 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
     let held = store
         .interactive_catalog_bytes()
         .expect("a warmed catalog reports the bytes it holds");
-    assert!(held > 0, "a warmed catalog holds resident bytes");
+    // Table sizing follows the target's hash group width, so the exact figure
+    // is per-architecture; the catalog still holds every id it serves.
+    let served_id_bytes = before.iter().map(|id| id.len() as u64).sum::<u64>();
+    assert!(
+        held >= served_id_bytes,
+        "the catalog holds {held} bytes, less than the {served_id_bytes} bytes of ids it serves"
+    );
 
     assert_eq!(
         store.release_interactive_catalog(),

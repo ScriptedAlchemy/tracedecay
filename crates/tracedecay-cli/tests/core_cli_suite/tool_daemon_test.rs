@@ -1258,22 +1258,79 @@ fn delivery_receipt_refusal_after_the_event_spooled_is_not_a_failed_capture() {
 
     assert_capture_transport_response("stop spooled without receipt", &output, 0);
     assert_eq!(native_capture_pending_records(&data_root, host), 1);
-    let completed = hook_row_attribution(&hook_analytics_rows(
-        &data_root.join("hook_analytics.jsonl"),
-    ))
-    .into_iter()
-    .filter(|row| row.0 == "hook_completed")
-    .collect::<Vec<_>>();
     assert_eq!(
-        completed,
+        completed_capture_rows(&data_root),
         vec![attribution(
             "hook_completed",
             "cursor",
             "stop",
             json!("conv-receipt"),
-            json!("hook_v2_spooled_delivery_receipt_unavailable"),
+            json!("hook_v2_spooled_delivery_receipt_failed_unsafe_path"),
         )]
     );
+}
+
+#[test]
+fn a_full_delivery_receipt_spool_refuses_the_receipt_of_a_spooled_event() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = NativeHostIdentityV1::CursorDesktop;
+    let data_root =
+        enroll_native_capture_project(&home_path, &project_path, "proj_capture_receipt_full");
+    let receipt_root = tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host);
+    drop(
+        tracedecay_hooks::HookDeliveryReceiptWriterV1::open_within(
+            &receipt_root,
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+        )
+        .unwrap(),
+    );
+    for index in 0..1_024_u32 {
+        std::fs::write(
+            receipt_root.join(format!("{index:032x}.delivery.v1.json")),
+            b"{}",
+        )
+        .unwrap();
+    }
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-stop",
+        &json!({
+            "conversation_id": "conv-receipt-full",
+            "generation_id": "gen-receipt-full",
+            "hook_event_name": "stop",
+            "model": "auto",
+            "status": "completed",
+            "loop_count": 0,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    assert_capture_transport_response("stop spooled with a full receipt spool", &output, 0);
+    assert_eq!(native_capture_pending_records(&data_root, host), 1);
+    assert_eq!(
+        completed_capture_rows(&data_root),
+        vec![attribution(
+            "hook_completed",
+            "cursor",
+            "stop",
+            json!("conv-receipt-full"),
+            json!("hook_v2_spooled_delivery_receipt_refused_full"),
+        )]
+    );
+}
+
+fn completed_capture_rows(data_root: &Path) -> Vec<(String, String, String, Value, Value)> {
+    hook_row_attribution(&hook_analytics_rows(
+        &data_root.join("hook_analytics.jsonl"),
+    ))
+    .into_iter()
+    .filter(|row| row.0 == "hook_completed")
+    .collect()
 }
 
 /// Connects an authenticated project client and completes `initialize`,
@@ -3417,8 +3474,8 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     assert!(
         lines.contains(
             &"service manager: unreachable from this shell (check XDG_RUNTIME_DIR and \
-              DBUS_SESSION_BUS_ADDRESS): systemctl --user is-active tracedecay.service reported \
-              no unit state (exit status: 1): Failed to connect to bus: No medium found"
+              DBUS_SESSION_BUS_ADDRESS): systemctl --user show --property=FragmentPath \
+              tracedecay.service failed (exit status: 1): Failed to connect to bus: No medium found"
         ),
         "{stdout}"
     );

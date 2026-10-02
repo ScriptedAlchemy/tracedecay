@@ -1222,6 +1222,7 @@ async fn execute_app_server<S>(
                 egress,
             },
         )
+        .map_err(tracedecay_domain::errors::TraceDecayError::from)
         .and_then(|summary| {
             let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
                 provider_id,

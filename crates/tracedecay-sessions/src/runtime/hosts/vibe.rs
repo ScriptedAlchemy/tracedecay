@@ -278,6 +278,7 @@ async fn capture_vibe_path(
     .with_cancellation(cancellation.clone());
     let native_session_id = meta.session_id;
     let model = meta.model;
+    let location = meta.working_directory.to_string_lossy().into_owned();
 
     admit_jsonl_observations(
         request,
@@ -294,6 +295,7 @@ async fn capture_vibe_path(
                         &native,
                         &canonical_session_id,
                         model.as_deref(),
+                        Some(location.as_str()),
                         native_record_id.clone(),
                         range,
                     )
