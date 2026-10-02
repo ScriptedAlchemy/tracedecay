@@ -107,8 +107,8 @@ mod graph_page_store;
 mod graph_pages;
 use changed_resolution::{GraphResolutionOutputsV1, edge_evidence_over_parent};
 pub(crate) use graph_page_store::{
-    CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1,
-    FileCodeGraphPageStoreV1, SealedCodeGraphPageStoreV1,
+    CodeGraphPageBuildFootprintV1, CodeGraphPageDescriptorV1, CodeGraphPageStoreV1,
+    CodeGraphPageStoreWriterV1, FileCodeGraphPageStoreV1, SealedCodeGraphPageStoreV1,
 };
 pub(crate) use graph_pages::PersistedCodeGraphPageV1;
 mod partitioned_codec;

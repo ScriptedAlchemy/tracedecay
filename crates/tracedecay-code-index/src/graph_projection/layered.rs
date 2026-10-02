@@ -447,7 +447,10 @@ mod tests {
             logical_path: path.to_owned(),
             page_digest,
             size_bytes: 1,
-            build_footprint: Default::default(),
+            build_footprint: crate::production::CodeGraphPageBuildFootprintV1 {
+                decode_bytes: 1,
+                ..Default::default()
+            },
         };
         let page = PersistedCodeGraphPageV1 {
             file: SanitizedCodeFileV1 {
@@ -517,9 +520,16 @@ mod tests {
         )
     }
 
-    fn changed_reads(unrelated: usize) -> (Vec<String>, Vec<String>) {
+    fn changed_reads(unrelated: usize) -> (Vec<String>, Vec<String>, CodeGraphBuildBoundV1) {
         let (mut child, mut base) = stores(unrelated);
         let plan = changed_page_plan(child.pages(), base.pages()).expect("changed page plan");
+        let bound = layered_page_graph_build_bound(
+            plan.changed
+                .iter()
+                .map(|page| (page.child.as_ref(), page.base.as_ref())),
+            base.pages(),
+            "fixture".len(),
+        );
         for_each_changed_page(&plan, &mut child, &mut base, &|| Ok(()), |_| Ok(()))
             .expect("materialize changed pages");
         let expected_child = plan
@@ -534,7 +544,7 @@ mod tests {
             .count();
         assert_eq!(child.reads.len(), expected_child);
         assert_eq!(base.reads.len(), expected_base);
-        (child.reads, base.reads)
+        (child.reads, base.reads, bound)
     }
 
     #[test]
