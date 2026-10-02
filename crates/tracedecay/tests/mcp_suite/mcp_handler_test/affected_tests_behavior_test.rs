@@ -4,7 +4,6 @@
 //! `cargo test` runner. Assertions are the JSON the caller reads, not which
 //! helper the handler invoked.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -512,9 +511,6 @@ async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_
         .begin_managed_test_run(
             root_uri,
             mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id"),
-            None,
-            None,
-            BTreeMap::new(),
             deadline.clone(),
         )
         .await

@@ -483,7 +483,7 @@ function costDetail(cost: RequestCostReceiptV1): string {
     `${cost.point_reads.graph_sealed} sealed-store and ${cost.point_reads.graph_staging} ` +
     `staging-store point reads, ${cost.adjacency_queries} adjacency queries returning ` +
     `${cost.adjacency_rows} rows, ${cost.bytes_hydrated} bytes hydrated, ` +
-    `${cost.catalog_symbols} catalog symbols, ${cost.wall_micros} µs wall`
+    `${cost.wall_micros} µs wall`
   );
 }
 
