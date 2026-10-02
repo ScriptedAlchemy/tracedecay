@@ -204,7 +204,30 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    assert_eq!(ingest["messages_upserted"], 2, "ingest: {ingest}");
+    // Admission is this pass's commit. `messages_upserted` counts only what
+    // this pass's own projection drain materialized, and the project catch-up
+    // drains the same queue, so the transcript is proven by what reads see.
+    assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
+    let envelope = answer_tool(
+        &fixture,
+        "tracedecay_message_search",
+        json!({
+            "provider": "cursor",
+            "query": "billing ingestion",
+            "require_fresh": false,
+        }),
+    )
+    .await;
+    let found = envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&envelope);
+    assert_eq!(found["status"], "ok", "message search: {found}");
+    assert!(
+        found["results"].as_array().is_some_and(|results| results
+            .iter()
+            .any(|row| row["session"]["session_id"] == "cursor-session")),
+        "ingested Cursor transcript must be readable: {found}"
+    );
     assert_eq!(
         ingest["hint_outcomes"],
         json!({
