@@ -789,6 +789,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shipped_v13_profile_remains_admissible_for_projector_rebuild() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 13, 123);",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            require_admissible_lcm_schema(&*conn)
+                .await
+                .map_err(|error| error.to_string())?,
+            LcmSchemaAdmission::Current
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn incompatible_profile_requires_reset_without_mutating_schema() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));

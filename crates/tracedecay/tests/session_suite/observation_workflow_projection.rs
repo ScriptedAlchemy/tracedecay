@@ -777,11 +777,8 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
 }
 
-/// Session search keeps each typed workflow fact as its own row, even when the
-/// observation's message repeats the task text, while a goal fact rendered as
-/// its observation's goal row surfaces once.
 #[tokio::test]
-async fn search_keeps_typed_workflow_facts_beside_their_transcript_row() {
+async fn search_returns_one_row_per_observation_before_applying_limit() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -815,27 +812,27 @@ async fn search_keeps_typed_workflow_facts_beside_their_transcript_row() {
         ],
     );
     let cursor = persist_and_project(&store, summary, None).await;
-    let goal = observation(
+    let follow_up = observation(
         FIXTURE_SESSION,
-        "record.release-goal",
+        "record.release-follow-up",
         2,
         vec![lifecycle(WorkflowLifecycleFixture {
-            semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-            reference: "goal.native.release",
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference: "task.native.follow-up",
             item_id: None,
             list_reference: None,
-            status: Some("active"),
-            item_order: None,
+            status: Some("pending"),
+            item_order: Some(2),
             event_sequence: None,
-            text: "release goal ships",
+            text: "release follow-up",
         })],
     );
-    persist_and_project(&store, goal, Some(cursor)).await;
+    persist_and_project(&store, follow_up, Some(cursor)).await;
 
     let mut hits = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database")
-        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 10)
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 2)
         .await
         .expect("search release observations")
         .into_iter()
@@ -845,10 +842,11 @@ async fn search_keeps_typed_workflow_facts_beside_their_transcript_row() {
     assert_eq!(
         hits,
         [
-            ("goal", "release goal ships"),
-            ("message", "release summary repeats release task alpha"),
-            ("task", "release task alpha"),
-            ("task", "release task beta"),
+            (
+                "message",
+                "release summary repeats release task alpha\n\nrelease task beta",
+            ),
+            ("task", "release follow-up"),
         ]
         .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
     );
