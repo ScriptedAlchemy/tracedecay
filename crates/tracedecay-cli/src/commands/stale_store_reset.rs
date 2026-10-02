@@ -109,8 +109,8 @@ fn reset_stores(profile_root: &Path, targets: &[ResettableStoreV1]) -> Result<()
     for target in targets {
         if *target == ResettableStoreV1::ProfileAuthority {
             println!(
-                "resetting the profile authority loses the project registry, profile \
-                 configuration and usage accounting it holds; every project store (code index, \
+                "resetting the profile authority loses the project registry, usage accounting \
+                 and remote-deletion records it holds; every project store (code index, \
                  graph, sessions, memory) stays in place"
             );
         }

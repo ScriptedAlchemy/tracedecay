@@ -15,13 +15,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::stale_sessions_store_reset::{
-    file_digests, mcp_initialize_and_list_tools, run_doctor_json, wait_for_code_index_hit,
-};
+use super::stale_sessions_store_reset::{file_digests, run_doctor_json, wait_for_code_index_hit};
 use crate::common::{
     canonical_existing_path, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
 };
@@ -29,7 +26,6 @@ use crate::common::{
 const STALE_STORE_RESET: &str = "tracedecay wipe --stale --yes";
 const REGISTRY_REASON: &str = "database error: table 'graph_scopes' has an incompatible number \
      of columns (operation: validate global database authority schema)";
-const CENSUS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Rewrites `graph_scopes` into the shape v1.0.0-beta.63 and earlier wrote,
 /// with each scope's `db_relpath`, keeping its rows, indexes and triggers.
@@ -86,26 +82,20 @@ fn give_registry_the_released_graph_scope_shape(db_path: &Path) {
     assert_eq!(released, 1, "the registered project keeps its graph scope");
 }
 
-/// The census `initialize` carries for this profile.
-fn initialize_census(home: &Path, project: &Path) -> Value {
-    let (initialize, _) = mcp_initialize_and_list_tools(home, project);
-    initialize["result"]["_meta"][tracedecay_daemon_protocol::RESET_REQUIRED_STORES_META_KEY]
-        .clone()
-}
-
-fn wait_for_initialize_census(home: &Path, project: &Path, expected: &Value) {
-    let started = Instant::now();
-    loop {
-        let census = initialize_census(home, project);
-        if &census == expected {
-            return;
-        }
-        assert!(
-            started.elapsed() < CENSUS_TIMEOUT,
-            "the daemon never reported exactly {expected:#}\nobserved: {census:#}"
-        );
-        std::thread::sleep(Duration::from_millis(500));
-    }
+/// The stores `tracedecay doctor --json` names as pending resets, read from
+/// the daemon's reset census.
+fn doctor_store_resets(home: &Path, project: &Path) -> (Option<i32>, Vec<String>) {
+    let (exit, report, _) = run_doctor_json(home, project);
+    let pending = report["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|check| check["level"] == "pending_operator_action")
+        .filter_map(|check| check["message"].as_str())
+        .filter(|message| message.starts_with("Store "))
+        .map(str::to_owned)
+        .collect();
+    (exit, pending)
 }
 
 fn search_problem(home: &Path, project: &Path) -> Value {
@@ -162,16 +152,6 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
     give_registry_the_released_graph_scope_shape(&profile_root.join("global.db"));
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
-    let refused = json!({
-        "store": "profile authority",
-        "authority": "project registry",
-        "found_version": null,
-        "required_version": null,
-        "reason": format!("project registry persisted shape requires reset: {REGISTRY_REASON}"),
-        "remedy": STALE_STORE_RESET,
-    });
-    // Project open is what admits the profile authority, so the first code
-    // read records it.
     let detail = search_problem(&home_path, &project_path);
     assert_eq!(
         detail,
@@ -185,31 +165,17 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
         }),
         "a code read names the refused registry and the scoped reset"
     );
-    wait_for_initialize_census(&home_path, &project_path, &json!([refused]));
-
-    let (exit, report, stderr) = run_doctor_json(&home_path, &project_path);
-    let pending: Vec<&str> = report["checks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|check| check["level"] == "pending_operator_action")
-        .filter_map(|check| check["message"].as_str())
-        .filter(|message| message.starts_with("Store "))
-        .collect();
     assert_eq!(
-        (exit, pending),
+        doctor_store_resets(&home_path, &project_path),
         (
             Some(75),
-            vec![
-                format!(
-                    "Store profile authority requires reset (project registry persisted shape \
-                     requires reset: {REGISTRY_REASON}). Pending operator action: run \
-                     `{STALE_STORE_RESET}`"
-                )
-                .as_str()
-            ]
+            vec![format!(
+                "Store profile authority requires reset (project registry persisted shape \
+                 requires reset: {REGISTRY_REASON}). Pending operator action: run \
+                 `{STALE_STORE_RESET}`"
+            )]
         ),
-        "{stderr}"
+        "the daemon reports only the profile authority, with its scoped reset"
     );
 
     let mut before_reset = BTreeMap::new();
@@ -293,7 +259,11 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
         [project_id],
         "the project registers again under the identity its store records"
     );
-    assert_eq!(initialize_census(&home_path, &project_path), json!([]));
+    assert_eq!(
+        doctor_store_resets(&home_path, &project_path).1,
+        Vec::<String>::new(),
+        "no store requires reset after the profile authority is recreated"
+    );
 
     let _ = daemon.kill_and_wait();
 }

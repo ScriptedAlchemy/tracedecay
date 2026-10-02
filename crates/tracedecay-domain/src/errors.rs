@@ -223,8 +223,8 @@ pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
 /// by the `store` label [`StoreResetRequiredV1`] carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResettableStoreV1 {
-    /// The profile database (`global.db`): project registry, profile
-    /// configuration, and usage accounting. Project stores keep their own
+    /// The profile database (`global.db`): project registry, usage
+    /// accounting, and remote-deletion records. Project stores keep their own
     /// identity, so its reset leaves every project store intact but
     /// unregistered.
     ProfileAuthority,

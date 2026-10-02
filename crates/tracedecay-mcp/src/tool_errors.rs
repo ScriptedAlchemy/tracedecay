@@ -372,7 +372,7 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
              deleted, nothing is backed up):\n  \
              {command}    deletes only the stores the daemon reports as requiring reset\n\
              the daemon recreates each one empty; resetting the profile authority (global.db) \
-             loses the project registry, profile configuration and usage accounting it holds, \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
              leaves every project store (code index, graph, sessions, memory) in place, and \
              prints the `tracedecay init` command that registers each project again"
         );
@@ -585,7 +585,7 @@ mod tests {
              tracedecay wipe --stale --yes    deletes only the stores the daemon reports as \
              requiring reset\n\
              the daemon recreates each one empty; resetting the profile authority (global.db) \
-             loses the project registry, profile configuration and usage accounting it holds, \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
              leaves every project store (code index, graph, sessions, memory) in place, and \
              prints the `tracedecay init` command that registers each project again"
         );

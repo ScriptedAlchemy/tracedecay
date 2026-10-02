@@ -224,7 +224,7 @@ pub(super) fn wait_for_code_index_hit(home: &Path, project: &Path, symbol: &str)
 }
 
 /// `initialize` then `tools/list` through a real `tracedecay serve` host.
-pub(super) fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) {
+fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) {
     let mut command = tracedecay_command_with_home(home);
     command
         .arg("serve")
