@@ -337,6 +337,7 @@ fn code_query_capability(
                 format!("Query {readable_name}"),
                 match kind {
                     CallableCodeOperationKind::Callees => "What does this call: outgoing calls of a known symbol node ID up to `maximum_depth` (default 3). A callee that is a trait method also returns the concrete impl methods reachable through the trait, tagged `dispatch_via_trait` with `dispatch_from`; set `resolve_trait_dispatch: false` for direct call edges only.".to_owned(),
+                    CallableCodeOperationKind::ExactOccurrence => "Find indexed occurrences of one exact literal in the field its shape picks: an identifier answers chunks declaring a symbol of that name (definition sites), a `::`-qualified name answers qualified names, a path answers file paths, and a technical literal answers its own kind (CLI flags, tool names, dotted configuration keys, commit identifiers, diagnostic codes, error text). This is not a full-text scan: an identifier referenced in many files still reports only its declaring chunks, so `total` and `coverage` describe the exact-term domain, not every textual mention. Use `code_phrase_search` or `grep` for source-text occurrences.".to_owned(),
                     _ => format!(
                         "Invoke the generation-bound query {readable_name} query without replacing its owning kernel."
                     ),
