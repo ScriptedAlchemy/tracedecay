@@ -5996,6 +5996,7 @@ dependencies = [
  "mimalloc",
  "rayon",
  "regex",
+ "reqwest",
  "rusqlite",
  "self-replace",
  "semver",
