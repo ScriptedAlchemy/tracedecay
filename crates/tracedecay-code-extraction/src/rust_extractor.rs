@@ -1875,25 +1875,21 @@ impl RustExtractor {
                             // Receiver spelling is not target authority. The field
                             // node owns the member identity and exact token site,
                             // independently of comments or whitespace after `.`.
-                            let (callee_name, position) = receiver.map_or_else(
-                                || {
-                                    (
-                                        Self::self_path_callee(state, member_callee)
-                                            .unwrap_or_else(|| state.node_text(callee).to_owned()),
-                                        child.start_position(),
-                                    )
-                                },
-                                |(value, field)| {
-                                    (
-                                        format!(
-                                            "{}.{}",
-                                            state.node_text(value),
-                                            state.node_text(field)
-                                        ),
-                                        field.start_position(),
-                                    )
-                                },
-                            );
+                            let (callee_name, position) = match receiver {
+                                Some((value, field)) => (
+                                    format!(
+                                        "{}.{}",
+                                        state.node_text(value),
+                                        state.node_text(field)
+                                    ),
+                                    field.start_position(),
+                                ),
+                                None => (
+                                    Self::self_path_callee(state, member_callee)
+                                        .unwrap_or_else(|| state.node_text(callee).to_owned()),
+                                    child.start_position(),
+                                ),
+                            };
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
                                 reference_name: callee_name,

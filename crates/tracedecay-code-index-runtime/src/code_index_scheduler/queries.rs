@@ -2347,6 +2347,27 @@ fn traversed_relation_symbols(
     Some(traversed)
 }
 
+/// The unbound calls made by the start symbol and every callee the walk
+/// expanded, read from relation identities without hydrating a symbol.
+fn walked_callee_gaps(
+    reader: &CodeGraphInteractiveReader,
+    start: &SymbolOccurrenceId,
+    keys: &[RelationKeyV1],
+    maximum_depth: u32,
+    cancellation: &Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Option<UnresolvedCallerGapsV1> {
+    let walked = std::iter::once(CodeGraphSymbolRefV1::for_occurrence(start).ok()?)
+        .chain(
+            keys.iter()
+                .filter(|key| key.depth < maximum_depth)
+                .map(|key| key.symbol.clone()),
+        )
+        .collect::<Vec<_>>();
+    reader
+        .unresolved_callee_gaps(&walked, Arc::clone(cancellation))
+        .ok()
+}
+
 /// A relation answer that unresolved call sites could extend is partial,
 /// with an omission naming why those sites have no edge.
 fn disclose_unresolved_calls<T>(
@@ -2951,25 +2972,13 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
-            let Ok(seed) = CodeGraphSymbolRefV1::for_occurrence(&start) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
-            };
-            let walked = std::iter::once(seed)
-                .chain(
-                    found
-                        .keys
-                        .iter()
-                        .filter(|key| key.depth < request.maximum_depth)
-                        .map(|key| key.symbol.clone()),
-                )
-                .collect::<Vec<_>>();
-            let Ok(unresolved) = prepared
-                .reader
-                .unresolved_callee_gaps(&walked, Arc::clone(&cancellation))
-            else {
+            let Some(unresolved) = walked_callee_gaps(
+                &prepared.reader,
+                &start,
+                &found.keys,
+                request.maximum_depth,
+                &cancellation,
+            ) else {
                 return unavailable_for_generation(
                     query_finished_at(),
                     prepared.generation().clone(),
