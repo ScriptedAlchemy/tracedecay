@@ -358,6 +358,9 @@ fn prompt_registration_state(prompt: &Path) -> HostBundleRegistrationStateV1 {
 
 fn doctor_check_registration(dc: &mut DoctorCounters, config: &Path, prompt: &Path) {
     match mcp_registration_state(config, None) {
+        HostBundleRegistrationStateV1::Unverifiable => {
+            dc.info("Vibe MCP registration is unverifiable")
+        }
         HostBundleRegistrationStateV1::Current => {
             dc.pass(&format!("MCP server registered in {}", config.display()))
         }

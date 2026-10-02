@@ -186,6 +186,10 @@ fn antigravity_registration_state(
         }
         (HostBundleRegistrationStateV1::Corrupt, _)
         | (_, HostBundleRegistrationStateV1::Corrupt) => HostBundleRegistrationStateV1::Corrupt,
+        (HostBundleRegistrationStateV1::Unverifiable, _)
+        | (_, HostBundleRegistrationStateV1::Unverifiable) => {
+            HostBundleRegistrationStateV1::Unverifiable
+        }
         (HostBundleRegistrationStateV1::Repairable, _)
         | (_, HostBundleRegistrationStateV1::Repairable)
         | (HostBundleRegistrationStateV1::Current, HostBundleRegistrationStateV1::Missing)

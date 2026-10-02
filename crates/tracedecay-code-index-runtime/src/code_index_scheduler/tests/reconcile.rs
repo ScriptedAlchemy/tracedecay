@@ -48,7 +48,7 @@ use super::{
     wait_for_live_complete_generation_by_polling, wait_for_owner, wait_for_owner_pass,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
     wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
-    wait_for_worker_phase, wait_until_serving_seat, write,
+    wait_for_worker_phase, wait_until_serving_seat, with_untouched_fillers, write,
 };
 use crate::{
     code_index::{
@@ -1016,7 +1016,10 @@ async fn wait_for_ready_clone_index(
 
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\n",
+    )]));
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
@@ -1937,9 +1940,11 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
             .reconcile_now()
             .expect("renamed linked-worktree publish"),
     );
+    // A rename adds and removes a path, so the successor builds whole: the
+    // untouched `src/other.rs` reuses its own artifact, the renamed file none.
     assert_eq!(
         registry.byte_pool_stats().parse_chunk_reused,
-        before_rename.parse_chunk_reused,
+        before_rename.parse_chunk_reused + 1,
         "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
     );
 }
@@ -2145,10 +2150,10 @@ fn empty_generation_restart_preserves_project_identity() {
 
 #[test]
 fn one_symbol_unrelated_work_skip() {
-    let fixture = GitFixture::new(&[(
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
         "src/lib.rs",
         "pub fn alpha() -> u32 { 1 }\n\npub fn unrelated() -> u32 { 99 }\n",
-    )]);
+    )]));
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let mut incremental = scheduler(

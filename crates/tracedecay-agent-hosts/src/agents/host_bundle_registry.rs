@@ -22,7 +22,7 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 18] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 19] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -41,6 +41,7 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 18] = [
     HostKindV1::Kilo,
     HostKindV1::Pi,
     HostKindV1::FactoryDroid,
+    HostKindV1::ChatGpt,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,7 +138,11 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Pi => None,
         // Factory Droid's `droid mcp add|remove` registry is its whole
         // integration surface.
-        | HostKindV1::FactoryDroid => None,
+        | HostKindV1::FactoryDroid
+        // ChatGPT's staged portable bundle is receipt-owned source; the host
+        // registers it through its own interactive surfaces, never through a
+        // config file TraceDecay writes.
+        | HostKindV1::ChatGpt => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -170,7 +175,10 @@ pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
             HostComponentV1::Agent,
             HostComponentV1::ContextMcp,
         ],
-        HostKindV1::Hermes | HostKindV1::KimiCode => {
+        // ChatGPT's staged bundle is one component: the portable manifest
+        // pair already carries the MCP servers the host launches, so a
+        // separable MCP component would double-claim the same registration.
+        HostKindV1::Hermes | HostKindV1::KimiCode | HostKindV1::ChatGpt => {
             vec![HostComponentV1::Core]
         }
         // Kiro's production integration owns a supported MCP registration.
@@ -510,6 +518,27 @@ fn component_assets(
             .map(|(relative, body)| {
                 (
                     format!(".claude/plugins/marketplaces/tracedecay/{relative}"),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
+    // ChatGPT's Core bundle owns its portable plugin source as one lifecycle
+    // component under the staged-source path its host flow consumes. Render
+    // through the integration's own renderer so the bytes the transaction
+    // deploys are byte-identical to the ones doctor verifies.
+    if (host, component) == (HostKindV1::ChatGpt, HostComponentV1::Core) {
+        let files = super::chatgpt::rendered_plugin_files(tracedecay_bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        return Ok(files
+            .into_iter()
+            .map(|(relative, body)| {
+                (
+                    format!(
+                        "{}/{relative}",
+                        super::chatgpt::CHATGPT_STAGED_PLUGIN_RELATIVE
+                    ),
                     body.into_bytes(),
                 )
             })

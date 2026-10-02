@@ -776,7 +776,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
 
     let db = registered.as_ref();
     let started = Instant::now();
-    let root_fixture = root_relation_fixture::refresh_sessions(
+    let root_fixture = Box::pin(root_relation_fixture::refresh_sessions(
         db,
         |session| {
             request_context(
@@ -790,7 +790,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         },
         root_sessions,
         observation_count,
-    )
+    ))
     .await?;
     let rebuild_activate_ns = elapsed_ns(started);
     if root_fixture

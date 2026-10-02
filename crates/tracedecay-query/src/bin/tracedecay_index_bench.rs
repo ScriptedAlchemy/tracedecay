@@ -49,7 +49,7 @@
 mod artifact_bench;
 
 use artifact_bench::{
-    ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
+    ActiveControl, AdmittedFile, ApplyingProjectionSink, SealedDrainBounds, decoded_generation,
     default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
     replicate, seal_partitioned,
 };
@@ -64,8 +64,9 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::clones::{CloneBodyEligibilityV1, CloneNormalizationClassV1};
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, PhysicalCodeArtifactPoolStatsV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublishedBuildV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1, PhysicalCodeArtifactPoolStatsV1,
     UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
@@ -271,16 +272,16 @@ fn edit_one_body(files: &[AdmittedFile]) -> Option<(Vec<AdmittedFile>, BTreeSet<
 }
 
 fn build_body_refresh(
-    owner: &mut CodeIndexProductionOwnerV1<MemoryPublicationStore, ApplyingProjectionSink>,
+    owner: &mut CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1, ApplyingProjectionSink>,
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
     edited_files: &[AdmittedFile],
-    increment: &Arc<CodeIndexPublishedGenerationV1>,
+    increment: CodeIndexPublishedBuildV1,
     increment_pool_stats: &PhysicalCodeArtifactPoolStatsV1,
-) -> Result<(Arc<CodeIndexPublishedGenerationV1>, BodyRefreshMetrics), String> {
+) -> Result<(CodeIndexPublishedBuildV1, BodyRefreshMetrics), String> {
     let Some((refresh_files, refresh_paths)) = edit_one_body(edited_files) else {
         return Ok((
-            Arc::clone(increment),
+            increment,
             BodyRefreshMetrics {
                 state: "unavailable",
                 changed_path: None,
@@ -363,12 +364,9 @@ fn build_generations(
     clone_envelope: bool,
     control: &ActiveControl,
 ) -> Result<GenerationRun, String> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemoryPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .map_err(|error| format!("open production owner: {error}"))?;
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| format!("open production owner: {error}"))?;
     let clean_request = build_request(
         repository,
         sanitizer_revision,
@@ -382,7 +380,7 @@ fn build_generations(
         .build_and_publish(clean_request, control)
         .map_err(|error| format!("build clean generation: {error}"))?;
     let clean_wall = clean_started.elapsed();
-    let clean_chunks = clean.chunks().chunks().len() as u64;
+    let clean_chunks = clean.publication().chunk_count();
     let clean_pool_stats = owner.physical_artifact_pool_stats();
     let clean_parse_stats = owner.retained_parse_stats();
 
@@ -422,7 +420,7 @@ fn build_generations(
             repository,
             sanitizer_revision,
             &edited,
-            &increment,
+            increment,
             &increment_pool_stats,
         )?
     } else {
@@ -439,7 +437,7 @@ fn build_generations(
         )
     };
     Ok(GenerationRun {
-        generation,
+        generation: decoded_generation(&store, &generation)?,
         edited_files,
         clean_chunks,
         clean_wall,

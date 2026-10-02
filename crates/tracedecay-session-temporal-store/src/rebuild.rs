@@ -165,12 +165,10 @@ async fn require_unsettled_message_ids(
             let message_id: String = row
                 .get(0)
                 .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-            Err(storage_message(
-                ACTIVATE_OPERATION,
-                format!(
-                    "session-scoped message id {message_id} resolves to more than one occurrence"
-                ),
-            ))
+            Err(SessionStoreError::AmbiguousMessageOccurrence {
+                message_id,
+                occurrences: 2,
+            })
         }
         None => Ok(()),
     }

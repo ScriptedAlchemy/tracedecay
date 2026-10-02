@@ -361,6 +361,7 @@ impl CatalogHostComponentRegistrationAuthority {
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Repairable => 2,
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Missing => 3,
                     crate::agents::host_bundle::HostBundleRegistrationStateV1::Corrupt => 4,
+                    crate::agents::host_bundle::HostBundleRegistrationStateV1::Unverifiable => 5,
                 }]);
             }
         }
@@ -704,16 +705,20 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Install
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => {
-                if component_set.host == crate::agents::host_bundle::HostKindV1::KimiCode {
+                if matches!(
+                    component_set.host,
+                    crate::agents::host_bundle::HostKindV1::KimiCode
+                ) {
                     match self
                         .integration
                         .preflight_non_interactive_install(&self.context)
                         .map_err(|error| Self::registration_error(component_set.host, error))?
                     {
                         crate::agents::NonInteractiveInstallOutcome::Ready => None,
-                        // Kimi's interactive `/plugins install` consumes the
-                        // staged source, so the transaction must still commit
-                        // it; the registration stays untouched.
+                        // These interactive-activation hosts consume the
+                        // staged source through their own install flow, so
+                        // the transaction must still commit it; the
+                        // registration stays untouched.
                         crate::agents::NonInteractiveInstallOutcome::DeferredUserAction(action) => {
                             self.should_apply = false;
                             self.deferred_activation = Some(action);

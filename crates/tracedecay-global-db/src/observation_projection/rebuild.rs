@@ -589,6 +589,7 @@ async fn project_observation_in_transaction_with_session(
             ObservationProjection::Skipped(
                 ProjectionSkipReason::InvalidContract
                     | ProjectionSkipReason::NativeSourceSuperseded
+                    | ProjectionSkipReason::SourceRecordRetired
             )
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)
@@ -624,7 +625,9 @@ async fn project_observation_in_transaction_with_session(
     if !matches!(
         effect,
         ObservationProjection::Skipped(
-            ProjectionSkipReason::InvalidContract | ProjectionSkipReason::NativeSourceSuperseded
+            ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::NativeSourceSuperseded
+                | ProjectionSkipReason::SourceRecordRetired
         )
     ) {
         record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
@@ -856,6 +859,7 @@ async fn stage_projection_rebuild_batch_transaction(
             ObservationProjection::Skipped(
                 ProjectionSkipReason::InvalidContract
                     | ProjectionSkipReason::NativeSourceSuperseded
+                    | ProjectionSkipReason::SourceRecordRetired
             )
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)

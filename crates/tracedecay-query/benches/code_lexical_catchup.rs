@@ -4,17 +4,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+    CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
     SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
@@ -24,13 +23,12 @@ use tracedecay_code_index::projection::{
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, FileOccurrenceId,
-    FreshnessCompatibilityV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey,
-    SourceNamespace, UtcMicros,
+    ChunkerRevision, ComponentRevision, FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalCloneRouteV1,
@@ -49,44 +47,6 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
-    }
-}
-
-#[derive(Default)]
-struct PublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for PublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("benchmark publication lock")
-            .get(scope)
-            .map(Arc::clone))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("benchmark publication lock");
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
     }
 }
 
@@ -290,19 +250,24 @@ fn build_fixture() -> Fixture {
         max_snapshot_age_micros: None,
     };
     let control = ActiveControl;
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config, PublicationStore::default(), ProjectionSink)
-            .expect("build deterministic production fixture owner");
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config,
+        MemorySealedPublicationStoreV1::default(),
+        ProjectionSink,
+    )
+    .expect("build deterministic production fixture owner");
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
     let manifest = generation
-        .encode_partitioned_sealed(|publication| {
+        .publication()
+        .encode(None, |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {

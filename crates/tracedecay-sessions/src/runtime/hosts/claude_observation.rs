@@ -724,6 +724,19 @@ where
     }
 
     let generation = ObservationSourceGenerationV1::new(scan.file_generation)?;
+    if let Some(previous) = observation_cursor
+        .as_ref()
+        .map(ObservationSourceCursorV1::generation)
+        && previous != generation
+    {
+        let (ClaudeFrameCoverage::Complete { start_offset, .. }
+        | ClaudeFrameCoverage::Deferred { start_offset, .. }) = coverage;
+        context
+            .admission
+            .begin_source_rewrite(&source, context.scope, previous, generation, start_offset)
+            .await
+            .map_err(|outcome| host_admission_error("claude", outcome))?;
+    }
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     let capture_context = FrameCaptureContext {
         source,
@@ -1104,42 +1117,59 @@ async fn process_source<A>(
 where
     A: HostAdmission + ?Sized,
 {
-    match prepare_source(context, path, max_new_bytes).await? {
-        SourcePreparation::Finished(stats) => Ok(stats),
-        SourcePreparation::Ready(prepared) => {
-            match apply_prepared_source_windowed(*prepared, context.admission, context.cancellation)
-                .await
-            {
-                Ok(stats) => Ok(stats),
-                Err(ClaudeWindowedCaptureFailure::Error(error)) => Err(error),
-                Err(ClaudeWindowedCaptureFailure::ScalarReplay(committed)) => {
-                    // Nothing from the refused window committed, so a fresh
-                    // scan from the durable cursor reproduces exactly the
-                    // uncaptured tail; per-frame capture then lands typed
-                    // rejected/quarantined coverage for the offending record.
-                    let replay = match prepare_source(context, path, max_new_bytes).await {
-                        Ok(SourcePreparation::Finished(stats)) => stats,
-                        Ok(SourcePreparation::Ready(prepared)) => {
-                            match apply_prepared_source(
-                                *prepared,
-                                context.admission,
-                                context.cancellation,
-                            )
-                            .await
-                            {
-                                Ok(stats) => stats,
-                                Err(error) => {
-                                    return Err(merge_committed_into_error(committed, error));
-                                }
+    let prepared = match prepare_source(context, path, max_new_bytes).await? {
+        SourcePreparation::Finished(stats) => return Ok(stats),
+        SourcePreparation::Ready(prepared) => prepared,
+    };
+    let source = prepared.capture_context.source.clone();
+    let generation = prepared.capture_context.generation;
+    let stats =
+        match apply_prepared_source_windowed(*prepared, context.admission, context.cancellation)
+            .await
+        {
+            Ok(stats) => stats,
+            Err(ClaudeWindowedCaptureFailure::Error(error)) => return Err(error),
+            Err(ClaudeWindowedCaptureFailure::ScalarReplay(committed)) => {
+                // Nothing from the refused window committed, so a fresh
+                // scan from the durable cursor reproduces exactly the
+                // uncaptured tail; per-frame capture then lands typed
+                // rejected/quarantined coverage for the offending record.
+                let replay = match prepare_source(context, path, max_new_bytes).await {
+                    Ok(SourcePreparation::Finished(stats)) => stats,
+                    Ok(SourcePreparation::Ready(prepared)) => {
+                        match apply_prepared_source(
+                            *prepared,
+                            context.admission,
+                            context.cancellation,
+                        )
+                        .await
+                        {
+                            Ok(stats) => stats,
+                            Err(error) => {
+                                return Err(merge_committed_into_error(committed, error));
                             }
                         }
-                        Err(error) => return Err(merge_committed_into_error(committed, error)),
-                    };
-                    Ok(committed.merge(replay))
-                }
+                    }
+                    Err(error) => return Err(merge_committed_into_error(committed, error)),
+                };
+                committed.merge(replay)
             }
-        }
+        };
+    // A deferred pass has not yet read the new generation to the end, so a
+    // record it has not offered again may still follow.
+    if stats.deferred_sources == 0 {
+        context
+            .admission
+            .complete_source_rewrite(&source, context.scope, generation)
+            .await
+            .map_err(|outcome| {
+                merge_committed_into_error(
+                    stats.clone(),
+                    host_admission_error("claude", outcome).into(),
+                )
+            })?;
     }
+    Ok(stats)
 }
 
 /// Folds windowed-phase committed stats into a replay failure so terminal

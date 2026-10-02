@@ -286,6 +286,13 @@ pub enum SessionStoreError {
     DeadlineExceeded,
     #[error("session temporal operation exceeded its {resource} budget")]
     BudgetExceeded { resource: &'static str },
+    /// A session resolves each message id to one occurrence; a refresh whose
+    /// projection would give one message two occurrences is refused.
+    #[error("session-scoped message id {message_id} resolves to {occurrences} occurrences")]
+    AmbiguousMessageOccurrence {
+        message_id: String,
+        occurrences: usize,
+    },
     #[error("session temporal generation {generation:?} is missing")]
     MissingGeneration {
         generation: SessionProjectionGenerationV1,

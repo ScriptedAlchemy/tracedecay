@@ -2,6 +2,7 @@ packages:
   - dashboard
   - sdks/typescript
   - plugin/cursor-native-extension
+  - plugin/chatgpt-extension
   # pnpm's Cargo inventory walks every directory not pruned by a negated
   # pattern and treats each Cargo.toml it finds as a workspace to install.
   # Test fixtures, eval corpora, mockups, vendored crates, and local git

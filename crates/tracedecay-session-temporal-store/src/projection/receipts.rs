@@ -19,7 +19,7 @@ use super::super::rebuild::checkpoint_relation_rebuild_control;
 use super::super::relation_projection::{IntroducedCopies, introduced_logical_copies};
 use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
-use crate::sql::SHARED_GENERATION_TABLES;
+use crate::sql::{SHARED_GENERATION_TABLES, live_effect_predicate};
 
 #[tracing::instrument(
     name = "session_temporal.projection.validate_receipt",
@@ -176,6 +176,9 @@ pub(crate) async fn base_source_frontier(
               AND settled.generation = receipt.generation
              WHERE receipt.session_id = ?1 AND receipt.generation < ?2
                AND settled.state IN ('active', 'superseded')
+               AND receipt.generation > COALESCE((
+                   SELECT reset.reset_generation FROM session_temporal_resets AS reset
+                   WHERE reset.session_id = receipt.session_id), 0)
              ORDER BY receipt.generation DESC, receipt.batch_ordinal DESC
              LIMIT 1",
             params![session_id.as_str(), generation],
@@ -210,18 +213,22 @@ pub(super) async fn validate_canonical_assertion_completeness(
     checkpoint_relation_rebuild_control(control)?;
     let mut rows = conn
         .query(
-            "SELECT observation.observation_json, anchor.anchor_json
-             FROM session_temporal_observation_effects AS effect
-             JOIN observations AS observation
-               ON observation.observation_id = effect.observation_id
-             JOIN observation_retrieval_anchors AS binding
-               ON binding.observation_id = observation.observation_id
-             JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
-             WHERE effect.session_id = ?1
-               AND effect.observation_sequence > ?3
-               AND effect.observation_sequence <= ?2
-               AND effect.output_count > 0
-             ORDER BY effect.observation_sequence",
+            &format!(
+                "SELECT observation.observation_json, anchor.anchor_json
+                 FROM session_temporal_observation_effects AS effect
+                 JOIN observations AS observation
+                   ON observation.observation_id = effect.observation_id
+                 JOIN observation_retrieval_anchors AS binding
+                   ON binding.observation_id = observation.observation_id
+                 JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
+                 WHERE effect.session_id = ?1
+                   AND effect.observation_sequence > ?3
+                   AND effect.observation_sequence <= ?2
+                   AND effect.output_count > 0
+                   AND {}
+                 ORDER BY effect.observation_sequence",
+                live_effect_predicate("?2")
+            ),
             params![
                 session_id.as_str(),
                 frontier_i64(source_frontier, super::super::query::ACTIVATE_OPERATION,)?,
@@ -352,6 +359,34 @@ pub(super) async fn validate_canonical_assertion_completeness(
 
 pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
     encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes))
+}
+
+/// Asks the next refresh of the session `observation_id` projected into to
+/// rebuild it from its first effect. The observation no longer owns its
+/// output, so occurrences derived from it cannot be extended in place.
+#[tracing::instrument(
+    name = "session_temporal.persist.reset_request",
+    level = "trace",
+    skip_all
+)]
+pub async fn request_session_temporal_reset(
+    conn: &impl Executor,
+    observation_id: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "INSERT INTO session_temporal_resets (session_id, requested_at)
+         SELECT effect.session_id, unixepoch() * 1000000
+         FROM session_temporal_observation_effects AS effect
+         WHERE effect.observation_id = ?1 AND effect.output_count > 0
+         ON CONFLICT(session_id) DO UPDATE SET requested_at = excluded.requested_at",
+        params![observation_id],
+    )
+    .await
+    .map_err(|error| ProjectionStoreError::Storage {
+        operation: "request session temporal reset",
+        source: Box::new(error),
+    })?;
+    Ok(())
 }
 
 #[tracing::instrument(
@@ -1139,6 +1174,9 @@ pub(crate) async fn base_projection_coverage(
               AND settled.generation = receipt.generation
              WHERE receipt.session_id = ?1 AND receipt.generation < ?2
                AND settled.state IN ('active', 'superseded')
+               AND receipt.generation > COALESCE((
+                   SELECT reset.reset_generation FROM session_temporal_resets AS reset
+                   WHERE reset.session_id = receipt.session_id), 0)
              ORDER BY receipt.generation DESC, receipt.batch_ordinal DESC
              LIMIT 1",
             params![session_id.as_str(), generation],
@@ -1184,7 +1222,7 @@ fn record_assertion_history_row(bytes: u64) {
     {
         metrics::gauge!("session_temporal.activation.history_rows").increment(1.0);
         metrics::gauge!("session_temporal.activation.history_row_payload_bytes")
-            .increment((bytes) as f64);
+            .increment(bytes as f64);
     }
 }
 
@@ -1197,7 +1235,7 @@ fn record_coverage_query_probe() {
 fn record_coverage_row(bytes: u64) {
     {
         metrics::gauge!("session_temporal.coverage.rows").increment(1.0);
-        metrics::gauge!("session_temporal.coverage.row_payload_bytes").increment((bytes) as f64);
+        metrics::gauge!("session_temporal.coverage.row_payload_bytes").increment(bytes as f64);
     }
 }
 

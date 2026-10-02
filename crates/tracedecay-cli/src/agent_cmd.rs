@@ -1026,6 +1026,14 @@ fn apply_canonical_component_set(
             remediation: action.remediation.clone(),
         });
     }
+    if agent_id == "chatgpt"
+        && request.lifecycle.operation
+            != tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall
+    {
+        eprintln!(
+            "  ChatGPT registration is unverifiable locally; install the staged bundle inside ChatGPT or follow its README to connect an MCP endpoint"
+        );
+    }
     // Hook trust is the one Codex activation step that stays host-owned, so a
     // successful (re)install finishes with the exact remaining action.
     if agent_id == "codex"

@@ -26,9 +26,9 @@ pub(crate) use persist::observation_envelope_from_payload;
 pub(super) use persist::persist_session_temporal_projection_batch_in_transaction;
 #[cfg(test)]
 use receipts::full_projection_coverage;
-pub use receipts::record_canonical_observation_effect;
 pub(super) use receipts::validate_final_projection_receipt;
 pub(crate) use receipts::{base_source_frontier, digest_bytes};
+pub use receipts::{record_canonical_observation_effect, request_session_temporal_reset};
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
@@ -120,6 +120,10 @@ async fn discover_session(
                      SELECT 1
                      FROM session_refresh_operations AS running
                      WHERE running.session_id = ?1 AND running.state = 'running'
+                 ),
+                 EXISTS (
+                     SELECT 1 FROM session_temporal_resets AS reset
+                     WHERE reset.session_id = ?1 AND reset.requested_at IS NOT NULL
                  )",
             params![session_id],
         )
@@ -145,11 +149,21 @@ async fn discover_session(
     };
     let observed_through =
         u64::try_from(observed_through).map_err(|error| storage(DISCOVER_REFRESH, error))?;
-    let committed_through = u64::try_from(
-        row.get::<i64>(1)
-            .map_err(|error| storage(DISCOVER_REFRESH, error))?,
-    )
-    .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+    let reset_requested = row
+        .get::<i64>(3)
+        .map_err(|error| storage(DISCOVER_REFRESH, error))?
+        != 0;
+    // A requested reset rebuilds the session from its first effect, so the
+    // refresh it begins starts from an empty projection.
+    let committed_through = if reset_requested {
+        0
+    } else {
+        u64::try_from(
+            row.get::<i64>(1)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+        )
+        .map_err(|error| storage(DISCOVER_REFRESH, error))?
+    };
     if observed_through <= committed_through {
         return Ok(DiscoveredSession::Current);
     }
@@ -269,6 +283,17 @@ async fn discover_pending_effects(
             discovery.decide(conn, session_id).await?;
         }
     }
+    // A reset request arrives without a new effect for its session, so the
+    // effect cursor never revisits it.
+    for session_id in requested_resets(conn, pending_limit).await? {
+        if discovery.is_full() {
+            cursor.running_sessions = running_sessions;
+            return Ok(true);
+        }
+        if !discovery.decided.contains(&session_id) {
+            discovery.decide(conn, session_id).await?;
+        }
+    }
     for (rowid, observation_id, session_id) in effects {
         if !discovery.decided.contains(&session_id) {
             if discovery.is_full() {
@@ -285,6 +310,40 @@ async fn discover_pending_effects(
     }
     skip_trailing_history_effects(conn, cursor).await?;
     Ok(false)
+}
+
+/// Sessions with a requested reset that no refresh owns, oldest request first.
+async fn requested_resets(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    limit: usize,
+) -> SessionStoreResult<Vec<String>> {
+    let limit = i64::try_from(limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
+    let mut rows = conn
+        .query(
+            "SELECT reset.session_id FROM session_temporal_resets AS reset
+             WHERE reset.requested_at IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_refresh_operations AS running
+                   WHERE running.session_id = reset.session_id AND running.state = 'running'
+               )
+             ORDER BY reset.requested_at, reset.session_id
+             LIMIT ?1",
+            params![limit],
+        )
+        .await
+        .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+    let mut sessions = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(DISCOVER_REFRESH, error))?
+    {
+        sessions.push(
+            row.get::<String>(0)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+        );
+    }
+    Ok(sessions)
 }
 
 /// Returns the rowid discovery resumes after, restarting from the first

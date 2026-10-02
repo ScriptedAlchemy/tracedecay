@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::{
-    FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    CanonicalObservationIdV1, FactOwnerV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -19,7 +20,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::GlobalDbObservationStore;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{ObservationSourcePresenceV1, RegisteredGlobalDb};
 use tracedecay_privacy::{PrivacySanitizerError, RecordSanitizerV1};
 use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
@@ -326,6 +327,35 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         ))
     }
 
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(HostAdmissionFacade::begin_source_rewrite(
+            self,
+            source,
+            scope,
+            previous,
+            generation,
+            retained_through,
+        ))
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, u64> {
+        Box::pin(HostAdmissionFacade::complete_source_rewrite(
+            self, source, scope, generation,
+        ))
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         provider: &'a str,
@@ -616,6 +646,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .authorities
             .registered_database(host_scope(&scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        record_source_presence(database, std::slice::from_ref(&request)).await?;
         let application = self.application(&provider, &scope)?;
         let outcome = application
             .capture_observation(
@@ -668,6 +699,7 @@ impl<'a> HostAdmissionFacade<'a> {
             .authorities
             .registered_database(host_scope(&scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        record_source_presence(database, &requests).await?;
         let application = self.application(&provider, &scope)?;
         let provenance = self.authorities.repository_provenance.clone();
         let requests = requests
@@ -679,6 +711,52 @@ impl<'a> HostAdmissionFacade<'a> {
             .await
             .map_err(|error| classify_error(&error))?;
         project_captured_outcomes(database, provenance.as_ref(), outcomes).await
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.begin_source_rewrite",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn begin_source_rewrite(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> Result<(), HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .begin_observation_source_rewrite(source, scope, previous, generation, retained_through)
+            .await
+            .map_err(|error| projection_error_outcome(&error))
+    }
+
+    #[tracing::instrument(
+        name = "usecases.admission.complete_source_rewrite",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn complete_source_rewrite(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> Result<u64, HostAdmissionOutcome> {
+        self.authorities.validate_scope(scope)?;
+        let database = self
+            .authorities
+            .registered_database(host_scope(scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .complete_observation_source_rewrite(source, scope, generation)
+            .await
+            .map_err(|error| projection_error_outcome(&error))
     }
 
     /// Persist one sanitized write through the store the façade already holds.
@@ -1076,6 +1154,46 @@ fn classify_external_source_error(
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }
+}
+
+/// Records where each file-byte record sits in its source's current layout,
+/// before capture, so a rewrite can tell the records it offered again from
+/// the ones it dropped. An identity the contract refuses names no record; its
+/// capture reports the refusal.
+async fn record_source_presence(
+    database: &RegisteredGlobalDb,
+    requests: &[CaptureObservationRequest],
+) -> Result<(), HostAdmissionOutcome> {
+    let mut by_source: Vec<(&ObservationSourceIdentityV1, &ObservationScopeV1, Vec<_>)> =
+        Vec::new();
+    for request in requests {
+        let identity = request.identity();
+        if identity.ordering_domain() != ObservationOrderingDomainV1::FileBytes {
+            continue;
+        }
+        let Ok(observation_id) = CanonicalObservationIdV1::derive(identity) else {
+            continue;
+        };
+        let presence = ObservationSourcePresenceV1 {
+            observation_id,
+            generation: identity.generation(),
+            start_offset: identity.position().start(),
+        };
+        match by_source
+            .iter_mut()
+            .find(|(source, scope, _)| *source == identity.source() && *scope == identity.scope())
+        {
+            Some((_, _, records)) => records.push(presence),
+            None => by_source.push((identity.source(), identity.scope(), vec![presence])),
+        }
+    }
+    for (source, scope, records) in by_source {
+        database
+            .record_observation_source_presence(source, scope, &records)
+            .await
+            .map_err(|error| projection_error_outcome(&error))?;
+    }
+    Ok(())
 }
 
 async fn project_captured_outcomes(

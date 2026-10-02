@@ -289,20 +289,20 @@ impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadCon
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_git_evidence(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        snapshot: &SanitizedCodeSnapshotV1,
     ) -> Result<Option<(String, String, String)>, CodeIndexPublicationStoreErrorV1> {
-        let Some(source_revision) = generation.snapshot().source_revision.as_ref() else {
+        let Some(source_revision) = snapshot.source_revision.as_ref() else {
             return Ok(None);
         };
-        let Some(reference) = generation.snapshot().reference.as_ref() else {
+        let Some(reference) = snapshot.reference.as_ref() else {
             return Ok(None);
         };
         let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
             .map_err(Self::unavailable)?;
         let identity =
             identity::IndexingIdentityV1::resolve(&self.project_root).map_err(Self::unavailable)?;
-        if generation.snapshot().repository != *identity.repository_id()
-            || generation.snapshot().worktree.as_ref() != Some(identity.worktree_id())
+        if snapshot.repository != *identity.repository_id()
+            || snapshot.worktree.as_ref() != Some(identity.worktree_id())
         {
             return Ok(None);
         }
@@ -639,10 +639,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut changed_paths = BTreeSet::new();
         if let Some(active) = self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
         {
             let active_files = active
+                .metadata
                 .snapshot()
                 .files
                 .iter()
@@ -737,10 +738,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         // second half of a both-sides miss in one call) rides it as history.
         let publication = match self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
         {
-            Some(active) if active.sealed_scope() == requested_scope => {
+            Some(active) if active.metadata.sealed_scope() == requested_scope => {
                 self.publication.retained_history()
             }
             Some(_) => {
@@ -798,6 +799,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 _ => CodeIndexSearchUnavailableReasonV1::Internal,
             })?;
+        let generation = self
+            .decoded_publication(&generation)
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?;
         Ok(self.bind_latest_complete(generation, None))
     }
 

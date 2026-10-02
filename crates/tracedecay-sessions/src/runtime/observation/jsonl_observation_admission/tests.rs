@@ -24,8 +24,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
-    SessionId,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::ParseOffset;
@@ -73,6 +73,17 @@ struct SeamSpyAdmission {
     /// Commit only the first batched frame, then report the window CAS lost.
     /// The durable cursor then covers a prefix, not the window's last frame.
     peer_covers_batch_prefix: AtomicBool,
+    rewrites: Mutex<Vec<RewriteCall>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RewriteCall {
+    Begin {
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    },
+    Complete(ObservationSourceGenerationV1),
 }
 
 #[tokio::test]
@@ -815,6 +826,37 @@ impl HostAdmission for SeamSpyAdmission {
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
         self.inner.committed_source_cursors(source, scope)
+    }
+
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> AdmissionFuture<'a, ()> {
+        self.rewrites.lock().unwrap().push(RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through,
+        });
+        self.inner
+            .begin_source_rewrite(source, scope, previous, generation, retained_through)
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64> {
+        self.rewrites
+            .lock()
+            .unwrap()
+            .push(RewriteCall::Complete(generation));
+        self.inner
+            .complete_source_rewrite(source, scope, generation)
     }
 
     fn drain_projection_queue<'a>(
@@ -1571,6 +1613,83 @@ async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
             .count();
         assert_eq!(edited, 1, "{records} records");
     }
+}
+
+/// A rewrite retires what the new generation stopped offering only once that
+/// generation was read to the end of the file: a tail spanning several passes
+/// stays deferred and never completes the rewrite early.
+#[tokio::test]
+async fn a_rewrite_completes_only_when_its_generation_reaches_the_end() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let records = 512_usize;
+    let original = (0..records)
+        .map(|index| catch_up_rollout_line(index, &cwd, "original"))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let spy = SeamSpyAdmission::default();
+    let pass = |max_new_bytes| {
+        try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            max_new_bytes,
+        )
+    };
+    assert!(!pass(None).await.expect("cold pass").source_deferred);
+    let previous = stored_cursor(&spy).await.expect("cold cursor").generation();
+    // Every pass that reaches the end settles its generation; with no rewrite
+    // pending that retires nothing.
+    assert_eq!(
+        std::mem::take(&mut *spy.rewrites.lock().unwrap()),
+        vec![RewriteCall::Complete(previous)]
+    );
+
+    let edited_index = records / 4;
+    let edit_offset = u64::try_from(edited_index * CATCH_UP_RECORD_BYTES).unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(edit_offset)).unwrap();
+    file.write_all(catch_up_rollout_line(edited_index, &cwd, "edited").as_bytes())
+        .unwrap();
+    drop(file);
+    spin_until_jsonl_change_settled(&path);
+
+    let first = pass(Some(CATCH_UP_WINDOW_BYTES))
+        .await
+        .expect("first tail pass");
+    assert!(first.source_deferred, "the tail spans several passes");
+    let generation = stored_cursor(&spy).await.expect("tail cursor").generation();
+    assert_ne!(generation, previous);
+    assert_eq!(
+        *spy.rewrites.lock().unwrap(),
+        vec![RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through: edit_offset,
+        }]
+    );
+    for _ in 0..records {
+        let tail = pass(Some(CATCH_UP_WINDOW_BYTES)).await.expect("tail pass");
+        if !tail.source_deferred {
+            assert_eq!(
+                *spy.rewrites.lock().unwrap().last().unwrap(),
+                RewriteCall::Complete(generation)
+            );
+            assert_eq!(spy.rewrites.lock().unwrap().len(), 2);
+            return;
+        }
+        assert_eq!(
+            spy.rewrites.lock().unwrap().len(),
+            1,
+            "a deferred pass must not complete the rewrite"
+        );
+    }
+    panic!("the tail never stopped deferring");
 }
 
 /// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta

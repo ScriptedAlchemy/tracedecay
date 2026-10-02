@@ -41,6 +41,8 @@ pub use registered_maintenance::{
     REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, RegisteredWalCheckpointReceiptV1, RegisteredWalReclaimV1,
 };
 mod registered_provider_usage;
+mod registered_source_rewrite;
+pub use registered_source_rewrite::ObservationSourcePresenceV1;
 #[cfg(test)]
 mod stack_delivery_tests;
 mod support;

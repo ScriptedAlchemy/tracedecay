@@ -287,6 +287,23 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
                 ON DELETE CASCADE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        -- Where each record of a file-byte source sits in the newest layout that
+        -- offered it. `observation_id` is the identity admission derived, so a
+        -- row may name a record the store refused and never holds.
+        CREATE TABLE IF NOT EXISTS observation_source_presence (
+            source_key TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
+            PRIMARY KEY(source_key, observation_id)
+        ) WITHOUT ROWID;
+        -- A rewrite of a source that has not yet been read to its end. Records
+        -- the new generation does not offer by then are retired.
+        CREATE TABLE IF NOT EXISTS observation_source_rewrites (
+            source_key TEXT PRIMARY KEY,
+            generation TEXT NOT NULL,
+            retained_through INTEGER NOT NULL CHECK(retained_through >= 0)
         );";
 
 /// Anchor-binding triggers of [`OBSERVATION_PROJECTION_SCHEMA_SQL`].

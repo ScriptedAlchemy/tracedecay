@@ -15,42 +15,7 @@ use crate::receipts::ChunkProjectionDecisionV1;
 
 use super::*;
 
-#[derive(Clone, Default)]
-pub(super) struct WorkerPublicationStore {
-    pub(super) active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for WorkerPublicationStore {
-    fn load_active(
-        &self,
-        _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .expect("publication lock")
-            .as_ref()
-            .map(Arc::clone))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().expect("publication lock");
-        if active
-            .as_ref()
-            .map(|current| &current.manifest.generation_id)
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        *active = Some(generation);
-        Ok(())
-    }
-}
+pub(super) type WorkerPublicationStore = MemorySealedPublicationStoreV1;
 
 pub(super) struct WorkerProjectionSink;
 
@@ -213,7 +178,7 @@ fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
             &UninterruptibleCodeIndexControlV1,
         )
         .expect("sealed generation");
-    let (manifest, segments) = partitioned_seal(&published);
+    let (manifest, segments) = partitioned_seal(published.decoded().expect("cold seal"));
     drop(sealing_build);
 
     let restored = partitioned_restore(&manifest, &segments);
@@ -256,11 +221,14 @@ fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
     );
 }
 
+/// An unchanged tree over its sealed parent seals over it: no file is
+/// extracted again and every segment and graph page carries.
 #[test]
-fn unchanged_increment_shares_symbol_records_with_parent_generation() {
+fn unchanged_successor_carries_every_parent_segment() {
     let store = WorkerPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("production owner");
     let source = b"pub fn unchanged() -> u32 { 1 }\n";
     let first = owner
         .build_and_publish(
@@ -268,65 +236,27 @@ fn unchanged_increment_shares_symbol_records_with_parent_generation() {
             &UninterruptibleCodeIndexControlV1,
         )
         .expect("first generation");
+    let extractions = owner.retained_parse_stats().full_extractions;
     let next = owner
         .build_and_publish(
             worker_request_with_source("file.worker.shared-symbol", 1_200_000, source),
             &UninterruptibleCodeIndexControlV1,
         )
-        .expect("unchanged increment");
+        .expect("unchanged successor");
 
-    assert_eq!(first.symbols.symbols.len(), 1);
-    assert!(Arc::ptr_eq(
-        &first.symbols.symbols[0],
-        &next.symbols.symbols[0]
-    ));
-    assert!(Arc::ptr_eq(
-        &first.files[0].artifacts.clone_bodies[0].payload,
-        &next.files[0].artifacts.clone_bodies[0].payload
-    ));
-}
-
-/// Arc-share incremental seals must survive parentless sealed restore.
-///
-/// Publish validates with a live parent; restore calls `validate_fresh()` with
-/// no parent and must still authenticate the Arc-share reused complement.
-/// Omit captured bytes on the successor so the file page is Arc-shared.
-#[test]
-fn arc_share_increment_restores_under_parentless_validate_fresh() {
-    let store = WorkerPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
-        .expect("production owner");
-    let source = b"pub fn carried() -> u32 { 7 }\n";
-    let first = owner
-        .build_and_publish(
-            worker_request_with_source("file.worker.arc-share-restore", 1_100_000, source),
-            &UninterruptibleCodeIndexControlV1,
-        )
-        .expect("first generation");
-    let mut carry = worker_request_with_source("file.worker.arc-share-restore", 1_200_000, source);
-    carry.captured_files.clear();
-    let next = owner
-        .build_and_publish(carry, &UninterruptibleCodeIndexControlV1)
-        .expect("arc-share increment");
-    assert!(
-        next.projection.request().changes.reused_count > 0,
-        "unchanged carry must seal a non-empty reused complement"
-    );
-    assert!(
-        Arc::ptr_eq(&first.files[0], &next.files[0]),
-        "fixture must Arc-share the unchanged file page"
-    );
-
-    let (manifest, segments) = partitioned_seal(&next);
-    let restored = partitioned_restore(&manifest, &segments);
-    assert_eq!(restored.manifest.generation_id, next.manifest.generation_id);
+    assert_eq!(next.cold_reason(), None);
+    assert_eq!(next.lane_digest(), first.lane_digest());
+    assert_eq!(owner.retained_parse_stats().full_extractions, extractions);
     assert_eq!(
-        restored.projection.request().changes.reused_digest,
-        next.projection.request().changes.reused_digest
+        next.projection().request().changes.reused_count,
+        first.projection().request().changes.added_or_changed.len() as u64
     );
-    restored
+    store
+        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(next.snapshot()))
+        .expect("successor restores")
+        .expect("active successor")
         .validate_fresh()
-        .expect("restored generation must re-validate without a live parent");
+        .expect("restored successor re-validates without a live parent");
 }
 
 #[test]
@@ -346,9 +276,14 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 
     let historical_import_digest =
         canonical_sha256(&"historical import row schema").expect("historical row digest");
+    let scope =
+        CodeIndexGenerationScopeV1::for_snapshot(&worker_request("file.worker.v4", 0).snapshot);
     {
-        let mut slot = store.active.lock().expect("publication lock");
-        let active = Arc::make_mut(slot.as_mut().expect("seeded active generation"));
+        let mut active = store
+            .decode_active(&scope)
+            .expect("seed decodes")
+            .expect("seeded active generation");
+        let incumbent = active.manifest.generation_id.clone();
         let rust = worker_id::<LanguageId>("rust");
         let mut descriptor = StaticLanguageRegistry::new()
             .descriptor(&rust)
@@ -372,11 +307,18 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         active.manifest.seal.expected_digest =
             expected_seal_digest(&active.manifest).expect("reseal historical manifest");
 
-        let file = Arc::make_mut(&mut active.files[0]);
-        file.extraction.extractor_revision =
-            ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
-        file.extraction.parser_import_rows_digest = historical_import_digest.clone();
         active.validated = OnceLock::new();
+        let mut publisher = store.clone();
+        publisher
+            .publish_atomically(
+                &scope,
+                Some(&incumbent),
+                &CodeIndexSealedPublicationV1::Cold(
+                    Arc::new(active),
+                    CodeIndexColdBuildReasonV1::NoParent,
+                ),
+            )
+            .expect("historical generation seals");
     }
 
     let mut upgraded =
@@ -389,6 +331,11 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         )
         .expect("extractor revision change re-extracts from source");
 
+    assert_eq!(
+        rebuilt.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::NoParent)
+    );
+    let rebuilt = rebuilt.decoded().expect("cold build");
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
         "extractor.rust.v19"
@@ -417,7 +364,9 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
             &UninterruptibleCodeIndexControlV1,
         )
         .expect("seed generation");
-    let mut stale = generation.files[0].as_ref().clone();
+    let mut stale = generation.decoded().expect("cold build").files[0]
+        .as_ref()
+        .clone();
     stale.extraction.extractor_revision =
         ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
     stale.extraction.parser_import_rows_digest =
@@ -434,10 +383,7 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
     let descriptor = registry
         .descriptor(language)
         .expect("compiled Rust descriptor");
-    let reuse_key = CodeIndexProductionOwnerV1::<
-        WorkerPublicationStore,
-        WorkerProjectionSink,
-    >::physical_reuse_key(
+    let reuse_key = physical_reuse_key(
         &worker_config(),
         &request.snapshot.files[0],
         descriptor,
@@ -456,6 +402,7 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
     let rebuilt = upgraded
         .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .expect("stale pooled artifact is re-extracted");
+    let rebuilt = rebuilt.decoded().expect("cold build");
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
@@ -468,58 +415,6 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
             .iter()
             .any(|row| row.is_public && row.is_glob),
         "replacement import evidence must have the v4 public-glob shape"
-    );
-}
-
-#[test]
-fn incremental_carry_forward_rejects_a_stale_extractor_revision() {
-    let source = b"mod inner { pub fn value() {} }\npub use inner::*;\n";
-    let store = WorkerPublicationStore::default();
-    let mut seed =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("seed production owner");
-    let generation = seed
-        .build_and_publish(
-            worker_request_with_source("file.worker.increment", 1_100_000, source),
-            &UninterruptibleCodeIndexControlV1,
-        )
-        .expect("seed generation");
-    drop(generation);
-    drop(seed);
-
-    {
-        let mut slot = store.active.lock().expect("publication lock");
-        let active = Arc::make_mut(slot.as_mut().expect("seeded active generation"));
-        let file = Arc::make_mut(&mut active.files[0]);
-        file.extraction.extractor_revision =
-            ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
-        file.extraction.parser_import_rows_digest =
-            canonical_sha256(&"historical import row schema").expect("historical row digest");
-        file.artifacts.imports.clear();
-        assert!(
-            active.validated.get().is_some(),
-            "fixture keeps the already-validated generation memo"
-        );
-    }
-
-    let mut upgraded =
-        CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
-            .expect("upgraded production owner");
-    let rebuilt = upgraded
-        .build_and_publish(
-            worker_request_with_source("file.worker.increment", 1_200_000, source),
-            &UninterruptibleCodeIndexControlV1,
-        )
-        .expect("stale carried artifact is re-extracted");
-
-    assert_eq!(upgraded.retained_parse_stats().full_extractions, 1);
-    assert!(
-        rebuilt.files[0]
-            .artifacts
-            .imports
-            .iter()
-            .any(|row| row.is_public && row.is_glob),
-        "replacement import evidence must have the current public-glob shape"
     );
 }
 
@@ -581,7 +476,8 @@ pub(super) fn partitioned_seal(
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {

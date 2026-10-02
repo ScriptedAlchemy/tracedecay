@@ -196,6 +196,16 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Hook => "src/agents/droid.rs",
         Mcp => "src/agents/droid.rs",
     }
+    // ChatGPT's staged bundle registers exactly one route, its `mcp.json`
+    // server entry, which the host's own interactive plugin or connector
+    // install consumes. ChatGPT exposes no hook surface to fixture, so the
+    // hook row names the absent surface, see the capability row in
+    // `tracedecay-domain`.
+    ChatGpt {
+        Cli => "src/tool_command.rs",
+        Hook => "chatgpt_host_hook_surface_absent_v1",
+        Mcp => "plugin/mcp.json",
+    }
 };
 
 /// Registration routes and their evidence for one stock host, used by
@@ -460,7 +470,10 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Gemini
-        | HostKindV1::Copilot => return None,
+        | HostKindV1::Copilot
+        // ChatGPT keeps no checked-in native event fixture; its portable
+        // bundle declares no hooks.
+        | HostKindV1::ChatGpt => return None,
     };
     let bytes = assets
         .native_fixtures
