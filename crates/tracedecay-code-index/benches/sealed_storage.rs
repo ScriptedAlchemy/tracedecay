@@ -587,6 +587,11 @@ fn seal(
             SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                 file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                file_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+            }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 pack.extend_from_slice(bytes);
             }

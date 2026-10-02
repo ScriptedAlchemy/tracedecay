@@ -149,7 +149,6 @@ pub(crate) struct PartitionedCodeGraphPageDescriptorV1 {
     pub(crate) file_occurrence_id: FileOccurrenceId,
     pub(crate) logical_path: String,
     pub(crate) page_digest: ManifestDigest,
-    pub(crate) offset: u64,
     pub(crate) size_bytes: u64,
     pub(crate) build_footprint: super::graph_page_store::CodeGraphPageBuildFootprintV1,
 }
@@ -164,6 +163,11 @@ pub struct SealedGenerationSegmentIdentityV1 {
 pub enum SealedGenerationSegmentPublicationV1<'a> {
     File {
         digest: &'a ManifestDigest,
+        bytes: &'a [u8],
+    },
+    CodeGraphPage {
+        file_key: u32,
+        page_digest: &'a ManifestDigest,
         bytes: &'a [u8],
     },
     GenerationEvidencePage {
@@ -313,9 +317,7 @@ struct PartitionedCodeGraphPageIdentityV1 {
     file_key: u32,
     file_occurrence_id: FileOccurrenceId,
     logical_path: String,
-    #[serde(rename = "page_digest")]
-    _page_digest: ManifestDigest,
-    offset: u64,
+    page_digest: ManifestDigest,
     size_bytes: u64,
 }
 
@@ -1145,33 +1147,30 @@ impl PartitionedSegmentEncoderV1 {
             ))
         })?;
         let evidence_size_bytes = writer.position();
+        let evidence_descriptor = writer.finish(evidence_size_bytes)?;
         let mut graph_page_descriptors = Vec::new();
         generation.for_each_sealed_code_graph_page(|page| {
-            let offset = writer.position();
             let size_bytes = u64::try_from(page.encoded.len()).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed code graph page length exceeds u64".to_owned(),
                 )
             })?;
-            writer.write_all(&page.encoded).map_err(|error| {
-                writer.take_publish_error().unwrap_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed code graph page publication failed: {error}"
-                    ))
-                })
+            publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                file_key: page.file_key,
+                page_digest: &page.page_digest,
+                bytes: &page.encoded,
             })?;
             graph_page_descriptors.push(PartitionedCodeGraphPageDescriptorV1 {
                 file_key: page.file_key,
                 file_occurrence_id: page.file_occurrence_id,
                 logical_path: page.logical_path,
                 page_digest: page.page_digest,
-                offset,
                 size_bytes,
                 build_footprint: page.build_footprint,
             });
             Ok(())
         })?;
-        Ok((writer.finish(evidence_size_bytes)?, graph_page_descriptors))
+        Ok((evidence_descriptor, graph_page_descriptors))
     }
 }
 
@@ -1457,26 +1456,18 @@ where
 fn validate_code_graph_page_layout<'a, I, J>(
     pages: I,
     snapshot_files: J,
-    evidence_size_bytes: u64,
-    segment_size_bytes: u64,
 ) -> Result<(), CodeIndexProductionErrorV1>
 where
-    I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId, &'a str, u64, u64)>,
+    I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId, &'a str, u64)>,
     J: ExactSizeIterator<Item = (usize, &'a FileOccurrenceId, &'a str)>,
 {
-    if evidence_size_bytes == 0 || evidence_size_bytes > segment_size_bytes {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation evidence boundary is outside its segment".to_owned(),
-        ));
-    }
     if pages.len() != snapshot_files.len() {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed code graph page count does not match its snapshot".to_owned(),
         ));
     }
-    let mut expected_offset = evidence_size_bytes;
     for (
-        (file_key, page_occurrence, page_path, offset, size_bytes),
+        (file_key, page_occurrence, page_path, size_bytes),
         (snapshot_key, snapshot_occurrence, snapshot_path),
     ) in pages.zip(snapshot_files)
     {
@@ -1493,21 +1484,11 @@ where
                 "sealed code graph pages are not canonically keyed".to_owned(),
             ));
         }
-        if size_bytes == 0 || offset != expected_offset {
+        if size_bytes == 0 {
             return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed code graph page ranges are not contiguous".to_owned(),
+                "sealed code graph page segment is empty".to_owned(),
             ));
         }
-        expected_offset = expected_offset.checked_add(size_bytes).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed code graph page range exceeds u64".to_owned(),
-            )
-        })?;
-    }
-    if expected_offset != segment_size_bytes {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed code graph pages do not cover their evidence segment suffix".to_owned(),
-        ));
     }
     Ok(())
 }
@@ -1590,7 +1571,6 @@ fn parse_partitioned_manifest(
                 page.file_key,
                 &page.file_occurrence_id,
                 page.logical_path.as_str(),
-                page.offset,
                 page.size_bytes,
             )
         }),
@@ -1600,8 +1580,6 @@ fn parse_partitioned_manifest(
             .iter()
             .enumerate()
             .map(|(key, file)| (key, &file.file_occurrence_id, file.logical_path.as_str())),
-        generation.generation_evidence.evidence_size_bytes,
-        generation.generation_evidence.segment_size_bytes,
     )?;
     Ok(generation)
 }
@@ -1973,11 +1951,9 @@ impl SealedGenerationFileWindowsV1 {
             })?;
         let mut encoded = Vec::new();
         read_segment(
-            SealedGenerationSegmentReadV1::Range {
-                digest: &self.generation.generation_evidence.segment_digest,
-                size_bytes: self.generation.generation_evidence.segment_size_bytes,
-                offset: expected.offset,
-                length: expected.size_bytes,
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &expected.page_digest,
+                size_bytes: expected.size_bytes,
             },
             &mut encoded,
         )?;
@@ -2384,6 +2360,12 @@ impl CodeIndexPublishedGenerationV1 {
             digest: generation.generation_evidence.segment_digest,
             size_bytes: generation.generation_evidence.segment_size_bytes,
         });
+        identities.extend(generation.code_graph_pages.into_iter().map(|page| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: page.page_digest,
+                size_bytes: page.size_bytes,
+            }
+        }));
         Ok(identities)
     }
 
@@ -2446,7 +2428,6 @@ impl CodeIndexPublishedGenerationV1 {
                     page.file_key,
                     &page.file_occurrence_id,
                     page.logical_path.as_str(),
-                    page.offset,
                     page.size_bytes,
                 )
             }),
@@ -2456,10 +2437,14 @@ impl CodeIndexPublishedGenerationV1 {
                 .iter()
                 .enumerate()
                 .map(|(key, file)| (key, &file.file_occurrence_id, file.logical_path.as_str())),
-            generation.generation_evidence.evidence_size_bytes,
-            generation.generation_evidence.segment_size_bytes,
         )?;
-        let mut identities = Vec::with_capacity(generation.file_segments.len().saturating_add(1));
+        let mut identities = Vec::with_capacity(
+            generation
+                .file_segments
+                .len()
+                .saturating_add(generation.code_graph_pages.len())
+                .saturating_add(1),
+        );
         for segment in generation.file_segments {
             identities.push(SealedGenerationSegmentIdentityV1 {
                 digest: segment.segment_digest,
@@ -2470,6 +2455,12 @@ impl CodeIndexPublishedGenerationV1 {
             digest: generation.generation_evidence.segment_digest,
             size_bytes: generation.generation_evidence.segment_size_bytes,
         });
+        identities.extend(generation.code_graph_pages.into_iter().map(|page| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: page.page_digest,
+                size_bytes: page.size_bytes,
+            }
+        }));
         Ok(Some(identities))
     }
 
@@ -3203,8 +3194,9 @@ mod tests {
                     assert_eq!(segment_size_bytes, expected.len() as u64);
                     assert_eq!(page_count as usize, published_pages.len());
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())
@@ -3354,8 +3346,9 @@ mod tests {
                 SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
                     commits += 1;
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())
@@ -3411,8 +3404,9 @@ mod tests {
                 SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
                     commits += 1;
                 }
-                SealedGenerationSegmentPublicationV1::File { .. } => {
-                    panic!("evidence writer cannot publish a file segment")
+                SealedGenerationSegmentPublicationV1::File { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
+                    panic!("evidence writer cannot publish another segment kind")
                 }
             }
             Ok(())

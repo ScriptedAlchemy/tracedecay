@@ -2937,6 +2937,11 @@ fn collect_published_segments<'a>(
                 *published_files += 1;
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+            }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 evidence_pack.extend_from_slice(bytes);
             }
@@ -3292,6 +3297,11 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    reencoded_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     reencoded_evidence_pack.extend_from_slice(bytes);
                 }
@@ -3520,6 +3530,13 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                         file_segments += 1;
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                         bytes, ..
@@ -3914,6 +3931,7 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
                 }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { .. } => {
                     published_evidence_pages += 1;
                 }

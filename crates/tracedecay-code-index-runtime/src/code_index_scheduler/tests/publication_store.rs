@@ -306,6 +306,18 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
                 .as_u64()
                 .expect("evidence segment size"),
         );
+        for page in manifest["generation"]["code_graph_pages"]
+            .as_array()
+            .expect("code graph page descriptors")
+        {
+            components.insert(
+                page["page_digest"]
+                    .as_str()
+                    .expect("code graph page digest")
+                    .to_owned(),
+                page["size_bytes"].as_u64().expect("code graph page size"),
+            );
+        }
         components
     };
     let first_components = component_sizes(&first_manifest);
@@ -351,8 +363,12 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         .collect::<Vec<_>>();
     assert_eq!(
         segment_sizes.len(),
-        5,
-        "three shared/edited file segments plus one evidence segment per generation"
+        first_components
+            .keys()
+            .chain(second_components.keys())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        "the segment directory must hold exactly the unique addressed components"
     );
     let first_generation_segment_bytes = first_segments
         .iter()
