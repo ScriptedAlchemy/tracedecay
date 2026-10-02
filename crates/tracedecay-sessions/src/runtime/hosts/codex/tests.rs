@@ -1233,6 +1233,7 @@ mod recent_first_discovery_tests {
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
         persist_codex_history_frontier, persist_host_provider_coverage,
@@ -1249,6 +1250,8 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, "{}\n").unwrap();
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
     }
 
