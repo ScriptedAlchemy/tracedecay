@@ -2580,15 +2580,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>> {
         Arc::clone(&self.remote_recovery_project_lifecycle)
     }
-
-    pub fn retain_hook_task<F, Fut>(&self, provider: &str, session_id: &str, operation: F) -> bool
-    where
-        F: FnOnce(ObservationCancellation) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.retained_hook_tasks
-            .retain(provider, session_id, operation)
-    }
 }
 
 #[hotpath::measure(label = "daemon.session_registry.runtime_incarnation")]

@@ -109,13 +109,6 @@ fn project_curation_authority(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UserSessionAutomationRun {
-    pub session_reflector: SessionReflectorAutomationRun,
-    pub memory_curator: MemoryCuratorAutomationRun,
-    pub skill_writer: SkillWriterAutomationRun,
-}
-
 /// The agent backend and session-retrieval ports one automation run reads.
 #[derive(Clone, Copy)]
 pub(crate) struct AutomationTaskIo<'a> {

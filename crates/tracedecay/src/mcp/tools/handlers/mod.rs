@@ -424,17 +424,6 @@ impl Default for ToolCallRegistryOptions<'_> {
 }
 
 impl<'a> ToolCallRegistryOptions<'a> {
-    pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
-        // Canonical session-store field is `registered_project_session_db`.
-        // The helper is the one place that copies the lease out of the
-        // authorities bag so dispatch never `.or()`s the two fields.
-        Self {
-            registered_project_session_db: session_authorities.project.cloned(),
-            session_authorities,
-            ..Self::default()
-        }
-    }
-
     /// Marks this call as admitted for the opened project's checkout.
     /// Fixture `handle_tool_call` uses this; production carries the scope
     /// from project-open publication.

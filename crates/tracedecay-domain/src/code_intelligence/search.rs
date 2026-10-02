@@ -470,15 +470,6 @@ impl ExactTechnicalTermV1 {
         self.symbol_occurrence_id.as_ref()
     }
 
-    pub fn requires_extraction_authority(&self) -> bool {
-        matches!(
-            self.kind,
-            ExactTechnicalTermKindV1::WholeSymbol
-                | ExactTechnicalTermKindV1::CompilerErrorText
-                | ExactTechnicalTermKindV1::RuntimeErrorText
-        )
-    }
-
     fn validate_shape(&self) -> Result<(), DomainError> {
         self.span.validate()?;
         if self.span.is_empty() || self.original_bytes.is_empty() || self.canonical_bytes.is_empty()
@@ -1072,15 +1063,6 @@ impl ChangedCodeChunkSetV1 {
         reused: &[(CodeSearchChunkId, ContentDigest)],
     ) -> Result<(u64, ManifestDigest), DomainError> {
         let reused_digest = code_reused_partition_digest(reused)?;
-        Ok((reused.len() as u64, reused_digest))
-    }
-
-    /// Seal the reused complement from borrowed `(chunk_id, content_digest)`
-    /// pairs without cloning the rows.
-    pub fn seal_reused_partition_refs(
-        reused: &[(&CodeSearchChunkId, &ContentDigest)],
-    ) -> Result<(u64, ManifestDigest), DomainError> {
-        let reused_digest = code_reused_partition_digest_refs(reused)?;
         Ok((reused.len() as u64, reused_digest))
     }
 
