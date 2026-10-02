@@ -204,7 +204,34 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    assert_eq!(ingest["messages_upserted"], 2, "ingest: {ingest}");
+    // Admission is the commit. `messages_upserted` counts only what this
+    // pass's own drain projected, and a peer drain (or a deferred one behind
+    // the predecessor rebuild on a slow host) may project the rows instead,
+    // so assert the commit here and the projection through the read path.
+    assert_eq!(ingest["observations_committed"], 2, "ingest: {ingest}");
+    let roles = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let loaded = answer_tool(
+                &fixture,
+                "tracedecay_lcm_load_session",
+                json!({"provider": "cursor", "session_id": "cursor-session", "limit": 10}),
+            )
+            .await;
+            let messages = &loaded["outcome"]["value"]["payload"]["messages"];
+            if messages.as_array().is_some_and(|m| m.len() == 2) {
+                break messages
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|message| message["role"].as_str().map(str::to_owned))
+                    .collect::<std::collections::BTreeSet<_>>();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("both committed cursor messages are projected");
+    assert_eq!(roles, ["assistant".to_owned(), "user".to_owned()].into());
     assert_eq!(
         ingest["hint_outcomes"],
         json!({
