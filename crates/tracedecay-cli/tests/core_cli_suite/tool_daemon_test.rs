@@ -1421,6 +1421,37 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
     );
 }
 
+/// A replacement daemon starts once its stopped predecessor's authority lock
+/// is free. A child the predecessor forked keeps a copy of the lock's open
+/// file description until it execs or exits, so a group `SIGKILL` that reaps
+/// only the leader can return while the lock is still held.
+///
+/// Fails if the replacement is spawned while the lock is held: it exits with
+/// "daemon authority for profile '..' is already held: operation would block".
+#[test]
+fn a_replacement_daemon_waits_for_its_predecessors_authority_lock() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    common::ensure_tracedecay_daemon(&home_path);
+    common::stop_managed_daemon(&home_path);
+
+    // Stands in for the predecessor's child that has not exited yet.
+    let lock = std::fs::File::open(
+        home_path
+            .join(".tracedecay")
+            .join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE),
+    )
+    .unwrap();
+    lock.try_lock().unwrap();
+    let exiting_child = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        lock.unlock().unwrap();
+    });
+
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    exiting_child.join().unwrap();
+}
+
 /// A draining daemon waits only for the store mount an in-flight open is
 /// inside. Once that mount returns, the open stops before opening the
 /// project graph instead of running on to its next composition phase.
