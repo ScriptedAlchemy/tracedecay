@@ -777,9 +777,9 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
 }
 
-/// Session search returns every matching workflow fact its observation's
-/// transcript row does not already carry. A message beside two tasks surfaces
-/// all three, while a goal fact whose objective is its row's text surfaces once.
+/// Session search keeps each typed workflow fact as its own row, even when the
+/// observation's message repeats the task text, while a goal fact rendered as
+/// its observation's goal row surfaces once.
 #[tokio::test]
 async fn search_keeps_typed_workflow_facts_beside_their_transcript_row() {
     let tmp = TempDir::new().unwrap();
