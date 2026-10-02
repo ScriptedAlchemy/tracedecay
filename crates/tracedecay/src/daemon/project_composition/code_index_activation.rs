@@ -563,7 +563,12 @@ mod tests {
             Arc::clone(&activation),
         );
 
-        assert!(activation.activate_for_root(&root));
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
         while !activation.mount_failed() {
             tokio::task::yield_now().await;
         }
