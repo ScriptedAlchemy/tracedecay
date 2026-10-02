@@ -1002,7 +1002,16 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
         .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release-item", 10)
         .await
         .expect("search current-projector workflow facts");
-    assert_eq!(production_results.len(), 2);
+    let [production_result] = production_results.as_slice() else {
+        panic!("one observation must produce one workflow search row");
+    };
+    assert_eq!(
+        production_result.message.text,
+        "release-item first\n\nrelease-item second"
+    );
+    let production_metadata: Value =
+        serde_json::from_str(production_result.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(production_metadata["item_order"], 1);
 
     let results = search_session_messages(
         &database_path,
@@ -1011,17 +1020,19 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
         "release-item",
         10,
     );
-    assert_eq!(results.len(), 2);
-    let metadata = results
-        .iter()
-        .map(|result| {
-            serde_json::from_str::<Value>(result.message.metadata_json.as_deref().unwrap()).unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(metadata[0]["item_order"], 1);
-    assert_eq!(metadata[1]["item_order"], 2);
-    assert!(metadata.iter().all(|value| value.get("status").is_none()));
-    assert!(metadata.iter().all(|value| value.get("revision").is_none()));
+    let [first, second] = results.as_slice() else {
+        panic!("both normalized workflow facts must remain durable");
+    };
+    let first_metadata: Value =
+        serde_json::from_str(first.message.metadata_json.as_deref().unwrap()).unwrap();
+    let second_metadata: Value =
+        serde_json::from_str(second.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(first_metadata["item_order"], 1);
+    assert_eq!(second_metadata["item_order"], 2);
+    assert!(first_metadata.get("status").is_none());
+    assert!(second_metadata.get("status").is_none());
+    assert!(first_metadata.get("revision").is_none());
+    assert!(second_metadata.get("revision").is_none());
 }
 
 #[tokio::test]
