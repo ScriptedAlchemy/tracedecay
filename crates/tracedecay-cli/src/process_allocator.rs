@@ -64,6 +64,9 @@ mod mimalloc_v3 {
         fn _mi_theap_default_set(theap: *mut c_void);
         fn _mi_is_main_thread() -> bool;
         fn mi_thread_done();
+        // `src/prim/unix/prim.c`: stores `theap` in the pthread key whose
+        // destructor (`mi_pthread_done`) calls `_mi_thread_done` on it.
+        fn _mi_prim_thread_associate_default_theap(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,
             visit_blocks: bool,
@@ -209,6 +212,14 @@ mod mimalloc_v3 {
         unsafe {
             if !_mi_is_main_thread() {
                 mi_thread_done();
+                // `mi_thread_done` frees the thread's main theap but leaves
+                // the pthread key (`_mi_heap_default_key`) pointing at it:
+                // it resets the default to `_mi_theap_empty`, which is not
+                // initialized, so the key is never re-associated. glibc runs
+                // TLS destructors (this one) before pthread key destructors,
+                // so `mi_pthread_done` would then dereference the freed
+                // theap. Hand it NULL instead, which it ignores.
+                _mi_prim_thread_associate_default_theap(std::ptr::null_mut());
             }
         }
     }
