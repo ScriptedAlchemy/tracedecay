@@ -168,7 +168,7 @@ async fn hook_watch_policy_refusal_is_not_scheduler_unavailable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_saves_are_delivered_within_the_hook_budget_on_a_slow_fsync_disk() {
+async fn concurrent_saves_share_spool_durability_barriers_on_a_slow_fsync_disk() {
     const SAVES: usize = 8;
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
@@ -245,7 +245,7 @@ async fn concurrent_saves_are_delivered_within_the_hook_budget_on_a_slow_fsync_d
     }
     let sequential_syncs = slow_disk.syncs().saturating_sub(concurrent_syncs);
     assert!(
-        concurrent_syncs <= sequential_syncs,
+        concurrent_syncs < sequential_syncs,
         "concurrent saves should amortize durability barriers: concurrent syncs={concurrent_syncs}, sequential syncs={sequential_syncs}"
     );
     assert_eq!(broker.pending_count().await, 0);

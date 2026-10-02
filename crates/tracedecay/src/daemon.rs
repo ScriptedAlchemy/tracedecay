@@ -41,7 +41,7 @@ pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshak
 pub(crate) use tracedecay_daemon_protocol::{
     ensure_private_socket_parent, unix_socket_path_within_limit,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
@@ -116,8 +116,6 @@ const PROJECT_OPEN_RESOURCE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// `observations` row and fails on the same row every time, so the debounce
 /// cadence above would saturate a core for as long as the daemon runs.
 const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5);
-const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
-    "project route open is backed off after an invariant rejection";
 
 /// One authenticated connection's bounded first request.
 ///

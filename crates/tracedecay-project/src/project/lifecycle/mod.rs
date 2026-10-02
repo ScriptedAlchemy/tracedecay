@@ -15,7 +15,7 @@ use crate::project_store_runtime::join_standalone_session_registry;
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
@@ -492,14 +492,6 @@ impl TraceDecay {
         Ok(())
     }
 
-    /// Refuses a read-only store that is not at the one schema shape this
-    /// binary creates. There is no upgrade path to name: the store was written
-    /// by an incompatible binary, so the only remedy is a fresh one.
-    #[hotpath::measure(label = "lifecycle.ensure_schema", future = true)]
-    pub async fn ensure_schema_current(&self) -> Result<()> {
-        Self::ensure_database_schema_current(&self.db).await
-    }
-
     /// Opens an existing `TraceDecay` project at the given root.
     ///
     /// If branch metadata exists, resolves the current git branch's published
@@ -596,12 +588,13 @@ impl TraceDecay {
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         if !db_path.exists() {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                     db_path.display()
                 ),
-            });
+            ));
         }
 
         // Registered mounts perform the exact final-schema admission. Project
@@ -790,12 +783,13 @@ impl TraceDecay {
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         if !db_path.exists() {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                     db_path.display()
                 ),
-            });
+            ));
         }
 
         let db = Self::mount_project_graph(

@@ -62,7 +62,9 @@ def validate_status(value: dict[str, Any], *, strict: bool = False) -> None:
     else:
         progress = worktree.get("progress")
         phase = progress.get("phase") if isinstance(progress, dict) else None
-        if worktree.get("coverage") != "complete":
+        # Omitted sources (unrepresentable paths, privacy-withheld files) are a
+        # property of the tree that no rebuild changes, so they still count.
+        if worktree.get("coverage") not in ("complete", "partial_omitted_sources"):
             unmet.append(
                 "strict status requires complete text-index coverage; "
                 f"coverage={worktree.get('coverage', 'absent')} phase={phase}"

@@ -14,7 +14,9 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
+use tracedecay_domain::errors::{
+    ProjectOpenFailureKind, Result, StoreResetRequiredV1, TraceDecayError,
+};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
@@ -2774,6 +2776,12 @@ pub fn registry_open_error(
         }
         StoreRuntimeRegistryFailure::OpenCancelled { .. } => {
             TraceDecayError::store_open_cancelled(operation)
+        }
+        StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted { limit } => {
+            TraceDecayError::project_open(
+                ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { limit },
+                format!("{operation} refused: all {limit} project code-runtime seats are taken"),
+            )
         }
         failure => session_registry_error(operation, format!("{failure:?}")),
     }
