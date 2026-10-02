@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.65](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.64...v1.0.0-beta.65) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **remote:** RemoteAuthorityUnavailableReasonV1 (and the dashboard RemoteAuthorityMissingReasonV1) gain writer_authority_unpublished, and a never-published authority now reports that reason instead of placement_unknown. The TypeScript SDK moves to 0.12.0.
+* hook admission ledgers written before the group-commit log, and pre-ledger pending-work spools, are no longer imported; the daemon refuses them until `tracedecay wipe --stale --yes` resets them.
+
+### Bug Fixes
+
+* **config:** report a corrupt profile config instead of defaults ([#2820](https://github.com/ScriptedAlchemy/tracedecay/issues/2820)) ([f2e1bc9](https://github.com/ScriptedAlchemy/tracedecay/commit/f2e1bc980ab48673dccb94e7f7d8310f7e118fee))
+* **daemon:** publish the Git transaction owner with its authority ([#2817](https://github.com/ScriptedAlchemy/tracedecay/issues/2817)) ([d40430b](https://github.com/ScriptedAlchemy/tracedecay/commit/d40430b27b9b2597fa1c70009fd6994abdb7e703)), closes [#2612](https://github.com/ScriptedAlchemy/tracedecay/issues/2612)
+* **doctor:** report stored settings the pin leaves unapplied ([#2813](https://github.com/ScriptedAlchemy/tracedecay/issues/2813)) ([838a4db](https://github.com/ScriptedAlchemy/tracedecay/commit/838a4dbc358a1c70e301e39ddda15e477b169639))
+* **hermes:** deploy embed_proxy.py beside the plugin api ([#2800](https://github.com/ScriptedAlchemy/tracedecay/issues/2800)) ([3e3019d](https://github.com/ScriptedAlchemy/tracedecay/commit/3e3019d5dd21932d33f0cf875e6515f0202fe4fa))
+* **maintenance:** keep a gone root's store while its owner lives ([#2821](https://github.com/ScriptedAlchemy/tracedecay/issues/2821)) ([baf7c24](https://github.com/ScriptedAlchemy/tracedecay/commit/baf7c24f3ee64b7d6bd5a435d1e05332ebe76be8))
+* **memory:** collect owner-heap pages on scope leave ([#2803](https://github.com/ScriptedAlchemy/tracedecay/issues/2803)) ([2b0c4d9](https://github.com/ScriptedAlchemy/tracedecay/commit/2b0c4d9b7af235f7ff59bb31b2e2459b62094e8a)), closes [#2490](https://github.com/ScriptedAlchemy/tracedecay/issues/2490)
+* **remote:** type the unpublished writer authority state ([#2818](https://github.com/ScriptedAlchemy/tracedecay/issues/2818)) ([e4f0dca](https://github.com/ScriptedAlchemy/tracedecay/commit/e4f0dca4f4d8da6d6c4d2662379f134cc10a6ca6)), closes [#2710](https://github.com/ScriptedAlchemy/tracedecay/issues/2710)
+* reset legacy hook ledgers and type stale placement digests ([#2816](https://github.com/ScriptedAlchemy/tracedecay/issues/2816)) ([964c3d7](https://github.com/ScriptedAlchemy/tracedecay/commit/964c3d752b3476c63abe2955f022d99a3e503b82))
+* **rusqlite:** settle released readers before a checkpoint ([#2819](https://github.com/ScriptedAlchemy/tracedecay/issues/2819)) ([d363101](https://github.com/ScriptedAlchemy/tracedecay/commit/d3631013ca15d274e83cfcaa0cebb17091bcafcf))
+* **sessions:** admit Vibe provider capture at the host facade ([#2812](https://github.com/ScriptedAlchemy/tracedecay/issues/2812)) ([001f59d](https://github.com/ScriptedAlchemy/tracedecay/commit/001f59d585becf91d72ef6262c52e19b01d242d3))
+* **sessions:** classify store errors by type, not message text ([#2814](https://github.com/ScriptedAlchemy/tracedecay/issues/2814)) ([03afa2b](https://github.com/ScriptedAlchemy/tracedecay/commit/03afa2bd6ccb0660ae30c022499c928f7040f439))
+* **status:** render a reset-required registry as its typed state ([#2806](https://github.com/ScriptedAlchemy/tracedecay/issues/2806)) ([d882e0f](https://github.com/ScriptedAlchemy/tracedecay/commit/d882e0ff780b9ae4ad6258442289c4b0dfd114dd))
+* **store-runtime:** a seal retired mid-build is superseded ([#2822](https://github.com/ScriptedAlchemy/tracedecay/issues/2822)) ([134157d](https://github.com/ScriptedAlchemy/tracedecay/commit/134157dabe9490635a69d420e2dee7ef5e269f30))
+
+
+### Performance Improvements
+
+* **code-index:** seal cross-file edges for restore ([#2815](https://github.com/ScriptedAlchemy/tracedecay/issues/2815)) ([4f7b9db](https://github.com/ScriptedAlchemy/tracedecay/commit/4f7b9db60f4ffb11a08948a63d76d52382522907))
+
 ## [1.0.0-beta.64](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.63...v1.0.0-beta.64) (2026-10-01)
 
 
