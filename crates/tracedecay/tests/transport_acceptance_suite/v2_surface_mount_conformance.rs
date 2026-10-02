@@ -43,9 +43,10 @@ use crate::common::run_ok;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -72,26 +73,11 @@ use tracedecay_tool_catalog::{
 ///
 /// Subjects are spelled `surface:name` so a mount landing on one surface but
 /// not another stays individually accountable.
-const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
-    (
-        "git-index-transaction:commit_index",
-        "`commit_index` publication is deliberately unavailable (deferred, \
-         2026-08-05): the files ref backend cannot prevent a new loose ref \
-         appearing between namespace validation and destination publication, \
-         so preflight reports typed AtomicRefNamespaceUnavailable and apply \
-         returns ProvenNoMutation. The requirement is deferred, not deleted: \
-         drop this row when publication becomes sound and the operation is \
-         bound to a surface.",
-    ),
-    (
-        "activity-family:task_activity",
-        "In flight 2026-08-07: ActivityFamilyV1::Task is admitted by the \
-         canonical activity envelope and rendered by the dashboard event \
-         surface, but no production caller publishes the family yet, so the \
-         `task_activity` stream is never emitted. Drop this row when a \
-         production site publishes ActivityFamilyV1::Task.",
-    ),
-];
+///
+/// The table is empty: every declared surface must be mounted. The const
+/// stays so the next genuinely sanctioned gap fails loudly until it is
+/// written down here with its plan citation.
+const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[];
 
 /// The callable-code operations, mirroring the set that
 /// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
@@ -278,6 +264,317 @@ fn ast_grep_executable() -> PathBuf {
                 .find(|path| path.is_file())
         })
         .expect("ast-grep must be on the test PATH to grade the ast-grep bindings")
+}
+
+/// The dashboard server's closed operation->route table, restated here as the
+/// reverse authority the catalog must not be derived from.
+///
+/// The dashboard adapter mounts three dispatch surfaces: the configuration
+/// router at `/api/dashboard/application/configuration/{operation}`, the
+/// feedback read router at `/api/feedback/{tail}`, and the native-integration
+/// status read under the active-project gateway. A catalog operation claiming
+/// the Dashboard surface that none of these tables answers is unmounted.
+fn dashboard_operation_route(operation: &str) -> Option<(&'static str, String)> {
+    if operation.starts_with("configuration_") {
+        return Some((
+            "POST",
+            format!("/api/dashboard/application/configuration/{operation}"),
+        ));
+    }
+    match operation {
+        "feedback_get" => Some(("POST", "/api/feedback/get".to_owned())),
+        "feedback_expand" => Some(("POST", "/api/feedback/expand".to_owned())),
+        "feedback_list" => Some(("POST", "/api/feedback/list".to_owned())),
+        "feedback_proximity" => Some(("POST", "/api/feedback/proximity".to_owned())),
+        "native_integration_status" => {
+            Some(("GET", "/api/native-integration/status".to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// A live `tracedecay dashboard` server answering for the fixture's project.
+///
+/// The dashboard mints a per-listener token that the launch URL carries once;
+/// programmatic clients replay it as the Basic-auth password, which ureq does
+/// when the base URL carries `tracedecay:{token}` userinfo.
+struct DashboardProbe {
+    agent: ureq::Agent,
+    base_url: String,
+}
+
+impl DashboardProbe {
+    fn start(fixture: &MountFixture) -> Self {
+        let stdout = run_ok(
+            isolated_command(&fixture.home)
+                .args(["dashboard", "--port", "0", "--path"])
+                .arg(&fixture.project)
+                .current_dir(&fixture.project),
+            "tracedecay dashboard",
+        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        let url = stdout
+            .split_whitespace()
+            .find(|token| token.starts_with("http://"))
+            .unwrap_or_else(|| panic!("tracedecay dashboard printed no launch URL:\n{stdout}"))
+            .to_owned();
+        let without_scheme = url.trim_start_matches("http://");
+        let (authority, query) = without_scheme
+            .split_once("/?")
+            .unwrap_or((without_scheme, ""));
+        let token = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .unwrap_or_else(|| {
+                panic!("dashboard launch URL carried no access token: {url}")
+            });
+        let probe = Self {
+            agent: common::http_agent_with_timeout(Duration::from_secs(30)),
+            base_url: format!("http://tracedecay:{token}@{authority}"),
+        };
+        probe.assert_discriminates();
+        probe
+    }
+
+    fn request_status(&self, method: &str, path: &str) -> u16 {
+        let url = format!("{}{path}", self.base_url);
+        let response = common::http_call_with_retry(&format!("{method} {url}"), || {
+            match method {
+                "GET" => self.agent.get(&url).call(),
+                _ => self.agent.post(&url).send_json(serde_json::json!({})),
+            }
+        });
+        response.status().as_u16()
+    }
+
+    /// Prove the route probes discriminate mounted from absent: a tail no
+    /// dashboard dispatch table holds must answer 404, and a known mounted
+    /// operation must answer something else. Without these preconditions
+    /// every operation could score mounted against a catch-all or unmounted
+    /// against a dead server.
+    fn assert_discriminates(&self) {
+        assert_eq!(
+            self.request_status("POST", "/api/feedback/no-such-read"),
+            404,
+            "the dashboard's feedback router must conceal an unresolvable \
+             operation as 404 for the mount probe to discriminate"
+        );
+        assert_ne!(
+            self.request_status(
+                "POST",
+                "/api/dashboard/application/configuration/configuration_list",
+            ),
+            404,
+            "configuration_list is dispatchable on the dashboard surface; \
+             a 404 here means the dashboard application routes never mounted, \
+             so no operation verdict below would be trustworthy"
+        );
+    }
+
+    fn operation_is_mounted(&self, operation: &str) -> bool {
+        let Some((method, path)) = dashboard_operation_route(operation) else {
+            return false;
+        };
+        self.request_status(method, &path) != 404
+    }
+}
+
+/// One Content-Length-framed JSON-RPC reply from the live `lsp bridge`.
+fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+    }
+    let length = content_length?;
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// A live `tracedecay lsp bridge --stdio` session bound to the fixture's
+/// project.
+///
+/// The bridge forwards each frame to a daemon-owned LSP session. Dispatch
+/// gates catalog-routable methods on the session's catalog binding before
+/// reaching a handler, so the wire verdict is exact: an operation whose name
+/// the method table does not parse, or whose catalog binding the session
+/// cannot resolve, answers `Method unavailable` (-32601); every implemented
+/// mount answers with a result or a non--32601 error from the handler or the
+/// parameter parsers beneath it.
+struct LspBridgeProbe {
+    _process: common::TestChildProcess,
+    stdin: ChildStdin,
+    responses: mpsc::Receiver<Value>,
+    next_id: i64,
+}
+
+impl LspBridgeProbe {
+    fn start(fixture: &MountFixture) -> Self {
+        let mut child = isolated_command(&fixture.home)
+            .args(["lsp", "bridge", "--stdio", "--project"])
+            .arg(&fixture.project)
+            .current_dir(&fixture.project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tracedecay lsp bridge should start");
+        let stdin = child.stdin.take().expect("lsp bridge stdin");
+        let mut reader = BufReader::new(child.stdout.take().expect("lsp bridge stdout"));
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Some(message) = read_lsp_frame(&mut reader) {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut probe = Self {
+            _process: common::TestChildProcess::new(child),
+            stdin,
+            responses: rx,
+            next_id: 0,
+        };
+        let initialize = probe.request(
+            "initialize",
+            serde_json::json!({
+                "processId": Value::Null,
+                "rootUri": format!("file://{}", fixture.project.display()),
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": {
+                        "declaration": {},
+                        "definition": {},
+                        "typeDefinition": {},
+                        "implementation": {},
+                        "references": {},
+                        "hover": {},
+                        "documentSymbol": {},
+                        "signatureHelp": {},
+                        "callHierarchy": {},
+                        "typeHierarchy": {},
+                        "diagnostic": {},
+                    },
+                    "workspace": {
+                        "symbol": {},
+                        "workspaceFolders": true,
+                    },
+                },
+                "workspaceFolders": [{
+                    "uri": format!("file://{}", fixture.project.display()),
+                    "name": "surface-mount-fixture",
+                }],
+            }),
+        );
+        assert!(
+            initialize["error"].is_null(),
+            "the lsp bridge rejected initialize: {initialize}"
+        );
+        probe.notify("initialized", serde_json::json!({}));
+        probe.assert_discriminates();
+        probe
+    }
+
+    /// Prove the method probes discriminate mounted from absent: a method the
+    /// surface does not mount must answer -32601 explicitlyUnavailable, and a
+    /// known catalog-routable method must not.
+    fn assert_discriminates(&mut self) {
+        let deferred = self.request("workspace/executeCommand", serde_json::json!({}));
+        assert_eq!(
+            (
+                deferred["error"]["code"].as_i64(),
+                deferred["error"]["data"]["reason"].as_str()
+            ),
+            (Some(-32601), Some("explicitlyUnavailable")),
+            "a method this surface does not mount must answer -32601 \
+             explicitlyUnavailable for the lsp probe to discriminate; got \
+             {deferred}"
+        );
+        let context = self.request("tracedecay/context", serde_json::json!({}));
+        assert!(
+            Self::verdict_is_mounted(&context),
+            "tracedecay/context is catalog-bound and dispatched; an unmounted \
+             verdict here means the lsp session's catalog admission failed, so \
+             no method verdict below would be trustworthy: {context}"
+        );
+    }
+
+    fn send_frame(&mut self, value: &Value) {
+        let body = serde_json::to_vec(value).expect("lsp frame json");
+        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|()| self.stdin.write_all(&body))
+            .and_then(|()| self.stdin.flush())
+            .expect("write lsp frame");
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send_frame(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "the lsp bridge never answered method {method}"
+            );
+            let message = self
+                .responses
+                .recv_timeout(remaining)
+                .expect("lsp bridge stdout closed before answering");
+            if message["id"].as_i64() == Some(id) {
+                return message;
+            }
+        }
+    }
+
+    fn notify(&mut self, method: &str, params: Value) {
+        self.send_frame(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }));
+    }
+
+    /// A response proves the request reached a dispatched handler unless it is
+    /// a catalog-admission miss. Catalog-admission rejects unroutable LSP
+    /// operation names at construction, so a binding whose method string left
+    /// the client table turns the whole session catalog unavailable and every
+    /// probe below answers `explicitlyUnavailable`; negotiation- and
+    /// provider-level unavailability (`capabilityNotNegotiated`,
+    /// `providerUnavailable`, `denied`, root-scoping) is truthful
+    /// per-deployment availability of a mounted method, not a mount gap.
+    fn verdict_is_mounted(response: &Value) -> bool {
+        response["error"]["code"].as_i64() != Some(-32601)
+            || response["error"]["data"]["reason"].as_str()
+                != Some("explicitlyUnavailable")
+    }
+
+    fn operation_is_mounted(&mut self, operation: &str) -> bool {
+        Self::verdict_is_mounted(&self.request(operation, serde_json::json!({})))
+    }
 }
 
 fn wait_for_http_authority(path: &Path) -> Value {
@@ -557,6 +854,8 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
     assert_external_surface_discriminates(&agent, &fixture);
     let cli_tools = cli_tool_listing(&fixture);
     let mcp_tools = mcp_tool_listing(&fixture);
+    let dashboard = DashboardProbe::start(&fixture);
+    let mut lsp = LspBridgeProbe::start(&fixture);
 
     let mut failures = Vec::new();
     let mut graded_by_surface: BTreeMap<BindingSurface, usize> = BTreeMap::new();
@@ -612,10 +911,11 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
             BindingSurface::Cli => cli_tools.contains(operation.as_str()),
             // The LSP and dashboard adapters have no listing endpoint of their
-            // own; the production resolver above is their reachability check,
-            // and it already rejects hidden, feature-gated, and non-callable
-            // entries.
-            BindingSurface::Lsp | BindingSurface::Dashboard => true,
+            // own, so they are probed the way a client drives them: a real
+            // `lsp bridge` session and the live dashboard server's closed
+            // route tables.
+            BindingSurface::Lsp => lsp.operation_is_mounted(operation),
+            BindingSurface::Dashboard => dashboard.operation_is_mounted(operation),
         };
 
         if !mounted && sanctioned_citation(&subject).is_none() {
@@ -631,7 +931,14 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                 BindingSurface::Cli => {
                     format!("{note}: absent from the `tracedecay tool` command listing")
                 }
-                BindingSurface::Lsp | BindingSurface::Dashboard => unreachable!(),
+                BindingSurface::Lsp => format!(
+                    "{note}: the live lsp bridge answered Method unavailable \
+                     (-32601) for this catalog-declared operation"
+                ),
+                BindingSurface::Dashboard => format!(
+                    "{note}: no route in the dashboard server's closed \
+                     dispatch table answers this catalog-declared operation"
+                ),
             });
         }
     }
@@ -834,8 +1141,8 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             ActivityFamilyV1::Hook
             | ActivityFamilyV1::SessionIngest
             | ActivityFamilyV1::CodeIndex
-            | ActivityFamilyV1::ToolCall => true,
-            ActivityFamilyV1::Task => false,
+            | ActivityFamilyV1::ToolCall
+            | ActivityFamilyV1::Task => true,
         };
         let subject = format!("activity-family:{}", family.stream_name());
         match (has_producer, sanctioned_citation(&subject)) {
