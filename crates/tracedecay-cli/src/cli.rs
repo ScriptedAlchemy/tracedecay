@@ -1044,6 +1044,9 @@ pub(crate) struct SessionsSearchArgs {
     /// Only sessions that produced this commit (full or >=6-char prefix)
     #[arg(long)]
     pub(crate) commit: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 #[derive(Subcommand)]
@@ -1136,6 +1139,9 @@ pub enum SessionsAction {
         /// Registered project root path or alias whose session sync should be inspected
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
+        /// Output the daemon's sync record as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Search previously ingested session messages
     Search(Box<SessionsSearchArgs>),
@@ -1250,6 +1256,9 @@ pub enum BranchAction {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
+        /// Output the daemon's branch diagnostics as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Track a new branch as a scope of the project graph
     Add {

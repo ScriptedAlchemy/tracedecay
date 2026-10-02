@@ -32,6 +32,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
         branch,
         worktree,
         commit,
+        json: _,
     } = args;
     let mut arguments = Map::from_iter([
         ("query".to_string(), Value::String(query)),
@@ -73,8 +74,9 @@ pub(crate) async fn handle_sessions_action(
             idempotency_key,
             project_id,
             project_path,
+            json,
         } => {
-            run_sync_status(profile, project_id, project_path, idempotency_key).await?;
+            run_sync_status(profile, project_id, project_path, idempotency_key, json).await?;
         }
         SessionsAction::Search(args) => {
             handle_sessions_search(profile, *args).await?;
@@ -136,6 +138,7 @@ async fn handle_sessions_search(
 ) -> tracedecay_domain::errors::Result<()> {
     let project_id = args.project_id.clone();
     let project_path = args.project_path.clone();
+    let json = args.json;
     let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let payload = call_daemon_tool(
         profile,
@@ -146,13 +149,21 @@ async fn handle_sessions_search(
     .await?;
     let result: MessageSearchResultV1 =
         crate::commands::retained_tool_payload("tracedecay_message_search", payload)?;
-    print!("{}", SessionsSearchReport::render(&result));
-    if let Some(error) = &result.error {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("sessions search failed: {}: {}", error.code, error.message),
-        });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print!("{}", SessionsSearchReport::render(&result));
     }
-    Ok(())
+    // A refusal already printed its own JSON document, so it ends as
+    // `ToolRefused`, which the `--json` boundary does not print again.
+    match result.error {
+        Some(error) => Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+            "tracedecay_message_search",
+            Some(error.code),
+            Some(error.message),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// One line per hit, or an explicit empty/refusal report. A search that
@@ -370,6 +381,7 @@ mod tests {
             branch: None,
             worktree: None,
             commit: None,
+            json: false,
         });
 
         assert_eq!(
@@ -400,6 +412,7 @@ mod tests {
             branch: Some("master".to_string()),
             worktree: Some("/repos/worktree".to_string()),
             commit: Some("abc123".to_string()),
+            json: false,
         });
 
         assert_eq!(

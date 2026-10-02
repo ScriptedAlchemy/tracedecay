@@ -42,6 +42,7 @@ pub(super) async fn run_sync_status(
     project_id: Option<String>,
     project_path: Option<String>,
     idempotency_key: String,
+    json: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_root = resolve_cli_project_root(profile, None, project_id, project_path).await?;
     let outcome = session_sync_action(
@@ -50,13 +51,34 @@ pub(super) async fn run_sync_status(
         AdminCliSurfaceRequestV1::SessionsSyncStatus { idempotency_key },
     )
     .await?;
-    if let SessionSyncPollState::Pending { operation_id, .. } =
-        session_sync_poll_state("session sync", outcome)?
-    {
-        println!(
+    let receipt = json.then(|| outcome.clone());
+    let state = session_sync_poll_state("session sync", outcome)?;
+    if let Some(receipt) = receipt {
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+        return Ok(());
+    }
+    match state {
+        SessionSyncPollState::Pending { operation_id, .. } => println!(
             "session sync is still running ({}); no cancellation was requested",
             operation_id.as_str()
-        );
+        ),
+        SessionSyncPollState::Deferred {
+            operation_id,
+            idempotency_key,
+            remaining_work,
+        } => println!(
+            "{}",
+            session_sync_deferred_report(
+                &project_root,
+                "session sync",
+                operation_id.as_str(),
+                idempotency_key.as_str(),
+                remaining_work,
+            )
+        ),
+        SessionSyncPollState::Completed { operation_id } => {
+            println!("session sync completed ({})", operation_id.as_str());
+        }
     }
     Ok(())
 }
@@ -67,7 +89,16 @@ pub(super) enum SessionSyncPollState {
         operation_id: RequestId,
         idempotency_key: IdempotencyKey,
     },
-    Completed,
+    /// The operation finished and handed its remaining catch-up to the
+    /// background refresh workers.
+    Deferred {
+        operation_id: RequestId,
+        idempotency_key: IdempotencyKey,
+        remaining_work: u64,
+    },
+    Completed {
+        operation_id: RequestId,
+    },
 }
 
 fn sync_failed(label: &str, detail: &str) -> tracedecay_domain::errors::TraceDecayError {
@@ -96,6 +127,7 @@ pub(super) fn session_sync_poll_state(
         }),
         AdminCliSessionSyncV1::Complete {
             operation_id,
+            idempotency_key,
             termination,
             coverage,
             failure_codes,
@@ -115,11 +147,11 @@ pub(super) fn session_sync_poll_state(
                 &failure_codes,
                 remaining_work,
             ) {
-                println!(
-                    "{label} scheduled ({}); historical catch-up has remaining work {remaining_work}",
-                    operation_id.as_str()
-                );
-                return Ok(SessionSyncPollState::Completed);
+                return Ok(SessionSyncPollState::Deferred {
+                    operation_id,
+                    idempotency_key,
+                    remaining_work,
+                });
             }
             if termination != OperationTermination::Completed || remaining_work > 0 {
                 let termination = termination_label(termination);
@@ -135,8 +167,7 @@ pub(super) fn session_sync_poll_state(
                 };
                 return Err(sync_failed(label, &detail));
             }
-            println!("{label} completed ({})", operation_id.as_str());
-            Ok(SessionSyncPollState::Completed)
+            Ok(SessionSyncPollState::Completed { operation_id })
         }
         AdminCliSessionSyncV1::Cancelled => Err(sync_failed(label, "cancelled")),
         AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(label, "deadline_exceeded")),
@@ -198,7 +229,27 @@ pub(super) async fn await_session_sync_completion(
     const MAX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
     loop {
         match session_sync_poll_state(label, outcome)? {
-            SessionSyncPollState::Completed => return Ok(()),
+            SessionSyncPollState::Completed { operation_id } => {
+                println!("{label} completed ({})", operation_id.as_str());
+                return Ok(());
+            }
+            SessionSyncPollState::Deferred {
+                operation_id,
+                idempotency_key,
+                remaining_work,
+            } => {
+                println!(
+                    "{}",
+                    session_sync_deferred_report(
+                        project_root,
+                        label,
+                        operation_id.as_str(),
+                        idempotency_key.as_str(),
+                        remaining_work,
+                    )
+                );
+                return Ok(());
+            }
             SessionSyncPollState::Pending {
                 operation_id,
                 idempotency_key,
@@ -234,8 +285,30 @@ fn session_sync_timeout_message(
     operation_id: &str,
     idempotency_key: &str,
 ) -> String {
+    format!(
+        "{label} observation ended after 35 seconds; background status is unknown and no \
+         cancellation was requested (operation {operation_id}). Check status with: {}",
+        sync_status_command(project_root, idempotency_key)
+    )
+}
+
+fn session_sync_deferred_report(
+    project_root: &Path,
+    label: &str,
+    operation_id: &str,
+    idempotency_key: &str,
+    remaining_work: u64,
+) -> String {
+    format!(
+        "{label} scheduled ({operation_id}); historical catch-up has remaining work \
+         {remaining_work} and continues in the background. Check status with: {}",
+        sync_status_command(project_root, idempotency_key)
+    )
+}
+
+fn sync_status_command(project_root: &Path, idempotency_key: &str) -> String {
     let project_root = project_root.to_string_lossy();
-    let status_command = shell_words::join([
+    shell_words::join([
         "tracedecay",
         "sessions",
         "sync-status",
@@ -243,12 +316,7 @@ fn session_sync_timeout_message(
         idempotency_key,
         "--project-path",
         project_root.as_ref(),
-    ]);
-    format!(
-        "{label} observation ended after 35 seconds; background status is unknown and no \
-         cancellation was requested (operation {operation_id}). Check status with: \
-         {status_command}"
-    )
+    ])
 }
 
 /// Resolves the `--since` argument (ISO-8601 or unix seconds) to a unix-second
@@ -368,7 +436,7 @@ mod tests {
                 )
             )
             .unwrap(),
-            SessionSyncPollState::Completed
+            SessionSyncPollState::Completed { .. }
         ));
     }
 
@@ -421,8 +489,37 @@ mod tests {
 
         assert!(matches!(
             session_sync_poll_state("session import", outcome).unwrap(),
-            SessionSyncPollState::Completed
+            SessionSyncPollState::Deferred {
+                remaining_work: 1,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn deferred_import_report_names_the_sync_status_command_for_its_key() {
+        let report = session_sync_deferred_report(
+            Path::new("/repo/it's an example"),
+            "session import",
+            "operation.fixture",
+            "session-sync.fixture",
+            2,
+        );
+
+        assert!(report.starts_with("session import scheduled (operation.fixture);"));
+        let command = report.split_once("Check status with: ").unwrap().1;
+        assert_eq!(
+            shell_words::split(command).unwrap(),
+            [
+                "tracedecay",
+                "sessions",
+                "sync-status",
+                "--idempotency-key",
+                "session-sync.fixture",
+                "--project-path",
+                "/repo/it's an example",
+            ]
+        );
     }
 
     #[test]
