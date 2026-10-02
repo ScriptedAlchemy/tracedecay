@@ -26,7 +26,7 @@ use super::util;
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
 /// reset.
-pub const LCM_SCHEMA_VERSION: i64 = 14;
+pub const LCM_SCHEMA_VERSION: i64 = 13;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's
