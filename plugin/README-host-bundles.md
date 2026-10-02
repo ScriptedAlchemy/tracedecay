@@ -55,16 +55,15 @@ never replaced wholesale.
   shared in-place JSON editor, and uninstall removes only those groups.
   Prompt, tool, and edit events stay typed unavailable until a fixture
   captures them.
-- **OpenCode:** a typed `@opencode-ai/plugin` module under
-  `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) consumes
-  `file.edited`, `tool.execute.after`, and `session.idle`, schedules a bounded
-  daemon admission child, and returns without waiting for it. Its MCP and
-  custom TraceDecay LSP entries are merged with the existing JSON config.
-  Upstream analyzer brokering is disabled by default so OpenCode's built-ins
-  and TraceDecay never claim the same analyzer. A globally installed older
-  TraceDecay binary may not recognize `lsp bridge --stdio`; Doctor validates
-  the installed configuration without relabeling the packaged capability
-  unavailable.
+- **OpenCode (2.x):** a typed `@opencode/plugin` V2 definition under
+  `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) registers
+  an `execute.after` tool hook and subscribes to the server event stream for
+  the `session.execution.{succeeded,failed,interrupted}` boundaries, schedules
+  a bounded daemon admission child in the plugin's location, and returns
+  without waiting for it. Daemon guidance is injected as system context at the
+  owning session's next model request (V2 server plugins have no client UI
+  channel). The MCP entry is merged into the native `mcp.servers` map of the
+  existing JSON config; OpenCode 2 runs no LSP, so none is registered.
 
 OpenCode command files are prompt-template command artifacts owned and
 receipted by the optional **Agent** component. An agent-referenced prompt file
@@ -87,9 +86,9 @@ copies. Pi is the MCP-free host: its extension registers the catalog tools over
 | **Skills** (`plugin/skills/`) | yes | yes (same set; the `skills/tracedecay-*` filter is a no-op guard) | yes | yes | yes (Agent component) | `pi/skill/SKILL.md` routing skill (Agent component) |
 | **Commands** | yes (`plugin/commands/`) | overlay twins (`overlays/cursor/commands/`), independently authored | **no** (intentional: plugin deploy is manifest + skills + hooks + MCP) | yes (verbatim Claude command Markdown) | yes (Agent; shared command templates) | `/tracedecay{, -sync, -version}` registered by the extension |
 | **Agents** (`plugin/agents/`) | yes (verbatim) | yes (derived Markdown) | generated TOML exists for automation export, **not** in the plugin deploy set (intentional) | **no** (intentional) | yes (schema-adapted, Agent) | **no** (intentional) |
-| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `file.edited`, `lsp.updated`, `session.idle` / idle `session.status`, `tool.execute.after` | extension events: `session_start` and `agent_end` forwarded to `hook-pi-event`; `tool_result` runs a debounced `sync` |
+| **Hooks** | `SessionStart`, `Stop`, `PostToolUse`, `PostCompact`, `SubagentStart` | `sessionStart`, `sessionEnd`, `stop`, `postToolUse`, `preCompact`, `afterFileEdit`, `afterShellExecution`, `workspaceOpen` | install-time table (`hooks-codex.json` seed is empty on purpose): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, `PostCompact`, `Stop` | inline `PostToolUse` + `Stop` in `.kimi-plugin/plugin.json` | `execute.after` tool hook; `session.execution.succeeded` / `failed` / `interrupted` stream events | extension events: `session_start` and `agent_end` forwarded to `hook-pi-event`; `tool_result` runs a debounced `sync` |
 | **MCP** | `.mcp.json` key `graph` | `mcp-cursor.json` key `tracedecay` | same `graph` key | session/user `mcp.json` key `tracedecay` (not in plugin manifest) | key `tracedecay` via `tracedecay-mcp.ts` + `opencode.registration.json` | **no** (typed unavailable; the extension bridges `tracedecay tool` over the daemon socket) |
-| **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | custom LSP in `opencode.registration.json` | **no** (intentional) |
+| **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | **no** (OpenCode 2 runs no LSP) | **no** (intentional) |
 | **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product | routing skill is Core instruction content |
 
 Cursor CLI binaries exist for `hook-cursor-subagent-start` and

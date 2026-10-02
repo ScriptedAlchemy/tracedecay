@@ -157,6 +157,7 @@ pub struct CodeGraphInteractiveReader {
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
     catalog: Arc<InteractiveCatalogCache>,
+    meter: Option<Arc<GraphReadMeter>>,
 }
 
 impl fmt::Debug for CodeGraphInteractiveReader {
@@ -199,6 +200,7 @@ impl CodeGraphReadCostMeter {
             adjacency_queries: cost.adjacency_queries,
             adjacency_rows: cost.adjacency_rows,
             bytes_hydrated: cost.bytes_hydrated,
+            catalog_symbols: cost.catalog_symbols,
         }
     }
 }
@@ -276,6 +278,7 @@ impl CodeGraphInteractiveReader {
             projection_node_count,
             cancellation,
             catalog,
+            meter: None,
         }
     }
 
@@ -289,8 +292,16 @@ impl CodeGraphInteractiveReader {
     pub fn metered(&self, cost: &CodeGraphReadCostMeter) -> Self {
         Self {
             snapshot: Arc::new(self.snapshot.metered(Arc::clone(&cost.meter))),
+            meter: Some(Arc::clone(&cost.meter)),
             ..self.clone()
         }
+    }
+
+    fn served_from_catalog<T>(&self, served: Vec<T>) -> Vec<T> {
+        if let Some(meter) = &self.meter {
+            meter.record_catalog_symbols(served.len() as u64);
+        }
+        served
     }
 
     /// Resolves symbols by exact qualified name, optionally narrowed to one
@@ -305,7 +316,7 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(limit, "code graph name resolution limit")?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog
                 .by_qualified_name
@@ -313,7 +324,7 @@ impl CodeGraphInteractiveReader {
                 .map(|ids| &ids[..]),
             kind,
             limit,
-        ))
+        )))
     }
 
     /// Resolves symbols by case-insensitive simple name (the trailing
@@ -328,7 +339,7 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(limit, "code graph name resolution limit")?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog
                 .by_simple_name
@@ -336,7 +347,7 @@ impl CodeGraphInteractiveReader {
                 .map(|ids| &ids[..]),
             kind,
             limit,
-        ))
+        )))
     }
 
     /// Whether unresolved call sites can name one of the queried methods.
@@ -429,12 +440,12 @@ impl CodeGraphInteractiveReader {
         file.validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
-        ))
+        )))
     }
 
     /// Lists the symbols bound to the file published under logical path
@@ -457,12 +468,12 @@ impl CodeGraphInteractiveReader {
         let Some(file) = catalog.by_logical_path.get(path) else {
             return Ok(Vec::new());
         };
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
-        ))
+        )))
     }
 
     pub fn file_by_logical_path(
@@ -625,7 +636,10 @@ impl CodeGraphInteractiveReader {
                 metadata: record.metadata.clone(),
             });
         }
-        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+        Ok(CodeGraphSymbolPageV1 {
+            symbols: self.served_from_catalog(symbols),
+            has_more,
+        })
     }
 
     /// Finds symbols in canonical occurrence order without hydrating
@@ -661,7 +675,7 @@ impl CodeGraphInteractiveReader {
                 }
             }
         }
-        Ok(symbols)
+        Ok(self.served_from_catalog(symbols))
     }
 
     /// Per-seed outgoing semantic edges (callees when filtered to call
@@ -870,14 +884,16 @@ impl CodeGraphInteractiveReader {
         }
         ranked.sort_unstable_by(order);
         Ok(CodeGraphDegreeRankingV1 {
-            ranked: ranked
-                .into_iter()
-                .map(|(_, _, occurrence, record)| CodeGraphRankedSymbolV1 {
-                    summary: InteractiveCatalog::symbol_summary(occurrence, record),
-                    outgoing: record.outgoing,
-                    incoming: record.incoming,
-                })
-                .collect(),
+            ranked: self.served_from_catalog(
+                ranked
+                    .into_iter()
+                    .map(|(_, _, occurrence, record)| CodeGraphRankedSymbolV1 {
+                        summary: InteractiveCatalog::symbol_summary(occurrence, record),
+                        outgoing: record.outgoing,
+                        incoming: record.incoming,
+                    })
+                    .collect(),
+            ),
             symbol_count: catalog.symbols.len(),
         })
     }
@@ -989,12 +1005,14 @@ impl CodeGraphInteractiveReader {
         }
         ranked.sort_unstable_by(order);
         Ok(CodeGraphRankedNeighborsV1 {
-            neighbors: ranked
-                .into_iter()
-                .map(|(_, _, _, occurrence, record)| {
-                    InteractiveCatalog::symbol_summary(occurrence, record)
-                })
-                .collect(),
+            neighbors: self.served_from_catalog(
+                ranked
+                    .into_iter()
+                    .map(|(_, _, _, occurrence, record)| {
+                        InteractiveCatalog::symbol_summary(occurrence, record)
+                    })
+                    .collect(),
+            ),
             total,
             walk_truncated,
         })
@@ -1151,7 +1169,7 @@ impl CodeGraphInteractiveReader {
             (!has_more).then_some(matched as u64)
         };
         Ok(CodeGraphSymbolSearchPageV1 {
-            symbols,
+            symbols: self.served_from_catalog(symbols),
             has_more,
             total,
         })

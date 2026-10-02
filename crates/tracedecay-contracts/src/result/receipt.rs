@@ -64,6 +64,8 @@ pub struct RequestCostReceiptV1 {
     pub adjacency_rows: u64,
     /// Property payload bytes decoded from every row read.
     pub bytes_hydrated: u64,
+    /// Symbol summaries served from the generation's in-memory catalog.
+    pub catalog_symbols: u64,
 }
 
 impl RequestCostReceiptV1 {

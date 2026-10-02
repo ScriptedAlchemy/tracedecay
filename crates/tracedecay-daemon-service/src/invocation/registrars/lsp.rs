@@ -123,6 +123,7 @@ impl DaemonLspOwnerRegistrar {
             lsp_session_factory(
                 runtime,
                 feedback_runtime,
+                registered_database.clone(),
                 code_index.clone() as Arc<dyn LspCodeIndexProjectionIdentityPort>,
                 workspace_index,
                 diagnostic_records,
