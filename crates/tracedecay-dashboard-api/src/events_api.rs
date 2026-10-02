@@ -495,6 +495,14 @@ impl EventStreamState {
                 let Some(receiver) = self.source_receiver.as_mut() else {
                     return events;
                 };
+                // `watch::channel` starts with a placeholder, not a source
+                // baseline. Wait for the poller's first complete observation;
+                // otherwise a connection could consume the empty default and
+                // miss the first real change before its next poll tick.
+                let needs_initial_snapshot = !receiver.borrow().initialized;
+                if needs_initial_snapshot && receiver.changed().await.is_err() {
+                    return events;
+                }
                 let snapshot = receiver.borrow_and_update().clone();
                 if let Some(registry) = snapshot.registry {
                     self.registry_roots = registry.roots;
@@ -521,6 +529,10 @@ impl EventStreamState {
 /// owned by a dashboard state.
 #[derive(Clone, Default)]
 struct SourcePollSnapshot {
+    /// False only for the watch channel's placeholder. A published snapshot is
+    /// initialized even when both sources are currently unavailable, so a new
+    /// stream can establish a real baseline before it starts change detection.
+    initialized: bool,
     registry: Option<RegistrySnapshot>,
     total_store_bytes: Option<u64>,
 }
@@ -536,13 +548,29 @@ pub struct SharedSourcePoll {
 }
 
 impl SharedSourcePoll {
+    /// Acquire the poller slot without turning a prior holder's panic into an
+    /// SSE-server panic. The protected sender remains valid after poisoning, so
+    /// retain it and report the invariant failure rather than replacing or
+    /// discarding a live poller.
+    fn lock_sender(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<tokio::sync::watch::Sender<SourcePollSnapshot>>> {
+        match self.sender.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                tracing::error!("dashboard shared source poller slot was poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Subscribe to the shared snapshot, starting the poller when it is not
     /// running (first stream, or a restart after the last stream dropped).
     fn subscribe(
         &self,
         state: &DashboardState,
     ) -> tokio::sync::watch::Receiver<SourcePollSnapshot> {
-        let mut slot = self.sender.lock().unwrap();
+        let mut slot = self.lock_sender();
         if let Some(sender) = slot.as_ref() {
             return sender.subscribe();
         }
@@ -560,7 +588,13 @@ impl SharedSourcePoll {
                     // holds while attaching a receiver: a stream that lands in
                     // between either bumps the count (keep polling) or sees
                     // the cleared slot and arms a fresh poller.
-                    let mut slot = poller_slot.lock().unwrap();
+                    let mut slot = match poller_slot.lock() {
+                        Ok(slot) => slot,
+                        Err(poisoned) => {
+                            tracing::error!("dashboard shared source poller slot was poisoned");
+                            poisoned.into_inner()
+                        }
+                    };
                     if poller_sender.receiver_count() == 0 {
                         *slot = None;
                         return;
@@ -569,6 +603,7 @@ impl SharedSourcePoll {
                 let registry = registry_snapshot(&poller_state).await;
                 let total_store_bytes = summed_store_bytes(&poller_state).await;
                 let _ = poller_sender.send(SourcePollSnapshot {
+                    initialized: true,
                     registry,
                     total_store_bytes,
                 });
@@ -1561,6 +1596,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_sources_waits_for_the_first_published_snapshot_before_baselining() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("run-test".to_string());
+        state.source_receiver = Some(receiver);
+        let base = scope();
+
+        let poll = tokio::spawn(async move {
+            let initial = state.poll_sources(&base).await;
+            (state, initial)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !poll.is_finished(),
+            "the watch placeholder must not become the source baseline"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("polling stream is still subscribed");
+        let (mut state, initial) = poll.await.expect("source poll task completes");
+        assert!(
+            initial.is_empty(),
+            "first published snapshot establishes baseline"
+        );
+
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(11),
+            })
+            .expect("polling stream is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(
+            changes.len(),
+            1,
+            "the first post-baseline change is emitted"
+        );
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 11 }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_initial_source_poll_releases_its_watch_receiver() {
+        let (sender, receiver) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let mut state = EventStreamState::new("cancelled-poll".to_string());
+        state.source_receiver = Some(receiver);
+        let poll = tokio::spawn(async move { state.poll_sources(&scope()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(sender.receiver_count(), 1, "the poll owns one receiver");
+
+        poll.abort();
+        assert!(poll.await.expect_err("aborted initial poll").is_cancelled());
+        assert_eq!(
+            sender.receiver_count(),
+            0,
+            "cancelling before the first snapshot must not retain a receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_source_poller_join_baselines_the_current_published_snapshot() {
+        let (sender, first) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(10),
+            })
+            .expect("initial subscriber keeps sender alive");
+        let mut state = EventStreamState::new("late-join".to_string());
+        state.source_receiver = Some(sender.subscribe());
+
+        assert!(
+            state.poll_sources(&scope()).await.is_empty(),
+            "a late joiner must baseline the shared current snapshot"
+        );
+        sender
+            .send(SourcePollSnapshot {
+                initialized: true,
+                registry: None,
+                total_store_bytes: Some(12),
+            })
+            .expect("late joiner is still subscribed");
+        let changes = state.poll_sources(&scope()).await;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].kind,
+            DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes: 12 }
+        );
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
         let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
         let registry = registered_database_for_test(&project.path().join("registry.db")).await;
@@ -1625,7 +1759,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(dash.event_source_poll.sender.lock().unwrap().is_none());
+        assert!(dash.event_source_poll.lock_sender().is_none());
 
         // A later stream re-arms a fresh poller that publishes again.
         let mut receiver = dash.event_source_poll.subscribe(&dash);
