@@ -59,6 +59,12 @@ mod mimalloc_v3 {
         fn mi_theap_collect(theap: *mut c_void, force: bool);
         // 3.3.2 declares `mi_theap_set_default` without defining it; this is
         // the definition its allocation path reads the default theap from.
+        // libmimalloc-sys compiles mimalloc as C++ for MSVC targets, so this
+        // internal (non-`extern "C"`) function carries its MSVC C++ name.
+        #[cfg_attr(
+            target_env = "msvc",
+            link_name = "?_mi_theap_default_set@@YAXPEAUmi_theap_s@@@Z"
+        )]
         fn _mi_theap_default_set(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,
