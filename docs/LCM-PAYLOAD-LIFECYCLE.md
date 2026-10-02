@@ -62,13 +62,15 @@ has the full map.
   **no FK from `lcm_external_payloads` to `lcm_raw_messages`**, and no FK from raw rows to
   payload metadata. `lcm_raw_messages` carries a nullable `payload_ref` and a
   `storage_kind IN ('inline','external')` (`schema.rs:381-419`).
-- **Write order is not atomic with the DB transaction.** `upsert_session_message_in_existing_tx`
-  (`crates/tracedecay-global-db/src/transcript.rs:392`) opens `BEGIN IMMEDIATE`, then calls
-  `upsert_raw_message_with_payload` (`crates/tracedecay-lcm/src/raw.rs`), which writes the file
-  (`raw.rs:400` → `payload.rs:112`) *before* the metadata row (`raw.rs:894`) and raw row
-  (`raw.rs:895`). The file write happens inside the open transaction, but **SQLite cannot
-  roll back a filesystem write.** On commit failure, rollback, or crash after the file is
-  written, the DB rows are undone but the orphan file remains.
+- **Write order is not atomic with the DB transaction.** `SessionStoreAccess::lcm_ingest_raw_message`
+  (`crates/tracedecay-sessions/src/runtime/store_access/lcm.rs:606-625`) stages the raw
+  message and writes its external file (`crates/tracedecay-lcm/src/raw.rs:827-868` →
+  `crates/tracedecay-lcm/src/payload.rs:112`) before opening the write transaction.
+  `commit_staged_raw_message` then writes the metadata row (`raw.rs:894`) and raw row
+  (`raw.rs:895`). The same stage-then-commit order is wrapped by
+  `upsert_raw_message_with_payload_tracked` (`crates/tracedecay-lcm/src/raw.rs:915-922`).
+  SQLite cannot roll back a filesystem write, so a process crash after the file is
+  written but before the database commit may leave an orphan file.
 - **Read path validates references before reading bytes.** `expand_payload`
   (`payload.rs:250`) validates the ref, loads metadata, enforces provider+session ownership,
   then `ensure_current_raw_payload_ref` (`payload.rs:419`) requires the ref to be either the
@@ -91,11 +93,12 @@ has the full map.
   produces a new deterministic ref; the old metadata row + file are left behind because
   `upsert_payload_metadata` conflicts only on `payload_ref` (`payload.rs:188`), not on the
   message owner.
-- **Diagnostics already classify these states (read-only).** `lcm_doctor` reports
-  `missing_payload_refs`, `orphan_payload_refs` (= `gc_candidate_payload_refs`),
-  `unreferenced_metadata`, `missing_placeholder_metadata`, `missing_placeholder_files`
-  (`doctor.rs:370-379`). `lcm_status` reports `missing_count`, `unreferenced_count`, and
-  `gc_candidate_count` (== unreferenced) (`crates/tracedecay-lcm/src/query/payload_health.rs:279-284`).
+- **Diagnostics already classify these states (read-only).** `payload_health_detail`
+  computes `missing_payload_refs`, `orphan_files`, `unreferenced_refs`,
+  `missing_placeholder_refs`, and integrity-mismatch details
+  (`crates/tracedecay-lcm/src/query/payload_health.rs:95-323`). `lcm_status` reports
+  `missing_count`, `unreferenced_count`, and `gc_candidate_count` (== unreferenced)
+  (`crates/tracedecay-lcm/src/query/status.rs:308-328`).
 - **A GC tombstone marker is part of the payload contract.**
   `is_external_payload_placeholder` (`payload.rs:99`) recognizes both
   `[externalized payload: …]` and `[gc'd externalized payload: …]` (and the `tool
