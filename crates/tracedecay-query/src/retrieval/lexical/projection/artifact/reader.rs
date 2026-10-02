@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::ops::Deref;
@@ -254,12 +254,6 @@ struct StableArtifactFileStateV1 {
     last_write_time: u64,
 }
 
-/// Whether an unchanged [`StableArtifactFileStateV1`] proves the artifact's
-/// bytes unchanged since the full verification that recorded it. Without a
-/// native [`RewriteWitness`] the state only guards an open against a
-/// concurrent replacement and every reopen re-verifies the content digest.
-const NATIVE_FILE_STATE_WITNESSES_REWRITES: bool = RewriteWitness::NATIVE.proves_unchanged_bytes();
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct CodeLexicalArtifactRestoreWitnessBodyV1 {
@@ -279,7 +273,7 @@ pub struct CodeLexicalArtifactRestoreWitnessV1 {
 }
 
 impl CodeLexicalArtifactRestoreWitnessV1 {
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
 
     fn digest_body(
         body: &CodeLexicalArtifactRestoreWitnessBodyV1,
@@ -416,16 +410,15 @@ impl CodeLexicalArtifactReaderV1 {
             expected_file_size_bytes,
             authority,
             cache_budget_bytes,
+            RewriteWitness::NATIVE,
             control,
         )
         .map(|(reader, _)| reader)
     }
 
     /// Perform the explicit full verification and capture the restore witness
-    /// from the same retained file handle after its final digest. Capturing
-    /// the state by reopening the pathname would create a gap in which changed
-    /// bytes could be incorrectly vouched for by the earlier digest. No witness
-    /// is captured where native file state cannot prove the bytes unchanged.
+    /// from the same retained file handle around its final digest. No witness
+    /// is captured when `rewrite_witness` cannot vouch for that file state.
     #[hotpath::measure(label = "query.artifact.open_content_addressed_full_verify_with_witness")]
     pub fn open_content_addressed_fully_verified_with_witness(
         path: impl AsRef<Path>,
@@ -433,6 +426,7 @@ impl CodeLexicalArtifactReaderV1 {
         expected_file_size_bytes: u64,
         authority: &super::super::CodeLexicalProjectionMetadataV1,
         cache_budget_bytes: usize,
+        rewrite_witness: RewriteWitness,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(Self, Option<CodeLexicalArtifactRestoreWitnessV1>), CodeLexicalArtifactErrorV1>
     {
@@ -489,19 +483,14 @@ impl CodeLexicalArtifactReaderV1 {
             control,
             integrity_authority: ReaderIntegrityAuthorityV1::ReceiptOnly,
         })?;
-        let verified_state = stable_artifact_file_state(&file)?;
-        verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
-        verify_stable_artifact_file_state(&file, &verified_state)?;
-        verify_named_path_identity(path, &file)?;
-        let witness = NATIVE_FILE_STATE_WITNESSES_REWRITES
-            .then(|| {
-                CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
-                    expected_file_digest.clone(),
-                    reader.receipt.artifact_digest().clone(),
-                    verified_state,
-                )
-            })
-            .transpose()?;
+        let witness = witness_verified_artifact(
+            path,
+            &mut file,
+            expected_file_digest,
+            reader.receipt.artifact_digest(),
+            rewrite_witness,
+            control,
+        )?;
         Ok((reader, witness))
     }
 
@@ -545,13 +534,6 @@ impl CodeLexicalArtifactReaderV1 {
         mut progress: impl FnMut(u64, u64),
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         const TOTAL_RESTORE_CHECKS: u64 = 6;
-        if !NATIVE_FILE_STATE_WITNESSES_REWRITES {
-            return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                "native file state on this platform cannot prove the artifact unchanged since \
-                 its full verification"
-                    .to_owned(),
-            ));
-        }
         progress(0, TOTAL_RESTORE_CHECKS);
         checkpoint(control)?;
         let path = path.as_ref();
@@ -571,7 +553,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
             )));
         }
-        let opened_state = stable_artifact_file_state(&file)?;
+        let opened_state = stable_artifact_file_state(&file, &metadata)?;
         if witness.body.version != CodeLexicalArtifactRestoreWitnessV1::VERSION
             || CodeLexicalArtifactRestoreWitnessV1::digest_body(&witness.body)?
                 != witness.body_digest
@@ -672,8 +654,8 @@ impl CodeLexicalArtifactReaderV1 {
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
         let file = open_private_file(path).map_err(map_private_artifact_file_error)?;
-        let file_state = stable_artifact_file_state(&file)?;
         let metadata = file.metadata().map_err(map_artifact_file_error)?;
+        let file_state = stable_artifact_file_state(&file, &metadata)?;
         if !metadata.file_type().is_file() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "artifact path is not a regular file".to_owned(),
@@ -3395,9 +3377,9 @@ fn digest_retained_artifact_file(
 }
 
 fn stable_artifact_file_state(
-    file: &File,
+    #[cfg_attr(unix, expect(unused_variables))] file: &File,
+    metadata: &Metadata,
 ) -> Result<StableArtifactFileStateV1, CodeLexicalArtifactErrorV1> {
-    let metadata = file.metadata().map_err(map_artifact_file_error)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -3427,13 +3409,47 @@ fn verify_stable_artifact_file_state(
     file: &File,
     expected: &StableArtifactFileStateV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let actual = stable_artifact_file_state(file)?;
+    let metadata = file.metadata().map_err(map_artifact_file_error)?;
+    let actual = stable_artifact_file_state(file, &metadata)?;
     if actual != *expected {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "artifact file changed while its serving reader opened".to_owned(),
         ));
     }
     Ok(())
+}
+
+/// Re-verify a fully verified artifact's bytes on its retained handle and
+/// issue the restore witness for the file state they were read under.
+///
+/// The witness asks whether that state can vouch before the final digest
+/// reads the bytes: a change time still inside the kernel's clock quantum can
+/// be shared by a same-size rewrite, so a restore that trusted it would serve
+/// the rewritten file under the old digest. Such a state issues no witness and
+/// the next open re-verifies the content digest instead.
+fn witness_verified_artifact(
+    path: &Path,
+    file: &mut File,
+    file_digest: &ManifestDigest,
+    receipt_digest: &ManifestDigest,
+    rewrite_witness: RewriteWitness,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Option<CodeLexicalArtifactRestoreWitnessV1>, CodeLexicalArtifactErrorV1> {
+    let metadata = file.metadata().map_err(map_artifact_file_error)?;
+    let verified_state = stable_artifact_file_state(file, &metadata)?;
+    let vouched = rewrite_witness.vouches_for_unchanged_bytes(&metadata);
+    verify_retained_artifact_digest(file, file_digest, control)?;
+    verify_stable_artifact_file_state(file, &verified_state)?;
+    verify_named_path_identity(path, file)?;
+    vouched
+        .then(|| {
+            CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
+                file_digest.clone(),
+                receipt_digest.clone(),
+                verified_state,
+            )
+        })
+        .transpose()
 }
 
 /// The content-addressed head is the immutable authority for the bytes served
@@ -3665,7 +3681,7 @@ mod tests {
         CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ManifestDigest,
         ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
     };
-    use tracedecay_private_fs::open_private_file;
+    use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
     use super::super::format::{PostingListEncoderV1, encode_document_set};
     use super::super::row_codec::{
@@ -3940,7 +3956,8 @@ mod tests {
         let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
             digest,
             receipt,
-            super::stable_artifact_file_state(&file).expect("stable file state"),
+            super::stable_artifact_file_state(&file, &file.metadata().expect("artifact metadata"))
+                .expect("stable file state"),
         )
         .expect("create restore witness");
         let mut encoded: serde_json::Value =
@@ -3957,51 +3974,128 @@ mod tests {
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
     }
 
+    /// A private SQLite artifact verified the way a full verification ends:
+    /// its digest, size, and the restore witness issued under
+    /// `rewrite_witness`.
     #[cfg(unix)]
-    #[test]
-    fn bounded_restore_refuses_a_same_inode_rewrite_witness() {
+    fn witnessed_artifact(
+        path: &std::path::Path,
+        rewrite_witness: RewriteWitness,
+    ) -> (
+        ManifestDigest,
+        u64,
+        Option<CodeLexicalArtifactRestoreWitnessV1>,
+    ) {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let path = directory.path().join("artifact.sqlite");
-        let connection = Connection::open(&path).expect("create SQLite artifact");
+        let connection = Connection::open(path).expect("create SQLite artifact");
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed artifact");
         drop(connection);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("make artifact private");
-        let mut file = open_private_file(&path).expect("open private artifact");
+        let mut file = open_private_file(path).expect("open private artifact");
         let digest = super::digest_content_addressed_file(&mut file, &AlwaysActiveControl)
             .expect("digest artifact");
         let size = file.metadata().expect("artifact metadata").len();
         let receipt =
             ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).expect("receipt digest");
-        let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
-            digest.clone(),
-            receipt,
-            super::stable_artifact_file_state(&file).expect("stable file state"),
-        )
-        .expect("create restore witness");
-        drop(file);
-        let connection = Connection::open(&path).expect("reopen artifact for mutation");
-        connection
-            .pragma_update(None, "user_version", 2i64)
-            .expect("rewrite the same inode");
-        drop(connection);
-
-        let error = CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
-            &path,
+        let witness = super::witness_verified_artifact(
+            path,
+            &mut file,
             &digest,
-            size,
-            &witness,
-            &opener(),
+            &receipt,
+            rewrite_witness,
             &AlwaysActiveControl,
-            |_, _| {},
         )
-        .expect_err("native file state must refuse a same-inode rewrite");
+        .expect("verify artifact and issue its witness");
+        (digest, size, witness)
+    }
 
-        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
+    /// Rewrite the artifact's bytes in place at the same size and put its
+    /// modification time back, so only content or the change time can tell.
+    #[cfg(unix)]
+    fn rewrite_in_place_restoring_mtime(path: &std::path::Path) {
+        use std::os::unix::fs::FileExt;
+
+        /// The SQLite header's big-endian `user_version` field.
+        const USER_VERSION_OFFSET: u64 = 60;
+        let before = std::fs::metadata(path).expect("artifact metadata");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("reopen artifact for mutation");
+        file.write_all_at(&2u32.to_be_bytes(), USER_VERSION_OFFSET)
+            .expect("rewrite the same inode");
+        file.set_modified(before.modified().expect("artifact mtime"))
+            .expect("restore artifact mtime");
+        let after = file.metadata().expect("rewritten metadata");
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.modified().ok(), before.modified().ok());
+    }
+
+    #[cfg(unix)]
+    const DIGEST_REFUSAL: &str =
+        "lexical artifact is corrupt: artifact file bytes do not match the durable head digest";
+
+    /// Verify a fresh artifact under `rewrite_witness`, rewrite it in place,
+    /// and reopen it the way serving does: a restore witness takes the
+    /// bounded restore, no witness re-verifies the content digest. Returns
+    /// whether a witness was issued and the reopen's refusal.
+    #[cfg(unix)]
+    fn reopen_after_in_place_rewrite(rewrite_witness: RewriteWitness) -> (bool, String) {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("artifact.sqlite");
+        let (digest, size, witness) = witnessed_artifact(&path, rewrite_witness);
+
+        rewrite_in_place_restoring_mtime(&path);
+
+        let error = match &witness {
+            Some(witness) => CodeLexicalArtifactReaderV1::restore_content_addressed_with_progress(
+                &path,
+                &digest,
+                size,
+                witness,
+                &opener(),
+                &AlwaysActiveControl,
+                |_, _| {},
+            )
+            .expect_err("a rewritten artifact must not restore"),
+            None => CodeLexicalArtifactReaderV1::open_content_addressed_fully_verified(
+                &path,
+                &digest,
+                size,
+                &opener(),
+                CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                &AlwaysActiveControl,
+            )
+            .expect_err("a rewritten artifact must not verify"),
+        };
+        (witness.is_some(), error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_restore_refuses_a_same_inode_rewrite_witness() {
+        let (witnessed, refusal) = reopen_after_in_place_rewrite(RewriteWitness::NATIVE);
+
+        let expected = if witnessed {
+            "lexical artifact is corrupt: lexical artifact restore witness does not match the \
+             durable artifact"
+        } else {
+            DIGEST_REFUSAL
+        };
+        assert_eq!(refusal, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_state_the_witness_cannot_vouch_for_reverifies_the_rewritten_bytes() {
+        assert_eq!(
+            reopen_after_in_place_rewrite(RewriteWitness::Absent),
+            (false, DIGEST_REFUSAL.to_owned())
+        );
     }
 
     #[cfg(unix)]
@@ -4028,7 +4122,8 @@ mod tests {
         let witness = CodeLexicalArtifactRestoreWitnessV1::from_verified_file_state(
             digest.clone(),
             receipt,
-            super::stable_artifact_file_state(&file).expect("stable file state"),
+            super::stable_artifact_file_state(&file, &file.metadata().expect("artifact metadata"))
+                .expect("stable file state"),
         )
         .expect("create restore witness");
         drop(file);

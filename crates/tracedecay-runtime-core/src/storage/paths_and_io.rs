@@ -31,6 +31,7 @@ impl StoreManifest {
             graph_db_relpath: relative_to_data_root(&layout.graph_db_path, &layout.data_root),
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
             branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
+            sessions_schema_digest: None,
         }
     }
 }

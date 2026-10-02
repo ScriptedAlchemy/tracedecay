@@ -122,6 +122,7 @@ async fn seed_store(
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
         branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
+        sessions_schema_digest: None,
     };
     std::fs::write(
         data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),

@@ -217,7 +217,7 @@ mod tests {
     };
 
     use crate::runtime::hosts::codex;
-    use crate::runtime::source::TranscriptDiscoveryBounds;
+    use crate::runtime::source::{TranscriptDiscoveryBounds, spin_until_jsonl_change_settled};
     use crate::runtime::store_port::TranscriptIngestStore;
 
     use super::{read_codex_discovery_frontier, write_codex_discovery_frontier};
@@ -308,6 +308,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("session directory");
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, b"{}\n").expect("rollout");
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
     }
 
