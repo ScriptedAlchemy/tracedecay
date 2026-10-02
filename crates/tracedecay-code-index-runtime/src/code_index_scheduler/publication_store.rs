@@ -2463,7 +2463,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     fn admit_measured_generation_work(
         &self,
-        component: &str,
+        component: &'static str,
         work_label: &str,
         generation_id: CodeGenerationId,
         bytes: u64,
