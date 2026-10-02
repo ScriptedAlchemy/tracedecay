@@ -438,12 +438,19 @@ fn tree_candidates(
     );
 
     let mut candidates = Vec::new();
-    for SensitiveScalar { key, value, origin } in sensitive {
+    for SensitiveScalar {
+        key,
+        value,
+        origin,
+        decoded_value_matched,
+    } in sensitive
+    {
         let (spans, marker, value_len, text_located) = match value {
             ScalarValue::Exact {
                 span,
                 marker,
                 value_len,
+                ..
             } => {
                 if raw.get(span.clone()).is_none() {
                     quarantine_findings.push(unlocatable_sensitive_field());
@@ -467,7 +474,7 @@ fn tree_candidates(
             value_len,
             spans,
             marker,
-            decoded_value_matched: false,
+            decoded_value_matched,
             text_located,
         });
     }
@@ -501,10 +508,20 @@ enum ScalarValue {
         span: Range<usize>,
         marker: &'static str,
         value_len: usize,
+        decoded_value: Option<String>,
     },
     /// Only the decoded value is known (`serde_yaml_ng` reports no spans), so
     /// the value is located by searching the raw text.
     Decoded(String),
+}
+
+impl ScalarValue {
+    fn decoded_value(&self) -> Option<&str> {
+        match self {
+            Self::Exact { decoded_value, .. } => decoded_value.as_deref(),
+            Self::Decoded(value) => Some(value),
+        }
+    }
 }
 
 /// JSON and TOML are walked through span-reporting parsers so every value is
@@ -553,15 +570,21 @@ fn json_node(value: Json<'_>) -> DocumentNode<'_> {
         }
         Json::StringLit(text) if text.value.is_empty() => DocumentNode::Empty,
         // The range includes both quotes; the marker replaces the body only.
-        Json::StringLit(text) => DocumentNode::Scalar(ScalarValue::Exact {
-            span: text.range.start + 1..text.range.end.saturating_sub(1),
-            marker: REDACTED_STRUCTURED_FIELD,
-            value_len: text.value.len(),
-        }),
+        Json::StringLit(text) => {
+            let span = text.range.start + 1..text.range.end.saturating_sub(1);
+            let decoded_value = text.value.into_owned();
+            DocumentNode::Scalar(ScalarValue::Exact {
+                span,
+                marker: REDACTED_STRUCTURED_FIELD,
+                value_len: decoded_value.len(),
+                decoded_value: Some(decoded_value),
+            })
+        }
         Json::NumberLit(number) => DocumentNode::Scalar(ScalarValue::Exact {
             span: number.range.start..number.range.end,
             marker: QUOTED_REDACTED_STRUCTURED_FIELD,
             value_len: number.value.len(),
+            decoded_value: None,
         }),
         Json::BooleanLit(_) | Json::NullKeyword(_) => DocumentNode::Empty,
     }
@@ -587,6 +610,7 @@ fn toml_node<'a>(raw: &str, value: Spanned<DeValue<'a>>) -> DocumentNode<'a> {
         // The span includes the delimiters: `"""`/`'''` for multi-line
         // strings, one quote otherwise. The marker replaces the body only.
         DeValue::String(text) => {
+            let decoded_value = text.into_owned();
             let delimiter = raw
                 .get(span.clone())
                 .filter(|token| token.starts_with("\"\"\"") || token.starts_with("'''"))
@@ -594,7 +618,8 @@ fn toml_node<'a>(raw: &str, value: Spanned<DeValue<'a>>) -> DocumentNode<'a> {
             DocumentNode::Scalar(ScalarValue::Exact {
                 span: span.start + delimiter..span.end.saturating_sub(delimiter),
                 marker: REDACTED_STRUCTURED_FIELD,
-                value_len: text.len(),
+                value_len: decoded_value.len(),
+                decoded_value: Some(decoded_value),
             })
         }
         DeValue::Integer(_) | DeValue::Float(_) | DeValue::Datetime(_) => {
@@ -602,6 +627,7 @@ fn toml_node<'a>(raw: &str, value: Spanned<DeValue<'a>>) -> DocumentNode<'a> {
                 value_len: span.len(),
                 span,
                 marker: QUOTED_REDACTED_STRUCTURED_FIELD,
+                decoded_value: None,
             })
         }
         DeValue::Boolean(_) => DocumentNode::Empty,
@@ -630,6 +656,7 @@ struct SensitiveScalar {
     key: String,
     value: ScalarValue,
     origin: SanitizationDetectorOriginV1,
+    decoded_value_matched: bool,
 }
 
 fn collect_tree_fields(
@@ -651,10 +678,11 @@ fn collect_tree_fields(
                     SanitizationActionV1::Quarantined,
                 );
                 match policy.classify(&NormalizedSensitiveKey::new(&key)) {
-                    Some(origin) => collect_scalars(child, &key, origin, sensitive),
+                    Some(origin) => collect_scalars(child, &key, origin, patterns, sensitive),
                     None => {
-                        collect_tree_fields(
+                        collect_detected_scalars(
                             child,
+                            &key,
                             policy,
                             patterns,
                             sensitive,
@@ -677,22 +705,74 @@ fn collect_scalars(
     node: DocumentNode<'_>,
     key: &str,
     origin: SanitizationDetectorOriginV1,
+    patterns: &CredentialPatternSet,
     sensitive: &mut Vec<SensitiveScalar>,
 ) {
     match node {
-        DocumentNode::Scalar(value) => sensitive.push(SensitiveScalar {
-            key: key.to_owned(),
-            value,
-            origin,
-        }),
+        DocumentNode::Scalar(value) => {
+            let decoded_value_matched = value
+                .decoded_value()
+                .is_some_and(|decoded| trips_a_detector(decoded, patterns));
+            sensitive.push(SensitiveScalar {
+                key: key.to_owned(),
+                value,
+                origin,
+                decoded_value_matched,
+            });
+        }
         DocumentNode::Object(fields) => {
             for (_, child) in fields {
-                collect_scalars(child, key, origin, sensitive);
+                collect_scalars(child, key, origin, patterns, sensitive);
             }
         }
         DocumentNode::Array(items) => {
             for item in items {
-                collect_scalars(item, key, origin, sensitive);
+                collect_scalars(item, key, origin, patterns, sensitive);
+            }
+        }
+        DocumentNode::Empty => {}
+    }
+}
+
+fn collect_detected_scalars(
+    node: DocumentNode<'_>,
+    key: &str,
+    policy: &ConfiguredSensitiveKeyPolicy<'_>,
+    patterns: &CredentialPatternSet,
+    sensitive: &mut Vec<SensitiveScalar>,
+    quarantine_findings: &mut Vec<SanitizationFindingV1>,
+) {
+    match node {
+        DocumentNode::Scalar(value) => {
+            if value
+                .decoded_value()
+                .is_some_and(|decoded| trips_a_detector(decoded, patterns))
+            {
+                sensitive.push(SensitiveScalar {
+                    key: key.to_owned(),
+                    value,
+                    origin: SanitizationDetectorOriginV1::BuiltInDetectorKernel,
+                    decoded_value_matched: true,
+                });
+            }
+        }
+        DocumentNode::Object(fields) => collect_tree_fields(
+            DocumentNode::Object(fields),
+            policy,
+            patterns,
+            sensitive,
+            quarantine_findings,
+        ),
+        DocumentNode::Array(items) => {
+            for item in items {
+                collect_detected_scalars(
+                    item,
+                    key,
+                    policy,
+                    patterns,
+                    sensitive,
+                    quarantine_findings,
+                );
             }
         }
         DocumentNode::Empty => {}
