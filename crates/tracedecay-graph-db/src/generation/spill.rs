@@ -774,12 +774,28 @@ pub(crate) fn read_spilled_entity(
     expected_identity: &GraphEntityId,
     expected_lanes: super::RowLanes,
 ) -> Result<GraphEntity, GraphDbError> {
+    let mut file = File::open(rows).map_err(|error| spill_io("entity rows open", error))?;
+    let rows_bytes = file
+        .metadata()
+        .map_err(|error| spill_io("entity rows metadata", error))?
+        .len();
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > rows_bytes)
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "graph entity row offset exceeds its row file".to_owned(),
+        });
+    }
     let length = usize::try_from(length)
         .map_err(|_| GraphDbError::unavailable("graph entity row length exceeds address space"))?;
-    let mut file = File::open(rows).map_err(|error| spill_io("entity rows open", error))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|error| spill_io("entity rows seek", error))?;
-    let mut encoded = vec![0_u8; length];
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(length).map_err(|error| {
+        GraphDbError::unavailable(format!("graph entity row cannot be allocated: {error}"))
+    })?;
+    encoded.resize(length, 0);
     file.read_exact(&mut encoded)
         .map_err(|error| spill_io("entity rows read", error))?;
     let mut cursor = encoded.as_slice();

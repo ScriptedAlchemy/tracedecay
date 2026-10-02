@@ -255,13 +255,14 @@ impl GraphSealedBaseV1 {
             }
             Err(error) => return Err(error),
         };
-        let entity_row_offsets = match EntityRowOffsets::open(&files.entity_row_offsets) {
-            Ok(offsets) => offsets,
-            Err(GraphDbError::Corrupt { .. }) => {
-                return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
-            }
-            Err(error) => return Err(error),
-        };
+        let entity_row_offsets =
+            match EntityRowOffsets::open(&files.entity_row_offsets, &files.entity_rows) {
+                Ok(offsets) => offsets,
+                Err(GraphDbError::Corrupt { .. }) => {
+                    return Ok(Err(GraphSealedBaseAbsenceV1::RowIndexMismatch));
+                }
+                Err(error) => return Err(error),
+            };
         if index.row_counts() != (entities as u64, relations as u64)
             || entity_row_offsets.entities() != entities as u64
             || index.row_sum(check)? != row_sum
@@ -472,7 +473,7 @@ impl GraphLayeredRowSpill {
                 })?;
             let (offset, length) = self.base.inner.entity_row_offsets.row(indexed.ordinal)?;
             let entity = read_spilled_entity(
-                &self.base.inner.entity_rows,
+                &self.spill.directory().join(LAYERED_BASE_ENTITY_ROWS_FILE),
                 offset,
                 length,
                 &endpoint,

@@ -407,10 +407,11 @@ pub(crate) struct EntityRowOffsets {
     path: PathBuf,
     file: Mutex<File>,
     entities: u64,
+    rows_bytes: u64,
 }
 
 impl EntityRowOffsets {
-    pub(crate) fn open(path: &Path) -> Result<Self, GraphDbError> {
+    pub(crate) fn open(path: &Path, rows: &Path) -> Result<Self, GraphDbError> {
         let mut file = File::open(path).map_err(|error| index_io("entity offsets open", error))?;
         let mut header = [0_u8; ENTITY_ROW_OFFSETS_HEADER_BYTES as usize];
         file.read_exact(&mut header)
@@ -434,10 +435,15 @@ impl EntityRowOffsets {
         if length != expected {
             return Err(corrupt("entity row offset length does not match its count"));
         }
+        let rows_bytes = rows
+            .metadata()
+            .map_err(|error| index_io("entity rows metadata", error))?
+            .len();
         Ok(Self {
             path: path.to_path_buf(),
             file: Mutex::new(file),
             entities,
+            rows_bytes,
         })
     }
 
@@ -473,6 +479,12 @@ impl EntityRowOffsets {
         let (offset, length) = (word(0..8), word(8..16));
         if length == 0 {
             return Err(corrupt("entity row offset records an empty row"));
+        }
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.rows_bytes)
+        {
+            return Err(corrupt("entity row offset exceeds its row file"));
         }
         Ok((offset, length))
     }
