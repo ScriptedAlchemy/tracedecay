@@ -233,6 +233,8 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     expect(symbol.graph.data.nodes.map((node) => node.role).sort()).toEqual(["callee", "caller", "focus"]);
     expect(symbol.graph.data.edges.length).toBe(2);
     expect(symbol.evidence).not.toBeNull();
+    const authority = await fixture.readAuthority();
+    expect(symbol.provenance?.authority).toEqual({ profile_root: fixture.profileRoot, daemon_version: authority!.version, daemon_pid: authority!.pid });
     expect(symbol.evidence!.markdown).toContain(`- Commit: ${billing.head()}`);
     expect(symbol.evidence!.markdown).toContain("src/report.ts::renderBillingReport");
     expect(symbol.evidence!.markdown).toContain(`- Generation: ${search.provenance!.generation}`);
@@ -425,7 +427,7 @@ export function taxTotal(invoices: Invoice[]): number {
     } else {
       // `tracedecay serve` relaunched the daemon: the view must name the new process, not the dead one.
       if (direct.page !== "symbol") throw new Error(JSON.stringify(direct));
-      expect(direct.provenance?.authority.daemon_pid).not.toBe(before?.pid);
+      expect(direct.provenance?.authority?.daemon_pid).not.toBe(before?.pid);
       expect(direct.symbol).toMatchObject({ state: "failed", failure: { kind: "not_found" } });
     }
   });

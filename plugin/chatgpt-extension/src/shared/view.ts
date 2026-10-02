@@ -35,7 +35,7 @@ export type Provenance = {
     readonly profile_root: string;
     readonly daemon_version: string;
     readonly daemon_pid: number;
-  };
+  } | null;
 };
 
 export type FailureKind =

@@ -4,8 +4,8 @@ A portable Agent Plugins bundle exposing the local TraceDecay daemon's
 semantic code intelligence to ChatGPT: a daemon-owned code-graph MCP server
 (`graph`) and a code-explorer MCP app (`tracedecay-explorer`). Read-only:
 every answer comes from the local TraceDecay daemon that already indexes
-your checkout, with exact repository, worktree, branch, commit, and
-generation provenance.
+your checkout, with separately reported project status and per-response
+relation generations. Symbol and impact reads do not report snapshot identity.
 
 ## Contents
 

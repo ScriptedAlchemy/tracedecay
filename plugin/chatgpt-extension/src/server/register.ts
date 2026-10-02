@@ -97,7 +97,7 @@ export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: R
     {
       title: "Inspect TraceDecay symbol",
       description:
-        "Inspect one symbol by node id: definition, direct callers and callees, dependent impact, and exact repository/worktree/ref/commit/generation provenance.",
+        "Inspect one symbol by node id: definition, direct callers and callees, dependent impact, and separately reported project status. Relations carry their served generation; symbol and impact reads do not report snapshot identity.",
       inputSchema: z.object({ project_id: projectId, node_id: z.string().min(1).describe("Symbol node id from a search result") }),
       annotations: readOnly,
       _meta: ui(),

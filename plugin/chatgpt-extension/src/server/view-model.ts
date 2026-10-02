@@ -84,7 +84,8 @@ export async function searchView(bridge: DaemonBridge, projectId: string, query:
       return searchSection(result);
     }),
   ]);
-  return { page: "search", project, query, results, provenance: provenanceFrom(project, status) };
+  const authority = await bridge.authority();
+  return { page: "search", project, query, results, provenance: withAuthority(provenanceFrom(project, status), authority.kind === "available" ? authority.record : null) };
 }
 
 export async function symbolView(bridge: DaemonBridge, projectId: string, nodeId: string, signal?: AbortSignal): Promise<ViewState> {
@@ -123,9 +124,11 @@ export async function symbolView(bridge: DaemonBridge, projectId: string, nodeId
       return { state: "ready", data: { nodes, complete: result.complete, max_depth: IMPACT_DEPTH } };
     }),
   ]);
+  const authority = await bridge.authority();
+  const observedProvenance = withAuthority(provenance, authority.kind === "available" ? authority.record : null);
   const graph = graphSection(symbol, callers, callees);
-  const evidence = symbol.state === "ready" ? buildEvidence(project, symbol.data, callers, callees, impact, provenance) : null;
-  return { page: "symbol", project, symbol, callers, callees, impact, graph, provenance, evidence };
+  const evidence = symbol.state === "ready" ? buildEvidence(project, symbol.data, callers, callees, impact, observedProvenance) : null;
+  return { page: "symbol", project, symbol, callers, callees, impact, graph, provenance: observedProvenance, evidence };
 }
 
 type Settled<T> = { ok: true; value: T } | { ok: false; failure: Failure };
@@ -150,13 +153,12 @@ export function provenanceFrom(project: ProjectRef, status: Settled<OperationApp
   if (!status.ok || !isProjectStatus(status.value)) return null;
   const value = status.value;
   const freshness = value.code_index_freshness;
-  if (freshness.status === "unavailable") return null;
+  if (!("worktree" in freshness)) return null;
   const worktree = freshness.worktree;
   const stalenessDetail =
     worktree.staleness_state === null || worktree.staleness_state === undefined ? null : `worktree ${worktree.staleness_state}`;
   const coverage = worktree.coverage;
   const coverageDetail = typeof coverage === "string" ? coverage : JSON.stringify(coverage);
-  const authority = value.server;
   return {
     project_id: project.project_id,
     project_root: worktree.worktree_root,
@@ -171,16 +173,7 @@ export function provenanceFrom(project: ProjectRef, status: Settled<OperationApp
       detail: "reason" in freshness && typeof freshness.reason === "string" ? freshness.reason : stalenessDetail,
     },
     coverage: { recall: coverageDetail === "complete" ? "full" : "partial", detail: coverageDetail },
-    authority: authorityOf(authority),
-  };
-}
-
-function authorityOf(server: unknown): Provenance["authority"] {
-  const record = typeof server === "object" && server !== null ? (server as Record<string, unknown>) : {};
-  return {
-    profile_root: typeof record.profile_root === "string" ? record.profile_root : "",
-    daemon_version: typeof record.version === "string" ? record.version : "",
-    daemon_pid: typeof record.pid === "number" ? record.pid : 0,
+    authority: null,
   };
 }
 
@@ -404,6 +397,7 @@ export function buildEvidence(
     `- Location: ${location}`,
     ...(symbol.signature === null ? [] : [`- Signature: \`${symbol.signature}\``]),
     `- Node id: \`${symbol.node_id}\``,
+    "_Symbol and impact reads do not report a generation; their snapshot identity is unverified._",
     ...relationLines(callers, "Callers", provenance?.generation ?? null),
     ...relationLines(callees, "Callees", provenance?.generation ?? null),
     ...sectionLines(
@@ -412,7 +406,7 @@ export function buildEvidence(
       (item) => `depth ${item.depth}: ${item.name} (${item.file}:${item.line})`,
     ),
     ...(impact.state === "ready" && !impact.data.complete ? ["_Impact traversal is partial: the daemon hit its traversal budget._"] : []),
-    "### Provenance",
+    "### Reported project status (separate read)",
     ...(provenance === null
       ? ["_Project status unavailable; provenance not verified._"]
       : [

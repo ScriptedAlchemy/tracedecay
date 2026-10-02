@@ -112,7 +112,7 @@ function modelContextFor(view: ViewState): { content: { type: "text"; text: stri
 
 function provenanceLine(provenance: Provenance | null): string {
   if (provenance === null) return "";
-  return ` [branch ${provenance.branch ?? "?"} commit ${provenance.commit ?? "?"} generation ${provenance.generation ?? "?"} freshness ${provenance.freshness.state}]`;
+  return ` [reported project status: branch ${provenance.branch ?? "?"} commit ${provenance.commit ?? "?"} generation ${provenance.generation ?? "?"} freshness ${provenance.freshness.state}]`;
 }
 
 function describeSection<T>(section: Section<T>, ready: (data: T) => string): string {
@@ -315,7 +315,7 @@ function renderSearchForm(project: ProjectRef, query: string): HTMLFormElement {
 
 function renderProvenance(provenance: Provenance | null, link: DeepLinkTarget): HTMLElement {
   if (provenance === null) {
-    return panel("Provenance", "provenance", [notice("Provenance is reported once the project answers a request.", "neutral", "provenance-pending")]);
+    return panel("Project status", "provenance", [notice("Project status is reported once the project answers a request.", "neutral", "provenance-pending")]);
   }
   const rows: [string, Node | string][] = [
     ["project", el("code", {}, [provenance.project_id])],
@@ -325,14 +325,14 @@ function renderProvenance(provenance: Provenance | null, link: DeepLinkTarget): 
     ["commit", el("code", { "data-testid": "provenance-commit" }, [provenance.commit ?? "—"])],
     ["generation", el("code", {}, [provenance.generation ?? "—"])],
     ["coverage", el("span", {}, [badge(provenance.coverage.recall, provenance.coverage.recall === "full" ? "ok" : "warn", "coverage-badge"), provenance.coverage.detail === null ? "" : ` ${provenance.coverage.detail}`])],
-    ["daemon", `${provenance.authority.daemon_version} · pid ${provenance.authority.daemon_pid}`],
+    ["daemon", provenance.authority === null ? "unavailable" : `${provenance.authority.daemon_version} · pid ${provenance.authority.daemon_pid}`],
     ["deep link", el("code", { "data-testid": "deep-link" }, [deepLinkPath(link)])],
   ];
   const dl = el("dl", { class: "prov" }, rows.flatMap(([k, v]) => [el("dt", {}, [k]), el("dd", {}, [v])]));
   const freshness = badge(provenance.freshness.state, freshnessTone(provenance.freshness.state), "freshness-badge");
   const children: Node[] = [dl];
   if (provenance.freshness.detail !== null) children.unshift(notice(provenance.freshness.detail, freshnessTone(provenance.freshness.state) === "ok" ? "neutral" : "warn", "freshness-detail"));
-  return panel("Provenance", "provenance", children, [freshness]);
+  return panel("Project status (separate read)", "provenance", children, [freshness]);
 }
 
 function renderSearch(view: Extract<ViewState, { page: "search" }>): Node[] {
@@ -468,7 +468,7 @@ function renderSymbol(view: Extract<ViewState, { page: "symbol" }>): Node[] {
   }
   return [
     renderSearchForm(view.project, ""),
-    panel("Symbol", "symbol-panel", [detail, actions]),
+    panel("Symbol", "symbol-panel", [detail, notice("Symbol and impact reads do not report a generation; their snapshot identity is unverified.", "neutral", "symbol-generation"), actions]),
     panel("Callers", "callers-panel", [relations(view.callers, "callers")]),
     panel("Callees", "callees-panel", [relations(view.callees, "callees")]),
     panel("Impact", "impact-panel", [impact]),

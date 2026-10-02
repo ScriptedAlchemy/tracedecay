@@ -14,8 +14,9 @@ From a ChatGPT conversation or the plugin's global entrypoint you can:
 - Search code symbols by name.
 - Inspect a symbol with its callers, callees, impact, and a bounded call
   graph.
-- See exact provenance on every answer: repository root, worktree, branch,
-  commit, generation, and index freshness.
+- See reported project status: repository root, worktree, branch, commit,
+  generation, and index freshness. Relations carry their served generation;
+  symbol and impact reads do not report snapshot identity.
 - Send the selected evidence back to the model as context or a message.
 - Follow deep links into a specific symbol view and toggle fullscreen.
 
