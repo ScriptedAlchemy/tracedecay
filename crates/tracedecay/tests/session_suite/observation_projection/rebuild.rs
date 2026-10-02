@@ -478,6 +478,14 @@ async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelate
     drain_projection_queue(&store).await;
     seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
     add_other_projector_owner(&tmp, unrelated.observation_id()).await;
+    drop(store);
+    drop(runtime);
+    checkpoint_database(&tmp).await;
+
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .expect("v5 projection state must remain admissible for convergence");
 
     let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.projected_rows(), 2);

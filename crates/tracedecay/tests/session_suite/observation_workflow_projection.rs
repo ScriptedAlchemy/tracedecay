@@ -932,7 +932,13 @@ async fn workflow_only_v5_profile_rebuilds_before_current_search() {
     )
     .unwrap();
     drop(conn);
+    drop(store);
+    drop(runtime);
 
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .expect("workflow-only v5 profile must reopen for convergence");
     let convergence = store.converge_projection_predecessor().await.unwrap();
     let rebuild = convergence
         .rebuild()
