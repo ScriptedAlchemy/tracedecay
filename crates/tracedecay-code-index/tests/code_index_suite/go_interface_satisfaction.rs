@@ -246,3 +246,72 @@ fn go_satisfaction_survives_sealed_restore() {
     assert!(undecided(&restored, "io/reader.go::Rows"));
     assert_eq!(PartitionedSealV1::of(&restored).manifest, sealed.manifest);
 }
+
+#[test]
+fn go_embedded_fields_and_aliases_promote_methods() {
+    let (child, cold) = increment(
+        "go-sat-promote",
+        &[
+            (
+                "calc/wrapped.go",
+                "package calc\n\ntype Wrapped struct {\n\tSimple\n}\n\ntype PtrWrapped struct {\n\t*Simple\n}\n\ntype Deep struct {\n\tWrapped\n}\n\ntype Same = Simple\n",
+            ),
+            (
+                "shapes/framed.go",
+                "package shapes\n\nimport \"example.com/sat/calc\"\n\ntype Framed struct {\n\tcalc.Simple\n}\n",
+            ),
+        ],
+    );
+    let edges = implements(&cold);
+    for implementor in [
+        "calc/wrapped.go::Wrapped",
+        "calc/wrapped.go::PtrWrapped",
+        "calc/wrapped.go::Deep",
+        "calc/wrapped.go::Same",
+        "shapes/framed.go::Framed",
+    ] {
+        assert!(
+            edges.contains(&edge(implementor, "calc/adder.go::Adder")),
+            "{implementor} carries Simple's Add: {edges:?}"
+        );
+    }
+    assert!(!undecided(&cold, "calc/adder.go::Adder"));
+    assert_eq!(implements(&child), edges);
+}
+
+#[test]
+fn go_struct_embedding_an_external_type_discloses_a_gap() {
+    let (child, cold) = increment(
+        "go-sat-external-embed",
+        &[(
+            "buf/buf.go",
+            "package buf\n\nimport \"bytes\"\n\ntype Writer interface {\n\tWrite(p []byte) (int, error)\n}\n\ntype Tagged interface {\n\tWrite(p []byte) (int, error)\n\ttag()\n}\n\ntype Buf struct {\n\tbytes.Buffer\n}\n\ntype Outer struct {\n\tBuf\n}\n\nfunc (Outer) tag() {}\n",
+        )],
+    );
+    for generation in [&child, &cold] {
+        let edges = implements(generation);
+        assert!(
+            !edges
+                .iter()
+                .any(|(_, to)| to == "buf/buf.go::Writer" || to == "buf/buf.go::Tagged"),
+            "bytes.Buffer's methods are outside the project: {edges:?}"
+        );
+        assert!(
+            undecided(generation, "buf/buf.go::Writer"),
+            "Buf may write through bytes.Buffer"
+        );
+        assert!(
+            undecided(generation, "buf/buf.go::Tagged"),
+            "Outer declares tag and may write through Buf's bytes.Buffer"
+        );
+        assert!(
+            !undecided(generation, "shapes/shape.go::Shape"),
+            "bytes.Buffer cannot supply Bounds() geom.Rect"
+        );
+        assert!(
+            !undecided(generation, "priv/priv.go::sealed"),
+            "bytes.Buffer cannot supply an unexported method"
+        );
+        assert!(edges.contains(&edge("shapes/box.go::Box", "shapes/shape.go::Shape")));
+    }
+}
