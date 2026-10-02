@@ -237,9 +237,9 @@ fn qualified_segment_chain(value: &str) -> Vec<String> {
 fn narrow_symbol_for_edit(symbol: &str, symbols: Vec<EditSymbolV1>) -> Result<EditSymbolV1> {
     let mut iter = symbols.into_iter();
     let Some(first) = iter.next() else {
-        return Err(TraceDecayError::Config {
-            message: format!("symbol '{symbol}' not found"),
-        });
+        return Err(TraceDecayError::not_found(format!(
+            "symbol '{symbol}' not found"
+        )));
     };
     let rest = iter.collect::<Vec<_>>();
     if rest.is_empty() {

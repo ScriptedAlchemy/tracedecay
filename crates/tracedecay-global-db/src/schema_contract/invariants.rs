@@ -1,6 +1,6 @@
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
-use super::super::{global_db_operation_error, global_db_operation_message};
+use super::super::global_db_operation_error;
 use super::normalize_trigger_sql;
 use tracedecay_runtime_core::db::{
     Database, DatabaseWriteTransaction,
@@ -29,7 +29,7 @@ use repair::{
     validate_observation_cursor_coverage,
 };
 use rows::{
-    authority_violation, observation_row_audit_covers, query_has_rows,
+    audit_read_error, authority_violation, observation_row_audit_covers, query_has_rows,
     validate_mutable_invariant_rows, validate_observation_authority_page,
     validate_observation_authority_rows, validate_receipt_authority_page,
     validate_receipt_authority_rows, validate_source_cursor_authority_chunk,
@@ -77,7 +77,7 @@ pub async fn require_foreign_key_audit(
         (FOREIGN_KEY_AUDIT_PROGRESS,),
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     Ok(())
 }
 
@@ -91,11 +91,11 @@ async fn foreign_key_audit_required(
             (FOREIGN_KEY_AUDIT_PROGRESS,),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     rows.next()
         .await
         .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(audit_read_error)
 }
 
 async fn projection_checkpoint(
@@ -110,13 +110,13 @@ async fn projection_checkpoint(
             params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     rows.next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("projection checkpoint query returned no row"))?
         .get(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(audit_read_error)
 }
 
 pub async fn ensure_authority_invariant_schema(
@@ -178,7 +178,7 @@ impl AuthorityInvariantTransactionProvider for Database {
             .background()
             .read_snapshot()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         Ok(Some(foreign_key_table_violates(&snapshot, table).await?))
     }
 }
@@ -545,8 +545,7 @@ async fn converge_authority_invariants(
                 }
             };
             if violation {
-                return Err(global_db_operation_message(
-                    OPERATION,
+                return Err(authority_violation(
                     "global database contains a foreign-key violation",
                 ));
             }
@@ -601,7 +600,7 @@ pub(super) async fn validate_invariant_rows(
             && query != FOREIGN_KEY_AUDIT_QUERY
             && query_has_rows(conn, query).await?
         {
-            return Err(global_db_operation_message(OPERATION, invariant.violation));
+            return Err(invariant.violated());
         }
     }
     Ok(())
@@ -640,16 +639,14 @@ async fn foreign_key_audit_next_table(
             (FOREIGN_KEY_AUDIT_PROGRESS,),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let last_table = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| {
-            global_db_operation_message(OPERATION, "foreign-key audit cursor disappeared")
-        })?
+        .map_err(audit_read_error)?
+        .ok_or_else(|| authority_violation("foreign-key audit cursor disappeared"))?
         .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     drop(rows);
 
     let mut rows = conn
@@ -663,14 +660,14 @@ async fn foreign_key_audit_next_table(
             (last_table,),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let table = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .map(|row| row.get::<String>(0))
         .transpose()
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     drop(rows);
     let Some(table) = table else {
         conn.execute(
@@ -678,7 +675,7 @@ async fn foreign_key_audit_next_table(
             (FOREIGN_KEY_AUDIT_PROGRESS,),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
         return Ok(None);
     };
     Ok(Some(table))
@@ -694,11 +691,11 @@ async fn foreign_key_table_violates(
             (table,),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     rows.next()
         .await
         .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(audit_read_error)
 }
 
 async fn record_foreign_key_audit_table(
@@ -712,7 +709,7 @@ async fn record_foreign_key_audit_table(
         params![FOREIGN_KEY_AUDIT_PROGRESS, table],
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     Ok(())
 }
 
@@ -743,17 +740,10 @@ async fn foreign_key_violation_exists_read_only(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut tables = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        tables.push(
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        );
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        tables.push(row.get::<String>(0).map_err(audit_read_error)?);
     }
     drop(rows);
 
@@ -764,13 +754,8 @@ async fn foreign_key_violation_exists_read_only(
                 (table,),
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .is_some()
-        {
+            .map_err(audit_read_error)?;
+        if rows.next().await.map_err(audit_read_error)?.is_some() {
             return Ok(true);
         }
     }
@@ -790,8 +775,7 @@ pub async fn validate_authority_rows_exhaustive(
     let released = ReleasedRenderingLedger::default();
     validate_projection_authority_suffix(conn, AuditCheckpoint::default(), &released).await?;
     if foreign_key_violation_exists_read_only(conn).await? {
-        return Err(global_db_operation_message(
-            OPERATION,
+        return Err(authority_violation(
             "global database contains a foreign-key violation",
         ));
     }
@@ -809,8 +793,9 @@ mod tests {
         AUDIT_PAGE_ROWS, AuthorityInvariantTransactionProvider, FOREIGN_KEY_AUDIT_PROGRESS,
         INCOMPLETE_EXHAUSTIVE_PASS, OBSERVATION_AUDIT_PAGE_ROWS, ensure_authority_invariants,
         foreign_key_violation_exists_read_only, foreign_key_violation_exists_resumable,
-        global_db_operation_error, global_db_operation_message,
+        global_db_operation_error,
     };
+    use crate::global_db_operation_message;
     use crate::schema_contract::invariants::test_fixture::{
         authority_fixture, open_registered, seed_observation, write_cursor,
     };
