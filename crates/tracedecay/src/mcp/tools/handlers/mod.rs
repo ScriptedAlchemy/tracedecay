@@ -423,7 +423,7 @@ impl Default for ToolCallRegistryOptions<'_> {
     }
 }
 
-impl<'a> ToolCallRegistryOptions<'a> {
+impl ToolCallRegistryOptions<'_> {
     /// Marks this call as admitted for the opened project's checkout.
     /// Fixture `handle_tool_call` uses this; production carries the scope
     /// from project-open publication.
