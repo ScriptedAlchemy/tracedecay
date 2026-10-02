@@ -551,6 +551,9 @@ pub(super) fn repair_action(
     if host == HostKindV1::KimiCode && state != HostBundleComponentDoctorStateV1::Current {
         return "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration".to_string();
     }
+    if host == HostKindV1::ChatGpt && state != HostBundleComponentDoctorStateV1::Current {
+        return "run `tracedecay install --agent chatgpt` to refresh the staged bundle, then register it inside ChatGPT through its interactive plugin or connector surfaces; ChatGPT keeps no local registry Doctor can verify".to_string();
+    }
     let component = component_slug(component);
     let host_descriptor = host.descriptor();
     let host = host_descriptor.cli_id();

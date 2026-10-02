@@ -265,6 +265,7 @@ tracedecay install --agent cursor      # Cursor
 tracedecay install --agent devin       # Devin
 tracedecay install --agent kiro        # AWS Kiro
 tracedecay install --agent kimi        # Kimi Code CLI
+tracedecay install --agent chatgpt     # ChatGPT
 ```
 
 Other host integrations can be detected by `doctor`, but do not appear in the
@@ -280,6 +281,7 @@ MCP registration or native plugin tools, with permissions where available.
   leaving Devin's permission policy unchanged.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes. Codex still asks you to trust new command hooks via `/hooks`.
 - Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; for the first install, run the printed `/plugins install <staged-path>` command in Kimi Code (it asks you to trust the plugin), then rerun TraceDecay so it can record the staged source. Later installs and updates refresh that plugin without a Kimi step: TraceDecay briefly starts `kimi web` on a loopback port and asks Kimi's own installer to reinstall it. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
+- ChatGPT stages its portable plugin bundle at `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` (`plugin.json`, `mcp.json`, the `tracedecay-explorer` MCP App server, the app UI, icon, and README). ChatGPT registers plugins and connectors only inside its own interactive surfaces, so every lifecycle command reports a pending operator step carrying the staged `node ... server.mjs --http` command; install the staged bundle inside ChatGPT or point a connector at that loopback endpoint. TraceDecay keeps no local registry to verify; `uninstall --agent chatgpt` removes the receipt-owned staged bytes. Reachability from hosted ChatGPT requires an operator-provided tunnel or HTTPS deployment; that route is unverified.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -433,6 +435,16 @@ Kimi Code's `/plugins remove tracedecay` first, then rerun `tracedecay
 uninstall --agent kimi` to remove the staged source. TraceDecay never writes
 Kimi's managed plugin directory or `installed.json`; only Kimi's installer
 does.
+
+ChatGPT's install is likewise two-step, but the second step never becomes
+automatic: ChatGPT exposes no host CLI or local registry, so TraceDecay
+stages the portable bundle under `~/.tracedecay/host-bundle-stage/chatgpt/`
+and reports the operator step (`node <staged>/chatgpt-extension/embedded/
+server.mjs --http 127.0.0.1:8787` or the host's plugin install) as a pending
+action on `install`, `update-plugin`, `update`, and `doctor`. `update-plugin`
+refreshes the staged bytes and reports the same pending step. `uninstall
+--agent chatgpt` deletes the receipt-owned staged tree; it cannot and does
+not claim to remove whatever was installed inside ChatGPT.
 
 The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 
@@ -711,7 +723,7 @@ Start the daemon and re-run Doctor to read the findings.
 |------|----------|---------------------------------------------------|
 | `0`  | no issue found; warnings and skipped hosts may be printed | every host completed, or was skipped as not applicable or `not installed` |
 | `1`  | an issue was found | a host's lifecycle ran and failed (or, for `update`, the upgrade failed) |
-| `75` | no issue, but an operator step is pending: `daemon_unavailable`, a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`) |
+| `75` | no issue, but an operator step is pending: `daemon_unavailable`, a store the daemon serves reset-required, or a host's interactive activation (Kimi Code's `/plugins install`, ChatGPT's in-app plugin/connector install) | nothing failed, but a host waits on an interactive step (Kimi Code's `/plugins install`, ChatGPT's in-app install) |
 
 A project runtime that is still mounting (`application.runtime.mounting`) is
 reported as pending with a wait remedy; it does not change the exit status.

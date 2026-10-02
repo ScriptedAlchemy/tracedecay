@@ -1,7 +1,7 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-Cursor, Kimi Code, OpenCode, and Pi. The Claude, Codex, Cursor, Kimi Code, and
+Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
 OpenCode bundles expose a host-specific MCP server key (`graph` for
 Claude/Codex, `tracedecay` for Cursor, Kimi Code, and OpenCode). Pi has no MCP
 route: its extension registers the catalog tools over the CLI bridge. Every
@@ -81,8 +81,8 @@ never a doubled `tracedecay`.
   events reach `tracedecay hook-pi-event`, record analytics under the `pi`
   host, and land that session's `~/.pi/agent/sessions` transcript (or the
   `PI_CODING_AGENT_DIR` one) through the Pi transcript source.
-- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
-  host README files, deployed as `README.md`.
+- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`,
+  `README-chatgpt.md`: host README files, deployed as `README.md`.
 - `README-opencode.md`: OpenCode host README. It is source documentation;
   OpenCode has no plugin-manifest README deploy slot.
 - `README-host-bundles.md`: catalog/lifecycle contract and the host

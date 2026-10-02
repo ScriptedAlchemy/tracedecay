@@ -12,7 +12,6 @@
   "keywords": ["code-graph", "mcp", "code-search", "call-graph", "impact-analysis", "code-health"],
   "extensions": {
     "com.openai": {
-      "hooks": "./hooks/hooks.json",
       "interface": {
         "displayName": "TraceDecay",
         "shortDescription": "Explore code with exact provenance",

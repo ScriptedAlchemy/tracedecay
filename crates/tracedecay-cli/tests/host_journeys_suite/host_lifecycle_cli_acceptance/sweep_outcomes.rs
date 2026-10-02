@@ -11,7 +11,10 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
 use super::install_kimi_cli;
-use super::{IsolatedCli, VERIFY_FAILURE_ENV, assert_success, host_case, seed_host};
+use super::{
+    IsolatedCli, VERIFY_FAILURE_ENV, assert_receipt_digests, assert_seeded_bytes, assert_success,
+    host_case, latest_receipt, seed_host,
+};
 
 /// `EX_TEMPFAIL`: nothing failed, but a host needs an operator step.
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
@@ -666,6 +669,97 @@ fn kimi_reports_pending_operator_action_until_its_plugins_install_runs() {
     assert_eq!(converged.status.code(), Some(0), "{}", stderr(&converged));
 }
 
+/// ChatGPT needs no host binary and keeps no locally readable registry:
+/// `install` commits the receipt-owned staged bundle and reports the
+/// host-side step as pending, the sweep keeps reporting it, `doctor`
+/// reports the same pending action, and `uninstall` removes the staged
+/// bundle while leaving operator-foreign host files untouched.
+#[cfg(unix)]
+#[test]
+fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::ChatGpt);
+    let originals = seed_host(case, &cli);
+    let staged = cli
+        .home
+        .path()
+        .join(".tracedecay/host-bundle-stage/chatgpt/tracedecay");
+    let command = format!(
+        "node {} --http 127.0.0.1:8787",
+        staged
+            .join("chatgpt-extension/embedded/server.mjs")
+            .display()
+    );
+
+    let install = cli.run(&["install", "--agent", case.id]);
+    let install_stderr = stderr(&install);
+    assert_eq!(
+        install.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "{install_stderr}"
+    );
+    assert!(
+        install_stderr.contains(&format!("chatgpt: pending operator action: `{command}`")),
+        "{install_stderr}"
+    );
+    // The receipt-owned staged bundle is the operator's install payload.
+    for relative in [
+        "plugin.json",
+        "mcp.json",
+        "README.md",
+        "chatgpt-extension/embedded/server.mjs",
+        "chatgpt-extension/embedded/app.html",
+        "chatgpt-extension/assets/icon.svg",
+    ] {
+        assert!(
+            staged.join(relative).is_file(),
+            "staged bundle missing {relative}"
+        );
+    }
+    let install_receipt = latest_receipt(&cli, case.host);
+    assert_receipt_digests(&cli, &install_receipt);
+    assert_seeded_bytes(&cli, &originals);
+    // The staged mcp.json launches the resolved tracedecay binary, not a
+    // placeholder or a bare `tracedecay` the host cannot resolve.
+    let mcp: serde_json::Value =
+        serde_json::from_slice(&fs::read(staged.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        mcp["mcpServers"]["graph"]["command"],
+        serde_json::json!(cli.installed_bin()),
+        "{mcp}"
+    );
+
+    let update = cli.run(&["update-plugin"]);
+    let update_stderr = stderr(&update);
+    assert_eq!(
+        update.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "the pending host stays tracked and the sweep keeps reporting it: {update_stderr}"
+    );
+    assert!(
+        update_stderr.contains(&format!("chatgpt: pending operator action: `{command}`")),
+        "{update_stderr}"
+    );
+
+    let doctor = stderr(&cli.run(&["doctor"]));
+    assert!(
+        doctor.contains(&format!("pending operator action: {command}")),
+        "{doctor}"
+    );
+
+    let uninstall = cli.run(&["uninstall", "--agent", case.id]);
+    let uninstall_stderr = stderr(&uninstall);
+    assert_eq!(uninstall.status.code(), Some(0), "{uninstall_stderr}");
+    assert!(!staged.exists(), "uninstall left the staged bundle behind");
+    assert!(install_receipt.component_receipts.iter().all(|component| {
+        component
+            .artifacts
+            .iter()
+            .all(|artifact| !cli.home.path().join(&artifact.relative_path).exists())
+    }));
+    assert_seeded_bytes(&cli, &originals);
+}
+
 #[test]
 fn post_update_exits_nonzero_when_a_host_refresh_fails() {
     let cli = IsolatedCli::new();
@@ -765,6 +859,8 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
     install_cline(&cli);
     fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
     fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
+    // ChatGPT's desktop app-data directory is its only local presence proof.
+    fs::create_dir_all(cli.home.path().join("Library/Application Support/ChatGPT")).unwrap();
     let _daemon = ProfileDaemon::start(&cli);
 
     let doctor = cli.run(&["doctor"]);
@@ -780,5 +876,16 @@ fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
             "{doctor_stderr}"
         );
     }
+    assert!(
+        doctor_stderr.contains(&format!(
+            "ChatGPT detected ({}) but tracedecay is not integrated, run `tracedecay install \
+             --agent chatgpt`\n",
+            cli.home
+                .path()
+                .join("Library/Application Support/ChatGPT")
+                .display()
+        )),
+        "{doctor_stderr}"
+    );
     assert!(!doctor_stderr.contains("NOT registered"), "{doctor_stderr}");
 }

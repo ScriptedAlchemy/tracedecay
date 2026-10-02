@@ -75,7 +75,9 @@ hosts that do not read the portable manifest.
 native extension's offline-packaging exception. `pnpm run build` regenerates
 `embedded/app.html` and `embedded/server.mjs`; `pnpm run check:embedded`
 performs a byte-for-byte drift check. `dist/` and `test-results/` stay
-ignored.
+ignored. The lifecycle stamps the installed `tracedecay` binary's resolved
+path into the staged `mcp.json` `graph.command` at deploy time, so the
+staged bundle runs against the exact binary that installed it.
 
 ## Verification
 
@@ -90,6 +92,23 @@ ignored.
   project → search → symbol → graph → evidence to chat → fullscreen, deep
   links, and denied/not-found/disconnected rendering. Requires
   `npx playwright install chromium` once.
+
+## Lifecycle
+
+`tracedecay install --agent chatgpt` deploys the portable bundle
+(`plugin.json`, `mcp.json`, this README, `embedded/server.mjs`,
+`embedded/app.html`, `assets/icon.svg`) as the staged plugin source at
+`~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` under the shared
+receipt-backed lifecycle; `update-plugin` and `update` refresh it and
+`uninstall --agent chatgpt` removes exactly the receipt-owned bytes.
+ChatGPT exposes no host CLI or local registry, so every lifecycle command
+reports a pending operator step instead of a completed activation: install
+the staged bundle inside ChatGPT through its interactive plugin flow, or
+point a connector at `node <staged>/chatgpt-extension/embedded/server.mjs
+--http 127.0.0.1:8787`. `tracedecay doctor` verifies the staged bundle
+(intact manifest, `extensions.com.openai` mapping, every declared file
+present) and repeats the pending step; it never claims a registration it
+cannot observe.
 
 ## Host support: verified vs. external prerequisite
 

@@ -183,6 +183,11 @@ impl CatalogHostComponentRegistrationAuthority {
             // writes the host-owned `~/.factory/mcp.json`; the deployed
             // descriptor alone is not the lifecycle.
             || component_set.host == crate::agents::host_bundle::HostKindV1::FactoryDroid
+            // ChatGPT's deployed artifact is the staged portable bundle; the
+            // host carries nothing until its own interactive plugin or
+            // connector flow consumes it, so the deployed bytes alone are not
+            // the lifecycle.
+            || component_set.host == crate::agents::host_bundle::HostKindV1::ChatGpt
             || component_set.host == crate::agents::host_bundle::HostKindV1::Cline
             || component_set.host == crate::agents::host_bundle::HostKindV1::RooCode
             || component_set.host == crate::agents::host_bundle::HostKindV1::Kilo
@@ -700,16 +705,21 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Install
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => {
-                if component_set.host == crate::agents::host_bundle::HostKindV1::KimiCode {
+                if matches!(
+                    component_set.host,
+                    crate::agents::host_bundle::HostKindV1::KimiCode
+                        | crate::agents::host_bundle::HostKindV1::ChatGpt
+                ) {
                     match self
                         .integration
                         .preflight_non_interactive_install(&self.context)
                         .map_err(|error| Self::registration_error(component_set.host, error))?
                     {
                         crate::agents::NonInteractiveInstallOutcome::Ready => None,
-                        // Kimi's interactive `/plugins install` consumes the
-                        // staged source, so the transaction must still commit
-                        // it; the registration stays untouched.
+                        // These interactive-activation hosts consume the
+                        // staged source through their own install flow, so
+                        // the transaction must still commit it; the
+                        // registration stays untouched.
                         crate::agents::NonInteractiveInstallOutcome::DeferredUserAction(action) => {
                             self.should_apply = false;
                             self.deferred_activation = Some(action);
