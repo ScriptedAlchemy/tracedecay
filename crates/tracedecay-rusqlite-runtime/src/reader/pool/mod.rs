@@ -216,6 +216,13 @@ pub(super) struct PoolState {
     opening_general: u16,
     opening_health: u16,
     pub(super) records: BTreeMap<u64, WorkerRecord>,
+    /// Idle workers ordered oldest-released first. Checkout takes the back:
+    /// `SQLite` keeps a connection's page cache across read transactions until
+    /// a commit lands after that connection's last read. The most recently
+    /// released worker is the likeliest to have read since the last commit;
+    /// handing out a longer-idle one re-reads every B-tree path it touches.
+    /// The front therefore holds the longest-idle burst workers, which is
+    /// where [`ReaderPool::retire_idle_at`] looks for retirees.
     general: VecDeque<AvailableWorker>,
     health: VecDeque<AvailableWorker>,
     pub(super) leased_general: u16,
@@ -936,7 +943,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 ReaderLane::ReservedHealth => state.leased_health,
             };
             if leased < lease_ceiling {
-                if let Some(worker) = state.available(lane).pop_front() {
+                if let Some(worker) = state.available(lane).pop_back() {
                     match lane {
                         ReaderLane::General => state.leased_general += 1,
                         ReaderLane::ReservedHealth => state.leased_health += 1,

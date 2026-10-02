@@ -14,9 +14,9 @@ use tracedecay_domain::{
 };
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
-use super::CodeLexicalArtifactErrorV1;
 use super::clone_census::CodeLexicalCloneIndexCensusV1;
 use super::schema::{CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, digest_domain_for_revision};
+use super::{CodeLexicalArtifactErrorV1, sqlite_error};
 
 pub(super) use super::schema::{SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11};
 
@@ -429,6 +429,20 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
 pub(super) fn verify_artifact_table_layout(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    // The removed parent-carry path sealed incomplete source receipts under
+    // this same format revision. Its marker survives sealing, so rebuild it.
+    let carried: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'carried_document_shift')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if carried {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(
+            "parent-carried lexical artifact requires a full rebuild".to_owned(),
+        ));
+    }
     for (table, expected_without_rowid, expected_columns) in ARTIFACT_TABLE_LAYOUT {
         let without_rowid: Option<i64> = connection
             .query_row(

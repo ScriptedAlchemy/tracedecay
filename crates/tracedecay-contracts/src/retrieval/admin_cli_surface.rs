@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_tool_catalog::OwnerStoresV1;
 
 use crate::project_registry::{ProjectRegistrySummary, ProjectRepoGroup, PublicCodeProject};
 use crate::session_sync::{
@@ -113,15 +114,15 @@ pub enum AdminCliSurfaceRequestV1 {
 }
 
 impl AdminCliSurfaceRequestV1 {
-    /// Whether this action runs on the project's session stores and session
-    /// sync owner, which only the project's full server mounts.
-    pub fn needs_session_stores(&self) -> bool {
+    /// The stores this action runs on: the session actions need the
+    /// project's session stores and session sync owner.
+    pub fn owner_stores(&self) -> OwnerStoresV1 {
         match self {
             Self::SessionsImport {}
             | Self::SessionsGitSync { .. }
             | Self::SessionsSyncStatus { .. }
             | Self::SessionsSyncCancel { .. }
-            | Self::SessionsUnfinished { .. } => true,
+            | Self::SessionsUnfinished { .. } => OwnerStoresV1::ProjectSessions,
             Self::CostSummary { .. }
             | Self::AnalyticsSync { .. }
             | Self::AnalyticsDiagnostics { .. }
@@ -132,7 +133,7 @@ impl AdminCliSurfaceRequestV1 {
             | Self::RegistryProjectTokens { .. }
             | Self::RegistryGc { .. }
             | Self::StorageReport { .. }
-            | Self::GainQuery { .. } => false,
+            | Self::GainQuery { .. } => OwnerStoresV1::ProjectGraph,
         }
     }
 }

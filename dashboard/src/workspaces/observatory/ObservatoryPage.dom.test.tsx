@@ -171,29 +171,6 @@ describe('ObservatoryPage store telemetry', () => {
     expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
   });
 
-  it('shows a failed pipeline mount and its retry action', async () => {
-    const failedMount = {
-      ...readyCodeIndexFreshnessEnvelope(),
-      domain_state: 'error',
-      payload: {
-        worktrees: [],
-        note: 'the last code-index mount for this project failed',
-        mount_failure: {
-          message: 'the code-index scheduler could not mount for this project',
-          remediation: 'run `tracedecay sync` to retry the code-index mount',
-        },
-      },
-    };
-    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), failedMount);
-    renderObservatory('pipeline');
-
-    expect(
-      await screen.findByText('the code-index scheduler could not mount for this project'),
-    ).toBeTruthy();
-    expect(screen.getByText('run `tracedecay sync` to retry the code-index mount')).toBeTruthy();
-    expect(screen.queryByText('no mounted code-index worktree')).toBeNull();
-  });
-
   it('renders table-growth unavailable states distinctly without zero measurements', async () => {
     stubTelemetry(telemetryPayload());
     renderObservatory('telemetry');
@@ -362,6 +339,32 @@ describe('ObservatoryPage store telemetry', () => {
     expect(panel.textContent).toContain('2.40ms');
     expect(panel.textContent).toContain('generation.empty');
     expect(panel.textContent).toContain('0 / 0');
+  });
+
+  it('names a failed mount and its retry command in the pipeline evidence', async () => {
+    const ready = readyCodeIndexFreshnessEnvelope();
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), {
+      ...ready,
+      domain_state: 'error',
+      payload: {
+        worktrees: [],
+        note: 'the last code-index mount for this project failed',
+        mount_failure: {
+          message: 'the code-index scheduler could not mount for this project',
+          remediation: 'run `tracedecay sync` to retry the code-index mount',
+        },
+      },
+    });
+    renderObservatory('pipeline');
+
+    await screen.findAllByText('run `tracedecay sync` to retry the code-index mount');
+    const pipelines = screen.getAllByRole('region', { name: 'Code-index pipeline' });
+    expect(pipelines.length).toBeGreaterThan(0);
+    for (const pipeline of pipelines) {
+      expect(pipeline.textContent).toContain('the code-index scheduler could not mount for this project');
+      expect(pipeline.textContent).toContain('run `tracedecay sync` to retry the code-index mount');
+    }
+    expect(screen.queryByText(/no mounted code-index worktree/)).toBeNull();
   });
 
   it('keeps partial, stale, and unavailable clone states distinct', async () => {

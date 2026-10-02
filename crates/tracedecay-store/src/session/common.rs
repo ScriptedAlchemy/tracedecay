@@ -14,8 +14,6 @@ use tracedecay_domain::{
 pub enum SessionTemporalCapabilityV1 {
     /// Freeze and consume immutable watermarks for retrieval.
     FrozenWatermarks,
-    /// Begin, persist, and activate candidate projection generations.
-    GenerationRebuild,
     /// Publish or exactly replay immutable summaries.
     ImmutableSummaryPublication,
     RefreshJoin,
@@ -298,11 +296,6 @@ pub enum SessionStoreError {
     MissingGeneration {
         generation: SessionProjectionGenerationV1,
     },
-    #[error("session temporal generation is stale: expected {expected:?}, actual {actual:?}")]
-    StaleGeneration {
-        expected: SessionProjectionGenerationV1,
-        actual: SessionProjectionGenerationV1,
-    },
     #[error("refresh operation {operation_id:?} cannot transition from state {state:?}")]
     InvalidRefreshState {
         operation_id: SessionRefreshOperationIdV1,
@@ -441,21 +434,6 @@ declare_session_temporal_operation!(
     SessionTemporalCapabilityV1::FrozenWatermarks
 );
 declare_session_temporal_operation!(
-    SessionGenerationRebuildBeginOperation,
-    SessionGenerationRebuildBeginPermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
-    SessionProjectionBatchPersistOperation,
-    SessionProjectionBatchPersistPermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
-    SessionGenerationActivateOperation,
-    SessionGenerationActivatePermit,
-    SessionTemporalCapabilityV1::GenerationRebuild
-);
-declare_session_temporal_operation!(
     SessionRefreshBeginOrJoinOperation,
     SessionRefreshBeginOrJoinPermit,
     SessionTemporalCapabilityV1::RefreshJoin
@@ -514,19 +492,6 @@ pub(super) fn require_declared_capability(
 ) -> SessionStoreResult<()> {
     if !capabilities.supports(capability) {
         return Err(SessionStoreError::UnsupportedCapability { capability });
-    }
-    Ok(())
-}
-
-pub(super) fn require_newer_generation(
-    candidate: SessionProjectionGenerationV1,
-    active: SessionProjectionGenerationV1,
-) -> SessionStoreResult<()> {
-    if candidate <= active {
-        return Err(SessionStoreError::StaleGeneration {
-            expected: candidate,
-            actual: active,
-        });
     }
     Ok(())
 }

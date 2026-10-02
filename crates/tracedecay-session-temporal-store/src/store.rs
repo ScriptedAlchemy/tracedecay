@@ -7,12 +7,9 @@ use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_store::{
-    SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
-    SessionGenerationActivationRequestV1, SessionGenerationRebuildBeginPermit,
-    SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1,
-    SessionProjectionBatchPersistPermit, SessionRefreshBeginOrJoinPermit,
-    SessionRefreshBeginOrJoinReceiptV1, SessionRefreshBeginOrJoinRequestV1,
-    SessionRefreshCancelPermit, SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
+    SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
+    SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
     SessionRefreshCompletionRequestV1, SessionRefreshFailPermit, SessionRefreshFailureRequestV1,
     SessionRefreshProgressPersistPermit, SessionRefreshProgressReadPermit,
     SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadPermit,
@@ -20,8 +17,8 @@ use tracedecay_store::{
     SessionRetrievalPageV1, SessionRetrievalStore, SessionSnapshotFreezePermit, SessionStoreResult,
     SessionTemporalCapabilitiesV1, SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
     SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchReceiptV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
-    SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
+    SessionTemporalProjectionBatchV1, SessionTemporalRetrievalRequestV1,
+    SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
 use super::refresh::SessionRefreshRecoveryV1;
@@ -220,7 +217,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalCapabilityProvider
         static CAPABILITIES: LazyLock<SessionTemporalCapabilitiesV1> = LazyLock::new(|| {
             SessionTemporalCapabilitiesV1::new([
                 SessionTemporalCapabilityV1::FrozenWatermarks,
-                SessionTemporalCapabilityV1::GenerationRebuild,
                 SessionTemporalCapabilityV1::RefreshJoin,
                 SessionTemporalCapabilityV1::RefreshProgressPersistence,
                 SessionTemporalCapabilityV1::RefreshCancellation,
@@ -253,50 +249,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionRetrievalStore for SessionTem
         async move {
             SessionTemporalAccess::new(db)
                 .retrieve_session_temporal_page_result(request)
-                .await
-        }
-    }
-}
-
-impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalProjectionStore
-    for SessionTemporalStore<'_, D>
-{
-    fn begin_session_generation_rebuild_supported(
-        &self,
-        _permit: SessionGenerationRebuildBeginPermit,
-        request: SessionGenerationRebuildRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationRebuildReceiptV1>> + Send {
-        let db = self.db;
-        async move {
-            SessionTemporalAccess::new(db)
-                .begin_session_generation_rebuild_result(request)
-                .await
-        }
-    }
-
-    fn persist_session_temporal_projection_batch_supported(
-        &self,
-        _permit: SessionProjectionBatchPersistPermit,
-        batch: SessionTemporalProjectionBatchV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalProjectionBatchReceiptV1>> + Send
-    {
-        let db = self.db;
-        async move {
-            SessionTemporalAccess::new(db)
-                .persist_session_temporal_projection_batch_result(batch)
-                .await
-        }
-    }
-
-    fn activate_session_temporal_generation_supported(
-        &self,
-        _permit: SessionGenerationActivatePermit,
-        request: SessionGenerationActivationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationActivationReceiptV1>> + Send {
-        let db = self.db;
-        async move {
-            SessionTemporalAccess::new(db)
-                .activate_session_temporal_generation_result(request)
                 .await
         }
     }

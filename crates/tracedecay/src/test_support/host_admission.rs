@@ -62,3 +62,63 @@ pub(crate) fn mcp_server_context_for_test(
     context.host_admission_test_runtime = Some(runtime);
     Ok(context)
 }
+
+#[cfg(test)]
+fn git(root: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program()
+            .expect("absolute git executable should resolve"),
+    )
+    .current_dir(root)
+    .args(args)
+    .status()
+    .expect("git command should run");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// [`mcp_server_context_for_test`] over a one-commit git project registered
+/// as `project_id` in an isolated profile. Returns the project directory,
+/// then the profile directory, beside the context.
+#[cfg(test)]
+pub(crate) async fn registered_git_project_context_for_test(
+    project_id: &str,
+) -> (
+    crate::mcp::server::McpServerConstructionContext,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let profile = tempfile::TempDir::new().expect("isolated profile");
+    let dir = tempfile::TempDir::new().expect("temp project");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "test@example.com"]);
+    git(dir.path(), &["config", "user.name", "Test"]);
+    std::fs::write(dir.path().join(".gitignore"), ".tracedecay/\n").expect("gitignore");
+    std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )
+    .expect("source");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "initial"]);
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        profile.path(),
+        dir.path(),
+        tracedecay_domain::ProjectId::new(project_id).expect("typed project identity"),
+    )
+    .await
+    .expect("registered runtime");
+    let graph = runtime
+        .initialize_project_graph_for_test(
+            dir.path(),
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(profile.path().to_path_buf()),
+                global_db_path: None,
+            },
+        )
+        .await
+        .expect("daemon-owned project init");
+    let context = mcp_server_context_for_test(Arc::new(runtime), graph, None)
+        .expect("registered MCP server context");
+    (context, dir, profile)
+}

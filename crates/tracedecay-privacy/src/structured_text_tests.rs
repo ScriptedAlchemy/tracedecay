@@ -383,16 +383,97 @@ fn json_numeric_sensitive_value_is_redacted_to_a_json_string() {
 }
 
 #[test]
-fn json_redaction_that_breaks_the_document_is_not_labelled_json() {
-    // `1e3` decodes to `1000.0`, so the value is only located by the key-line
-    // tail, which also swallows the trailing comma: the result is no longer
-    // JSON and must not claim to be.
+fn json_number_the_decoder_respells_is_replaced_at_its_own_token() {
+    // `1e3` decodes to `1000.0`, which never occurs in the text. The parser's
+    // own span replaces exactly the number, leaving the trailing comma.
     let raw = "{\n  \"vault_password\": 1e3,\n  \"region\": \"us-east\"\n}\n";
 
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!({
+            "vault_password": "TraceDecay-redacted-sensitive-field",
+            "region": "us-east",
+        }),
+    );
+    assert_eq!(
+        scanned.sanitized_text(),
+        "{\n  \"vault_password\": \"TraceDecay-redacted-sensitive-field\",\n  \"region\": \"us-east\"\n}\n",
+    );
+}
+
+#[test]
+fn json_escaped_credential_under_an_ordinary_key_is_redacted_at_its_token() {
+    let raw = "{\n  \"note\": \"sk-test-\\u0031234567890abcdef\",\n  \"region\": \"us-east\"\n}\n";
+
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!({
+            "note": "TraceDecay-redacted-sensitive-field",
+            "region": "us-east",
+        }),
+    );
+    assert_eq!(
+        scanned.sanitized_text(),
+        "{\n  \"note\": \"TraceDecay-redacted-sensitive-field\",\n  \"region\": \"us-east\"\n}\n",
+    );
+}
+
+#[test]
+fn json_root_array_escaped_credential_is_redacted_at_its_token() {
+    let raw = "[\"sk-test-\\u0031234567890abcdef\", \"us-east\"]";
+
+    let scanned = assert_redacts_to_json(
+        raw,
+        json!(["TraceDecay-redacted-sensitive-field", "us-east",]),
+    );
+    assert_eq!(
+        scanned.sanitized_text(),
+        "[\"TraceDecay-redacted-sensitive-field\", \"us-east\"]",
+    );
+}
+
+#[test]
+fn toml_inline_table_value_is_replaced_at_its_own_token() {
+    // The sensitive key sits inside an inline table, not at the start of a
+    // line, and `1e3` is not how the decoder spells the value, so only the
+    // parser's span can find it.
+    let raw = "[server]\ncreds = { password = 1e3, user = \"svc\" }\nnote = '''\nkeep\n'''\n";
+
     let scanned = sanitize_structured_text(raw).expect("structured scan runs");
-    assert!(serde_json::from_str::<Value>(scanned.sanitized_text()).is_err());
-    assert_eq!(scanned.format(), None);
-    assert!(!scanned.sanitized_text().contains("1e3"));
+    assert_eq!(scanned.quarantine_findings(), &[]);
+    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Toml));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "[server]\ncreds = { password = \"TraceDecay-redacted-sensitive-field\", user = \"svc\" }\nnote = '''\nkeep\n'''\n",
+    );
+    let replayed = sanitize_structured_text(scanned.sanitized_text()).expect("replay scan runs");
+    assert_eq!(replayed.sanitized_text(), scanned.sanitized_text());
+}
+
+#[test]
+fn toml_escaped_credential_under_an_ordinary_key_is_redacted_at_its_token() {
+    let raw = "note = \"sk-test-\\u0031234567890abcdef\"\nregion = \"us-east\"\n";
+
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Toml));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "note = \"TraceDecay-redacted-sensitive-field\"\nregion = \"us-east\"\n",
+    );
+    let replayed = sanitize_structured_text(scanned.sanitized_text()).expect("replay scan runs");
+    assert_eq!(replayed.sanitized_text(), scanned.sanitized_text());
+}
+
+#[test]
+fn toml_multiline_secret_keeps_its_delimiters() {
+    let raw = "token = \"\"\"\nline-one\nline-two\"\"\"\nregion = \"us-east\"\n";
+
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Toml));
+    assert_eq!(
+        scanned.sanitized_text(),
+        "token = \"\"\"TraceDecay-redacted-sensitive-field\"\"\"\nregion = \"us-east\"\n",
+    );
 }
 
 #[test]

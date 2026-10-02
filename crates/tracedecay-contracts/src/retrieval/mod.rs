@@ -205,7 +205,6 @@ pub use hook_runtime_surface::{
     HookRuntimeAcceptedV1, HookRuntimeDispositionV1, HookRuntimeResultV1,
     HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
     HookV2NoticeDeliveryResultV1, HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
-    hook_runtime_needs_session_stores,
 };
 pub use owner_effect_surface::{
     AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1, AdminSyncSurfaceRequestV1,

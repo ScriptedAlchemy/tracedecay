@@ -37,6 +37,7 @@ import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { elideStart, formatCount, formatMicrosUtc } from '../../ui/format.ts';
 import {
+  CodeIndexMountFailureNotice,
   codeIndexBlockedReasonLabel,
   codeIndexPhaseLabel,
   codeIndexProgressPercentage,
@@ -110,12 +111,7 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
       {authorization ? (
         <StateChip kind={authorization} detail="read authorization" />
       ) : null}
-      {mountFailure ? (
-        <div className="text-3xs leading-snug text-state-warning">
-          <p>{mountFailure.message}</p>
-          <p>{mountFailure.remediation}</p>
-        </div>
-      ) : null}
+      {mountFailure ? <CodeIndexMountFailureNotice failure={mountFailure} /> : null}
       {worktrees.map((worktree) => (
         <WorktreeReading
           key={worktree.worktree_root}

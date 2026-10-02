@@ -24,7 +24,6 @@ pub(super) fn snapshot_for(
         SessionFrozenWatermarksV1::new(generation(active_generation), 51, 47, 43),
         capabilities([
             SessionTemporalCapabilityV1::FrozenWatermarks,
-            SessionTemporalCapabilityV1::GenerationRebuild,
             SessionTemporalCapabilityV1::ImmutableSummaryPublication,
             SessionTemporalCapabilityV1::RefreshJoin,
             SessionTemporalCapabilityV1::RefreshProgressPersistence,
@@ -133,21 +132,6 @@ pub(super) fn summary(
             valid_through: Some(UtcMicros(40)),
         },
         UtcMicros(60),
-    )
-    .unwrap()
-}
-
-pub(super) fn projection_batch(session_id: &SessionId) -> SessionTemporalProjectionBatchV1 {
-    SessionTemporalProjectionBatchV1::new(
-        session_id.clone(),
-        generation(8),
-        SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43),
-        vec![
-            occurrence_record(session_id, 0),
-            occurrence_record(session_id, 1),
-        ],
-        vec![copy_record(0, 1)],
-        vec![assertion_record(0, 1)],
     )
     .unwrap()
 }

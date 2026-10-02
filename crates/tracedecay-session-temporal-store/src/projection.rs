@@ -4,13 +4,12 @@ use tracedecay_domain::SessionId;
 use tracedecay_runtime_core::db::engine::{IntoParams, params};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
-    SessionStoreResult, SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
+    SessionStoreResult, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::execution::ExecutionControl;
 
-use super::query::{PERSIST_OPERATION, storage, storage_message};
+use super::query::{storage, storage_message};
 use super::refresh::SessionRefreshRecoveryV1;
-use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
+use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 use crate::support as hotpath_observe;
 
 mod derived;
@@ -24,9 +23,7 @@ use materialize::materialize_session_temporal_refresh_batch_in_transaction;
 
 pub(super) use materialize::{ParentMessageResolver, canonical_parent_message_resolver};
 pub(crate) use persist::observation_envelope_from_payload;
-pub(super) use persist::{
-    ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
-};
+pub(super) use persist::persist_session_temporal_projection_batch_in_transaction;
 #[cfg(test)]
 use receipts::full_projection_coverage;
 pub use receipts::record_canonical_observation_effect;
@@ -493,31 +490,5 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         hotpath_observe::record_snapshot_admissions(1);
         materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
-    }
-
-    #[hotpath::measure(future = true, label = "session_temporal.txn.persist_projection")]
-    pub async fn persist_session_temporal_projection_batch_result(
-        &self,
-        batch: SessionTemporalProjectionBatchV1,
-    ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
-        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
-            self.begin_write_transaction()
-                .await
-                .map_err(|error| storage(PERSIST_OPERATION, error))?
-        });
-        let receipt = persist_session_temporal_projection_batch_in_transaction(
-            &transaction,
-            &batch,
-            &ExecutionControl::default(),
-            ProjectionProgressBaseline::Empty,
-        )
-        .await?;
-        hotpath::measure_block!("session_temporal.txn.commit", {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(PERSIST_OPERATION, error))?
-        });
-        Ok(receipt)
     }
 }

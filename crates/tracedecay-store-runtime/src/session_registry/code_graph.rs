@@ -247,14 +247,12 @@ impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
         // build. A checkpoint that trusts the last published state keeps
         // allocating until the cgroup kill line. Read the process here,
         // without reclaiming: this checkpoint also runs on the indexing pool.
-        let Some(
-            tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
-                observed_bytes,
-                limit_bytes,
-                high_watermark_bytes,
-                ..
-            },
-        ) = self.pressure.sample_for_checkpoint()
+        let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
+            observed_bytes,
+            limit_bytes,
+            high_watermark_bytes,
+            ..
+        } = self.pressure.sample_for_checkpoint()
         else {
             return false;
         };

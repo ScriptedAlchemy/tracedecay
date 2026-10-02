@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type {
   CodeIndexBuildProgressV1,
   CodeIndexFreshnessPayloadV1,
+  CodeIndexMountFailureV1,
   CodeIndexWorktreeFreshnessV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -43,10 +44,11 @@ export function CodeIndexPipeline({
       aria-label="Code-index pipeline"
     >
       <h2 className="td-legend">Code-index pipeline</h2>
-      <CodeIndexReadinessList
-        mountFailure={payload?.mount_failure}
-        worktrees={worktrees}
-      />
+      {payload?.mount_failure ? (
+        <CodeIndexMountFailureNotice className="mt-2" failure={payload.mount_failure} />
+      ) : (
+        <CodeIndexReadinessList worktrees={worktrees} />
+      )}
       {worktrees.some((worktree) => worktree.restore_progress != null) ? (
         <div className="mt-2 flex flex-col gap-2">
           {worktrees.flatMap((worktree) =>
@@ -85,21 +87,27 @@ export function CodeIndexPipeline({
   );
 }
 
+/** The daemon's safe sentence for a failed mount and the command that retries it. */
+export function CodeIndexMountFailureNotice({
+  failure,
+  className,
+}: {
+  failure: CodeIndexMountFailureV1;
+  className?: string;
+}) {
+  return (
+    <div className={className} data-code-index-mount-failure>
+      <p className="text-body text-state-error">{failure.message}</p>
+      <p className="text-sm text-text-secondary">{failure.remediation}</p>
+    </div>
+  );
+}
+
 function CodeIndexReadinessList({
-  mountFailure,
   worktrees,
 }: {
-  mountFailure: CodeIndexFreshnessPayloadV1['mount_failure'];
   worktrees: CodeIndexWorktreeFreshnessV1[];
 }) {
-  if (mountFailure) {
-    return (
-      <div className="mt-2 text-body text-state-warning">
-        <p>{mountFailure.message}</p>
-        <p>{mountFailure.remediation}</p>
-      </div>
-    );
-  }
   if (worktrees.length === 0) {
     return <p className="mt-2 text-body text-text-muted">no mounted code-index worktree</p>;
   }

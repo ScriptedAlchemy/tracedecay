@@ -14,6 +14,7 @@ mod manifest;
 mod mcp;
 mod operation;
 mod owner_side_effect;
+mod owner_stores;
 mod profile;
 mod retrieval;
 mod snapshot;
@@ -55,6 +56,7 @@ pub use owner_side_effect::{
     INTERACTIVE_CEILING_MILLIS, IdenticalCallPolicyV1, LONG_RUNNING_CEILING_MILLIS,
     OwnerSideEffectEntryV1,
 };
+pub use owner_stores::{OwnerStoreDeclarationV1, OwnerStoresV1};
 pub use profile::{ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind};
 pub use retrieval::{
     ContributionContractRef, CoverageContractRef, OmissionContractRef, RetrievalFamily,
