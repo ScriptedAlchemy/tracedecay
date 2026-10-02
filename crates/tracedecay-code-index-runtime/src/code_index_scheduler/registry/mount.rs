@@ -16,7 +16,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_code_index_retention::code_index_generations::wait_for_code_generation_store_release;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 
@@ -2526,8 +2526,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     Ok((Ok(_), Some(latest), Some(_))) => GraphActivationGateV1::decide(
                         graph_already_serves
-                            || latest.code_graph_serving_readiness()
-                                == CodeGraphServingReadinessV1::Ready,
+                            || latest.code_graph_serving_readiness().is_activated(),
                         replace_serving_generation,
                         latest.graph_activation_is_pending(),
                         graph_seat_attempted.as_ref()

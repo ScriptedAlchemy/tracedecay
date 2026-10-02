@@ -130,9 +130,8 @@ fn ready_serving_source(
 ) -> Option<ReadyServingSourceV1<'_>> {
     let freshness = payload?.worktrees.first()?;
     if freshness.latest_generation_id.is_none()
-        || !matches!(
-            freshness.code_graph_serving,
-            Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
+        || !freshness.code_graph_serving.as_ref().is_some_and(
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::is_activated,
         )
     {
         return None;

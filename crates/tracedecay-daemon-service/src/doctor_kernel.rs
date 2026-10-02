@@ -15,6 +15,7 @@ use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, setting_findings};
+use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
@@ -168,42 +169,47 @@ fn host_integration_read_from_report(
 
 // === Code index mount ========================================================
 
-/// Read the real code-index mount state from the daemon scheduler registry.
+/// Read the code-index mount state from the freshness ladder status reports,
+/// so doctor and status give one verdict for the same worktree.
 ///
-/// An unmounted worktree reports `Unmounted`; a mounted worktree whose freshness
-/// ladder has already proven a complete generation current reports `Mounted`;
-/// a worktree whose background convergence is parked on a deterministic
-/// contract violation reports `Parked` with the exact reason; stale,
-/// restored-unverified, or busy schedulers report `Indexing` and schedule
-/// background reconciliation. Doctor never performs code-index catch-up on its
-/// request path.
+/// An unmounted worktree reports `Unmounted`; a fresh one `Mounted`; a stale
+/// one `Stale`; a worktree whose background convergence is parked on a
+/// deterministic contract violation reports `Parked` with the exact reason;
+/// one still indexing, refreshing, restoring, or verifying reports
+/// `Indexing`. The read observes only: it neither renews a residency lease
+/// nor wakes code-index work.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
 pub async fn code_index_read_from_registry(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeIndexMountReadV1 {
-    if !registry.is_worktree_mounted(project_root).await {
-        return CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Unmounted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-    }
-    if registry.latest_complete_ready(project_root).await.is_some() {
-        return CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Mounted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-    }
-    if let Some(parked) = registry.convergence_park(project_root).await {
+    let observed = |state| CodeIndexMountReadV1::Observed {
+        state,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    };
+    let freshness = match registry.dashboard_freshness_read(project_root).await {
+        Ok(Some(freshness)) => freshness,
+        Ok(None) => return observed(CodeIndexMountStateV1::Unmounted),
+        Err(_) => return CodeIndexMountReadV1::Unknown,
+    };
+    if let Some(parked) = freshness.parked {
         return CodeIndexMountReadV1::Parked {
             reason: format!("{}; {}", parked.reason, parked.remediation),
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
     }
-    CodeIndexMountReadV1::Observed {
-        state: CodeIndexMountStateV1::Indexing,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    }
+    observed(match freshness.staleness_state {
+        Some(CodeIndexStalenessStateV1::Fresh) => CodeIndexMountStateV1::Mounted,
+        Some(CodeIndexStalenessStateV1::Stale) => CodeIndexMountStateV1::Stale,
+        Some(
+            CodeIndexStalenessStateV1::Indexing
+            | CodeIndexStalenessStateV1::Refreshing
+            | CodeIndexStalenessStateV1::Restoring
+            | CodeIndexStalenessStateV1::Verifying
+            | CodeIndexStalenessStateV1::Parked,
+        )
+        | None => CodeIndexMountStateV1::Indexing,
+    })
 }
 
 // === Pending schema migrations (Storage family) ==============================
@@ -1067,10 +1073,12 @@ pub fn production_doctor_report_reader(
                     &project_root,
                 );
             let advisory_feedback_read = async {
+                // The advertised generation, read without renewing the graph's
+                // residency lease or asking for a decode.
                 let current_generation = schedulers
-                    .latest_complete_ready(&project_root)
+                    .latest_text_serving_for_root(&project_root)
                     .await
-                    .map(|latest| latest.generation().manifest().generation_id.clone());
+                    .map(|latest| latest.metadata().manifest().generation_id.clone());
                 match feedback_runtimes.doctor_read_store(&project_root).await {
                     Some(store) => match store.doctor_latest_publication(&context).await {
                         Ok(publication) => advisory_feedback_read_from_publication(
