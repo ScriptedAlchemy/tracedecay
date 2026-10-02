@@ -146,10 +146,17 @@ fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
 /// the owner can still write into the store until it is retired and joined.
 /// Only the exact registered root counts.
 fn classify_owned(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
+    // Owner roots arrive spelled however their caller built them while census
+    // roots come from the canonical registry; raw equality misses `\\?\`
+    // verbatim and macOS `/var` aliases of one directory.
     if std::iter::once(&entry.canonical_root)
         .chain(entry.display_root.as_ref())
         .chain(&entry.alias_roots)
-        .any(|root| owner_roots.contains(root))
+        .any(|root| {
+            owner_roots
+                .iter()
+                .any(|owner| tracedecay_runtime_core::path_safety::same_canonical_path(owner, root))
+        })
     {
         return StoreDisposition::Live;
     }

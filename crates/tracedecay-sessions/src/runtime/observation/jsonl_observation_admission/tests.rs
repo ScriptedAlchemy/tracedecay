@@ -1543,11 +1543,22 @@ async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
         assert_eq!(windows, (len - edit_offset) / CATCH_UP_WINDOW_BYTES);
         assert_eq!(io.content_bytes, len - edit_offset, "{records} records");
         assert_eq!(io.snapshot_hash_bytes, 0, "{records} records");
-        assert_eq!(
-            io.prefix_validation_bytes,
-            len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
-            "{records} records: only the divergence walks hash the prefix, never a later window"
-        );
+        // Without a stat rewrite witness (Windows) no resume proof can be
+        // minted, so every window's resume re-validates its prefix: the walk
+        // is strictly larger than the single divergence walk Unix needs once.
+        if cfg!(unix) {
+            assert_eq!(
+                io.prefix_validation_bytes,
+                len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
+                "{records} records: only the divergence walks hash the prefix, never a later window"
+            );
+        } else {
+            assert!(
+                io.prefix_validation_bytes >= len + edit_offset + CATCH_UP_RECORD_BYTES as u64,
+                "{records} records: resumes re-validated their prefixes: {}",
+                io.prefix_validation_bytes
+            );
+        }
         assert!(
             prior_context_bytes <= windows * CATCH_UP_WINDOW_BYTES,
             "{records} records over {windows} windows reread {prior_context_bytes} prefix bytes \
@@ -2083,9 +2094,16 @@ async fn edited_middle_record_reingests_only_the_bytes_after_the_edit() {
         "only bytes after the edit are framed"
     );
     assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    // Without a stat rewrite witness (Windows) the resume proof itself cannot
+    // cache: it re-walks the recorded prefix before the divergence check does,
+    // so the same work costs one extra full-prefix walk.
+    let expected_prefix_validation = if cfg!(unix) {
+        51_200 + 25_728
+    } else {
+        2 * 51_200 + 25_728
+    };
     assert_eq!(
-        rescan.io.prefix_validation_bytes,
-        51_200 + 25_728,
+        rescan.io.prefix_validation_bytes, expected_prefix_validation,
         "divergence check walks the recorded prefix, recovery stops one record past the edit"
     );
     assert_eq!(rescan.bytes_consumed, 25_600);

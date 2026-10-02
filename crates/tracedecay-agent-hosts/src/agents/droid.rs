@@ -773,41 +773,48 @@ mod tests {
             .unwrap()
         );
         let installed = std::fs::read_to_string(&hooks_path).unwrap();
+        let command = serde_json::to_string(&crate::agents::hook_command(
+            "/usr/local/bin/tracedecay",
+            DROID_HOOK_MARKER,
+        ))
+        .unwrap();
         assert_eq!(
             installed,
-            r#"{
+            format!(
+                r#"{{
     "SessionStart": [
-        {
+        {{
             "matcher": "startup",
             "hooks": [
-                { "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }
+                {{ "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }}
             ]
-        },
-        {
+        }},
+        {{
             "hooks": [
-                {
-                    "command": "'/usr/local/bin/tracedecay' hook-droid-event",
+                {{
+                    "command": {command},
                     "timeout": 30,
                     "type": "command"
-                }
+                }}
             ],
             "matcher": "*"
-        }
+        }}
     ],
     "Stop": [
-        {
+        {{
             "hooks": [
-                {
-                    "command": "'/usr/local/bin/tracedecay' hook-droid-event",
+                {{
+                    "command": {command},
                     "timeout": 30,
                     "type": "command"
-                }
+                }}
             ],
             "matcher": "*"
-        }
+        }}
     ]
-}
+}}
 "#
+            )
         );
 
         assert!(

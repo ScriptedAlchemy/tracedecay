@@ -2355,8 +2355,17 @@ mod tests {
             for (scope, max_new_bytes) in &mut scopes {
                 let next = resume_next_batch(&path, Some(scope), *max_new_bytes);
                 assert_eq!(next.start_offset, scope.new_cursor.position);
+                // Without a stat rewrite witness (Windows), resuming honestly
+                // re-proves the recorded prefix and then re-proves the whole
+                // consumed prefix after the scan, instead of skipping the
+                // rehash the witness makes safe on Unix.
+                let expected_prefix_validation = if cfg!(unix) {
+                    0
+                } else {
+                    next.start_offset + next.read_through
+                };
                 assert_eq!(
-                    next.io.prefix_validation_bytes, 0,
+                    next.io.prefix_validation_bytes, expected_prefix_validation,
                     "the batch at {} rehashed its prefix",
                     next.start_offset
                 );
@@ -2377,16 +2386,30 @@ mod tests {
         spin_until_jsonl_change_settled(&path);
         let mut ahead = resume_next_batch(&path, None, 1_024);
         let behind = resume_next_batch(&path, None, 1_536);
+        // Hosts without a stat rewrite witness (Windows) can never skip
+        // prefix re-validation: every resume re-proves the recorded prefix
+        // and the whole consumed prefix after the scan.
+        let expected_prefix_validation = |scan: &RawNewJsonl| {
+            if cfg!(unix) {
+                0
+            } else {
+                scan.start_offset + scan.read_through
+            }
+        };
         for _ in 0..6 {
             let next = resume_next_batch(&path, Some(&ahead), 1_024);
             assert_eq!(next.start_offset, ahead.new_cursor.position);
-            assert_eq!(next.io.prefix_validation_bytes, 0);
+            assert_eq!(
+                next.io.prefix_validation_bytes,
+                expected_prefix_validation(&next)
+            );
             ahead = next;
         }
         let resumed = resume_next_batch(&path, Some(&behind), 1_536);
         assert_eq!(resumed.start_offset, behind.new_cursor.position);
         assert_eq!(
-            resumed.io.prefix_validation_bytes, 0,
+            resumed.io.prefix_validation_bytes,
+            expected_prefix_validation(&resumed),
             "the idle cursor rehashed its prefix after the other ran ahead"
         );
     }
@@ -2680,15 +2703,23 @@ mod tests {
         .unwrap();
         let prefix = u64::try_from(first_line.len()).unwrap();
         let appended_len = u64::try_from(appended.len()).unwrap();
+        // A platform without a rewrite witness cannot trust the token, so the
+        // commit step re-proves the consumed prefix at `read_through` bytes.
+        let commit_proof = if RewriteWitness::NATIVE.proves_unchanged_bytes() {
+            0
+        } else {
+            second.read_through
+        };
         assert_eq!(second.io.change, JsonlChangeKind::Appended);
         assert_eq!(second.io.content_bytes, appended_len);
         assert_eq!(
             second.io.scan_payload_read_bytes,
-            prefix + 1 + appended_len,
+            prefix + 1 + appended_len + commit_proof,
             "the canonical handle reads one exact prefix proof, one frame-boundary byte, and only the delta"
         );
         assert_eq!(
-            second.io.prefix_validation_bytes, prefix,
+            second.io.prefix_validation_bytes,
+            prefix + commit_proof,
             "one append verifies the stored prefix once and reuses that digest"
         );
         assert_eq!(

@@ -834,7 +834,12 @@ impl InvocationProjectRuntimeIdentityV1 {
     }
 
     pub(super) fn matches_project_root(&self, project_root: &Path) -> bool {
-        self.project_root == project_root
+        // The registered root is canonical (`\\?\` on Windows) while a file
+        // URI round-trips to the plain spelling of the same directory.
+        tracedecay_runtime_core::path_safety::same_canonical_path(
+            &self.project_root,
+            project_root,
+        )
     }
 }
 

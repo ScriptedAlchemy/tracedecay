@@ -644,15 +644,31 @@ fn validate_registered_configuration_database(
         database.binding().shard_id.scope,
         tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
     );
+    // The registration locator has been through `canonicalize` (a `\\?\`
+    // verbatim spelling on Windows, a symlink-resolved name on macOS) where the
+    // target root is the spelling the caller built, so ownership is a
+    // canonical-path question, not a spelling equality.
     if is_project_sessions
-        && tracedecay_configuration::config::registered_configuration_owner(database)?
-            == (target.profile_root.clone(), target.project_id.clone())
+        && registered_owner_matches_target(database, target)?
     {
         return Ok(());
     }
     Err(config_error(
         "configuration authority unavailable: registered database is not the exact project session shard",
     ))
+}
+
+fn registered_owner_matches_target(
+    database: &RegisteredGlobalDb,
+    target: &RuntimeConfigurationTarget,
+) -> Result<bool> {
+    let (profile_root, project_id) =
+        tracedecay_configuration::config::registered_configuration_owner(database)?;
+    Ok(project_id == target.project_id
+        && tracedecay_runtime_core::path_safety::same_canonical_path(
+            &profile_root,
+            &target.profile_root,
+        ))
 }
 
 fn daemon_project_source_binding(

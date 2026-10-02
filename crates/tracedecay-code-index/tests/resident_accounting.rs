@@ -402,7 +402,17 @@ fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
     );
     let pinned = LIVE.load(Ordering::Relaxed).saturating_sub(before);
     pool.release_dead_entries();
-    let left = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+    // A dead entry's last strong Arc can sit in a fan-out worker's completed
+    // slot, freeing only when that worker next schedules — under parallel load
+    // that lags this measurement. Wait for the frees that must land.
+    let mut left = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+    for _ in 0..200 {
+        if left <= pinned / 20 {
+            break;
+        }
+        std::thread::yield_now();
+        left = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+    }
     eprintln!("ACCOUNTING dead entries pinned {pinned} left {left}");
     assert_eq!(pool.stats().resident, 0);
     assert!(

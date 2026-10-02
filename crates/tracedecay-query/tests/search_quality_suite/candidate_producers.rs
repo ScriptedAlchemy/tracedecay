@@ -1127,6 +1127,13 @@ fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() 
                 .expect("capture the killed builder's file");
         }
     }
+    #[cfg(windows)]
+    // fs::copy gives the destination the directory's inherited DACL; a real
+    // killed staging file carries the private DACL its creator installed.
+    drop(
+        tracedecay_private_fs::make_private_file(&killed_path)
+            .expect("restore the private DACL on the captured staging"),
+    );
     assert!(
         PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
         "an unsynced append must live in the staging WAL"
