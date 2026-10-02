@@ -406,19 +406,11 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
     assert_eq!(
         unresolved,
         [
-            "console.info",
             "defaulted",
             "gone",
-            "kind.toUpperCase",
             "missing",
             "relayedMissing",
-            "rows.join",
-            "stores.map",
-            "stores.slice",
-            "tools.absentMember",
-            "value.toLowerCase",
-            "value.toUpperCase",
-            "value.trim"
+            "tools.absentMember"
         ]
     );
 }

@@ -466,7 +466,7 @@ impl CodeGraphInteractiveReader {
     /// cannot list.
     pub fn unresolved_callee_gaps(
         &self,
-        sources: &[SymbolOccurrenceId],
+        sources: &[CodeGraphSymbolRefV1],
         request_cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<UnresolvedCallerGapsV1, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
@@ -475,8 +475,9 @@ impl CodeGraphInteractiveReader {
         for source in sources {
             catalog::check_cancelled(cancellation.as_ref())?;
             for call in catalog
-                .symbols
-                .get(source)
+                .unresolved_sources_by_entity
+                .get(&source.0)
+                .and_then(|occurrence| catalog.symbols.get(occurrence))
                 .into_iter()
                 .flat_map(|symbol| &symbol.unresolved_calls)
             {

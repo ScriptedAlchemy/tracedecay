@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_code_index::graph_projection::{CodeGraphInteractiveReader, CodeGraphSymbolRefV1};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::NeverCancelled;
@@ -125,7 +125,13 @@ impl SealedGraph {
     fn callees_partial(&self, qualified_name: &str) -> bool {
         !self
             .reader
-            .unresolved_callee_gaps(&[self.symbol(qualified_name)], Arc::new(NeverCancelled))
+            .unresolved_callee_gaps(
+                &[
+                    CodeGraphSymbolRefV1::for_occurrence(&self.symbol(qualified_name))
+                        .expect("symbol graph identity"),
+                ],
+                Arc::new(NeverCancelled),
+            )
             .expect("unresolved callee probe")
             .is_empty()
     }

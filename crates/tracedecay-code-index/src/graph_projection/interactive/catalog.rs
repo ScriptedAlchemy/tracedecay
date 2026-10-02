@@ -216,6 +216,11 @@ impl CatalogScan {
                 "code graph contains a duplicate symbol entity".to_owned(),
             ));
         }
+        if !record.unresolved_calls.is_empty() {
+            self.catalog
+                .unresolved_sources_by_entity
+                .insert(entity.identity.clone(), record.occurrence.clone());
+        }
         self.catalog.insert(
             record.occurrence.clone(),
             CatalogSymbol {
