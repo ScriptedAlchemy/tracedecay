@@ -336,6 +336,24 @@ impl DaemonRemoteCredentialAuthorityV1 {
         self.register_storage(node_id.clone(), storage)
     }
 
+    /// The storage of a node this daemon already provisioned or mounted.
+    /// `None` means the node was never registered here.
+    pub fn registered_node_storage(
+        &self,
+        node_id: &BrainNodeId,
+    ) -> std::result::Result<Option<RemoteSqliteStorageV1>, DaemonRemoteCredentialRegistryErrorV1>
+    {
+        self.ensure_accepting()?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| DaemonRemoteCredentialRegistryErrorV1::Unavailable)?;
+        Ok(state
+            .nodes
+            .get(node_id)
+            .map(|registered| registered.storage.clone()))
+    }
+
     fn storage_for_credential(
         &self,
         class: RemoteCredentialClassV1,

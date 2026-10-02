@@ -578,7 +578,7 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
 }
 
 #[tokio::test]
-async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate() {
+async fn claude_malformed_complete_frame_is_covered_and_repair_recovers_without_gap_or_duplicate() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-malformed-frame");
@@ -608,18 +608,18 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     )
     .unwrap();
 
-    let rejected = open_project_session_db(&project).await.unwrap();
-    let malformed = try_ingest_claude_source(&rejected, &source, &project)
+    let covered = open_project_session_db(&project).await.unwrap();
+    let malformed = try_ingest_claude_source(&covered, &source, &project)
         .await
-        .expect("malformed complete frame must defer, not fail the pass");
-    assert_eq!(malformed.messages_upserted, 0);
+        .expect("malformed complete frame must be covered, not fail the pass");
+    assert_eq!(malformed.messages_upserted, 1);
     assert_eq!(
-        claude_observation_cursor(&rejected, &path).await,
-        Some(prefix_offset)
+        claude_observation_cursor(&covered, &path).await,
+        Some(std::fs::metadata(&path).unwrap().len())
     );
-    assert_eq!(rejected.session_message_count().await.unwrap(), 2);
-    assert!(rejected.get_session_message("claude", "u4").await.is_none());
-    drop(rejected);
+    assert_eq!(covered.session_message_count().await.unwrap(), 3);
+    assert!(covered.get_session_message("claude", "u4").await.is_some());
+    drop(covered);
 
     let repaired = serde_json::json!({
         "type": "user",
@@ -635,7 +635,7 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     let recovered = try_ingest_claude_source(&retry, &source, &project)
         .await
         .unwrap();
-    assert_eq!(recovered.messages_upserted, 2);
+    assert_eq!(recovered.messages_upserted, 1);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
     assert!(retry.get_session_message("claude", "u4").await.is_some());

@@ -18,9 +18,8 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
-    BrainNodeId, Confidence, CurrentRemoteAuthorityStateV1, EntityId, FactCategoryV1,
-    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
-    canonical_sha256,
+    BrainNodeId, Confidence, EntityId, FactCategoryV1, FactCurationActionV1,
+    FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -32,6 +31,7 @@ use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
+    RemoteWriterPublicationErrorV1,
 };
 use tracedecay_session_memory::memory::{
     MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
@@ -721,8 +721,53 @@ impl RemoteRecoveryControlPortV1 for PromotionControl {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_not_cancellation() {
+struct ProvisionedWriterFixture {
+    caller: RemoteRecoveryCallerV1,
+    authority_key: tracedecay_domain::ManifestDigest,
+    recovery: Arc<tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1>,
+    writer: RemoteWriterAuthorityV1,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    node_id: BrainNodeId,
+    registry: DaemonSessionRuntimeRegistryV1,
+    identity: LocalProfileIdentityAuthorityV1,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _daemon_authority: tracedecay_daemon_identity::authority::DaemonAuthority,
+    _temporary: tempfile::TempDir,
+}
+
+impl ProvisionedWriterFixture {
+    async fn publish(&self) -> Result<(), RemoteWriterPublicationErrorV1> {
+        self.registry
+            .publish_remote_writer_authority(
+                &self.node_id,
+                self.writer.clone(),
+                crate::daemon::remote_protocol_tests::replay_policy(&self.writer.scope),
+            )
+            .await
+    }
+
+    fn promotion(&self, request_id: &str) -> RemoteProtocolRequestV1<PromotionConfirmationV1> {
+        RemoteProtocolRequestV1::new(
+            RequestId::new(request_id).expect("request identity"),
+            self.identity.brain_id().clone(),
+            self.node_id.clone(),
+            1,
+            Some(self.writer.authority.fence.clone()),
+            UtcMicros(2),
+            PromotionConfirmationV1 {
+                preview_id: format!("promotion.{request_id}"),
+                expected_authority_epoch: 1,
+                expected_placement_revision: 1,
+                expires_at_micros: i64::MAX,
+            },
+        )
+        .expect("promotion request")
+    }
+}
+
+/// Mounts one project and provisions one `RemoteNode` for its writer scope,
+/// without publishing the writer.
+async fn provisioned_writer_fixture() -> ProvisionedWriterFixture {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     #[cfg(unix)]
@@ -750,32 +795,6 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
         .install_remote_recovery_project_lifecycle(Arc::new(AdmitRemoteRecovery))
         .expect("install recovery project lifecycle");
     let node_id = BrainNodeId::new("node.remote.cancel-test").expect("remote node identity");
-    let grant = crate::daemon::remote_protocol_tests::grant(
-        identity.brain_id().clone(),
-        node_id.clone(),
-        &[5_u8; 32],
-    );
-    registry
-        .provision_remote_node(
-            grant.clone(),
-            crate::daemon::remote_protocol_tests::admission(&grant),
-        )
-        .await
-        .expect("provision RemoteNode");
-    let storage = registry
-        .remote_node_storage(
-            node_id.clone(),
-            Arc::new(TestRemoteKeyring(Arc::new(
-                RemoteSpoolKeyV1::from_secret_bytes(1, vec![7; 32]).expect("remote spool key"),
-            ))),
-        )
-        .await
-        .expect("mount RemoteNode");
-    let recovery = registry
-        .remote_recovery_authority(&node_id)
-        .await
-        .expect("mounted remote recovery authority");
-
     let project_id = ProjectId::new("project.cancel-test").expect("project identity");
     let project_root = temporary.path().join("cancel-test");
     std::fs::create_dir_all(&project_root).expect("project root");
@@ -812,6 +831,23 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
         }
     }))
     .expect("remote writer authority");
+    let mut grant = crate::daemon::remote_protocol_tests::grant(
+        identity.brain_id().clone(),
+        node_id.clone(),
+        &[5_u8; 32],
+    );
+    grant.scope = writer.scope.clone();
+    registry
+        .provision_remote_node(
+            grant.clone(),
+            crate::daemon::remote_protocol_tests::admission(&grant),
+        )
+        .await
+        .expect("provision RemoteNode");
+    let recovery = registry
+        .remote_recovery_authority(&node_id)
+        .await
+        .expect("mounted remote recovery authority");
     let fence = writer.authority.fence.clone();
     let authority_key = canonical_sha256(&(
         "tracedecay.remote-recovery-authority.v1",
@@ -826,52 +862,46 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
         enrollment_revision: 1,
         scope: writer.scope.clone(),
     };
-    let promotion = |request_id: &str| {
-        RemoteProtocolRequestV1::new(
-            RequestId::new(request_id).expect("request identity"),
-            identity.brain_id().clone(),
-            node_id.clone(),
-            1,
-            Some(fence.clone()),
-            UtcMicros(2),
-            PromotionConfirmationV1 {
-                preview_id: format!("promotion.{request_id}"),
-                expected_authority_epoch: 1,
-                expected_placement_revision: 1,
-                expires_at_micros: i64::MAX,
-            },
-        )
-        .expect("promotion request")
-    };
-    let corrupt = promotion("request.cancel-test.corrupt");
-    let interrupted = promotion("request.cancel-test.interrupted");
-    let seed_writer = writer.clone();
-    tokio::task::spawn_blocking(move || {
-        storage.publish_authority(
-            &CurrentRemoteAuthorityStateV1::Available(seed_writer.authority.clone()),
-            &seed_writer,
-            UtcMicros(1),
-        )
-    })
-    .await
-    .expect("publish thread")
-    .expect("publish the current writer on the RemoteNode");
+    ProvisionedWriterFixture {
+        caller,
+        authority_key,
+        recovery,
+        writer,
+        project_sessions,
+        node_id,
+        registry,
+        identity,
+        _database_scope,
+        _daemon_authority: daemon_authority,
+        _temporary: temporary,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_not_cancellation() {
+    let fixture = provisioned_writer_fixture().await;
+    let corrupt = fixture.promotion("request.cancel-test.corrupt");
+    let interrupted = fixture.promotion("request.cancel-test.interrupted");
+    fixture
+        .publish()
+        .await
+        .expect("publish the current writer at every sink");
 
     // The fence row is valid JSON of the wrong shape; its decode error quotes
     // the text "cancel-test".
-    project_sessions
+    fixture
+        .project_sessions
         .writer_connection()
         .expect("project sessions writer")
         .execute_batch(&format!(
-            "INSERT INTO remote_writer_fences
-                 (authority_key, writer_fence_json, frontier_sequence, updated_at)
-             VALUES ('{}', '\"cancel-test\"', 0, 1);",
-            authority_key.as_str()
+            "UPDATE remote_writer_fences SET writer_fence_json = '\"cancel-test\"'
+             WHERE authority_key = '{}';",
+            fixture.authority_key.as_str()
         ))
         .await
-        .expect("seed corrupt writer fence");
-    let promote_recovery = Arc::clone(&recovery);
-    let promote_caller = caller.clone();
+        .expect("corrupt the published writer fence");
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
     let corrupt_outcome = tokio::task::spawn_blocking(move || {
         promote_recovery
             .promote(&corrupt, &promote_caller, &PromotionControl(None))
@@ -880,22 +910,25 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
     .await
     .expect("corrupt failover thread");
 
-    project_sessions
+    fixture
+        .project_sessions
         .writer_connection()
         .expect("project sessions writer")
         .execute_batch(&format!(
             "UPDATE remote_writer_fences SET writer_fence_json = '{}'
              WHERE authority_key = '{}';",
-            serde_json::to_string(&fence).expect("encode writer fence"),
-            authority_key.as_str()
+            serde_json::to_string(&fixture.writer.authority.fence).expect("encode writer fence"),
+            fixture.authority_key.as_str()
         ))
         .await
         .expect("repair writer fence");
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
     let interrupted_outcome = tokio::task::spawn_blocking(move || {
-        recovery
+        promote_recovery
             .promote(
                 &interrupted,
-                &caller,
+                &promote_caller,
                 &PromotionControl(Some(RemoteRecoveryInterruptionV1::Cancelled)),
             )
             .err()
@@ -910,6 +943,39 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
             Some(RemoteRecoveryOperationErrorV1::Cancelled),
         )
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failover() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.restored-fence");
+    fixture.publish().await.expect("publish the first writer");
+    fixture
+        .project_sessions
+        .writer_connection()
+        .expect("project sessions writer")
+        .execute_batch("DELETE FROM remote_writer_fences;")
+        .await
+        .expect("lose the ProjectSessions writer fence");
+
+    let republished = fixture.publish().await;
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let promote_caller = fixture.caller.clone();
+    let failover = tokio::task::spawn_blocking(move || {
+        promote_recovery
+            .promote(&promotion, &promote_caller, &PromotionControl(None))
+            .map(|committed| {
+                (
+                    committed.output.previous_epoch,
+                    committed.output.installed_epoch,
+                    committed.output.old_authority_fenced,
+                )
+            })
+    })
+    .await
+    .expect("failover thread");
+
+    assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -215,10 +215,6 @@ impl ProjectStorageStatus {
             Self::Stale => "stale",
         }
     }
-
-    pub fn is_live(self) -> bool {
-        self == Self::ProfileSharded
-    }
 }
 
 pub fn classify_project_storage(

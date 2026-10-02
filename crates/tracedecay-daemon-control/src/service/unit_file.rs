@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use sha2::Digest;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::runner::ServicePlatform;
@@ -422,13 +423,28 @@ pub(super) fn service_unit_path(profile: &ProfileRoot) -> Result<PathBuf> {
     }
 }
 
-fn systemd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
+pub(super) fn systemd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {
     let config_home = profile
         .config_home()
         .ok_or_else(|| TraceDecayError::Config {
             message: "could not determine XDG config directory".to_string(),
         })?;
-    Ok(config_home.join("systemd/user").join(crate::SERVICE_NAME))
+    Ok(config_home
+        .join("systemd/user")
+        .join(systemd_unit_name(profile)))
+}
+
+/// The systemd user unit `profile` owns. The user manager is shared by every
+/// profile of the account, so a unit name is the only thing that keeps one
+/// profile's lifecycle commands off another's daemon. The home's default
+/// profile keeps the established `tracedecay.service`; any other data
+/// directory names its own unit after a digest of that directory.
+pub fn systemd_unit_name(profile: &ProfileRoot) -> String {
+    if profile.is_home_default() {
+        return "tracedecay.service".to_owned();
+    }
+    let digest = sha2::Sha256::digest(profile.data_dir().as_os_str().as_encoded_bytes());
+    format!("tracedecay-{}.service", hex::encode(&digest[..8]))
 }
 
 fn launchd_user_service_path(profile: &ProfileRoot) -> Result<PathBuf> {

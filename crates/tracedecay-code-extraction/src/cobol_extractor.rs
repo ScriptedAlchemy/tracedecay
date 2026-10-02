@@ -11,8 +11,8 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::common::{ExtractionState, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from COBOL source files using tree-sitter.
@@ -83,7 +83,7 @@ impl CobolExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
@@ -569,17 +569,6 @@ impl CobolExtractor {
         let qw = find_direct_child_by_kind(label, "qualified_word")?;
         let word = find_direct_child_by_kind(qw, "WORD")?;
         Some(state.node_text(word).to_string())
-    }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
     }
 }
 

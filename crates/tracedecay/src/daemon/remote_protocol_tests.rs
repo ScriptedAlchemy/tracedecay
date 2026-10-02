@@ -7,6 +7,9 @@ use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
 };
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
+};
 use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1,
 };
@@ -104,6 +107,33 @@ pub(crate) fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionE
         Deadline::new(UtcMicros(100)).expect("deadline"),
     )
     .expect("enrollment admission")
+}
+
+pub(crate) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
+    let digest = ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("policy digest");
+    RemoteReplayPolicyEvidenceV1 {
+        scope: ResolvedScope::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            scope.reference.clone(),
+        )
+        .expect("resolved scope"),
+        repository_scope: scope.clone(),
+        policy_revision: 1,
+        decision: RemoteReplayPolicyDecisionV1::Admit,
+        policy: PolicyDecisionRef::new(
+            "policy.remote-registry.replay",
+            1,
+            digest.clone(),
+            ComponentVersion::new("policy.remote-registry.replay.v1").expect("policy component"),
+        )
+        .expect("policy decision"),
+        configuration_digest: digest.clone(),
+        catalog_digest: digest.clone(),
+        privacy_digest: digest,
+        revalidated_at: UtcMicros(1),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -60,6 +60,7 @@ mod rows;
 mod schema;
 mod spool_limits;
 mod status;
+mod writer_publication;
 
 pub use credential_admission::{RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1};
 pub use crypto::{CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
@@ -78,6 +79,7 @@ pub use replay_recovery::RemoteReplayStartupRecoveryV1;
 use rows::*;
 pub use schema::REMOTE_NODE_LOCAL_SCHEMA;
 pub use status::{RemoteRecoveryOperationalSnapshotV1, RemoteStorageStatusSnapshotV1};
+pub use writer_publication::{RemoteWriterPublicationErrorV1, RemoteWriterPublicationStateV1};
 
 #[derive(Debug, Error)]
 pub enum RemoteSqliteStorageErrorV1 {
@@ -231,56 +233,6 @@ impl RemoteSqliteStorageV1 {
 
     fn handle(&self) -> &ExactSqlHandle {
         self.retained.handle()
-    }
-
-    pub fn publish_authority(
-        &self,
-        state: &CurrentRemoteAuthorityStateV1,
-        writer: &RemoteWriterAuthorityV1,
-        updated_at: UtcMicros,
-    ) -> Result<(), RemoteSqliteStorageErrorV1> {
-        state
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        writer
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let brain_id = match state {
-            CurrentRemoteAuthorityStateV1::Available(authority)
-                if authority.fence == writer.authority.fence =>
-            {
-                authority.fence.brain_id.as_str()
-            }
-            _ => return Err(RemoteSqliteStorageErrorV1::Corruption),
-        };
-        let runtime_binding_json = serde_json::to_string(&self.binding)
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let authority_state_json =
-            serde_json::to_string(state).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let writer_json =
-            serde_json::to_string(writer).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        hotpath::measure_block!("rusqlite.remote.persist_authority", {
-            self.handle().execute(ExactSqlStatement::new(
-                "INSERT INTO remote_authorities (
-                    brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(brain_id) DO UPDATE SET
-                    runtime_binding_json = excluded.runtime_binding_json,
-                    authority_state_json = excluded.authority_state_json,
-                    writer_json = excluded.writer_json,
-                    updated_at = excluded.updated_at
-                 WHERE excluded.updated_at >= remote_authorities.updated_at"
-                    .to_owned(),
-                vec![
-                    text(brain_id),
-                    text(&runtime_binding_json),
-                    text(&authority_state_json),
-                    text(&writer_json),
-                    ExactSqlValue::Integer(updated_at.0),
-                ],
-            )?)
-        })?;
-        Ok(())
     }
 
     pub fn store_enrollment_grant(

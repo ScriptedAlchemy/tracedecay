@@ -12,7 +12,9 @@ use crate::restart_atomicity::{
     ingest_global_sources_for_provider, ingest_user_provider, mark_test_project,
     observation_source_cursor, open_project_session_db, set_projection_failure,
 };
-use crate::support::{create_git_repo_with_linked_worktree, init_git_repo, setup};
+use crate::support::{
+    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+};
 
 fn encode_workspace_path(path: &std::path::Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -276,6 +278,41 @@ async fn kiro_secret_is_sanitized_before_observation_and_projection() {
         1
     );
     assert_secret_absent_from_observation_sinks(&db, "kiro", secret).await;
+}
+
+#[tokio::test]
+async fn kiro_workspace_location_projects_session_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_workspace_session_json(&home, &project, "sess-location");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
+
+    let session = db.get_session("kiro", "sess-location").await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&metadata["kiro_session_cwd"], &project);
+    assert_metadata_path_eq(&metadata["kiro_session_worktree"], &project);
+    assert_eq!(
+        metadata["kiro_session_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
+
+    let hit = db
+        .search_session_messages("kiro", None, "billing pipeline", 10)
+        .await
+        .into_iter()
+        .next()
+        .expect("the workspace message should be searchable");
+    let message_metadata: serde_json::Value =
+        serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_metadata_path_eq(&message_metadata["kiro_session_cwd"], &project);
+    assert_metadata_path_eq(&message_metadata["kiro_session_worktree"], &project);
+    assert_eq!(
+        message_metadata["kiro_session_location_provenance"].as_str(),
+        Some("workspace_mapping")
+    );
 }
 
 #[tokio::test]
