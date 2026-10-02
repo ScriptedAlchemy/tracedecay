@@ -26,13 +26,15 @@ pub fn normalize_observation(
     native: &Value,
     session_id: &str,
     model: Option<&str>,
+    location: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Vibe records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
     hotpath::gauge!("capture.vibe.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_vibe_record(native, session_id, model, stable_record_id, range);
+    let envelope =
+        normalize_vibe_record(native, session_id, model, location, stable_record_id, range);
     if envelope.is_err() {
         hotpath::gauge!("capture.vibe.normalize_failures").inc(1u64);
     }
@@ -45,6 +47,7 @@ fn normalize_vibe_record(
     native: &Value,
     session_id: &str,
     model: Option<&str>,
+    location: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -69,12 +72,29 @@ fn normalize_vibe_record(
 
     let relations =
         CanonicalObservationRelationsV1::new(session_id).with_message_id(stable_record_id.clone());
-    let mut facts = vec![CanonicalObservationFactV1::Message {
+    let mut facts = Vec::new();
+    if let Some(location) = location.filter(|path| !path.is_empty()) {
+        // `project_path` stays unset on purpose: session routing keeps its
+        // scope-derived fallback, only the location metadata is projected.
+        facts.push(CanonicalObservationFactV1::Session {
+            project_path: None,
+            location_path: Some(location.to_owned()),
+            transcript_path: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            native_source: None,
+            profile: None,
+            location_provenance: Some("session_meta".to_owned()),
+        });
+    }
+    facts.push(CanonicalObservationFactV1::Message {
         role,
         content,
         model: model.map(str::to_owned),
         timestamp,
-    }];
+    });
     append_tool_invocations(&mut facts, native)?;
     append_usage(&mut facts, native)?;
 

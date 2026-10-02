@@ -13,6 +13,7 @@ use tracedecay_domain::{
 
 use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::runtime::SessionMessageRecord;
+use crate::runtime::shared::TranscriptLocationMetadataKeys;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
@@ -212,6 +213,35 @@ pub fn snapshot_message_fields(
     fields
 }
 
+/// Copies the host-recorded task/workspace location into the native snapshot
+/// payload so the canonical envelope can project it as a `Session` fact.
+pub fn insert_snapshot_location(
+    payload: &mut Map<String, Value>,
+    metadata: Option<&Value>,
+    keys: TranscriptLocationMetadataKeys,
+) {
+    let Some(cwd) = metadata
+        .and_then(|metadata| metadata.get(keys.cwd))
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    else {
+        return;
+    };
+    let mut location = Map::new();
+    location.insert("path".to_string(), Value::String(cwd.to_string()));
+    if let Some(provenance) = metadata
+        .and_then(|metadata| metadata.get(keys.provenance))
+        .and_then(Value::as_str)
+        .filter(|provenance| !provenance.is_empty())
+    {
+        location.insert(
+            "provenance".to_string(),
+            Value::String(provenance.to_string()),
+        );
+    }
+    payload.insert("location".to_string(), Value::Object(location));
+}
+
 pub fn canonical_snapshot_envelope(
     native: &Value,
     provider: &str,
@@ -227,6 +257,33 @@ pub fn canonical_snapshot_envelope(
         .unwrap_or(CanonicalMessageRoleV1::Unknown);
     let timestamp = native.get("timestamp").and_then(Value::as_i64);
     let mut facts = Vec::new();
+    if let Some(location) = native.get("location").filter(|location| {
+        location
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| !path.is_empty())
+    }) {
+        // `project_path` stays unset on purpose: session routing keeps its
+        // scope-derived fallback, only the location metadata is projected.
+        facts.push(CanonicalObservationFactV1::Session {
+            project_path: None,
+            location_path: location
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            transcript_path: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            native_source: None,
+            profile: None,
+            location_provenance: location
+                .get("provenance")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
     if let Some(text) = native.get("text").cloned() {
         facts.push(CanonicalObservationFactV1::Message {
             role,

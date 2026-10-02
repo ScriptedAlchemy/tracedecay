@@ -2612,8 +2612,10 @@ pub fn classify_observation_collision(
 }
 
 /// Whether `candidate` is the current canonical form of a retained Codex or
-/// Cursor record written before route-only source context was removed, or a
-/// Cursor native record replayed from another physical transcript occurrence.
+/// Cursor record written before route-only source context was removed, a
+/// Cursor native record replayed from another physical transcript occurrence,
+/// or a snapshot-host (Cline-family, Kiro) or Vibe record written before its
+/// location was projected as a leading `Session` fact.
 ///
 /// The compatibility is deliberately directional and field-bounded. It first
 /// binds both payloads to the same native record identity, then permits only
@@ -2669,9 +2671,82 @@ pub fn is_canonical_payload_revision_replay(
     let legacy_context_changed = match candidate_envelope.provider().as_str() {
         "codex" => normalize_codex_payload_revision(&mut normalized, current),
         "cursor" => normalize_cursor_payload_revision(&mut normalized, current),
+        "cline" | "roo-code" | "kilo" | "kiro" | "vibe" => {
+            normalize_snapshot_location_revision(&mut normalized, current)
+        }
         _ => false,
     };
     legacy_context_changed && normalized == *current
+}
+
+/// Snapshot hosts (Cline-family, Kiro) and Vibe now lead every canonical
+/// payload with a location-only `Session` fact; records admitted before that
+/// change carry none. The revision is directional: an existing payload gains
+/// the candidate's leading location session verbatim, or a retained
+/// location-only session may adopt a moved `location_path`/`location_provenance`.
+/// A candidate whose first fact is not a location-only session, or any deeper
+/// difference, stays an identity collision.
+fn normalize_snapshot_location_revision(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_object), Some(current_object)) =
+        (existing.as_object_mut(), current.as_object())
+    else {
+        return false;
+    };
+    let (Some(existing_facts), Some(current_facts)) = (
+        existing_object
+            .get_mut("facts")
+            .and_then(Value::as_array_mut),
+        current_object.get("facts").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    let Some(current_session) = current_facts.first().and_then(Value::as_object) else {
+        return false;
+    };
+    if current_session.get("kind").and_then(Value::as_str) != Some("session")
+        || !is_location_only_session_fact(current_session)
+    {
+        return false;
+    }
+    let existing_is_session = existing_facts
+        .first()
+        .and_then(Value::as_object)
+        .is_some_and(|fact| fact.get("kind").and_then(Value::as_str) == Some("session"));
+    if existing_is_session {
+        if existing_facts.len() != current_facts.len() {
+            return false;
+        }
+        let Some(existing_session) = existing_facts.first_mut().and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        if !is_location_only_session_fact(existing_session) {
+            return false;
+        }
+        let mut changed = false;
+        for key in ["location_path", "location_provenance"] {
+            changed |= replace_with_current_field(existing_session, current_session, key);
+        }
+        changed
+    } else {
+        if existing_facts.len() + 1 != current_facts.len() {
+            return false;
+        }
+        existing_facts.insert(0, current_facts[0].clone());
+        true
+    }
+}
+
+/// A session fact may carry only the projected location. Fields the
+/// serializer always emits (`source`) or that are absent in this revision's
+/// shape must be unset or JSON null to count as location-only.
+fn is_location_only_session_fact(fact: &serde_json::Map<String, Value>) -> bool {
+    fact.iter().all(|(key, value)| {
+        matches!(
+            key.as_str(),
+            "kind" | "location_path" | "location_provenance"
+        ) || value.is_null()
+    })
 }
 
 fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bool {
