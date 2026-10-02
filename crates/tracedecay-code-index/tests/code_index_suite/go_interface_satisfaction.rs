@@ -320,3 +320,35 @@ fn go_struct_embedding_an_external_type_discloses_a_gap() {
         assert!(edges.contains(&edge("shapes/box.go::Box", "shapes/shape.go::Shape")));
     }
 }
+
+#[test]
+fn go_promotion_follows_selector_depth_and_ambiguity() {
+    let (child, cold) = increment(
+        "go-sat-promote-depth",
+        &[(
+            "calc/depth.go",
+            "package calc\n\ntype Left struct {\n\t*Right\n\tSimple\n}\n\ntype Right struct {\n\t*Left\n}\n\ntype Shadowed struct {\n\tSimple\n}\n\nfunc (Shadowed) Add(a, b int64) int { return int(a + b) }\n\ntype Twin struct{}\n\nfunc (Twin) Add(x, y int) int { return x + y }\n\ntype Both struct {\n\tSimple\n\tTwin\n}\n\ntype Picked struct {\n\tBoth\n\tSimple\n}\n\ntype ViaA struct {\n\tSimple\n}\n\ntype ViaB struct {\n\tSimple\n}\n\ntype Diamond struct {\n\tViaA\n\tViaB\n}\n",
+        )],
+    );
+    let edges = implements(&cold);
+    for implementor in ["Left", "Right", "Twin", "Picked", "ViaA", "ViaB"] {
+        assert!(
+            edges.contains(&edge(
+                &format!("calc/depth.go::{implementor}"),
+                "calc/adder.go::Adder"
+            )),
+            "{implementor} selects one Add(int, int) int: {edges:?}"
+        );
+    }
+    for implementor in ["Shadowed", "Both", "Diamond"] {
+        assert!(
+            !edges.contains(&edge(
+                &format!("calc/depth.go::{implementor}"),
+                "calc/adder.go::Adder"
+            )),
+            "{implementor}'s Add is hidden or ambiguous: {edges:?}"
+        );
+    }
+    assert!(!undecided(&cold, "calc/adder.go::Adder"));
+    assert_eq!(implements(&child), edges);
+}

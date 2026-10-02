@@ -3,7 +3,7 @@
 //! a type implements an interface exactly when its method set (the union of
 //! its value and pointer receiver methods) covers the interface's.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tracedecay_code_extraction::{GoMethodSetRowV1, GoMethodSignatureV1, GoTypeTokenV1};
 use tracedecay_domain::{
@@ -141,7 +141,7 @@ where
 {
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
     let mut method_sets = HashMap::<OwnerV1<'_>, HashSet<MethodKeyV1>>::new();
-    let mut promotes = HashMap::<OwnerV1<'_>, Vec<EmbedV1>>::new();
+    let mut promotes = HashMap::<OwnerV1<'_>, Vec<PromotedV1>>::new();
     let mut interfaces = Vec::<InterfaceV1<'_>>::new();
     let mut interface_rows = HashMap::<&SymbolOccurrenceId, usize>::new();
     let mut interface_names = HashMap::<(&str, &str), Vec<usize>>::new();
@@ -191,23 +191,16 @@ where
                     continue;
                 }
                 GoMethodSetRowV1::Promotes { embedded } => {
-                    let owner = (dir, symbol.simple_name.as_str());
-                    match embedded.as_slice() {
+                    let promoted = match embedded.as_slice() {
                         // Of the predeclared types only `error` has a method.
-                        [GoTypeTokenV1::Text(name)] if name == "error" => {
-                            method_sets.entry(owner).or_default().insert(MethodKeyV1 {
-                                name: "Error".to_owned(),
-                                package: None,
-                                params: Vec::new(),
-                                results: vec!["string".to_owned()],
-                            });
-                        }
-                        [GoTypeTokenV1::Text(_)] => {}
-                        _ => promotes
-                            .entry(owner)
-                            .or_default()
-                            .push((go_file.embedded_name(embedded), render(embedded))),
-                    }
+                        [GoTypeTokenV1::Text(name)] if name == "error" => PromotedV1::Error,
+                        [GoTypeTokenV1::Text(_)] => continue,
+                        _ => PromotedV1::Embed(go_file.embedded_name(embedded), render(embedded)),
+                    };
+                    promotes
+                        .entry((dir, symbol.simple_name.as_str()))
+                        .or_default()
+                        .push(promoted);
                     continue;
                 }
                 _ => {
@@ -263,19 +256,23 @@ where
         .collect::<Vec<_>>();
     owners.sort_unstable();
     owners.dedup();
-    let mut promotion = PromotionV1 {
+    let promotion = PromotionV1 {
         named_types: &named_types,
         interface_names: &interface_names,
         expansions: &expansions,
         promotes: &promotes,
-        own: method_sets,
-        effective: HashMap::new(),
-        visiting: HashSet::new(),
+        own: &method_sets,
+        error: MethodKeyV1 {
+            name: "Error".to_owned(),
+            package: None,
+            params: Vec::new(),
+            results: vec!["string".to_owned()],
+        },
     };
-    for owner in &owners {
-        promotion.resolve(*owner);
-    }
-    let effective = promotion.effective;
+    let effective = owners
+        .iter()
+        .map(|owner| (*owner, promotion.effective(*owner)))
+        .collect::<HashMap<_, _>>();
     let mut by_method = HashMap::<&MethodKeyV1, Vec<OwnerV1<'_>>>::new();
     for owner in &owners {
         for method in &effective[owner].methods {
@@ -362,60 +359,115 @@ where
     GoSatisfactionV1 { edges, gaps }
 }
 
+/// What an embedded field or alias target promotes to its owner.
+enum PromotedV1 {
+    /// The predeclared `error` interface.
+    Error,
+    Embed(Option<(String, String)>, String),
+}
+
+/// A type an embedding walk reaches.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReachedV1<'a> {
+    Named(OwnerV1<'a>),
+    Interface(usize),
+    Error,
+}
+
 struct PromotionV1<'a> {
     named_types: &'a HashMap<OwnerV1<'a>, Vec<(&'a SymbolOccurrenceId, SourceSpan)>>,
     interface_names: &'a HashMap<OwnerV1<'a>, Vec<usize>>,
     expansions: &'a [ExpandedV1],
-    promotes: &'a HashMap<OwnerV1<'a>, Vec<EmbedV1>>,
-    own: HashMap<OwnerV1<'a>, HashSet<MethodKeyV1>>,
-    effective: HashMap<OwnerV1<'a>, EffectiveV1>,
-    visiting: HashSet<OwnerV1<'a>>,
+    promotes: &'a HashMap<OwnerV1<'a>, Vec<PromotedV1>>,
+    own: &'a HashMap<OwnerV1<'a>, HashSet<MethodKeyV1>>,
+    error: MethodKeyV1,
 }
 
 impl<'a> PromotionV1<'a> {
-    /// Records `owner`'s effective method set; a promotion cycle contributes
-    /// nothing beyond the methods already reached.
-    fn resolve(&mut self, owner: OwnerV1<'a>) {
-        if self.effective.contains_key(&owner) || !self.visiting.insert(owner) {
-            return;
-        }
-        let (named_types, interface_names, promotes) =
-            (self.named_types, self.interface_names, self.promotes);
-        let mut effective = EffectiveV1 {
-            methods: self.own.remove(&owner).unwrap_or_default(),
-            open: None,
-        };
-        for (name, text) in promotes.get(&owner).into_iter().flatten() {
-            let key = name
-                .as_ref()
-                .map(|(dir, name)| (dir.as_str(), name.as_str()));
-            let interface = key.and_then(|key| interface_names.get(&key));
-            let named = key
-                .and_then(|key| named_types.get_key_value(&key))
-                .map(|(target, occurrences)| (*target, occurrences.as_slice()));
-            let open = match (interface.map(Vec::as_slice), named) {
-                (Some([index]), None) => match &self.expansions[*index] {
-                    Ok(methods) => {
-                        effective.methods.extend(methods.iter().cloned());
-                        None
+    /// `owner`'s methods, walked one embedding depth at a time as Go
+    /// selectors resolve: a name found at a shallower depth hides deeper
+    /// ones, and a name reached by more than one path at its shallowest depth
+    /// is ambiguous and belongs to no method set.
+    fn effective(&self, owner: OwnerV1<'a>) -> EffectiveV1 {
+        let mut decided = HashMap::<(&str, Option<&str>), Option<&MethodKeyV1>>::new();
+        let mut open = None;
+        let mut walked = HashSet::from([owner]);
+        // Each reached type with the number of embedding paths reaching it.
+        let mut level = BTreeMap::from([(ReachedV1::Named(owner), 1_usize)]);
+        while !level.is_empty() {
+            let mut found = HashMap::<(&str, Option<&str>), (&MethodKeyV1, usize)>::new();
+            let mut next = BTreeMap::new();
+            for (reached, paths) in level {
+                let methods: Box<dyn Iterator<Item = &MethodKeyV1>> = match reached {
+                    ReachedV1::Named(named) => {
+                        for promoted in self.promotes.get(&named).into_iter().flatten() {
+                            match self.reach(promoted) {
+                                // Every name of a type reached at a shallower
+                                // depth is already decided.
+                                Ok(ReachedV1::Named(inner)) if walked.contains(&inner) => {}
+                                Ok(inner) => {
+                                    let count = next.entry(inner).or_default();
+                                    *count = paths.saturating_add(*count);
+                                }
+                                Err(text) => {
+                                    open.get_or_insert_with(|| text.to_owned());
+                                }
+                            }
+                        }
+                        Box::new(self.own.get(&named).into_iter().flatten())
                     }
-                    Err(_) => Some(text),
-                },
-                (None, Some((target, [_]))) => {
-                    self.resolve(target);
-                    self.effective.get(&target).and_then(|inner| {
-                        effective.methods.extend(inner.methods.iter().cloned());
-                        inner.open.as_ref()
-                    })
+                    ReachedV1::Interface(index) => {
+                        Box::new(self.expansions[index].iter().flatten())
+                    }
+                    ReachedV1::Error => Box::new(std::iter::once(&self.error)),
+                };
+                for method in methods {
+                    let name = (method.name.as_str(), method.package.as_deref());
+                    if !decided.contains_key(&name) {
+                        let (_, count) = found.entry(name).or_insert((method, 0));
+                        *count = paths.saturating_add(*count);
+                    }
                 }
-                _ => Some(text),
-            };
-            if effective.open.is_none() {
-                effective.open = open.cloned();
             }
+            decided.extend(
+                found
+                    .into_iter()
+                    .map(|(name, (method, count))| (name, (count == 1).then_some(method))),
+            );
+            walked.extend(next.keys().filter_map(|reached| match reached {
+                ReachedV1::Named(named) => Some(*named),
+                _ => None,
+            }));
+            level = next;
         }
-        self.visiting.remove(&owner);
-        self.effective.insert(owner, effective);
+        EffectiveV1 {
+            methods: decided.into_values().flatten().cloned().collect(),
+            open,
+        }
+    }
+
+    /// The type `promoted` names, or its source text when the project cannot
+    /// see that type's methods.
+    fn reach(&self, promoted: &'a PromotedV1) -> Result<ReachedV1<'a>, &'a str> {
+        let (name, text) = match promoted {
+            PromotedV1::Error => return Ok(ReachedV1::Error),
+            PromotedV1::Embed(name, text) => (name, text.as_str()),
+        };
+        let key = name
+            .as_ref()
+            .map(|(dir, name)| (dir.as_str(), name.as_str()));
+        let interface = key.and_then(|key| self.interface_names.get(&key));
+        let named = key.and_then(|key| self.named_types.get_key_value(&key));
+        match (
+            interface.map(Vec::as_slice),
+            named.map(|(target, sites)| (target, sites.as_slice())),
+        ) {
+            (Some([index]), None) if self.expansions[*index].is_ok() => {
+                Ok(ReachedV1::Interface(*index))
+            }
+            (None, Some((target, [_]))) => Ok(ReachedV1::Named(*target)),
+            _ => Err(text),
+        }
     }
 }
 
