@@ -3004,7 +3004,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:c1ee79e4e62183bcf082e4a1fa453e897dd3d8c4afe90bf500c86c4fd8ef49f2";
+    "sha256:0751ff121eba690e3fb73122253332add996519fa8e42d5d9534efc92206291b";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:3bb9509e6da5059d42c95f1e9499e2748e4fd62b5c9769dccbb02b1cf59e73c6",
@@ -3033,7 +3033,13 @@ fn partitioned_file_segments_omit_the_identities_they_determine() {
     let (_, manifest, segments) = partitioned_codec_fixture();
     let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
         .expect("partitioned segment identities parse");
-    let (files, _evidence) = identities.split_at(identities.len() - 1);
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
+    let files = &identities[..file_segment_count];
     let mut chunks = 0;
     let mut explicit_ids = 0;
     let mut whole_symbol_terms = 0;
@@ -3143,7 +3149,10 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     tracedecay_code_index::parallelism::force_indexing_workers_for_test(2);
     let _forced_width = ForcedDecodeWidth;
     let window = CodeIndexPublishedGenerationV1::partitioned_decode_window_files();
-    let file_segment_count = PARTITIONED_FORMAT_SEGMENTS.len() - 1;
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
     assert!(
         window == 2 && file_segment_count > window,
         "the fixture must span more file segments than one decode window"
