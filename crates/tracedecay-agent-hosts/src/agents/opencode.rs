@@ -948,7 +948,10 @@ mod tests {
         assert!(config["mcp"].get("tracedecay").is_none());
         assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
         assert!(config["lsp"].get("tracedecay").is_none());
-        assert_eq!(config["lsp"]["operator"]["command"], json!(["operator-lsp"]));
+        assert_eq!(
+            config["lsp"]["operator"]["command"],
+            json!(["operator-lsp"])
+        );
         assert_eq!(config["plugins"], json!(["opencode-acme-plugin"]));
 
         uninstall_mcp_server(&config_path).unwrap();
@@ -956,7 +959,10 @@ mod tests {
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert!(config["mcp"]["servers"].get("tracedecay").is_none());
         assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
-        assert_eq!(config["lsp"]["operator"]["command"], json!(["operator-lsp"]));
+        assert_eq!(
+            config["lsp"]["operator"]["command"],
+            json!(["operator-lsp"])
+        );
         assert_eq!(config["plugins"], json!(["opencode-acme-plugin"]));
     }
 
