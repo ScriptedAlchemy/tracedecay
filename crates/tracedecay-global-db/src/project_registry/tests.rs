@@ -309,7 +309,10 @@ async fn failed_reregistration_rolls_back_without_leaking_replacement_alias() {
         .await
         .expect_err("injected project update failure must not report success");
     assert!(
-        failure.is_database_error(),
+        matches!(
+            failure,
+            tracedecay_domain::errors::TraceDecayError::Database { .. }
+        ),
         "an injected write fault must surface as a database fault, not as an \
          admission refusal or a reset demand: {failure:?}"
     );

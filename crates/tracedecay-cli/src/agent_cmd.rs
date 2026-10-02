@@ -1356,7 +1356,7 @@ mod tests {
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
 "#;
-    const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
+    const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"servers":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}}},"unrelated":{"keep":true}}
 "#;
     /// One agent's whole canonical component set, as `install --agent <id>`
     /// (with `--yes --adopt` when `adopt`) runs it.
@@ -2794,7 +2794,17 @@ mod tests {
         for path in [&config_path, &context_path, &agent_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
-        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        let mut legacy_config: serde_json::Value =
+            serde_json::from_slice(OPENCODE_CONTEXT_CONFIG).unwrap();
+        legacy_config["lsp"] = serde_json::json!({
+            "tracedecay": {"command": ["tracedecay", "lsp", "bridge", "--stdio"]},
+            "operator": {"command": ["operator-lsp"]}
+        });
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&legacy_config).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&context_path, b"context-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
         let core_set = canonical_host_component_set_with_tracedecay_bin(
@@ -2833,25 +2843,18 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
             assert_eq!(config["unrelated"]["keep"], true);
             assert_eq!(
-                config["mcp"]["other"]["command"],
+                config["mcp"]["servers"]["other"]["command"],
                 serde_json::json!(["other"])
             );
             assert_eq!(
-                config["mcp"]["tracedecay"]["command"],
+                config["mcp"]["servers"]["tracedecay"]["command"],
                 serde_json::json!(["tracedecay", "serve"])
             );
-            if operation == HostBundleCliOperation::Uninstall {
-                assert!(config["lsp"].get("tracedecay").is_none());
-            } else {
-                // The bridge binds its workspace roots from the host's own
-                // `initialize` frame, so the registration deliberately carries
-                // no `--project`: pinning it to OpenCode's process CWD would
-                // override the folders the editor actually opened.
-                assert_eq!(
-                    config["lsp"]["tracedecay"]["command"],
-                    serde_json::json!([tracedecay_bin.clone(), "lsp", "bridge", "--stdio"])
-                );
-            }
+            assert!(config["lsp"].get("tracedecay").is_none());
+            assert_eq!(
+                config["lsp"]["operator"]["command"],
+                serde_json::json!(["operator-lsp"])
+            );
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
             assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");
             assert!(!PathBuf::from(format!("{}.bak", config_path.display())).exists());
@@ -3010,7 +3013,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
+    fn opencode_core_ignores_operator_lsp_entries() {
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
@@ -3031,7 +3034,7 @@ mod tests {
             adopt: false,
         };
 
-        let error = apply_canonical_component_set(
+        apply_canonical_component_set(
             profile,
             "opencode",
             HostBundleCliOperation::Install,
@@ -3041,20 +3044,14 @@ mod tests {
             lifecycle.path(),
             &ComponentSetApplyContext::resolved(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("a non-tracedecay LSP entry runs the tracedecay binary"),
-            "unexpected error: {error}"
-        );
         assert_eq!(
             std::fs::read(&config_path).unwrap(),
             OPENCODE_UNRELATED_CONFIG
         );
         for artifact in &component_set.component_set.components[0].manifest.artifacts {
-            assert!(!home.path().join(&artifact.relative_path).exists());
+            assert!(home.path().join(&artifact.relative_path).exists());
         }
     }
 

@@ -134,7 +134,7 @@ fn status_and_list_render_a_reset_required_project_registry() {
          Reset authority: project registry\n\
          Reset reason: database error: table 'code_projects' has an incompatible number \
          of columns (operation: validate global database authority schema)\n\
-         Reset remedy: tracedecay wipe --all --yes\n";
+         Reset remedy: tracedecay wipe --stale --yes\n";
     for args in [&["status"][..], &["list", "--all"][..]] {
         let output = tracedecay_command_with_home(&home_path)
             .current_dir(&project_path)

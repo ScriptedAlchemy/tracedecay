@@ -60,7 +60,7 @@ use crate::diagnostics_producer::{
     CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProjectCheckV1,
     typescript_diagnostics_availability,
 };
-use crate::operation_stream::{
+use crate::managed_test_runs::{
     ManagedTestRunCurrentScope, ManagedTestRunReadOutcome, ManagedTestRunStaleReason,
     managed_test_run_source_refusal,
 };

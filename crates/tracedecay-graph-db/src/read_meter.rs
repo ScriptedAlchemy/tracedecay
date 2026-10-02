@@ -27,6 +27,7 @@ pub struct GraphReadMeter {
     adjacency_queries: AtomicU64,
     adjacency_rows: AtomicU64,
     bytes_hydrated: AtomicU64,
+    catalog_symbols: AtomicU64,
 }
 
 /// A reading of a [`GraphReadMeter`].
@@ -37,6 +38,7 @@ pub struct GraphReadCost {
     pub adjacency_queries: u64,
     pub adjacency_rows: u64,
     pub bytes_hydrated: u64,
+    pub catalog_symbols: u64,
 }
 
 impl GraphReadMeter {
@@ -48,6 +50,7 @@ impl GraphReadMeter {
             adjacency_queries: self.adjacency_queries.load(Ordering::Relaxed),
             adjacency_rows: self.adjacency_rows.load(Ordering::Relaxed),
             bytes_hydrated: self.bytes_hydrated.load(Ordering::Relaxed),
+            catalog_symbols: self.catalog_symbols.load(Ordering::Relaxed),
         }
     }
 
@@ -64,6 +67,12 @@ impl GraphReadMeter {
         self.adjacency_queries.fetch_add(1, Ordering::Relaxed);
         self.adjacency_rows.fetch_add(rows, Ordering::Relaxed);
         self.bytes_hydrated.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Counts symbol summaries a reader served from its generation catalog,
+    /// which answers from memory and so never reaches the lease.
+    pub fn record_catalog_symbols(&self, symbols: u64) {
+        self.catalog_symbols.fetch_add(symbols, Ordering::Relaxed);
     }
 }
 

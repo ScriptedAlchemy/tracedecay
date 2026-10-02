@@ -339,7 +339,7 @@ async fn typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer() {
         cost_trailer(&texts),
         format!(
             "\ntracedecay_cost: wall_us={} graph_sealed_reads=3 graph_staging_reads=0 \
-             adjacency_queries=2 adjacency_rows=3 bytes_hydrated={}",
+             adjacency_queries=2 adjacency_rows=3 bytes_hydrated={} catalog_symbols=0",
             cost["wall_micros"], cost["bytes_hydrated"]
         ),
         "the trailer renders the envelope's receipt"
@@ -402,7 +402,7 @@ async fn typed_callers_carry_their_read_cost() {
         cost_trailer(&texts),
         format!(
             "\ntracedecay_cost: wall_us={} graph_sealed_reads=1 graph_staging_reads=0 \
-             adjacency_queries=1 adjacency_rows=2 bytes_hydrated={}",
+             adjacency_queries=1 adjacency_rows=2 bytes_hydrated={} catalog_symbols=0",
             cost["wall_micros"], cost["bytes_hydrated"]
         )
     );
@@ -463,12 +463,13 @@ async fn file_dependents_carry_their_read_cost_and_its_wall_time() {
         cost_trailer(&texts),
         format!(
             "\ntracedecay_cost: wall_us={} graph_sealed_reads={} graph_staging_reads=0 \
-             adjacency_queries={} adjacency_rows={} bytes_hydrated={}",
+             adjacency_queries={} adjacency_rows={} bytes_hydrated={} catalog_symbols={}",
             cost["wall_micros"],
             cost["point_reads"]["graph_sealed"],
             cost["adjacency_queries"],
             cost["adjacency_rows"],
-            cost["bytes_hydrated"]
+            cost["bytes_hydrated"],
+            cost["catalog_symbols"]
         ),
         "{payload:#}"
     );
