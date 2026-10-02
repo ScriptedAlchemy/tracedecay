@@ -3074,6 +3074,35 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 }
+                // A publication left unseated whose text owner already serves
+                // supersedes the predecessor's seat; an occupied slot tells
+                // later passes no decode is owed, so the successor never seats.
+                if published_pass && !matches!(&result, Ok((Ok(_), Some(_), _))) {
+                    let advertised = worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .filter(|text| text.query_owners_are_ready())
+                        .map(|text| text.metadata().manifest().generation_id.clone());
+                    let superseded = advertised.is_some_and(|advertised| {
+                        worker_serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                            .is_some_and(|seat| {
+                                seat.generation().manifest().generation_id != advertised
+                            })
+                    });
+                    if superseded {
+                        Self::release_superseded_serving_seat(
+                            &worker_serving_generation,
+                            &worker_serving_generation_epoch,
+                            &worker_serving_source_witness,
+                            &worker_serving_seats,
+                            &worker_serving_generation_changed,
+                        );
+                    }
+                }
                 // The source proof and serving witness are now published as
                 // one lifecycle. Optional receipts do not keep source
                 // verification in flight. A retained-work continuation this
