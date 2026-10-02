@@ -204,9 +204,6 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    // Admission is this pass's commit. `messages_upserted` counts only what
-    // this pass's own projection drain materialized, and the project catch-up
-    // drains the same queue, so the transcript is proven by what reads see.
     assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
     let envelope = answer_tool(
         &fixture,
@@ -222,12 +219,18 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         .pointer("/outcome/value/payload")
         .unwrap_or(&envelope);
     assert_eq!(found["status"], "ok", "message search: {found}");
+    let question = found["results"]
+        .as_array()
+        .and_then(|results| results.iter().find(|row| row["message"]["role"] == "user"))
+        .unwrap_or_else(|| panic!("ingested Cursor question in {found}"));
     assert!(
-        found["results"].as_array().is_some_and(|results| results
-            .iter()
-            .any(|row| row["session"]["session_id"] == "cursor-session")),
-        "ingested Cursor transcript must be readable: {found}"
+        question["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Where is billing ingestion?")),
+        "ingested Cursor question text: {question}"
     );
+    assert_eq!(question["message"]["session_id"], "cursor-session");
+    assert_eq!(question["message"]["provider"], "cursor");
     assert_eq!(
         ingest["hint_outcomes"],
         json!({
