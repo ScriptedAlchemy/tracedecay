@@ -33,7 +33,7 @@ use crate::runtime::jsonl_observation_admission::{
     shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
 use crate::runtime::shared::TranscriptScopeMatcher;
-use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::{JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
@@ -239,6 +239,11 @@ pub struct CodexJsonlAdmissionProgress {
     pub resumed: bool,
     /// The committed source cursor's position once this pass settled.
     pub covered_through: u64,
+    /// Bytes this pass's rollout scan read, by category.
+    pub io: JsonlIoAccounting,
+    /// Bytes reread before the resume offset to recover the cwd the first
+    /// new record inherits.
+    pub prior_context_bytes: u64,
 }
 
 /// Admit a Codex rollout for one exact project identity.
@@ -648,6 +653,7 @@ async fn admit_codex_jsonl_page(
     if let Some(max_frames) = max_frames {
         request = request.with_max_frames(max_frames);
     }
+    let mut prior_context_bytes = 0;
     let progress = admit_jsonl_observations(
         request,
         |scan| {
@@ -655,10 +661,13 @@ async fn admit_codex_jsonl_page(
                 scan.frame_bytes().all(|frame| !frame.is_empty()),
                 "shared JSONL admission never exposes empty native frames"
             );
-            // The prior context is rebuilt by reading the rollout up to its
+            // The prior context is rebuilt by reading the rollout before its
             // cursor; a scan with no new frame never consults it.
             let context = if scan.resumed && scan.frame_bytes().next().is_some() {
-                CodexContextState::scan_prior(path, scan.start_offset, meta)
+                let (context, read) =
+                    CodexContextState::scan_prior(path, scan.generation, scan.start_offset, meta);
+                prior_context_bytes = read;
+                context
             } else {
                 CodexContextState::from_meta(meta)
             };
@@ -676,7 +685,7 @@ async fn admit_codex_jsonl_page(
             // decode per frame to reach it.
             let in_scope = *state
                 .scope_verdict
-                .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()));
+                .get_or_insert_with(|| scope_matcher().accepts(Some(state.context.cwd.as_path())));
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -692,10 +701,9 @@ async fn admit_codex_jsonl_page(
                     // can no longer be trusted.
                     state.scope_verdict = None;
                 }
-                if !*state
-                    .scope_verdict
-                    .get_or_insert_with(|| scope_matcher().accepts(state.context.cwd.as_deref()))
-                {
+                if !*state.scope_verdict.get_or_insert_with(|| {
+                    scope_matcher().accepts(Some(state.context.cwd.as_path()))
+                }) {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
@@ -740,5 +748,7 @@ async fn admit_codex_jsonl_page(
         frames_persisted: progress.frames_persisted,
         resumed: progress.resumed,
         covered_through: progress.covered_through,
+        io: progress.io,
+        prior_context_bytes,
     })
 }

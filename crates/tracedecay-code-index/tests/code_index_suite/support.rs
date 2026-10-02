@@ -70,6 +70,7 @@ pub fn validated_rust_file(source: &[u8]) -> ReceiptBoundCodeFileV1 {
             content_identity: content_digest(source),
             captured_at: UtcMicros(1_000_000),
             files: vec![file.clone()],
+            omitted_sources: Vec::new(),
         })
         .expect("snapshot capability");
     intake

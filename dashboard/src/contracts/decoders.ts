@@ -127,7 +127,10 @@ import type {
   CodeIndexFreshnessPayloadV1,
   CodeIndexGenerationRecoveryServingV1,
   CodeIndexGenerationRecoveryV1,
+  CodeIndexOmittedSourcesV1,
+  CodeIndexOmittedSourceV1,
   CodeIndexRestoreProgressV1,
+  CodeIndexSourceOmissionReasonV1,
   CodeIndexStalenessStateV1,
   CodeIndexWorkerLimitingReasonV1,
   CodeIndexWorkerSelectionV1,
@@ -2470,7 +2473,7 @@ while the ladder would otherwise say ready.
 
 `Unobserved` is only the constructed default. A projected read never emits
 it, so an absent observation cannot be mistaken for `complete`. */
-export const CodeIndexFreshnessCoverageV1Schema: z.ZodEnum<["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]> = z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]);
+export const CodeIndexFreshnessCoverageV1Schema: z.ZodType<"complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources", z.ZodTypeDef, unknown> = z.union([z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]), z.literal("partial_omitted_sources")]);
 
 export const CodeIndexFreshnessPayloadV1Schema: z.ZodObject<{
   note: z.ZodType<string, z.ZodTypeDef, unknown>;
@@ -2495,6 +2498,25 @@ export const CodeIndexGenerationRecoveryV1Schema: z.ZodObject<{
   serving: z.lazy(() => CodeIndexGenerationRecoveryServingV1Schema),
 });
 
+/** Sources a sealed snapshot captured but does not index. */
+export const CodeIndexOmittedSourcesV1Schema: z.ZodObject<{
+  count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  sources: z.ZodType<Array<CodeIndexOmittedSourceV1>, z.ZodTypeDef, unknown>;
+}> = z.object({
+  count: z.number().int().safe().min(0),
+  sources: z.array(z.lazy(() => CodeIndexOmittedSourceV1Schema)),
+});
+
+export const CodeIndexOmittedSourceV1Schema: z.ZodObject<{
+  display_path: z.ZodType<string, z.ZodTypeDef, unknown>;
+  git_path_bytes: z.ZodType<Array<number>, z.ZodTypeDef, unknown>;
+  reason: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown>;
+}> = z.object({
+  display_path: z.string(),
+  git_path_bytes: z.array(z.number().int().min(0).max(255)),
+  reason: z.lazy(() => CodeIndexSourceOmissionReasonV1Schema),
+});
+
 /** Bounded authentication work required to restore one immutable lexical
 artifact as a serving reader.
 
@@ -2515,6 +2537,13 @@ export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
   authenticated_total: z.number().int().safe().min(0),
   generation_id: z.string(),
 });
+
+export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  detail: z.string(),
+  kind: z.literal("privacy_withheld"),
+}), z.object({
+  kind: z.literal("unrepresentable_path"),
+})]);
 
 /** Closed staleness ladder for one mounted worktree.
 
@@ -2576,6 +2605,7 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   last_reconcile_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
   latest_generation_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  omitted_sources: z.ZodOptional<z.ZodType<CodeIndexOmittedSourcesV1 | null, z.ZodTypeDef, unknown>>;
   parked: z.ZodType<CodeIndexConvergenceParkedV1 | null, z.ZodTypeDef, unknown>;
   progress: z.ZodType<CodeIndexBuildProgressV1 | null, z.ZodTypeDef, unknown>;
   rebuild_in_flight: z.ZodType<boolean, z.ZodTypeDef, unknown>;
@@ -2596,6 +2626,7 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
   hook_hint_count: z.number().int().safe().min(0).nullable(),
   last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
+  omitted_sources: z.union([z.lazy(() => CodeIndexOmittedSourcesV1Schema), z.null()]).optional(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]),
   progress: z.union([z.lazy(() => CodeIndexBuildProgressV1Schema), z.null()]),
   rebuild_in_flight: z.boolean(),

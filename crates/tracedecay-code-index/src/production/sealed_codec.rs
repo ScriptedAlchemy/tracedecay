@@ -39,7 +39,8 @@ use super::*;
 /// parent delta (optional parent binding). Evidence lineage, request, and
 /// receipt rows leave implicit what the generation's own symbols and chunks
 /// imply. Evidence also carries the cross-file edges sealing resolved, so a
-/// restore never re-resolves the corpus.
+/// restore never re-resolves the corpus. The snapshot carries the sources
+/// capture omitted, with the reason.
 ///
 /// Every other revision is refused through
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt

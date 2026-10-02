@@ -507,7 +507,7 @@ pub(in crate::runtime) struct JsonlFrameHints {
     pub identity_collision_retry: bool,
 }
 
-fn jsonl_frame_hints(bytes: &[u8]) -> JsonlFrameHints {
+pub(in crate::runtime) fn jsonl_frame_hints(bytes: &[u8]) -> JsonlFrameHints {
     const TOKEN_LEN: usize = 12;
     const SESSION_META: &[u8; TOKEN_LEN] = b"session_meta";
     const TURN_CONTEXT: &[u8; TOKEN_LEN] = b"turn_context";

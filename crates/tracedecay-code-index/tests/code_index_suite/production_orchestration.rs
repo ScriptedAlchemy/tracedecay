@@ -332,6 +332,7 @@ fn request_at_path(
         content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: vec![file.clone()],
+        omitted_sources: Vec::new(),
     };
 
     CodeIndexBuildRequestV1 {
@@ -915,6 +916,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
             content_identity: content_digest(format!("{fast_source}{slow_source}").as_bytes()),
             captured_at: UtcMicros(1_000_000),
             files: vec![fast.clone(), slow.clone()],
+            omitted_sources: Vec::new(),
         },
         captured_files: vec![
             CodeIndexCapturedFileV1 {
@@ -2875,6 +2877,7 @@ fn partitioned_request(
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files,
@@ -2996,7 +2999,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:9046bf4c0a75cabea0b19c44ea0b6e5ec1402a6f62dda4460ef186d9e033ab17";
+    "sha256:c1ee79e4e62183bcf082e4a1fa453e897dd3d8c4afe90bf500c86c4fd8ef49f2";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:3bb9509e6da5059d42c95f1e9499e2748e4fd62b5c9769dccbb02b1cf59e73c6",
@@ -3011,7 +3014,7 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_311,
     ),
     (
-        "sha256:4b9bb46f8c50d82584cf3c78e6166c7c0013352c751cf989de0655403161af31",
+        "sha256:09668c3306b167aa9b04cc1a87e8b5dfcbcf3bc7697b8a20966de80d360fc1d7",
         9_594,
     ),
 ];

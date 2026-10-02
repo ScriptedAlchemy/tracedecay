@@ -184,6 +184,7 @@ fn request(files: usize) -> CodeIndexBuildRequestV1 {
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(1_000_000),
             files: snapshot_files,
+            omitted_sources: Vec::new(),
         },
         captured_files: captured,
         changed_files: BTreeSet::new(),
