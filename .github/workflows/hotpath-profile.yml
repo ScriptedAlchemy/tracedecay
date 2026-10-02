@@ -66,6 +66,10 @@ jobs:
         with:
           prefix-key: v1-rust
           shared-key: hotpath-profile
+          # Vendored-dependency roots: see the debug-cli cache step in ci.yml.
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
           cache-workspace-crates: "false"
           cache-on-failure: true
 
