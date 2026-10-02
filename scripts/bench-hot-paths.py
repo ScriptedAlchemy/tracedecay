@@ -360,31 +360,12 @@ class Run:
                 call = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
                 if not call.ok:
                     continue
+                # `tool --json` always carries the typed answer in
+                # structuredContent; content[].text may be a truncated preview.
                 try:
-                    response = json.loads(call.stdout)
-                except (ValueError, TypeError):
+                    hits = json.loads(call.stdout)["structuredContent"]["results"]
+                except (ValueError, KeyError, TypeError):
                     continue
-                if not isinstance(response, dict):
-                    continue
-                payload = response.get("structuredContent")
-                if not isinstance(payload, dict):
-                    for item in response.get("content") or []:
-                        try:
-                            payload = json.loads(item["text"])
-                        except (ValueError, KeyError, TypeError):
-                            continue
-                        if isinstance(payload, dict) and isinstance(payload.get("preview"), str):
-                            try:
-                                payload = json.loads(payload["preview"])
-                            except (ValueError, TypeError):
-                                continue
-                        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-                            break
-                    else:
-                        payload = None
-                if not isinstance(payload, dict):
-                    continue
-                hits = payload.get("results")
                 if not isinstance(hits, list):
                     continue
                 for hit in hits:
@@ -504,7 +485,9 @@ class Run:
 
     def execute(self) -> None:
         log(f"cloning {self.source_repo} into the run directory")
-        subprocess.run(["git", "clone", "--quiet", "--local", str(self.source_repo), str(self.repo)],
+        # No --local: it makes a failed hardlink fatal, and the run dir sits on
+        # TMPDIR, which is often a different filesystem from the target.
+        subprocess.run(["git", "clone", "--quiet", str(self.source_repo), str(self.repo)],
                        check=True, env=self.env)
         cloned_revision = subprocess.run(
             ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
