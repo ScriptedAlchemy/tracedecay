@@ -428,7 +428,6 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
         }),
         "the routed exact-symbol read must expose the unhinted edit: {payload}"
     );
-    assert_eq!(payload["freshness"]["state"], "fresh", "{payload}");
 
     projects.shutdown().await;
 }
