@@ -391,6 +391,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn log_daemon_event_writes_the_logfmt_line_to_stderr_when_rust_log_is_unset() {
+        // The unset-RUST_LOG path is under test, so the ambient operator
+        // config leaves the process environment for the test's duration.
+        struct RustLogGuard(Option<std::ffi::OsString>);
+        impl RustLogGuard {
+            fn unset() -> Self {
+                let previous = std::env::var_os("RUST_LOG");
+                // SAFETY: no other test in this binary reads or writes process
+                // environment, so the removal cannot race an env access.
+                unsafe { std::env::remove_var("RUST_LOG") };
+                Self(previous)
+            }
+        }
+        impl Drop for RustLogGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(previous) = self.0.take() {
+                        std::env::set_var("RUST_LOG", previous);
+                    } else {
+                        std::env::remove_var("RUST_LOG");
+                    }
+                }
+            }
+        }
+        let _rust_log = RustLogGuard::unset();
         assert!(
             std::env::var_os("RUST_LOG").is_none(),
             "visibility is the unset-RUST_LOG path; the emitter is eprintln, not tracing"

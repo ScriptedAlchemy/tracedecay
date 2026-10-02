@@ -147,6 +147,10 @@ pub fn apply_hermetic_child_env(command: &mut Command, home: &Path) {
     for key in HOST_RELOCATION_ENV {
         command.env_remove(key);
     }
+    // The operator's logging config is not fixture state: hook stderr belongs
+    // to its host and stays silent unless `RUST_LOG` overrides it, so a test
+    // wanting child logs sets `RUST_LOG` explicitly after this helper.
+    command.env_remove("RUST_LOG");
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
