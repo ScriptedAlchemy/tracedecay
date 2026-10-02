@@ -9,6 +9,14 @@ bundle ships shared workflow skills and host-specific lifecycle hooks. Each hook
 daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
 
+The plugin root also carries the portable Agent Plugins manifest pair
+(`plugin.json` + `mcp.json`) that ChatGPT and Codex read directly. Its
+`extensions.com.openai` block supplies the OpenAI presentation and hook
+mapping, and `mcp.json` launches both the `graph` server (`tracedecay serve`)
+and the `tracedecay-explorer` MCP App server from `chatgpt-extension/`. The
+`.codex-plugin/plugin.json` overlay stays as the compatibility fallback for
+hosts that do not read the portable manifest.
+
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the
 host capability matrix, lifecycle/rollback contract, and Cline evidence
@@ -47,6 +55,14 @@ never a doubled `tracedecay`.
   empty; the global Codex plugin fills hooks at install time.
 - `hooks/hooks-cursor.json`: Cursor lifecycle hooks.
 - `.lsp.json`: Claude Code's single configured-language TraceDecay LSP bridge.
+- `plugin.json` + `mcp.json`: portable Agent Plugins manifests (ChatGPT and
+  Codex plugin loading). `mcp.json` declares transports explicitly and adds
+  the `tracedecay-explorer` stdio server beside `graph`.
+- `chatgpt-extension/`: the ChatGPT extension (MCP App UI + read-only MCP
+  adapter over `tracedecay serve` and the daemon application API). Commits
+  `embedded/server.mjs` and `embedded/app.html` like the Cursor native
+  extension; `pnpm run check:embedded` guards drift. See
+  `chatgpt-extension/README.md`.
 - `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
   install scope; Claude rewrites the command to the resolved binary path.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
