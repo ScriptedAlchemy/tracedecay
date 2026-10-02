@@ -47,6 +47,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -119,6 +120,43 @@ def proc_status(pid: int) -> dict[str, int] | None:
     return values
 
 
+class DaemonRssSampler:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._peak_rss_kb: int | None = None
+        self._thread: threading.Thread | None = None
+
+    def _sample(self) -> None:
+        status = proc_status(self.pid)
+        if status is None or "VmRSS" not in status:
+            return
+        with self._lock:
+            self._peak_rss_kb = max(self._peak_rss_kb or 0, status["VmRSS"])
+
+    def _poll(self) -> None:
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(0.1)
+
+    def start(self) -> None:
+        if not LINUX:
+            return
+        self._sample()
+        self._thread = threading.Thread(target=self._poll, name="daemon-rss-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> int | None:
+        if self._thread is None:
+            return None
+        self._stop.set()
+        self._thread.join()
+        self._sample()
+        with self._lock:
+            return self._peak_rss_kb
+
+
 def problem_code(stdout: bytes) -> str | None:
     try:
         return json.loads(stdout)["structuredContent"]["problem"]["code"]
@@ -138,7 +176,7 @@ def tree_bytes(root: Path) -> int:
 
 
 class Run:
-    def __init__(self, args: argparse.Namespace, run_dir: Path) -> None:
+    def __init__(self, args: argparse.Namespace, run_dir: Path, target_revision: str) -> None:
         self.bin = str(Path(args.bin).resolve())
         self.samples = args.samples
         self.run_dir = run_dir
@@ -149,10 +187,11 @@ class Run:
         self.index_timeout = args.index_timeout
         self.edit_reconcile = not args.skip_edit_reconcile
         self.source_repo = Path(args.target_repo).resolve()
+        self.target_revision = target_revision
+        self.seed_symbols = args.seed_symbol or SEED_SYMBOLS
         self.daemon: subprocess.Popen[bytes] | None = None
         self.rows = (self.out / "samples.jsonl").open("w", encoding="utf-8")
         self.env = self._isolated_env()
-        self.node_id: str | None = None
         self.generation: object = None
 
     def _isolated_env(self) -> dict[str, str]:
@@ -314,44 +353,80 @@ class Run:
         self.record("index", "init_to_ready", **{**ready, "wall_ms": (time.perf_counter() - start) * 1000})
         self.generation = ready["generation_id"]
 
-    def resolve_node(self) -> None:
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            for symbol in SEED_SYMBOLS:
+    def resolve_node(self) -> tuple[str, str] | None:
+        unavailable = f"no seed symbol resolved to a node; tried: {', '.join(self.seed_symbols)}"
+        for attempt in range(3):
+            for symbol in self.seed_symbols:
                 call = self.tool("tracedecay_search", {"query": symbol, "limit": 10, "format": "json"})
                 if not call.ok:
                     continue
                 try:
-                    payload = json.loads(json.loads(call.stdout)["content"][0]["text"])
-                except (ValueError, KeyError, IndexError, TypeError):
+                    response = json.loads(call.stdout)
+                except (ValueError, TypeError):
                     continue
-                for hit in payload.get("results") or []:
-                    node_id = hit.get("node_id") or (hit.get("candidate") or {}).get("anchor_id")
-                    if node_id:
-                        self.node_id = node_id
-                        return
-            time.sleep(2)
+                if not isinstance(response, dict):
+                    continue
+                payload = response.get("structuredContent")
+                if not isinstance(payload, dict):
+                    for item in response.get("content") or []:
+                        try:
+                            payload = json.loads(item["text"])
+                        except (ValueError, KeyError, TypeError):
+                            continue
+                        if isinstance(payload, dict) and isinstance(payload.get("preview"), str):
+                            try:
+                                payload = json.loads(payload["preview"])
+                            except (ValueError, TypeError):
+                                continue
+                        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                            break
+                    else:
+                        payload = None
+                if not isinstance(payload, dict):
+                    continue
+                hits = payload.get("results")
+                if not isinstance(hits, list):
+                    continue
+                for hit in hits:
+                    if not isinstance(hit, dict):
+                        continue
+                    node_id = hit.get("node_id")
+                    if isinstance(node_id, str) and node_id:
+                        self.record("request", "callers_node", node_id=node_id, seed_symbol=symbol)
+                        return node_id, symbol
+            if attempt < 2:
+                time.sleep(1)
+        self.record("request", "callers_node", unavailable=unavailable)
+        return None
 
-    def request_ops(self) -> list[tuple[str, str, dict[str, object]]]:
+    def request_ops(
+        self, caller_node: tuple[str, str] | None
+    ) -> list[tuple[str, str, dict[str, object]]]:
+        first_seed = self.seed_symbols[0]
+        second_seed = self.seed_symbols[1] if len(self.seed_symbols) > 1 else first_seed
         ops = [
             ("status", "tracedecay_status", {"format": "json"}),
-            ("search_symbol", "tracedecay_search", {"query": SEED_SYMBOLS[0], "limit": 10, "format": "json"}),
-            ("search_identifier", "tracedecay_search", {"query": SEED_SYMBOLS[1], "limit": 10, "format": "json"}),
-            ("grep", "tracedecay_grep", {"pattern": SEED_SYMBOLS[1], "fixed_strings": True, "max_results": 20, "format": "json"}),
+            ("search_symbol", "tracedecay_search", {"query": first_seed, "limit": 10, "format": "json"}),
+            ("search_identifier", "tracedecay_search", {"query": second_seed, "limit": 10, "format": "json"}),
+            ("grep", "tracedecay_grep", {"pattern": second_seed, "fixed_strings": True, "max_results": 20, "format": "json"}),
             ("context", "tracedecay_context", {"task": CONTEXT_TASK, "max_nodes": 20, "format": "json"}),
             ("plan_context", "tracedecay_context", {"task": CONTEXT_TASK, "max_nodes": 20, "format": "json", "mode": "plan"}),
         ]
-        if self.node_id:
-            ops.insert(4, ("callers", "tracedecay_callers", {"node_id": self.node_id, "max_depth": 2, "format": "json"}))
+        if caller_node:
+            node_id, _ = caller_node
+            ops.insert(4, ("callers", "tracedecay_callers", {
+                "node_id": node_id, "maximum_depth": 2, "format": "json",
+            }))
         else:
-            self.record("request", "callers", unavailable="no seed symbol resolved to a node")
+            unavailable = f"no seed symbol resolved to a node; tried: {', '.join(self.seed_symbols)}"
+            self.record("request", "callers", unavailable=unavailable)
         return ops
 
     def lane_request(self) -> None:
         log("request (sequential warm reads)")
-        self.resolve_node()
+        caller_node = self.resolve_node()
         pid = self.daemon_pid()
-        ops = self.request_ops()
+        ops = self.request_ops(caller_node)
         for op, tool, args in ops:
             self.tool(tool, args)
         for op, tool, args in ops:
@@ -396,10 +471,22 @@ class Run:
         with target.open("a", encoding="utf-8") as handle:
             handle.write(f"\n{marker} bench-hot-paths edit {time.time_ns()}\n")
         start = time.perf_counter()
-        sync = self.client(["sync"])
-        if not sync.ok:
-            raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
-        ready = self.wait_for_ready("edit_reconcile", self.generation)
+        rss_sampler = DaemonRssSampler(self.daemon_pid())
+        rss_sampler.start()
+        try:
+            sync = self.client(["sync"])
+            if not sync.ok:
+                raise HarnessError(f"`tracedecay sync` failed: {sync.stderr[-2000:].decode(errors='replace')}")
+            ready = self.wait_for_ready("edit_reconcile", self.generation)
+        finally:
+            peak_rss_kb = rss_sampler.stop()
+        if peak_rss_kb is None:
+            ready.pop("peak_daemon_rss_kb", None)
+            ready["unsupported"] = (
+                "daemon /proc counters are Linux-only" if not LINUX else "daemon VmRSS is unavailable"
+            )
+        else:
+            ready["peak_daemon_rss_kb"] = peak_rss_kb
         self.record("edit_reconcile", "sync_request", wall_ms=sync.wall_ms)
         self.record("edit_reconcile", "edited_file", path=tracked[0])
         self.record("edit_reconcile", "edit_to_ready",
@@ -419,6 +506,17 @@ class Run:
         log(f"cloning {self.source_repo} into the run directory")
         subprocess.run(["git", "clone", "--quiet", "--local", str(self.source_repo), str(self.repo)],
                        check=True, env=self.env)
+        cloned_revision = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        if cloned_revision.returncode != 0:
+            raise HarnessError("could not determine the cloned target revision")
+        actual_revision = cloned_revision.stdout.strip()
+        if actual_revision != self.target_revision:
+            raise HarnessError(
+                f"cloned target revision mismatch: expected {self.target_revision}, got {actual_revision}"
+            )
         for path in (self.profile, self.run_dir / "home" / ".config", self.run_dir / "home" / ".local" / "share"):
             path.mkdir(parents=True, exist_ok=True)
         self.lane_cli_startup()
@@ -490,6 +588,8 @@ def main() -> int:
                         help="directory for samples.jsonl, summary.json, summary.md")
     parser.add_argument("--index-timeout", type=int, default=1800, help="seconds to wait for a ready graph")
     parser.add_argument("--skip-edit-reconcile", action="store_true", help="skip the edit_reconcile lane")
+    parser.add_argument("--seed-symbol", action="append", metavar="NAME",
+                        help="symbol to search for and resolve as a callers node; repeatable")
     args = parser.parse_args()
 
     binary = Path(args.bin)
@@ -505,12 +605,26 @@ def main() -> int:
     if git_dir.returncode != 0:
         log(f"--target-repo '{target}' is not a git checkout")
         return 2
+    target_status = subprocess.run(["git", "-C", str(target), "status", "--porcelain"],
+                                   capture_output=True, text=True, check=False)
+    if target_status.returncode != 0:
+        log(f"could not inspect --target-repo '{target}' status")
+        return 2
+    if target_status.stdout.strip():
+        log(f"--target-repo '{target}' is dirty; commit or stash first")
+        return 2
+    target_revision_result = subprocess.run(["git", "-C", str(target), "rev-parse", "HEAD"],
+                                            capture_output=True, text=True, check=False)
+    if target_revision_result.returncode != 0:
+        log(f"could not determine --target-repo '{target}' revision")
+        return 2
+    target_revision = target_revision_result.stdout.strip()
     Path(args.out).mkdir(parents=True, exist_ok=True)
 
     # A Unix socket path is capped near 108 bytes, so keep the run dir short.
     run_dir = Path(tempfile.mkdtemp(prefix="tdhot.", dir=os.environ.get("TMPDIR", "/tmp")))
     run_dir.chmod(0o700)
-    run = Run(args, run_dir)
+    run = Run(args, run_dir, target_revision)
     meta = {
         "binary": run.bin,
         "binary_version": subprocess.run([run.bin, "--version"], capture_output=True, text=True,
@@ -518,8 +632,7 @@ def main() -> int:
         "host": f"{platform.system()} {platform.machine()} cpus={os.cpu_count()}",
         "samples": args.samples,
         "target_repo": str(run.source_repo),
-        "target_revision": subprocess.run(["git", "-C", str(target), "rev-parse", "HEAD"],
-                                          capture_output=True, text=True, check=False).stdout.strip(),
+        "target_revision": target_revision,
         "started_at_unix": int(time.time()),
     }
     status = 0

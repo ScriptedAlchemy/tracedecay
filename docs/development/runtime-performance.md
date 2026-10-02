@@ -359,7 +359,14 @@ The script never builds. It clones `--target-repo` (by default, this checkout)
 into a run directory that is private to the current user. It points HOME, XDG,
 the profile, and the daemon socket into that directory, starts a private
 daemon, and deletes the directory on exit. The edit lane appends one line to the
-disposable clone only.
+disposable clone only. The target must be clean before output is created; the
+harness records its `HEAD` and verifies the clone has the same revision.
+
+`--seed-symbol NAME` is repeatable and defaults to `DaemonHandshake`,
+`default_socket_path`, `call_default_tool`, and `TraceDecay`. All supplied seeds
+are tried for callers-node discovery. The first seed drives `search_symbol`;
+the second drives `search_identifier` and `grep`, or the first is reused when
+only one seed is supplied.
 
 | Lane | What is measured |
 | --- | --- |
@@ -368,7 +375,7 @@ disposable clone only.
 | `index` | `init` until the status reports a current generation with a `ready` graph. A fast return from `init` does not mean the index is done. |
 | `request` | Sequential warm `status`, `search`, `grep`, `callers`, `context`, and plan `context` requests. Each sample records wall time and the daemon's CPU delta from `/proc`. |
 | `memory` | Daemon RSS split into anonymous and file memory, the thread count, profile size on disk, and the graph-engine owner bytes that `status` reports |
-| `edit_reconcile` | One appended line and `sync`, until a new generation is current and ready. Records the elapsed time and the peak daemon RSS. |
+| `edit_reconcile` | One appended line and `sync`, until a new generation is current and ready. A background sampler polls daemon RSS every ~100 ms from just before `sync` through readiness; RSS is typed unsupported where `/proc` is unavailable. |
 
 Session capture and read keep their fixture-backed harness,
 `scripts/run-session-temporal-benchmark.sh --run`. This script records that lane

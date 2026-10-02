@@ -27,9 +27,14 @@ FAKE_TRACEDECAY = textwrap.dedent(
         return json.load(open(state)) if os.path.exists(state) else {"generation": 0}
     def save(value):
         json.dump(value, open(state, "w"))
-    def reply(payload, ok=True):
-        envelope = {"content": [{"type": "text", "text": json.dumps(payload)}], "isError": not ok}
-        if not ok:
+    def reply(payload, ok=True, content_payload=None, structured=None):
+        envelope = {
+            "content": [{"type": "text", "text": json.dumps(payload if content_payload is None else content_payload)}],
+            "isError": not ok,
+        }
+        if structured is not None:
+            envelope["structuredContent"] = structured
+        elif not ok:
             envelope["structuredContent"] = {"problem": payload["problem"]}
         print(json.dumps(envelope))
         sys.exit(0 if ok else 1)
@@ -61,7 +66,29 @@ FAKE_TRACEDECAY = textwrap.dedent(
                            "owners": [{"kind": "graph_engine", "bytes": 4096}]},
             })
         if tool == "tracedecay_search":
-            reply({"results": [{"node_id": "node.fake"}]})
+            args = json.loads(argv[argv.index("--args") + 1])
+            payload = {"results": []}
+            if args["query"] in {"DaemonHandshake", "default_socket_path", "call_default_tool"}:
+                payload["results"].append({
+                    "candidate": {"anchor_id": "code-symbol:node.fake"},
+                    "final_ordinal": 0,
+                    "node_id": "node.fake",
+                })
+            body = json.dumps(payload)
+            reply(payload, content_payload={
+                "handle": "rh_fake",
+                "original_chars": len(body),
+                "preview": body[:80],
+                "preview_chars": min(len(body), 80),
+                "retrieve_tool": "tracedecay_result_retrieve",
+                "retrieve_ttl_seconds": 300,
+                "truncated": len(body) > 80,
+            }, structured=payload)
+        if tool == "tracedecay_callers":
+            args = json.loads(argv[argv.index("--args") + 1])
+            if set(args) - {"node_id", "maximum_depth", "format"}:
+                reply({"problem": {"code": "invalid_argument"}}, ok=False)
+            reply({"results": []})
         if tool == "tracedecay_grep":
             reply({"problem": {"code": "invalid_argument"}}, ok=False)
         reply({"results": []})
@@ -116,6 +143,8 @@ class BenchHotPathsTests(unittest.TestCase):
         )
         self.assertEqual(distributions[("request", "status")]["n"], 2)
         self.assertEqual(distributions[("request", "status")]["errors"], 0)
+        self.assertEqual(distributions[("request", "callers")]["n"], 2)
+        self.assertEqual(distributions[("request", "callers")]["errors"], 0)
         self.assertIsNone(distributions[("request", "status")]["wall_ms"]["p90"])
         self.assertEqual(distributions[("request", "grep")]["errors"], 2)
         grep_problems = {row["problem"] for row in self.rows() if row["op"] == "grep"}
@@ -125,10 +154,34 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(single[("index", "init_to_ready")]["generation_id"], "generation.1")
         self.assertEqual(single[("edit_reconcile", "edit_to_ready")]["generation_id"], "generation.2")
         self.assertEqual(single[("edit_reconcile", "edited_file")]["path"], "src/lib.rs")
+        edit_ready = single[("edit_reconcile", "edit_to_ready")]
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(edit_ready["peak_daemon_rss_kb"], int)
+            self.assertGreater(edit_ready["peak_daemon_rss_kb"], 0)
+        else:
+            self.assertEqual(edit_ready["unsupported"], "daemon /proc counters are Linux-only")
         self.assertEqual(single[("memory", "after_requests")]["status_memory"]["owners"], {"graph_engine": 4096})
+        self.assertEqual(single[("request", "callers_node")]["node_id"], "node.fake")
+        self.assertEqual(single[("request", "callers_node")]["seed_symbol"], "DaemonHandshake")
         self.assertEqual(single[("daemon", "alive_after_run")]["ok"], True)
         self.assertEqual(list(self.tmp.iterdir()), [])
         self.assertEqual((self.repo / "src" / "lib.rs").read_text(), "pub fn answer() -> u32 { 42 }\n")
+
+    def test_an_unknown_seed_records_callers_unavailable_without_failing_the_run(self) -> None:
+        result = self.bench("--seed-symbol", "missing_symbol")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads((self.out / "summary.json").read_text())
+        distributions = {(row["lane"], row["op"]): row for row in summary["distributions"]}
+        single = {(row["lane"], row["op"]): row for row in summary["single"]}
+        self.assertNotIn(("request", "callers"), distributions)
+        self.assertEqual(
+            single[("request", "callers")]["unavailable"],
+            "no seed symbol resolved to a node; tried: missing_symbol",
+        )
+        self.assertEqual(
+            single[("request", "callers_node")]["unavailable"],
+            "no seed symbol resolved to a node; tried: missing_symbol",
+        )
 
     def test_a_daemon_that_dies_mid_run_is_a_harness_error(self) -> None:
         result = self.bench("--skip-edit-reconcile", env={"FAKE_DAEMON_DIES_AT_GENERATION": "1"})
@@ -142,6 +195,14 @@ class BenchHotPathsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("is not an executable file", result.stderr)
         self.assertFalse(self.out.exists())
+
+    def test_a_dirty_target_fails_preflight_without_output(self) -> None:
+        (self.repo / "untracked.txt").write_text("uncommitted\n")
+        result = self.bench()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("commit or stash first", result.stderr)
+        self.assertFalse(self.out.exists())
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
 
 if __name__ == "__main__":
