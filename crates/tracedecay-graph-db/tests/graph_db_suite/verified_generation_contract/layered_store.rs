@@ -289,6 +289,9 @@ fn publish_layered(
         PRODUCER_INPUTS,
         "the spill pins the base's producer attachment"
     );
+    let sealed_root = support::graph_path(root).with_extension("sealed");
+    let parent_directory = sealed_directory_of(&sealed_root, parent.generation.as_str());
+    std::fs::remove_dir_all(parent_directory).unwrap();
     let parent_entities = parent
         .entities
         .iter()
@@ -631,6 +634,9 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         '1',
         Some(PRODUCER_INPUTS),
     );
+    let sealed_root = support::graph_path(layered_root.path()).with_extension("sealed");
+    let parent_directory = sealed_directory_of(&sealed_root, "layered-g1");
+    let parent_verified = std::fs::read(parent_directory.join("generation.verified")).unwrap();
     let (layered_child, delta) = publish_layered(
         &layered_graph,
         layered_root.path(),
@@ -654,20 +660,15 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
     // The base's verify-once proof binds its container's bytes, which the
     // layer links, so the layer carries it: a restart resolves the base by
     // marker instead of re-proving every base row.
-    let sealed_root = support::graph_path(layered_root.path()).with_extension("sealed");
-    let parent_directory = sealed_directory_of(&sealed_root, "layered-g1");
     let layered_directory = sealed_directory_of(&sealed_root, "layered-g2");
     assert_eq!(
         std::fs::read(layered_directory.join("base.verified")).unwrap(),
-        std::fs::read(parent_directory.join("generation.verified")).unwrap()
+        parent_verified
     );
 
     drop((layered_child, layered_parent));
     assert!(layered_graph.close().unwrap());
     drop(layered_graph);
-    // Retirement deletes the parent's artifact; the layered store must not
-    // depend on anything but its own directory.
-    std::fs::remove_dir_all(parent_directory).unwrap();
     // Restart: the sealed-first recovery a cold daemon runs adopts the
     // layered store and re-proves its hard-linked base from disk.
     let layered_graph = RegisteredGraph::new_mounted(layered_root.path()).unwrap();
@@ -684,6 +685,77 @@ fn a_layered_generation_serves_and_digests_like_its_cold_build() {
         .unwrap();
     assert!(recovered.serves_from_sealed_store());
     assert_same_reads(&cold_child.snapshot, &recovered, &identity);
+}
+
+#[test]
+fn a_layered_endpoint_copy_refuses_an_offset_past_the_pinned_rows() {
+    let identity = projection("sealed-store:layered-offset-bound", "code");
+    let parent = manifest(
+        &identity,
+        "offset-bound-g1",
+        (vec![symbol(0, "parent"), symbol(1, "parent")], Vec::new()),
+    );
+    let root = TempDir::new().unwrap();
+    let graph = RegisteredGraph::new_mounted(root.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let parent_commit = publish_cold(
+        &graph,
+        root.path(),
+        &mut authority,
+        &parent,
+        None,
+        '1',
+        Some(PRODUCER_INPUTS),
+    );
+    let sealed_root = support::graph_path(root.path()).with_extension("sealed");
+    let parent_directory = sealed_directory_of(&sealed_root, "offset-bound-g1");
+    let rows_length = std::fs::metadata(parent_directory.join("entities.rows"))
+        .unwrap()
+        .len();
+    let mut offsets = std::fs::read(parent_directory.join("entity-rows.offsets")).unwrap();
+    for record in offsets[16..].chunks_exact_mut(16) {
+        record[8..].copy_from_slice(&rows_length.saturating_add(1).to_be_bytes());
+    }
+    std::fs::write(parent_directory.join("entity-rows.offsets"), offsets).unwrap();
+
+    let base = graph
+        .registry
+        .sealed_generation_base(
+            registration(graph.binding.clone(), root.path()),
+            parent.projection.clone(),
+            parent.generation.clone(),
+            &|| Ok(()),
+        )
+        .unwrap()
+        .expect("the structurally valid sidecar opens as a base");
+    let mut spill = graph
+        .registry
+        .layered_row_spill(
+            registration(graph.binding.clone(), root.path()),
+            parent.projection.clone(),
+            base,
+        )
+        .unwrap();
+    spill
+        .push_batch(
+            vec![symbol(2, "child")],
+            vec![edge(
+                &identity,
+                "offset-bound-edge".to_owned(),
+                2,
+                0,
+                "calls",
+            )],
+            &|| Ok(()),
+        )
+        .unwrap();
+    let missing = spill.missing_endpoints();
+    let error = spill.copy_base_endpoints(missing, &|| Ok(())).unwrap_err();
+    assert!(
+        matches!(error, GraphDbError::Corrupt { .. }),
+        "an out-of-file endpoint offset must be typed corruption: {error}"
+    );
+    drop(parent_commit);
 }
 
 #[cfg(target_os = "linux")]
