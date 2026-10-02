@@ -356,7 +356,10 @@ mod tests {
     use tracedecay_contracts::{IdempotencyKey, OperationTermination, RequestId};
     use tracedecay_domain::UtcMicros;
 
-    use super::{SessionSyncPollState, session_sync_poll_state, session_sync_timeout_message};
+    use super::{
+        SessionSyncPollState, session_sync_deferred_report, session_sync_poll_state,
+        session_sync_timeout_message,
+    };
 
     fn complete(
         termination: OperationTermination,
