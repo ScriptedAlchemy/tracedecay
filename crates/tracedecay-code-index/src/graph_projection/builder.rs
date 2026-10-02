@@ -10,12 +10,12 @@ use crate::chunks::{
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::{
-    CodeGraphResolutionV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1,
+    CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1, PersistedCodeGraphPageV1,
+    SealedCodeGraphPageStoreV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, EdgeAuthorityV1,
-    FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1, SnapshotFileDispositionV1,
-    SymbolOccurrenceId,
+    FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationRelation,
@@ -39,17 +39,11 @@ use super::{
 /// Builds a sealed generation's code graph from its on-disk file segments and
 /// spills the rows, never assembling the generation.
 ///
-/// One pass over the segments, one bounded window of files at a time, retains
-/// only what cross-file resolution and graph emission read: symbols, compact
-/// chunk-derived bindings, unresolved references, imports, and per-file
-/// edges. Chunk text and clone streams are dropped with their decode window.
-/// Resolution then derives the cross-file edges, bound symbol set, and
-/// unresolved-call limitations before the retained graph-only batches are
-/// emitted to `spill`.
-///
-/// The spill sorts and merges the rows on disk into the canonical order the
-/// sealed store and the recovered digest require, so the result is
-/// byte-identical to the manifest the whole generation would project.
+/// Sealing has already resolved the generation and recorded one authenticated
+/// graph-output page per snapshot file. This pass streams those pages into
+/// both the row spill and the independently readable base attachment. The
+/// spill sorts and merges rows into the canonical order used by serving and
+/// recovered-digest verification.
 #[hotpath::measure(label = "code_index.graph.build_rows")]
 pub fn build_sealed_code_graph_rows(
     projection: GraphProjectionIdentity,
@@ -70,76 +64,25 @@ pub fn build_sealed_code_graph_rows(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    let inputs = crate::production::CodeGraphBaseInputsWriterV1::create(
+    let mut pages = SealedCodeGraphPageStoreV1::new(source, read_segment);
+    let descriptors = pages.pages().to_vec();
+    let mut attachment = CodeGraphPageStoreWriterV1::create(
         &spill.attachment_path(),
         &generation,
         projector_revision.as_str(),
+        &descriptors,
     )?;
-    let resolution: CodeGraphResolutionV1<'_> = hotpath::measure_block!(
-        "code_index.graph.build_rows.resolve",
-        source.resolve_code_graph(read_segment, Some(inputs), check)
-    )?;
-    let CodeGraphResolutionV1 {
-        bound,
-        cross_file_edges,
-        unresolved_calls,
-        batches,
-    } = resolution;
-    let unresolved_by_source = group_unresolved_calls(&unresolved_calls, check)?;
-    let snapshot = source.snapshot();
-    let files = snapshot
-        .files
-        .iter()
-        .map(|file| (&file.file_occurrence_id, file))
-        .collect::<BTreeMap<_, _>>();
-    let context = CodeGraphRowContext {
-        projection: &projection,
-        generation: &generation,
-        files: Some(&files),
-        bound: &bound,
-        unresolved_by_source: &unresolved_by_source,
-    };
     hotpath::measure_block!("code_index.graph.build_rows.emit", {
-        for batch in batches {
+        for descriptor in &descriptors {
             check()?;
-            let rows = emit_code_graph_rows(
-                &context,
-                &CodeGraphRowBatch {
-                    files: &batch.files,
-                    imports: &batch.imports,
-                    chunks: &batch.chunks,
-                    symbols: &batch.symbols,
-                    edges: &batch.edges,
-                    bindings: Some(&batch.bindings),
-                },
-                check,
-            )?;
-            drop(batch);
+            let page = pages.read_page(descriptor)?;
+            attachment.write_page(descriptor, &page)?;
+            let rows = emit_persisted_code_graph_page(&projection, &generation, &page, check)?;
             spill.push_batch(rows.entities, rows.relations, check)?;
         }
-        // The rows no window owns: snapshot files sealed without a segment
-        // and the cross-file edges resolution derived.
-        let unsegmented = snapshot
-            .files
-            .iter()
-            .filter(|file| file.disposition != SnapshotFileDispositionV1::Present)
-            .collect::<Vec<_>>();
-        let rows = emit_code_graph_rows(
-            &context,
-            &CodeGraphRowBatch {
-                files: &unsegmented,
-                imports: &[],
-                chunks: &[],
-                symbols: &[],
-                edges: &cross_file_edges,
-                bindings: None,
-            },
-            check,
-        )?;
-        spill.push_batch(rows.entities, rows.relations, check)?;
+        attachment.finish()?;
         Ok::<(), SealedCodeGraphRowsError>(())
     })?;
-    drop(cross_file_edges);
     // The generation marker counts every entity, itself included.
     let projection_node_count = spill.distinct_entities().checked_add(1).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
@@ -158,6 +101,53 @@ pub fn build_sealed_code_graph_rows(
         spill.finish(identity, check)
     )
     .map_err(Into::into)
+}
+
+pub(super) fn emit_persisted_code_graph_page(
+    projection: &GraphProjectionIdentity,
+    generation: &CodeGenerationId,
+    page: &PersistedCodeGraphPageV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<EmittedRows, CodeGraphProjectionError> {
+    let files = BTreeMap::from([(&page.file.file_occurrence_id, &page.file)]);
+    let bound = page
+        .bindings
+        .keys()
+        .chain(page.symbols.iter().map(|symbol| &symbol.occurrence))
+        .chain(
+            page.target_files
+                .keys()
+                .filter(|occurrence| !page.placeholder_targets.contains(*occurrence)),
+        )
+        .cloned()
+        .collect::<HashSet<_>>();
+    let unresolved_by_source = group_unresolved_calls(&page.unresolved_calls, check)?;
+    let mut rows = emit_code_graph_rows(
+        &CodeGraphRowContext {
+            projection,
+            generation,
+            files: Some(&files),
+            bound: &bound,
+            unresolved_by_source: &unresolved_by_source,
+        },
+        &CodeGraphRowBatch {
+            files: &[&page.file],
+            imports: &page.imports,
+            chunks: &[],
+            symbols: &page.symbols,
+            edges: &page.edges,
+            bindings: Some(&page.bindings),
+        },
+        check,
+    )?;
+    let foreign_placeholders = page
+        .placeholder_targets
+        .difference(&page.owned_placeholders)
+        .map(symbol_entity_id)
+        .collect::<Result<HashSet<_>, _>>()?;
+    rows.entities
+        .retain(|entity| !foreign_placeholders.contains(&entity.identity));
+    Ok(rows)
 }
 
 /// The unresolved receiver and import calls a graph discloses on their source

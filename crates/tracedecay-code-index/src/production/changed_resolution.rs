@@ -18,16 +18,20 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, EdgeAuthorityV1, FileOccurrenceId, NodeKind, SourceSpan,
     SymbolOccurrenceId,
 };
+#[cfg(test)]
 use tracedecay_graph_db::GraphDbError;
 
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
 };
+#[cfg(test)]
 use crate::graph_projection::{SealedCodeGraphRowsError, unresolved_call_limitations};
 
+#[cfg(test)]
+use super::helpers::unresolved_import_calls;
 use super::helpers::{
     collect_edge_evidence, edge_evidence, edge_order, resolve_selected_cross_file_references,
-    selected_references, unresolved_import_calls,
+    selected_references,
 };
 use super::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
@@ -102,6 +106,7 @@ impl<'f> ChangedSitesV1<'f> {
     }
 
     /// References re-decided at the moved sites.
+    #[cfg(any(test, feature = "hotpath"))]
     pub(super) fn resolved_references(&self) -> usize {
         self.selection.iter().map(|(_, picks)| picks.len()).sum()
     }
@@ -132,6 +137,7 @@ impl<'f> ChangedSitesV1<'f> {
     /// still hold, re-derived at the moved sites against `cross_file_edges`.
     /// A site's limitations depend only on its own references and the edges
     /// bound at it, and the selection carries every reference of each site.
+    #[cfg(test)]
     pub(super) fn unresolved_calls(
         &self,
         files: &[Arc<FileGenerationArtifactsV1>],

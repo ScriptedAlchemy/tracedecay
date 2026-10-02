@@ -102,15 +102,17 @@ pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
 mod changed_resolution;
-mod graph_base_inputs;
+mod graph_page_store;
+mod graph_pages;
 use changed_resolution::edge_evidence_over_parent;
-pub(crate) use graph_base_inputs::CodeGraphBaseInputsWriterV1;
-mod graph_inputs;
-pub(crate) use graph_inputs::{
-    CodeGraphLayeredResolutionV1, CodeGraphRemovedFileV1, CodeGraphResolutionV1,
+pub(crate) use graph_page_store::{
+    CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1,
+    FileCodeGraphPageStoreV1, SealedCodeGraphPageStoreV1,
 };
+pub(crate) use graph_pages::PersistedCodeGraphPageV1;
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
+mod resolution_outputs;
 pub use partitioned_codec::{
     SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
@@ -800,6 +802,8 @@ pub struct CodeIndexPublishedGenerationV1 {
     lineage: Vec<SymbolLineageCandidateV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
+    /// Canonical unresolved-call limitations derived while sealing.
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
     clone_payloads_reused: u64,
@@ -2224,6 +2228,10 @@ where
                     _ => collect_edge_evidence(&staged.files),
                 }
             )?;
+            let unresolved_calls = hotpath::measure_block!(
+                "code_index.build.assemble.unresolved_calls",
+                resolution_outputs::unresolved_calls_for_edges(&staged.files, &edges, &|| Ok(()))
+            )?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
                 staged.symbols.symbols.len(),
@@ -2241,6 +2249,7 @@ where
                 lineage: staged.lineage,
                 imports,
                 edges,
+                unresolved_calls,
                 edge_abstentions,
                 statistics,
                 clone_payloads_reused: staged.clone_payloads_reused,
