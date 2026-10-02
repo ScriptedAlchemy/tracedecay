@@ -155,7 +155,12 @@ pub fn hook_v2_pending_work_envelopes(
 ) -> std::result::Result<Vec<tracedecay_hooks::HookEventEnvelopeV2>, HookV2AdmissionLedgerUnavailable>
 {
     let ledger_root = hook_v2_admission_ledger_root(data_root, host);
-    if !ledger_root.is_dir() && !pre_ledger_hook_v2_pending_work_root(data_root, host).is_dir() {
+    let absent = |root: &Path| match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(tracedecay_hooks::HookAdmissionLedgerError::Io),
+    };
+    if absent(&ledger_root)? && absent(&pre_ledger_hook_v2_pending_work_root(data_root, host))? {
         return Ok(Vec::new());
     }
     Ok(with_hook_v2_admission_ledger(

@@ -40,6 +40,29 @@ pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
 /// could not drain, or a wake the spool watch could not deliver.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Whether a spool root is absent. Only a missing root is an empty spool;
+/// any other unreadable state is the drain's failure to report.
+fn spool_root_absent(root: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("hook spool root could not be inspected: {error}")),
+    }
+}
+
+/// The cause a pending-work redrive left its producer work owed, or `None`
+/// when the redrive admitted it.
+fn unresolved_pending_work(outcome: &HookV2AdmissionOutcomeV1) -> Option<&'static str> {
+    match outcome {
+        HookV2AdmissionOutcomeV1::Admitted { .. }
+        | HookV2AdmissionOutcomeV1::ExactDuplicate { .. } => None,
+        HookV2AdmissionOutcomeV1::Conflict => Some("conflicted with an earlier admission"),
+        HookV2AdmissionOutcomeV1::CatchupRequired => Some("requires binding catch-up"),
+        HookV2AdmissionOutcomeV1::Backpressured => Some("was backpressured"),
+        HookV2AdmissionOutcomeV1::Unavailable => Some("was unavailable"),
+    }
+}
+
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
     match outcome {
         HookV2AdmissionOutcomeV1::Admitted { .. } => HookReplayAdmissionOutcomeV1::Admitted,
@@ -57,24 +80,25 @@ fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmi
 /// spool with hook callbacks, which write it while the daemon is down; a
 /// drain woken by a publication waits out the publishing writer. A receipt
 /// that is not settled stays durable for the next sweep, and the failure
-/// names its cause.
+/// names its cause. `Ok(true)` means a full batch settled and receipts
+/// remain behind it.
 #[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: NativeHostIdentityV1,
     authority: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
-    if !root.is_dir() {
-        return Ok(());
+    if spool_root_absent(&root)? {
+        return Ok(false);
     }
+    let batch = usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS);
     let open = || {
         HookDeliveryReceiptSpoolV1::open(&root, tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET)
             .map_err(|error| error.to_string())
     };
-    let receipts = open()?
-        .pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS))
-        .map_err(|error| error.to_string())?;
+    let receipts = open()?.pending(batch).map_err(|error| error.to_string())?;
+    let full_batch = receipts.len() >= batch;
 
     let mut settled = Vec::new();
     let mut unsettled = None;
@@ -106,13 +130,20 @@ async fn drain_hook_delivery_receipts(
             .acknowledge_many(&settled)
             .map_err(|error| error.to_string())?;
     }
-    unsettled.map_or(Ok(()), Err)
+    if let Some(cause) = unsettled {
+        return Err(cause);
+    }
+    if !full_batch {
+        return Ok(false);
+    }
+    HookDeliveryReceiptSpoolV1::has_receipts(&root).map_err(|error| error.to_string())
 }
 
 /// What one sweep over every host left behind.
 #[derive(Default)]
 struct HookReplaySweepV1 {
-    /// A pass settled a full batch, so the next sweep runs at once.
+    /// A pass settled a full batch of records or receipts, so the next sweep
+    /// runs at once.
     more_pending: bool,
     failures: Vec<StatusHookReplayFailureV1>,
 }
@@ -168,46 +199,14 @@ async fn drain_all_hosts(
         .map_err(|error| format!("hook worktree identity is unavailable: {error}"));
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
-        if let Err(cause) =
-            drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await
-        {
-            sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause);
+        match drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await {
+            Ok(more) => sweep.more_pending |= more,
+            Err(cause) => sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause),
         }
-        let pending_work = match hook_v2_pending_work_envelopes(data_root, *host, now) {
-            Ok(pending_work) => pending_work,
-            Err(error) => {
-                sweep.fail(
-                    *host,
-                    StatusHookReplaySpoolV1::PendingWork,
-                    error.to_string(),
-                );
-                Vec::new()
-            }
-        };
-        for envelope in pending_work {
-            if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
-                continue;
-            }
-            // Owed work the daemon cannot admit now stays in the ledger and
-            // is redriven by the next sweep.
-            let _ = admit_replayed_envelope_with_authoritative_session(
-                envelope,
-                None,
-                |project_id, worktree_id, protected_session_id| async move {
-                    tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
-                        .await
-                },
-            )
-            .await;
-        }
+        Box::pin(redrive_pending_work(
+            graph, data_root, *host, project_id, now, &mut sweep,
+        ))
+        .await;
         let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
@@ -250,6 +249,66 @@ async fn drain_all_hosts(
     sweep
 }
 
+/// Redrives the producer work `host`'s admission ledger still owes. Work a
+/// redrive cannot admit stays owed, and the sweep names it.
+async fn redrive_pending_work(
+    graph: &tracedecay_project::project::TraceDecay,
+    data_root: &Path,
+    host: NativeHostIdentityV1,
+    project_id: Option<[u8; 16]>,
+    now: UtcMicros,
+    sweep: &mut HookReplaySweepV1,
+) {
+    let pending_work = match hook_v2_pending_work_envelopes(data_root, host, now) {
+        Ok(pending_work) => pending_work,
+        Err(error) => {
+            sweep.fail(
+                host,
+                StatusHookReplaySpoolV1::PendingWork,
+                error.to_string(),
+            );
+            Vec::new()
+        }
+    };
+    let mut owed = 0_usize;
+    let mut owed_cause = None;
+    for envelope in pending_work {
+        if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
+            continue;
+        }
+        // Owed work the daemon cannot admit now stays in the ledger and
+        // is redriven by the next sweep.
+        let outcome = admit_replayed_envelope_with_authoritative_session(
+            envelope,
+            None,
+            |project_id, worktree_id, protected_session_id| async move {
+                tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                    project_id,
+                    worktree_id,
+                    protected_session_id,
+                )
+                .await
+            },
+            |envelope, native_session_id| async move {
+                admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
+                    .await
+            },
+        )
+        .await;
+        if let Some(cause) = unresolved_pending_work(&outcome) {
+            owed += 1;
+            owed_cause.get_or_insert(cause);
+        }
+    }
+    if let Some(cause) = owed_cause {
+        sweep.fail(
+            host,
+            StatusHookReplaySpoolV1::PendingWork,
+            format!("{owed} pending producer work redrive(s) stayed owed; the first {cause}"),
+        );
+    }
+}
+
 /// Replays one host's spooled records, or `None` when it holds none.
 async fn drain_admitted_host_spool(
     host: NativeHostIdentityV1,
@@ -267,7 +326,9 @@ async fn drain_admitted_host_spool(
     // A hook that appends after this observation publishes its record and
     // wakes the next sweep; non-empty spools still take the lease before
     // interpreting acknowledgement or recovery state.
-    if !root.is_dir() || !HookSpoolV1::has_records(&root).map_err(|error| error.to_string())? {
+    if spool_root_absent(&root)?
+        || !HookSpoolV1::has_records(&root).map_err(|error| error.to_string())?
+    {
         return Ok(None);
     }
     let project_id =
@@ -433,7 +494,11 @@ pub(crate) fn register_hook_v2_replay_consumer(
             .await;
             drop(graph_owner);
             drop(delivery_settlements);
-            publish_sweep(&task_data_root, &task_graph, sweep.failures);
+            // A sweep that leaves a backlog for the next one is not a
+            // finished drain; only its failures are worth publishing early.
+            if !sweep.more_pending || !sweep.failures.is_empty() {
+                publish_sweep(&task_data_root, &task_graph, sweep.failures);
+            }
             if sweep.more_pending {
                 tokio::task::yield_now().await;
                 continue;
@@ -485,4 +550,43 @@ pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
         let _ = task.await;
     }
     spool_watch::detach_consumer(data_root);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_admitted_redrive_settles_pending_work() {
+        let duplicate = HookV2AdmissionOutcomeV1::ExactDuplicate {
+            context_scout_address: None,
+            ready_guidance: serde_json::Value::Null,
+        };
+        assert_eq!(unresolved_pending_work(&duplicate), None);
+        for (outcome, cause) in [
+            (HookV2AdmissionOutcomeV1::Unavailable, "was unavailable"),
+            (HookV2AdmissionOutcomeV1::Backpressured, "was backpressured"),
+            (
+                HookV2AdmissionOutcomeV1::CatchupRequired,
+                "requires binding catch-up",
+            ),
+            (
+                HookV2AdmissionOutcomeV1::Conflict,
+                "conflicted with an earlier admission",
+            ),
+        ] {
+            assert_eq!(unresolved_pending_work(&outcome), Some(cause));
+        }
+    }
+
+    #[test]
+    fn only_a_missing_spool_root_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(spool_root_absent(&dir.path().join("missing")), Ok(true));
+        assert_eq!(spool_root_absent(dir.path()), Ok(false));
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(spool_root_absent(&file), Ok(false));
+        assert!(spool_root_absent(&file.join("child")).is_err());
+    }
 }

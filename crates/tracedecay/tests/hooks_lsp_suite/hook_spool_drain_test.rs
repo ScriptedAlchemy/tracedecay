@@ -302,6 +302,102 @@ fn a_failed_receipt_drain_is_reported_on_status_and_clears_when_the_spool_drains
 }
 
 #[test]
+fn a_receipt_spool_root_that_is_not_a_directory_is_reported_on_status() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let project = init_git_project(&home);
+    let _daemon = spawn_tracedecay_daemon(&home);
+    tracedecay(&home, &project, &["init"]);
+    let layout = default_profile_sharded_layout(&project, &home.join(".tracedecay")).unwrap();
+    let receipts =
+        hook_delivery_receipt_spool_root(&layout.data_root, NativeHostIdentityV1::CursorDesktop);
+    if receipts.exists() {
+        std::fs::remove_dir_all(&receipts).unwrap();
+    }
+    std::fs::create_dir_all(receipts.parent().unwrap()).unwrap();
+    std::fs::write(&receipts, b"not a receipt spool").unwrap();
+
+    let failed = json!({
+        "status": "failed",
+        "failures": [{
+            "host": "cursor_desktop",
+            "spool": "delivery_receipts",
+            "cause": "hook delivery receipt spool path is unsafe",
+        }],
+    });
+    assert_eq!(
+        await_hook_replay_status(&home, &project, &failed, PROMPT_DRAIN),
+        failed
+    );
+    assert!(
+        receipts.is_file(),
+        "the drain must not replace the unusable root"
+    );
+}
+
+/// A receipt backlog larger than one drain batch settles in back-to-back
+/// sweeps, and status reads `drained` only once none is left.
+#[test]
+fn a_receipt_backlog_beyond_one_batch_drains_without_waiting_for_the_sweep() {
+    const BACKLOG: usize = 65;
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let project = init_git_project(&home);
+    let daemon = spawn_tracedecay_daemon(&home);
+    tracedecay(&home, &project, &["init"]);
+    let layout = default_profile_sharded_layout(&project, &home.join(".tracedecay")).unwrap();
+    let records = layout
+        .data_root
+        .join("hook-v2-spool/cursor-desktop/records.v1.bin");
+    let receipts =
+        hook_delivery_receipt_spool_root(&layout.data_root, NativeHostIdentityV1::CursorDesktop);
+
+    drop(daemon);
+    for index in 0..BACKLOG {
+        capture_stop(&home, &project, &format!("backlog-{index}"));
+    }
+    let held = published_receipts(&receipts)
+        .into_iter()
+        .map(|path| {
+            let receipt = serde_json::from_slice::<HookDeliverySourceReceiptV1>(
+                &std::fs::read(&path).unwrap(),
+            )
+            .unwrap();
+            std::fs::remove_file(&path).unwrap();
+            receipt
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        held.len(),
+        BACKLOG,
+        "each stop publishes one delivery receipt"
+    );
+
+    // Drain the stops' events first so only the receipt backlog remains.
+    let daemon = spawn_tracedecay_daemon(&home);
+    assert!(
+        drain_latency(&records, PROMPT_DRAIN).is_some(),
+        "the stops' events must drain within {PROMPT_DRAIN:?}"
+    );
+    drop(daemon);
+    for receipt in &held {
+        publish(&receipts, receipt);
+    }
+
+    let _daemon = spawn_tracedecay_daemon(&home);
+    assert!(
+        receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
+        "a {BACKLOG}-receipt backlog must drain within {PROMPT_DRAIN:?}, not one batch per 30 s sweep; {} left",
+        published_receipts(&receipts).len()
+    );
+    let drained = json!({ "status": "drained" });
+    assert_eq!(
+        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
+        drained
+    );
+}
+
+#[test]
 fn delivery_receipts_drain_promptly_after_the_last_append_and_after_a_restart() {
     let home = tempfile::TempDir::new().unwrap();
     let home = home.path().canonicalize().unwrap();

@@ -378,3 +378,23 @@ fn concurrent_profile_scoped_admissions_are_all_recorded() {
         "every concurrent admission was durably recorded exactly once"
     );
 }
+
+#[test]
+fn an_admission_ledger_root_that_is_not_a_directory_is_unavailable_not_empty() {
+    let data_root = tempfile::tempdir().unwrap();
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
+    let ledger_root = hook_v2_admission_ledger_root(data_root.path(), host);
+    std::fs::create_dir_all(ledger_root.parent().unwrap()).unwrap();
+    std::fs::write(&ledger_root, b"not a ledger").unwrap();
+
+    let pending = hook_v2_pending_work_envelopes(data_root.path(), host, UtcMicros(1_000));
+    assert!(
+        matches!(
+            pending,
+            Err(HookV2AdmissionLedgerUnavailable::Ledger(
+                tracedecay_hooks::HookAdmissionLedgerError::UnsafePath
+            ))
+        ),
+        "an unusable admission ledger is a typed failure, not nothing owed: {pending:?}"
+    );
+}
