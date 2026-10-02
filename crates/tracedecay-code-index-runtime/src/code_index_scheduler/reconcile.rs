@@ -3985,7 +3985,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if reusable_active.is_none()
             && allow_active_generation_reuse
             && self.ignored_source_admissions.is_empty()
-            && classification.changes().is_empty()
+            && !classification.has_changes()
             && let (Some(reference), Some(revision), Some(tree)) = (
                 self.identity.head_ref(),
                 self.identity.head_commit(),
@@ -4031,7 +4031,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         }
         let source_revision = (self.ignored_source_admissions.is_empty()
-            && classification.changes().is_empty())
+            && !classification.has_changes())
         .then(|| self.identity.head_commit().cloned())
         .flatten();
         let mut candidate_paths = classification.candidate_paths();
@@ -4049,13 +4049,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         );
         let dirty = if !self.ignored_source_admissions.is_empty() {
             RepositoryDirtyStateV1::Dirty
-        } else if classification
-            .changes()
-            .iter()
-            .any(|change| change.class == classification::WorktreeChangeClassV1::Conflicted)
-        {
+        } else if classification.has_conflicted() {
             RepositoryDirtyStateV1::Conflicted
-        } else if classification.changes().is_empty() {
+        } else if !classification.has_changes() {
             RepositoryDirtyStateV1::Clean
         } else {
             RepositoryDirtyStateV1::Dirty

@@ -64,7 +64,9 @@ use crate::{
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
         CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
         RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-        classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
+        classification::{
+            NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
+        },
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
         freshness_witness::SourceSweepStatsV1,
@@ -7960,6 +7962,57 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
     assert!(
         !candidates.contains("src/d.rs"),
         "a deleted path is never a present-content candidate"
+    );
+}
+
+/// Deleting a non-UTF-8 path must not decode its name lossily into the
+/// string-keyed change set: the lossy decode can equal a real UTF-8 path, and
+/// the deletion would then remove that distinct file from the candidates.
+#[cfg(unix)]
+#[test]
+fn non_utf8_deletion_never_displaces_the_utf8_path_its_lossy_name_matches() {
+    let fixture = GitFixture::new(&[("src/keep.rs", "pub fn keep() -> u32 { 1 }\n")]);
+    std::fs::write(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+        "pub fn non_utf8() {}\n",
+    )
+    .expect("write a non-UTF-8 source name");
+    write(
+        fixture.path(),
+        "src/\u{fffd}.rs",
+        "pub fn utf8_replacement() {}\n",
+    );
+    fixture.commit_all("track both names");
+    std::fs::remove_file(
+        fixture
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"src/\xff.rs")),
+    )
+    .expect("delete the non-UTF-8 source");
+
+    let classification = WorktreeChangeClassificationV1::classify(
+        &tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix"),
+    )
+    .expect("classify");
+
+    assert_eq!(
+        classification.non_utf8_changes(),
+        &[NonUtf8ClassifiedChangeV1 {
+            git_path: b"src/\xff.rs".to_vec(),
+            class: WorktreeChangeClassV1::UnstagedDeleted,
+        }]
+    );
+    assert!(
+        classification.changes().is_empty(),
+        "the lossy decode must never enter the string-keyed change set: {:?}",
+        classification.changes()
+    );
+    assert!(classification.has_changes());
+    assert!(
+        classification.candidate_paths().contains("src/\u{fffd}.rs"),
+        "the distinct UTF-8 file must survive the non-UTF-8 deletion"
     );
 }
 

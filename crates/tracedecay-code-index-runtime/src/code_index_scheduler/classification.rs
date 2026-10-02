@@ -67,6 +67,17 @@ pub struct ClassifiedChangeV1 {
     pub class: WorktreeChangeClassV1,
 }
 
+/// One classified change whose Git path bytes are not UTF-8. No `String`
+/// names it, so it lives outside `changes`: a lossy decode could equal a
+/// real UTF-8 path and make the string-keyed candidate and changed sets
+/// treat this change as that file's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonUtf8ClassifiedChangeV1 {
+    /// The exact Git path bytes.
+    pub git_path: Vec<u8>,
+    pub class: WorktreeChangeClassV1,
+}
+
 /// A complete, truthful classification of one worktree snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeChangeClassificationV1 {
@@ -74,6 +85,9 @@ pub struct WorktreeChangeClassificationV1 {
     /// baseline present in the checkout).
     committed_baseline: BTreeSet<String>,
     changes: Vec<ClassifiedChangeV1>,
+    /// Changes whose Git path bytes are not UTF-8, kept byte-exact so the
+    /// worktree is still dirty on a non-UTF-8-only transition.
+    non_utf8_changes: Vec<NonUtf8ClassifiedChangeV1>,
     /// Present paths whose Git bytes are not UTF-8, so no `String` above
     /// names them.
     non_utf8_paths: BTreeSet<Vec<u8>>,
@@ -101,6 +115,7 @@ impl WorktreeChangeClassificationV1 {
         }
 
         let mut changes = Vec::new();
+        let mut non_utf8_changes = Vec::new();
         let status = repository
             .status(gix::progress::Discard)
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
@@ -124,22 +139,31 @@ impl WorktreeChangeClassificationV1 {
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
             let location: &[u8] = item.location().as_ref();
-            let path = item.location().to_str_lossy().into_owned();
             if let Some(class) = classify_item(&item) {
-                if std::str::from_utf8(location).is_err() {
-                    if class.presents_content() {
-                        non_utf8_paths.insert(location.to_vec());
-                    } else {
-                        non_utf8_paths.remove(location);
+                match location.to_str() {
+                    Ok(path) => changes.push(ClassifiedChangeV1 {
+                        path: path.to_owned(),
+                        class,
+                    }),
+                    Err(_) => {
+                        if class.presents_content() {
+                            non_utf8_paths.insert(location.to_vec());
+                        } else {
+                            non_utf8_paths.remove(location);
+                        }
+                        non_utf8_changes.push(NonUtf8ClassifiedChangeV1 {
+                            git_path: location.to_vec(),
+                            class,
+                        });
                     }
                 }
-                changes.push(ClassifiedChangeV1 { path, class });
             }
         }
 
         Ok(Self {
             committed_baseline,
             changes,
+            non_utf8_changes,
             non_utf8_paths,
         })
     }
@@ -178,6 +202,21 @@ impl WorktreeChangeClassificationV1 {
         candidates
     }
 
+    /// Whether the worktree carries any change relative to the committed
+    /// baseline, UTF-8-named or not.
+    pub fn has_changes(&self) -> bool {
+        !(self.changes().is_empty() && self.non_utf8_changes().is_empty())
+    }
+
+    /// Whether any classified change is a merge conflict.
+    pub fn has_conflicted(&self) -> bool {
+        self.changes()
+            .iter()
+            .map(|change| change.class)
+            .chain(self.non_utf8_changes().iter().map(|change| change.class))
+            .any(|class| class == WorktreeChangeClassV1::Conflicted)
+    }
+
     /// Paths whose indexing evidence changed relative to the last generation:
     /// every staged, unstaged, or untracked path (deletions included so
     /// tombstones flow through). This is a hint to narrow work, not the identity
@@ -199,9 +238,16 @@ impl WorktreeChangeClassificationV1 {
             .collect()
     }
 
-    /// All classified changes (for reporting and tests).
+    /// All classified changes a `String` can name (for reporting and tests).
+    /// Non-UTF-8 changes live under [`Self::non_utf8_changes`].
     pub fn changes(&self) -> &[ClassifiedChangeV1] {
         &self.changes
+    }
+
+    /// All classified changes whose Git path bytes are not UTF-8, kept
+    /// byte-exact (for reporting and tests).
+    pub fn non_utf8_changes(&self) -> &[NonUtf8ClassifiedChangeV1] {
+        &self.non_utf8_changes
     }
 
     /// The class recorded for `path`, if any change touched it.
