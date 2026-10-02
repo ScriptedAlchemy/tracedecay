@@ -45,8 +45,9 @@ use tracedecay_domain::{
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProviderId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros, canonical_sha256,
+    RemoteRepositoryScopeV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -305,6 +306,37 @@ fn enrollment_grant(secret: &[u8]) -> EnrollmentGrantV1 {
         ]),
         scope: writer().scope,
     }
+}
+
+/// Provisions the writer's scope on this node, then publishes the writer
+/// with the replay policy that admits its frames.
+fn publish_writer(storage: &RemoteSqliteStorageV1, writer: &RemoteWriterAuthorityV1) {
+    provision_scope(storage, &writer.scope);
+    storage
+        .publish_authority(writer, &replay_policy(&writer.scope), UtcMicros(10))
+        .unwrap();
+}
+
+fn provision_scope(storage: &RemoteSqliteStorageV1, scope: &RemoteRepositoryScopeV1) {
+    let mut grant = enrollment_grant(&[3_u8; 32]);
+    grant.grant_id = EntityId::new("grant.remote.writer-scope").unwrap();
+    grant.scope = scope.clone();
+    storage
+        .store_enrollment_grant(&grant, &enrollment_admission(&grant))
+        .unwrap();
+}
+
+fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
+    let mut policy = capture_policy_evidence();
+    policy.scope = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .unwrap();
+    policy.repository_scope = scope.clone();
+    policy
 }
 
 fn enrollment_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
@@ -654,11 +686,7 @@ fn capture_is_encrypted_and_idempotent() {
     let fixture = fixture();
     let storage = storage(&fixture);
     let writer = writer();
-    let authority =
-        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
-    storage
-        .publish_authority(&authority, &writer, UtcMicros(10))
-        .unwrap();
+    publish_writer(&storage, &writer);
     let capture = admitted();
 
     let first = storage.capture_pending(&capture).unwrap();
@@ -705,9 +733,7 @@ fn query_authority_snapshot_is_exactly_scope_and_registry_bound() {
     let writer = writer();
     let authority =
         tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
-    storage
-        .publish_authority(&authority, &writer, UtcMicros(10))
-        .unwrap();
+    publish_writer(&storage, &writer);
 
     let snapshot = storage
         .query_authority_snapshot(&writer.scope, UtcMicros(11))
@@ -773,13 +799,7 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
             Err(unpublished),
         )
     );
-    storage
-        .publish_authority(
-            &tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone()),
-            &writer,
-            UtcMicros(10),
-        )
-        .unwrap();
+    publish_writer(&storage, &writer);
     assert_eq!(
         read_all(&storage),
         (
@@ -793,16 +813,87 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
 }
 
 #[test]
+fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let writer = writer();
+    let policy = replay_policy(&writer.scope);
+    let fence = &writer.authority.fence;
+    let expected = tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1 {
+        brain_id: fence.brain_id.as_str().to_owned(),
+        shard_id: fence.shard_id.as_str().to_owned(),
+        generation_id: fence.generation_id.as_str().to_owned(),
+        authority_node_id: fence.authority_node_id.as_str().to_owned(),
+        placement_revision: fence.placement_revision.get(),
+        authority_epoch: fence.authority_epoch.0,
+    };
+
+    assert_eq!(
+        storage.publish_authority(&writer, &policy, UtcMicros(10)),
+        Err(RemoteWriterPublicationErrorV1::ScopeNotProvisioned)
+    );
+    provision_scope(&storage, &writer.scope);
+    let mut foreign_brain = writer.clone();
+    foreign_brain.authority.fence.brain_id = BrainId::new("brain.foreign").unwrap();
+    let mut foreign_policy = policy.clone();
+    foreign_policy.repository_scope.snapshot_id =
+        tracedecay_domain::RepositoryStateSnapshotId::new("snapshot.foreign").unwrap();
+    assert_eq!(
+        (
+            storage.publish_authority(&foreign_brain, &policy, UtcMicros(10)),
+            storage.publish_authority(&writer, &foreign_policy, UtcMicros(10)),
+            storage.publish_authority(&writer, &policy, UtcMicros(9)),
+        ),
+        (
+            Err(RemoteWriterPublicationErrorV1::InvalidWriter),
+            Err(RemoteWriterPublicationErrorV1::InvalidWriter),
+            Err(RemoteWriterPublicationErrorV1::InvalidWriter),
+        )
+    );
+    assert!(matches!(
+        storage.recovery_writer(&expected),
+        Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished)
+    ));
+    assert_eq!(
+        storage.writer_publication_state(&writer, &policy, UtcMicros(10)),
+        Ok(RemoteWriterPublicationStateV1::Unpublished)
+    );
+
+    storage
+        .publish_authority(&writer, &policy, UtcMicros(10))
+        .unwrap();
+    storage
+        .publish_authority(&writer, &policy, UtcMicros(12))
+        .unwrap();
+    let mut rival = writer.clone();
+    rival.authority.fence.authority_node_id = BrainNodeId::new("node.rival").unwrap();
+    let mut rival_policy = policy.clone();
+    rival_policy.decision = RemoteReplayPolicyDecisionV1::Quarantine;
+    assert_eq!(
+        (
+            storage.writer_publication_state(&writer, &policy, UtcMicros(12)),
+            storage.publish_authority(&rival, &policy, UtcMicros(12)),
+            storage.publish_authority(&writer, &rival_policy, UtcMicros(12)),
+        ),
+        (
+            Ok(RemoteWriterPublicationStateV1::Published),
+            Err(RemoteWriterPublicationErrorV1::Conflict),
+            Err(RemoteWriterPublicationErrorV1::Conflict),
+        )
+    );
+    assert_eq!(storage.recovery_writer(&expected).unwrap(), writer);
+    assert_eq!(
+        storage.recovery_policy_digest(&writer.scope).unwrap(),
+        policy.policy.digest
+    );
+}
+
+#[test]
 fn capture_and_promotion_gate_share_one_write_transaction() {
     let fixture = fixture();
     let storage = storage(&fixture);
     let capture = admitted();
-    let authority = tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(
-        capture.writer.authority.clone(),
-    );
-    storage
-        .publish_authority(&authority, &capture.writer, UtcMicros(10))
-        .unwrap();
+    publish_writer(&storage, &capture.writer);
     let fence = &capture.writer.authority.fence;
     let authority_key = canonical_sha256(&(
         "tracedecay.remote-recovery-authority.v1",
@@ -1363,10 +1454,7 @@ fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
         Arc::clone(&owner_keyring),
     )
     .unwrap();
-    let authority = CurrentRemoteAuthorityStateV1::Available(capture.writer.authority.clone());
-    owner_storage
-        .publish_authority(&authority, &capture.writer, UtcMicros(10))
-        .unwrap();
+    publish_writer(&owner_storage, &capture.writer);
     let receipt = owner_storage.capture_pending(&capture).unwrap();
 
     // A restart re-derives the same key from the same credential and decrypts.

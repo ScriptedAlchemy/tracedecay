@@ -28,6 +28,8 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use tracedecay_application::http_agent::http_agent;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_contracts::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, RequestId, RetryDirective, SafeDiagnostic,
@@ -39,7 +41,8 @@ use tracedecay_daemon_service::remote_http_transport::RemoteBrainTlsListener;
 use tracedecay_daemon_service::remote_http_transport::{
     RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot, RemoteBrainTlsIngressSnapshot,
 };
-use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
+use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
+use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -128,6 +131,14 @@ struct RemoteHttpApplicationMount {
 struct RemoteNodeProvisionRequestV1 {
     grant: EnrollmentGrantV1,
     admission: RemoteEnrollmentAdmissionEvidenceV1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteWriterAuthorityPublicationRequestV1 {
+    node_id: BrainNodeId,
+    writer: RemoteWriterAuthorityV1,
+    replay_policy: RemoteReplayPolicyEvidenceV1,
 }
 
 #[derive(Clone)]
@@ -323,6 +334,10 @@ impl DaemonHttpApplicationRegistry {
                 any(dispatch_project_application),
             )
             .route("/remote-nodes/provision", post(provision_remote_node))
+            .route(
+                "/remote-nodes/writer-authority",
+                post(publish_remote_writer_authority),
+            )
             .route("/remote-status", get(remote_operational_status))
             // Deletion lifecycle intake. The upstream lanes mounted this at
             // `/remote/deletions`; at this tip `/remote` is a nest point for the
@@ -380,18 +395,23 @@ impl DaemonHttpApplicationRegistry {
     pub(super) fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
+
+    fn remote_runtime(
+        &self,
+    ) -> Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
+        self.remote.read().ok().and_then(|remote| {
+            remote
+                .as_ref()
+                .and_then(|remote| remote.runtime.as_ref().map(Arc::clone))
+        })
+    }
 }
 
 async fn provision_remote_node(
     State(registry): State<DaemonHttpApplicationRegistry>,
     Json(request): Json<RemoteNodeProvisionRequestV1>,
 ) -> Response {
-    let runtime = registry.remote.read().ok().and_then(|remote| {
-        remote
-            .as_ref()
-            .and_then(|remote| remote.runtime.as_ref().map(Arc::clone))
-    });
-    let Some(runtime) = runtime else {
+    let Some(runtime) = registry.remote_runtime() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match hotpath::future!(
@@ -404,6 +424,40 @@ async fn provision_remote_node(
         Err(error) => {
             tracing::error!(%error, "remote node provision failed");
             (StatusCode::CONFLICT, error.to_string()).into_response()
+        }
+    }
+}
+
+async fn publish_remote_writer_authority(
+    State(registry): State<DaemonHttpApplicationRegistry>,
+    Json(request): Json<RemoteWriterAuthorityPublicationRequestV1>,
+) -> Response {
+    let Some(runtime) = registry.remote_runtime() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match hotpath::future!(
+        runtime.publish_remote_writer_authority(
+            &request.node_id,
+            request.writer,
+            request.replay_policy,
+        ),
+        label = "daemon.http.application.remote_writer_authority_publish"
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "remote writer authority publication refused");
+            let status = match error {
+                RemoteWriterPublicationErrorV1::InvalidWriter => StatusCode::BAD_REQUEST,
+                RemoteWriterPublicationErrorV1::NodeNotRegistered => StatusCode::NOT_FOUND,
+                RemoteWriterPublicationErrorV1::ScopeNotProvisioned => StatusCode::FORBIDDEN,
+                RemoteWriterPublicationErrorV1::Conflict => StatusCode::CONFLICT,
+                RemoteWriterPublicationErrorV1::Corruption => StatusCode::INTERNAL_SERVER_ERROR,
+                RemoteWriterPublicationErrorV1::ProjectUnavailable
+                | RemoteWriterPublicationErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            (status, Json(serde_json::json!({ "code": error }))).into_response()
         }
     }
 }
