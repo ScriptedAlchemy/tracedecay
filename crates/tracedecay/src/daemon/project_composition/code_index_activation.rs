@@ -596,6 +596,100 @@ mod tests {
         ));
     }
 
+    /// `tracedecay sync` retries a failed mount while the retained failure
+    /// flag stays published. A readiness wait that begins during that retry
+    /// must keep waiting for the mount the retry may land inside its own
+    /// budget; reporting the stale flag as unreachable would deny a wait
+    /// the settlement it exists to observe.
+    #[tokio::test]
+    async fn readiness_wait_started_during_mount_retry_waits_for_settlement() {
+        let repository = repository();
+        let root =
+            canonical_existing_identity(repository.path()).expect("canonical repository root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let release_retry = Arc::new(tokio::sync::Notify::new());
+        let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+            let mount_attempts = Arc::clone(&mount_attempts);
+            let release_retry = Arc::clone(&release_retry);
+            Arc::new(move || {
+                let mount_attempts = Arc::clone(&mount_attempts);
+                let release_retry = Arc::clone(&release_retry);
+                Box::pin(async move {
+                    if mount_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err("the first mount failed".to_owned());
+                    }
+                    release_retry.notified().await;
+                    Ok(())
+                })
+            })
+        };
+        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+            &root,
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            mount,
+            Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
+        ));
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let waiter = super::super::project_readiness_waiter(registry, Arc::clone(&activation));
+
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !activation.mount_failed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the first mount attempt must fail and publish the flag");
+
+        // The operator retry: a second mount attempt is in flight while the
+        // retained failure is still published.
+        assert_eq!(
+            activation
+                .admit(&root, CodeIndexDemandV1::OperatorReconcile)
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while mount_attempts.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the explicit retry must start a second mount attempt");
+        assert!(activation.mount_in_progress());
+        assert!(activation.mount_failed());
+
+        let waited = tokio::spawn(waiter(
+            root,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            std::time::Duration::from_millis(250),
+        ));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        release_retry.notify_one();
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), waited)
+            .await
+            .expect("the readiness wait must join")
+            .expect("the readiness wait task must not panic")
+            .expect("the readiness authority stays typed");
+        assert!(
+            matches!(
+                waited,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
+                    ..
+                }
+            ),
+            "a wait started during an in-flight mount retry must hold for the settlement and the scheduler's own signals, not report the retained failure as unreachable"
+        );
+    }
+
     /// A linked worktree under the default `sync.watch_linked_worktrees = false`
     /// carries `LinkedWorktreeDisabled` automatic admission, which is the
     /// filesystem-watcher policy. `tracedecay init` inside that worktree still

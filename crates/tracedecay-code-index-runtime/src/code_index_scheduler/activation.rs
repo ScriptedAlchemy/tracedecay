@@ -222,6 +222,13 @@ impl CodeIndexActivationV1 {
         self.mount_failed.subscribe()
     }
 
+    /// Whether a mount attempt is currently in flight for this route. A
+    /// retained mount failure while one is in flight is a retry underway,
+    /// not the terminal observation the flag alone would name.
+    pub fn mount_in_progress(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTING
+    }
+
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
         self.retirement.install(callback);
     }
@@ -320,11 +327,15 @@ impl CodeIndexActivationV1 {
                     return;
                 }
                 let mounted = mount().await;
-                mount_failed.send_replace(mounted.is_err());
                 if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
                     hotpath::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
+                    // The retained failure publishes only once the attempt
+                    // has fully settled: a waiter that reads the flag while
+                    // `mount_in_progress` still holds is observing a retry
+                    // underway, not the terminal observation this flag names.
+                    mount_failed.send_replace(true);
                     tracing::warn!(
                         event = "code_index_activation",
                         project = %project_root.display(),
@@ -334,6 +345,7 @@ impl CodeIndexActivationV1 {
                     );
                     return;
                 }
+                mount_failed.send_replace(false);
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);

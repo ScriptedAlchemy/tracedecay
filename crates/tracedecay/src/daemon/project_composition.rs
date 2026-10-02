@@ -2038,7 +2038,12 @@ fn project_readiness_waiter(
         let activation = Arc::clone(&activation);
         Box::pin(async move {
             let mut mount_failure = activation.subscribe_mount_failure();
-            if *mount_failure.borrow_and_update() {
+            // The retained failure is a terminal observation only once no
+            // mount attempt is in flight: an explicit `tracedecay sync`
+            // retry keeps the flag set until it settles, and bailing on it
+            // would deny this wait the mount that retry may land inside
+            // the caller's own budget.
+            if !activation.mount_in_progress() && *mount_failure.borrow_and_update() {
                 return Ok(
                     tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
                         reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_MOUNT_FAILED.to_owned(),
@@ -2054,7 +2059,9 @@ fn project_readiness_waiter(
                         if changed.is_err() {
                             return waiting.await;
                         }
-                        if *mount_failure.borrow_and_update() {
+                        if *mount_failure.borrow_and_update()
+                            && !activation.mount_in_progress()
+                        {
                             return Ok(
                                 tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
                                     reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_MOUNT_FAILED.to_owned(),
