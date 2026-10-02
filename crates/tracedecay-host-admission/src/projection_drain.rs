@@ -234,7 +234,14 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let convergence = database.converge_session_git_evidence(&SystemGit).await;
+            let project_root = self
+                .authorities
+                .repository_provenance
+                .as_ref()
+                .map(|provenance| provenance.admitted_project_root());
+            let convergence = database
+                .converge_session_git_evidence(&SystemGit, project_root)
+                .await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
@@ -317,7 +324,7 @@ mod tests {
                     backfill,
                     frontier:
                         tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-                            activity_timestamp: 0,
+                            change_sequence: 0,
                             source_rowid: 0,
                         },
                     generation: None,
