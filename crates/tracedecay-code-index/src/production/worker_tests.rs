@@ -128,6 +128,7 @@ pub(super) fn worker_request_with_source(
             content_identity: content_digest(source),
             captured_at: UtcMicros(1_000_000),
             files: vec![file.clone()],
+            omitted_sources: Vec::new(),
         },
         captured_files: vec![CodeIndexCapturedFileV1 {
             file_occurrence_id: file.file_occurrence_id,

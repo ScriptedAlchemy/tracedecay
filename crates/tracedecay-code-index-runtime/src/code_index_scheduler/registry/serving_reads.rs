@@ -411,6 +411,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // could not join, so verification is unknown here.
                             source_verified: None,
                             hook_hint_count,
+                            sources_omitted: identity.omitted_sources.is_some(),
                         },
                     );
                     let clone_index = text.as_ref().map_or_else(Default::default, |text| {
@@ -490,6 +491,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     verified,
                     source_change_pending,
                 );
+            let identity = if text.is_some() {
+                dashboard_text_freshness_identity(text.as_ref())
+            } else {
+                dashboard_freshness_identity(latest.as_ref())
+            };
             let observation = tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderV1::project(
                 tracedecay_contracts::code_index_freshness::CodeIndexFreshnessLadderInputsV1 {
                     ready,
@@ -499,6 +505,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     parked: parked.as_ref(),
                     source_verified: Some(verified),
                     hook_hint_count,
+                    sources_omitted: identity.omitted_sources.is_some(),
                 },
             );
             let clone_index = text.as_ref().map_or_else(Default::default, |text| {
@@ -511,11 +518,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     clone_update,
                 )
             });
-            let identity = if text.is_some() {
-                dashboard_text_freshness_identity(text.as_ref())
-            } else {
-                dashboard_freshness_identity(latest.as_ref())
-            };
             project_graph_publication_phase(&mut progress, &code_graph_serving);
             tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),

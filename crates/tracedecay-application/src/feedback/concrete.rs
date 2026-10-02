@@ -1643,7 +1643,7 @@ fn store_request_handle(
         &content,
         micros_to_seconds(observed_at),
     )
-    .map_err(FeedbackRuntimeError::HandleStore)?;
+    .map_err(|error| FeedbackRuntimeError::HandleStore(error.into()))?;
     Ok(stored.handle)
 }
 

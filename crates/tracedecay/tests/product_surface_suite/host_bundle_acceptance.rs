@@ -9,7 +9,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentDoctorStateV1, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
     HostBundleRegistrationStateV1, HostBundleWriterV1, HostCapabilityStateV1,
-    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
+    HostCapabilityUnavailableReasonV1, HostComponentSetExecutionRequestV1,
     HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
     HostComponentSetTransactionV1, HostComponentV1, HostKindV1, HostRegistrationRouteV1,
     cline_family_evidence, dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
@@ -27,7 +27,7 @@ use tracedecay_agent_hosts::agents::{HealthcheckContext, inspect_receipt_backed_
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_hooks::{
     NativeHookDecodeError, OpenCodePluginSurfaceV1, decode_native_hook_event,
-    decode_opencode_lsp_event, decode_opencode_plugin_event,
+    decode_opencode_plugin_event,
 };
 
 /// Generator commit passed to both bundle staging and doctor inspection so
@@ -286,8 +286,12 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
     );
 }
 
+/// OpenCode 2 runs no language servers and the component set registers none,
+/// so operator `lsp` entries in `opencode.json`, including ones that happen
+/// to run a `tracedecay` binary, are not a registration surface the lifecycle
+/// contends for.
 #[test]
-fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
+fn component_set_dry_run_ignores_operator_lsp_entries() {
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set =
@@ -304,23 +308,27 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         },
         operation_id: [31; 16],
     };
+    let dry_run = |home: &Path| {
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+            "opencode",
+            home,
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+            home,
+            lifecycle.path(),
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut registration,
+        )
+    };
 
-    let mut clean_registration = CatalogHostComponentRegistrationAuthority::new(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "opencode",
-        home.path(),
-        request.lifecycle.operation,
-    )
-    .unwrap();
-    dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-        home.path(),
-        lifecycle.path(),
-        &component_set.component_set,
-        &request,
-        &component_set,
-        &mut clean_registration,
-    )
-    .expect("a clean temporary OpenCode profile passes dry run");
+    let clean = dry_run(home.path()).expect("a clean temporary OpenCode profile passes dry run");
+    assert!(clean.competing_extension_claims.is_empty());
+    assert!(!clean.confirmation_required);
 
     let config_path = home.path().join(".config/opencode/opencode.json");
     fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -328,36 +336,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         &config_path,
         serde_json::to_vec_pretty(&json!({
             "lsp": {
-                "rust-analyzer": {
-                    "command": ["rust-analyzer"],
-                    "extensions": [".rs"]
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let mut retained_registration = CatalogHostComponentRegistrationAuthority::new(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "opencode",
-        home.path(),
-        request.lifecycle.operation,
-    )
-    .unwrap();
-    dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-        home.path(),
-        lifecycle.path(),
-        &component_set.component_set,
-        &request,
-        &component_set,
-        &mut retained_registration,
-    )
-    .expect("an existing language analyzer is retained beside projection-only TraceDecay LSP");
-
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&json!({
-            "lsp": {
+                "rust-analyzer": { "command": ["rust-analyzer"], "extensions": [".rs"] },
                 "third-party-tracedecay": {
                     "command": ["third-party-tracedecay"],
                     "extensions": [".rs"]
@@ -367,27 +346,10 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         .unwrap(),
     )
     .unwrap();
-    let mut conflicting_registration = CatalogHostComponentRegistrationAuthority::new(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "opencode",
-        home.path(),
-        request.lifecycle.operation,
-    )
-    .unwrap();
-    assert!(
-        matches!(
-            dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-                home.path(),
-                lifecycle.path(),
-                &component_set.component_set,
-                &request,
-                &component_set,
-                &mut conflicting_registration,
-            ),
-            Err(HostBundleError::OwnershipConflict(_))
-        ),
-        "dry run must refuse a third-party registration aliasing TraceDecay"
-    );
+    let with_lsp = dry_run(home.path()).expect("operator LSP entries do not contend with the set");
+    assert!(with_lsp.competing_extension_claims.is_empty());
+    assert!(!with_lsp.confirmation_required);
+    assert_eq!(with_lsp.component_plans, clean.component_plans);
 }
 
 #[test]
@@ -597,171 +559,6 @@ fn cline_family_hook_evidence_stays_separate_from_mcp_lifecycle_support() {
 /// own guard: a third-party analyzer already serving a language TraceDecay
 /// projects is reported, demands confirmation, and binds into the plan digest
 /// so it cannot appear between preview and apply.
-#[test]
-fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
-    let home = tempfile::tempdir().unwrap();
-    let lifecycle = tempfile::tempdir().unwrap();
-    let component_set =
-        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0, GENERATOR_COMMIT)
-            .unwrap();
-    let request = HostComponentSetExecutionRequestV1 {
-        lifecycle: HostComponentSetLifecycleRequestV1 {
-            operation: HostBundleLifecycleOpV1::Repair,
-            expected_host: HostKindV1::OpenCode,
-            expected_components: default_components(HostKindV1::OpenCode),
-            explicit_confirmation: true,
-            hermes_profile_bindings: 0,
-            explicit_adoption: false,
-        },
-        operation_id: [43; 16],
-    };
-    let preview_now = |home: &Path| {
-        let mut registration = CatalogHostComponentRegistrationAuthority::new(
-            &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
-            "opencode",
-            home,
-            request.lifecycle.operation,
-        )
-        .unwrap();
-        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-            home,
-            lifecycle.path(),
-            &component_set.component_set,
-            &request,
-            &component_set,
-            &mut registration,
-        )
-    };
-
-    let clean = preview_now(home.path()).expect("a clean profile previews");
-    assert!(clean.competing_extension_claims.is_empty());
-    assert!(!clean.confirmation_required);
-
-    let config_path = home.path().join(".config/opencode/opencode.json");
-    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&json!({
-            "lsp": {
-                "rust-analyzer": { "command": ["rust-analyzer"], "extensions": [".rs"] },
-                "elm-language-server": { "command": ["elm-ls"], "extensions": [".elm"] }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let contested =
-        preview_now(home.path()).expect("a competing analyzer is reported, not refused");
-    let claims = &contested.competing_extension_claims;
-    assert_eq!(
-        claims
-            .iter()
-            .map(|claim| claim.extension_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rust-analyzer"],
-        "only an analyzer claiming a language TraceDecay projects is a competing claim"
-    );
-    assert_eq!(claims[0].capability, HostCapabilityV1::Lsp);
-    assert_ne!(claims[0].evidence_digest, [0; 32]);
-    assert!(
-        contested.confirmation_required,
-        "ambiguous ownership must demand explicit confirmation"
-    );
-    assert_ne!(
-        contested.plan_digest, clean.plan_digest,
-        "a competing claim must change the confirmed plan identity"
-    );
-    assert_eq!(
-        contested.component_plans, clean.component_plans,
-        "discovery reports a conflict; it never rewrites the artifact plan"
-    );
-
-    // A claim appearing after the operator confirmed invalidates that plan.
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&json!({
-            "lsp": {
-                "rust-analyzer": { "command": ["rust-analyzer"], "extensions": [".rs"] },
-                "pyright": { "command": ["pyright-langserver"], "extensions": [".py"] }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let widened = preview_now(home.path()).expect("a second competing analyzer previews");
-    assert_eq!(widened.competing_extension_claims.len(), 2);
-    assert_ne!(widened.plan_digest, contested.plan_digest);
-
-    let mut writer =
-        HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
-    let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration = CatalogHostComponentRegistrationAuthority::new(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "opencode",
-        home.path(),
-        request.lifecycle.operation,
-    )
-    .unwrap();
-    assert!(
-        matches!(
-            transaction.execute_confirmed(
-                &component_set.component_set,
-                &request,
-                &contested,
-                &component_set,
-                &mut registration,
-            ),
-            Err(HostBundleError::StalePreview(_))
-        ),
-        "apply must refuse a preview confirmed before the newest competing claim"
-    );
-}
-
-/// Discovery that cannot read the host's registration surface must refuse
-/// rather than report a clear one.
-#[test]
-fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
-    let home = tempfile::tempdir().unwrap();
-    let lifecycle = tempfile::tempdir().unwrap();
-    let config_path = home.path().join(".config/opencode/opencode.json");
-    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    fs::write(&config_path, b"{ this is not json").unwrap();
-
-    let component_set =
-        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0, GENERATOR_COMMIT)
-            .unwrap();
-    let request = HostComponentSetExecutionRequestV1 {
-        lifecycle: HostComponentSetLifecycleRequestV1 {
-            operation: HostBundleLifecycleOpV1::Repair,
-            expected_host: HostKindV1::OpenCode,
-            expected_components: default_components(HostKindV1::OpenCode),
-            explicit_confirmation: true,
-            hermes_profile_bindings: 0,
-            explicit_adoption: false,
-        },
-        operation_id: [44; 16],
-    };
-    let mut registration = CatalogHostComponentRegistrationAuthority::new(
-        &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-        "opencode",
-        home.path(),
-        request.lifecycle.operation,
-    )
-    .unwrap();
-    assert_eq!(
-        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-            home.path(),
-            lifecycle.path(),
-            &component_set.component_set,
-            &request,
-            &component_set,
-            &mut registration,
-        ),
-        Err(HostBundleError::InvalidObservedState)
-    );
-}
-
 /// The checked-in Cline-family packet governs only native hook admission. The
 /// separately documented MCP registration does not promote packet evidence.
 #[test]
@@ -1281,38 +1078,28 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
         "../../../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
     ));
     let events = opencode["events"].as_array().expect("OpenCode events");
-    for identity in ["saved_edit", "stop"] {
-        let event = events
+    let stop = events
+        .iter()
+        .find(|event| event["identity"] == "stop")
+        .expect("OpenCode fixture identity");
+    decode_opencode_plugin_event(
+        OpenCodePluginSurfaceV1::Event,
+        serde_json::to_vec(&stop["request"]).unwrap().as_slice(),
+    )
+    .unwrap_or_else(|error| panic!("OpenCode stop rejected: {error}"));
+    for identity in ["post_tool_use", "tool_completed"] {
+        let tool_after = events
             .iter()
             .find(|event| event["identity"] == identity)
-            .expect("OpenCode fixture identity");
+            .expect("OpenCode execute.after");
         decode_opencode_plugin_event(
-            OpenCodePluginSurfaceV1::Event,
-            serde_json::to_vec(&event["request"]).unwrap().as_slice(),
+            OpenCodePluginSurfaceV1::ToolExecuteAfter,
+            serde_json::to_vec(&tool_after["request"])
+                .unwrap()
+                .as_slice(),
         )
         .unwrap_or_else(|error| panic!("OpenCode {identity} rejected: {error}"));
     }
-    let tool_after = events
-        .iter()
-        .find(|event| event["identity"] == "post_tool_use")
-        .expect("OpenCode tool.execute.after");
-    decode_opencode_plugin_event(
-        OpenCodePluginSurfaceV1::ToolExecuteAfter,
-        serde_json::to_vec(&tool_after["request"])
-            .unwrap()
-            .as_slice(),
-    )
-    .expect("OpenCode tool.execute.after decodes");
-    let lsp_updated = events
-        .iter()
-        .find(|event| event["identity"] == "lsp_updated")
-        .expect("OpenCode lsp.updated");
-    decode_opencode_lsp_event(
-        serde_json::to_vec(&lsp_updated["request"])
-            .unwrap()
-            .as_slice(),
-    )
-    .expect("OpenCode lsp.updated decodes");
 }
 
 #[test]
