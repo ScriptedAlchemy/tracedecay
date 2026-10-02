@@ -224,7 +224,7 @@ pub(super) fn wait_for_code_index_hit(home: &Path, project: &Path, symbol: &str)
 }
 
 /// `initialize` then `tools/list` through a real `tracedecay serve` host.
-fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) {
+pub(super) fn mcp_initialize_and_list_tools(home: &Path, project: &Path) -> (Value, Value) {
     let mut command = tracedecay_command_with_home(home);
     command
         .arg("serve")
@@ -716,7 +716,7 @@ fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
 }
 
 /// One `tracedecay doctor --json` run: exit code, document, and stderr.
-fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
+pub(super) fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Value, String) {
     let doctor = tracedecay_command_with_home(home)
         .args(["doctor", "--json"])
         .current_dir(project)

@@ -223,6 +223,11 @@ pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
 /// by the `store` label [`StoreResetRequiredV1`] carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResettableStoreV1 {
+    /// The profile database (`global.db`): project registry, profile
+    /// configuration, and usage accounting. Project stores keep their own
+    /// identity, so its reset leaves every project store intact but
+    /// unregistered.
+    ProfileAuthority,
     ProfileSessions,
     ProjectSessions {
         project_id: String,
@@ -237,6 +242,7 @@ pub enum ResettableStoreV1 {
 }
 
 impl ResettableStoreV1 {
+    const PROFILE_AUTHORITY_LABEL: &'static str = "profile authority";
     const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
     const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
     const PROFILE_HOOK_ADMISSIONS_LABEL: &'static str = "profile hook admissions";
@@ -245,6 +251,7 @@ impl ResettableStoreV1 {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
+            Self::ProfileAuthority => Self::PROFILE_AUTHORITY_LABEL.to_owned(),
             Self::ProfileSessions => Self::PROFILE_SESSIONS_LABEL.to_owned(),
             Self::ProjectSessions { project_id } => {
                 format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
@@ -261,6 +268,7 @@ impl ResettableStoreV1 {
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
+            Self::PROFILE_AUTHORITY_LABEL => return Some(Self::ProfileAuthority),
             Self::PROFILE_SESSIONS_LABEL => return Some(Self::ProfileSessions),
             Self::PROFILE_HOOK_ADMISSIONS_LABEL => return Some(Self::ProfileHookAdmissions),
             _ => {}
