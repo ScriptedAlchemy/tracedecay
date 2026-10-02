@@ -3938,6 +3938,20 @@ mod tests {
         )
         .expect("create restore witness");
         drop(file);
+        // Linux stamps ctime from CLOCK_REALTIME_COARSE: a rewrite inside the
+        // same quantum keeps the witnessed change time and is invisible to the
+        // file-state check. Wait out the quantum so the rewrite always earns a
+        // newer ctime the witness can see.
+        let witnessed_nanos = i128::from(witness.body.file_state.change_seconds) * 1_000_000_000
+            + i128::from(witness.body.file_state.change_nanoseconds);
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !tracedecay_private_fs::change_time_settled(witnessed_nanos) {
+            assert!(
+                std::time::Instant::now() < settle_deadline,
+                "the artifact's change time never left its write quantum"
+            );
+            std::thread::yield_now();
+        }
         let connection = Connection::open(&path).expect("reopen artifact for mutation");
         connection
             .pragma_update(None, "user_version", 2i64)
