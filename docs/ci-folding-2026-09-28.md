@@ -327,11 +327,11 @@ proposed contribution is admission, coalescing and routing work to those workers
 
 ## Initial delivery
 
-This section records the initial ancestor-snapshot experiment. The current
-workflow accepts two explicitly trusted PR heads and runs the existing
-`core-contracts` group. Its usage and trust boundary are documented in
-[`evals/ci-folding/README.md`](../evals/ci-folding/README.md). The historical
-measurements below are not evidence for the cross-PR worker.
+This section records the initial ancestor-snapshot experiment and the later
+manual two-PR trial. Both experimental workflows have been retired. Their
+measurements remain in [`evals/ci-folding`](../evals/ci-folding/README.md), and
+their implementations remain in Git history. The historical measurements
+below do not establish current production queue or verdict latency.
 
 - A composite experiment at `evals/ci-folding/action.yml` and manual
   `.github/workflows/ci-folding.yml` in TraceDecay. Its initial dispatch measured
@@ -355,8 +355,8 @@ smaller public shape; consumers needing the old detailed record use `result`.
 
 The six-worker Linux integration has completed its hosted treatment run.
 The initial manual Action ran the separate warm-snapshot probe and published its
-measurement artifact. The current manual trial adds multi-head checks, while
-automatic multi-PR demand admission remains unimplemented. Production
+measurement artifact. The later manual trial added multi-head checks. These
+were experimental steps, not the final production architecture. Production
 workers do not persist across workflow runs. Release workflows retain their
 current behavior.
 
@@ -373,7 +373,9 @@ non-required checks reported on the admitted SHAs; the report, JUnit and
 compile logs are attached to the run. These are three sequential measurements
 on one hosted worker, not independent parallel PR verdicts or proof of a
 production queue reduction. The worker still spent about six minutes in
-dependency setup, and automatic cross-PR admission remains to be built.
+dependency setup. A subsequent automatic controller admitted merge snapshots,
+but duplicated ordinary PR CI and could lose its result when a PR changed.
+It was disabled before the two-worker PR trial.
 
 For the compact-await change released as Cargo Hauler 0.10.0, `pnpm run check`
 passed artifact freshness, validation, build, typechecking, Effect diagnostics,
