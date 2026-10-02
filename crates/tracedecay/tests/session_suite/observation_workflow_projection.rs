@@ -17,7 +17,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageRecord,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
@@ -778,6 +778,220 @@ async fn latest_goal_state_filters_provider_session_and_status() {
 }
 
 #[tokio::test]
+async fn search_returns_one_row_per_observation_before_applying_limit() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let task = |reference, item_order, text| {
+        lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference,
+            item_id: None,
+            list_reference: None,
+            status: Some("pending"),
+            item_order: Some(item_order),
+            event_sequence: None,
+            text,
+        })
+    };
+    let summary = observation(
+        FIXTURE_SESSION,
+        "record.release-summary",
+        1,
+        vec![
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "release summary repeats release task alpha"}),
+                model: None,
+                timestamp: Some(1_750_000_001),
+            },
+            task("task.native.alpha", 0, "release task alpha"),
+            task("task.native.beta", 1, "release task beta"),
+        ],
+    );
+    let cursor = persist_and_project(&store, summary, None).await;
+    let follow_up = observation(
+        FIXTURE_SESSION,
+        "record.release-follow-up",
+        2,
+        vec![lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference: "task.native.follow-up",
+            item_id: None,
+            list_reference: None,
+            status: Some("pending"),
+            item_order: Some(2),
+            event_sequence: None,
+            text: "release follow-up",
+        })],
+    );
+    persist_and_project(&store, follow_up, Some(cursor)).await;
+
+    let hits = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 2)
+        .await
+        .expect("search release observations")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hits,
+        [
+            ("task", "release follow-up"),
+            (
+                "message",
+                "release summary repeats release task alpha\n\nrelease task beta",
+            ),
+        ]
+        .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
+    );
+    let top_hit = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 1)
+        .await
+        .expect("limit the ordered observation search");
+    let [top_hit] = top_hit.as_slice() else {
+        panic!("limit one must return exactly the first observation");
+    };
+    assert_eq!(top_hit.message.kind.as_deref(), Some("task"));
+    assert_eq!(top_hit.message.text, "release follow-up");
+
+    let spanning_hit = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "summary beta", 2)
+        .await
+        .expect("search across one observation's message and workflow facts")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spanning_hit,
+        [(
+            "message".to_owned(),
+            "release summary repeats release task alpha\n\nrelease task beta".to_owned(),
+        )]
+    );
+
+    // A workflow-only observation stands as its own row only when its facts
+    // carry every query term; "release follow-up" lacks "alpha".
+    let partial_terms = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "follow alpha", 2)
+        .await
+        .expect("search terms split across unrelated observations")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial_terms,
+        [(
+            "message".to_owned(),
+            "release summary repeats release task alpha\n\nrelease task beta".to_owned(),
+        )]
+    );
+
+    let workflow_only = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "beta", 2)
+        .await
+        .expect("search a later workflow fact in one observation");
+    let [workflow_only] = workflow_only.as_slice() else {
+        panic!("the matching observation must produce exactly one search row");
+    };
+    let metadata: Value =
+        serde_json::from_str(workflow_only.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["provider_reference"], "task.native.beta");
+}
+
+#[tokio::test]
+async fn workflow_only_v5_profile_rebuilds_before_current_search() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        FIXTURE_SESSION,
+        "record.workflow-only-v5",
+        1,
+        vec![lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference: "task.native.v5",
+            item_id: None,
+            list_reference: None,
+            status: Some("pending"),
+            item_order: Some(1),
+            event_sequence: None,
+            text: "workflow-only predecessor canary",
+        })],
+    );
+    persist_and_project(&store, candidate, None).await;
+
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    conn.execute(
+        "UPDATE observation_workflow_facts
+         SET projector_version = ?1
+         WHERE projector_version = ?2",
+        rusqlite::params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE observation_projection_checkpoints
+         SET projector_version = ?1
+         WHERE projector_version = ?2",
+        rusqlite::params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+        ],
+    )
+    .unwrap();
+    drop(conn);
+    drop(store);
+    drop(runtime);
+
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .expect("workflow-only v5 profile must reopen for convergence");
+    let convergence = store.converge_projection_predecessor().await.unwrap();
+    let rebuild = convergence
+        .rebuild()
+        .expect("v5 workflow facts must trigger predecessor convergence");
+    assert!(rebuild.is_complete());
+
+    let hits = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(
+            FIXTURE_PROVIDER,
+            Some("user"),
+            "workflow-only predecessor",
+            2,
+        )
+        .await
+        .expect("search rebuilt workflow-only observation");
+    let [hit] = hits.as_slice() else {
+        panic!("the rebuilt workflow observation must produce one search row");
+    };
+    assert_eq!(hit.message.text, "workflow-only predecessor canary");
+}
+
+#[tokio::test]
 async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
@@ -823,7 +1037,16 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
         .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release-item", 10)
         .await
         .expect("search current-projector workflow facts");
-    assert_eq!(production_results.len(), 2);
+    let [production_result] = production_results.as_slice() else {
+        panic!("one observation must produce one workflow search row");
+    };
+    assert_eq!(
+        production_result.message.text,
+        "release-item first\n\nrelease-item second"
+    );
+    let production_metadata: Value =
+        serde_json::from_str(production_result.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(production_metadata["item_order"], 1);
 
     let results = search_session_messages(
         &database_path,
@@ -832,17 +1055,19 @@ async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields
         "release-item",
         10,
     );
-    assert_eq!(results.len(), 2);
-    let metadata = results
-        .iter()
-        .map(|result| {
-            serde_json::from_str::<Value>(result.message.metadata_json.as_deref().unwrap()).unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(metadata[0]["item_order"], 1);
-    assert_eq!(metadata[1]["item_order"], 2);
-    assert!(metadata.iter().all(|value| value.get("status").is_none()));
-    assert!(metadata.iter().all(|value| value.get("revision").is_none()));
+    let [first, second] = results.as_slice() else {
+        panic!("both normalized workflow facts must remain durable");
+    };
+    let first_metadata: Value =
+        serde_json::from_str(first.message.metadata_json.as_deref().unwrap()).unwrap();
+    let second_metadata: Value =
+        serde_json::from_str(second.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(first_metadata["item_order"], 1);
+    assert_eq!(second_metadata["item_order"], 2);
+    assert!(first_metadata.get("status").is_none());
+    assert!(second_metadata.get("status").is_none());
+    assert!(first_metadata.get("revision").is_none());
+    assert!(second_metadata.get("revision").is_none());
 }
 
 #[tokio::test]

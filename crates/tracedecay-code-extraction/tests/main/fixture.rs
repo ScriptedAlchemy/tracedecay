@@ -144,7 +144,8 @@ fn test_fixture_typescript() {
             "getDisplayName",
             "getDisplayName",
             "fetchProfile",
-            "resetCache"
+            "resetCache",
+            "addToken"
         ]
     );
     let fetch = methods
@@ -171,6 +172,7 @@ fn test_fixture_typescript() {
             "this._cache.set",
             "log",
             "this._cache.clear",
+            "this.tokens.push",
         ]
     );
     assert_eq!(ref_names(&result, EdgeKind::Extends), ["EventEmitter"]);

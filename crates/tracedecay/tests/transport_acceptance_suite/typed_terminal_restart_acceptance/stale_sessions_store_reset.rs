@@ -635,19 +635,19 @@ fn stale_session_stores_refuse_sessions_only_until_their_scoped_reset() {
 }
 
 #[test]
-fn project_session_store_at_another_lcm_schema_version_refuses_sessions_only() {
+fn session_stores_at_shipped_lcm_schema_13_refuse_sessions_only_until_their_scoped_reset() {
     refused_session_stores_serve_code_until_their_scoped_reset(&SessionStoreRefusal {
         age: |db| {
             execute_once(
                 db,
-                "UPDATE session_schema_migrations SET version = 12 WHERE name = 'lcm'",
+                "UPDATE session_schema_migrations SET version = 13 WHERE name = 'lcm'",
             );
         },
-        ages_profile_store: false,
+        ages_profile_store: true,
         authority: "LCM",
-        found_version: json!(12),
-        required_version: json!(13),
-        reason: "LCM profile schema 12 is incompatible with required schema 13; reset the profile",
+        found_version: json!(13),
+        required_version: json!(14),
+        reason: "LCM profile schema 13 is incompatible with required schema 14; reset the profile",
         session_tool: "tracedecay_lcm_grep",
         session_tool_args: || json!({ "query": "probe", "format": "json" }),
     });

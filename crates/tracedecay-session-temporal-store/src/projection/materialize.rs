@@ -328,7 +328,7 @@ pub(super) async fn materialize_effect_occurrences(
         // One derivation per observation, reused across all of its outputs.
         let projection = derive_canonical_projection(observation)
             .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        let outputs = projection.messages().collect::<Vec<_>>();
+        let outputs = projection.message().into_iter().collect::<Vec<_>>();
         if outputs.len() != *output_count {
             return Err(storage_message(
                 MATERIALIZE_REFRESH,
@@ -794,7 +794,8 @@ pub async fn canonical_parent_message_resolver(
             let projection = derive_canonical_projection(&observation)
                 .map_err(|error| storage(operation, error))?;
             for output in projection
-                .messages()
+                .message()
+                .into_iter()
                 .filter(|output| output.session().session_id == session_id)
             {
                 let occurrence_id = MessageOccurrenceIdV1::derive(

@@ -11,7 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [dependencies]
-dirs = "6"
 hex = "0.4"
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }

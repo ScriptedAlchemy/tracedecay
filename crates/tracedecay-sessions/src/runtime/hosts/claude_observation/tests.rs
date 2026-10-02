@@ -303,9 +303,14 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     let payload = payload.to_string();
     let root = fixture.temp.path().to_string_lossy().into_owned();
     let normalized = payload.replace(&root, "/fixture");
+    // The record embeds the temp directory as `cwd`, so its byte span (the
+    // whole one-record file) depends on that path's length.
+    let end = fs::metadata(&fixture.transcript).unwrap().len();
     assert_eq!(
         normalized,
-        r#"{"evidence":{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{"end":255,"start":0}},"facts":[{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript"},{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}],"native_record_kind":"user","provider":"claude","relations":{"message_id":"message-production-vertical","session_id":"production-session"},"stable_record_id":"message-production-vertical","version":1}"#
+        format!(
+            r#"{{"evidence":{{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{{"end":{end},"start":0}}}},"facts":[{{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript"}},{{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}}],"native_record_kind":"user","provider":"claude","relations":{{"message_id":"message-production-vertical","session_id":"production-session"}},"stable_record_id":"message-production-vertical","version":1}}"#
+        )
     );
     assert!(!payload.contains("never-persist-this-secret"));
     assert!(payload.contains("production vertical searchable"));

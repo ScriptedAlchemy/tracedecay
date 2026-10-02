@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
     ProviderUsageContractDimensionV1, SessionId,
 };
 
@@ -26,13 +26,15 @@ pub fn normalize_observation(
     native: &Value,
     session_id: &str,
     model: Option<&str>,
+    location: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Vibe records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
     hotpath::gauge!("capture.vibe.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_vibe_record(native, session_id, model, stable_record_id, range);
+    let envelope =
+        normalize_vibe_record(native, session_id, model, location, stable_record_id, range);
     if envelope.is_err() {
         hotpath::gauge!("capture.vibe.normalize_failures").inc(1u64);
     }
@@ -45,6 +47,7 @@ fn normalize_vibe_record(
     native: &Value,
     session_id: &str,
     model: Option<&str>,
+    location: Option<&str>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -69,13 +72,30 @@ fn normalize_vibe_record(
 
     let relations =
         CanonicalObservationRelationsV1::new(session_id).with_message_id(stable_record_id.clone());
-    let mut facts = vec![CanonicalObservationFactV1::Message {
+    let mut facts = Vec::new();
+    if let Some(location) = location.filter(|path| !path.is_empty()) {
+        // `project_path` stays unset on purpose: session routing keeps its
+        // scope-derived fallback, only the location metadata is projected.
+        facts.push(CanonicalObservationFactV1::Session {
+            project_path: None,
+            location_path: Some(location.to_owned()),
+            transcript_path: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            native_source: None,
+            profile: None,
+            location_provenance: Some("session_meta".to_owned()),
+        });
+    }
+    facts.push(CanonicalObservationFactV1::Message {
         role,
         content,
         model: model.map(str::to_owned),
         timestamp,
-    }];
-    append_tool_invocations(&mut facts, native, &stable_record_id)?;
+    });
+    append_tool_invocations(&mut facts, native)?;
     append_usage(&mut facts, native)?;
 
     let mut evidence =
@@ -110,7 +130,6 @@ fn canonical_role(native: &Value) -> Result<CanonicalMessageRoleV1, ObservationR
 fn append_tool_invocations(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,
-    message_id: &ObservationId,
 ) -> Result<(), ObservationRecordParseErrorV1> {
     let mut calls = Vec::new();
     if let Some(values) = native
@@ -151,18 +170,11 @@ fn append_tool_invocations(
             Value::String(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
             value => value,
         };
-        let invocation_evidence = json!({
-            "message_id": message_id.as_str(),
-            "native_tool_id": call.get("id"),
-            "name": name,
-            "arguments": arguments,
-        });
-        let digest = PayloadReferenceV1::for_payload(&invocation_evidence)
-            .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-        let invocation_id = ObservationId::new(format!("vibe.tool.{}", digest.digest().as_str()))
-            .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
+            invocation_id: call
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| ObservationId::new(id).ok()),
             name: name.to_owned(),
             arguments,
         });

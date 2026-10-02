@@ -2871,6 +2871,22 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             self.seal_encoded_segment_bytes
                                 .fetch_add(segment_size, Ordering::Relaxed);
                         }
+                        SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                            let segment_size = u64::try_from(bytes.len()).map_err(|_| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed file evidence length exceeds u64".to_owned(),
+                                )
+                            })?;
+                            hotpath::measure_block!(
+                                "code_index.generation.publish.file_evidence_durable",
+                                self.stage_segment(digest, bytes, &mut staged_segments)
+                            )
+                            .map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(error.to_string())
+                            })?;
+                            referenced_segment_bytes =
+                                referenced_segment_bytes.saturating_add(segment_size);
+                        }
                         SealedGenerationSegmentPublicationV1::CodeGraphPage {
                             page_digest,
                             bytes,

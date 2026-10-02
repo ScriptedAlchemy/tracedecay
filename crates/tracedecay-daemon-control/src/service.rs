@@ -32,7 +32,7 @@ mod update_restore_tests;
 pub use probe::{
     DaemonProcessProofV1, daemon_reachable, daemon_reset_required_stores, daemon_socket_connectable,
 };
-pub use unit_file::installed_service_socket_path;
+pub use unit_file::{installed_service_socket_path, systemd_unit_name};
 
 use probe::{
     DaemonProtocolState, DaemonSocketState, daemon_readiness_probe, daemon_socket_state,
@@ -213,7 +213,7 @@ impl QuiescedDaemonLifecycle {
             profile,
             operation,
             expected_version,
-            ServiceRunner::current()?,
+            ServiceRunner::current_for_installed_unit(profile)?,
             timeout,
         )
     }
@@ -589,6 +589,16 @@ impl DaemonServiceSpec {
     pub fn render_systemd_user_unit(&self) -> Result<String> {
         validate_managed_remote_tls(self.remote_tls.as_ref())?;
         let service_path = daemon_service_path_env(self.profile.home(), &self.tracedecay_bin);
+        // Without it the unit's daemon resolves the home's default profile,
+        // not the one that installed and controls the unit.
+        let data_dir_environment = match &self.data_dir_override {
+            Some(data_dir) => format!(
+                "Environment=\"{}={}\"\n",
+                tracedecay_runtime_core::config::USER_DATA_DIR_ENV,
+                systemd_escape_env_value(&data_dir.display().to_string())
+            ),
+            None => String::new(),
+        };
         let remote_arguments = match self.remote_tls.as_ref() {
             Some(config) => format!(
                 " --remote-listen {} --remote-tls-cert {} --remote-tls-key {}",
@@ -616,6 +626,7 @@ impl DaemonServiceSpec {
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
+             {}\
              ExecStart={} daemon run --socket {}{}\n\
              # Restart=always (not on-failure): come back after OOM SIGKILL,\n\
              # crash, or a clean-but-unexpected exit. A looping daemon is\n\
@@ -627,7 +638,7 @@ impl DaemonServiceSpec {
              # Sized from this host's physical RAM at install. MemoryHigh is\n\
              # the pressure line where the daemon sheds caches; MemoryMax and\n\
              # MemorySwapMax bound it before it can take the desktop down.\n\
-             # Override in a drop-in: `systemctl --user edit tracedecay`.\n\
+             # Override in a drop-in: `systemctl --user edit` this unit.\n\
              MemoryHigh={}\n\
              MemoryMax={}\n\
              MemorySwapMax={}\n\
@@ -635,6 +646,7 @@ impl DaemonServiceSpec {
              [Install]\n\
              WantedBy=default.target\n",
             systemd_escape_env_value(&service_path),
+            data_dir_environment,
             systemd_quote_exec_argument_if_needed(&self.tracedecay_bin.display().to_string()),
             systemd_quote_exec_argument_if_needed(&self.socket_path.display().to_string()),
             remote_arguments,
@@ -1013,10 +1025,7 @@ pub fn service_spec_with_remote_tls(
 /// The data directory a managed service must be told about: `profile`'s
 /// directory whenever it is not the default under the profile's home.
 fn data_dir_override(profile: &ProfileRoot) -> Option<PathBuf> {
-    let default = profile
-        .home()
-        .map(|home| ProfileRoot::under_home(home).data_dir().to_path_buf());
-    (default.as_deref() != Some(profile.data_dir())).then(|| profile.data_dir().to_path_buf())
+    (!profile.is_home_default()).then(|| profile.data_dir().to_path_buf())
 }
 
 #[doc(hidden)]
@@ -1066,7 +1075,7 @@ pub fn install_service_under_lease(
     start: bool,
     expected_version: &str,
 ) -> Result<PathBuf> {
-    let runner = ServiceRunner::current()?;
+    let runner = ServiceRunner::current(&spec.profile)?;
     #[cfg(windows)]
     let new_windows_task = windows_task::service_state()? == DaemonServiceState::Missing;
     #[cfg(not(windows))]
@@ -1155,7 +1164,7 @@ fn refresh_installed_service_with_state(
     expected_version: &str,
 ) -> Result<Option<PathBuf>> {
     refresh_installed_service_with_state_and_runner(
-        &ServiceRunner::current()?,
+        &ServiceRunner::current_for_installed_unit(&spec.profile)?,
         spec,
         previous_state,
         expected_version,
@@ -1208,7 +1217,7 @@ pub fn quiesce_installed_service_before_lease(
 ) -> Result<DaemonServiceState> {
     quiesce_installed_service_before_lease_with_runner(
         profile,
-        &ServiceRunner::current()?,
+        &ServiceRunner::current_for_installed_unit(profile)?,
         expected_version,
     )
 }
@@ -1262,7 +1271,10 @@ fn quiesce_installed_service_before_lease_with_runner(
 pub fn verify_installed_service_quiesced_under_lease(
     profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
-    verify_installed_service_quiesced_under_lease_with_runner(profile, &ServiceRunner::current()?)
+    verify_installed_service_quiesced_under_lease_with_runner(
+        profile,
+        &ServiceRunner::current_for_installed_unit(profile)?,
+    )
 }
 
 fn verify_installed_service_quiesced_under_lease_with_runner(
@@ -1319,7 +1331,7 @@ pub fn restore_installed_service_after_update(
 ) -> Result<()> {
     restore_installed_service_after_update_with_runner(
         profile,
-        &ServiceRunner::current()?,
+        &ServiceRunner::current_for_installed_unit(profile)?,
         previous_state,
         expected_version,
     )
@@ -1413,7 +1425,7 @@ pub fn installed_service_state(profile: &ProfileRoot) -> Result<DaemonServiceSta
     let unit = read_service_unit(&service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    ServiceRunner::current()?.service_state(&socket_path)
+    ServiceRunner::current(profile)?.service_state(&socket_path)
 }
 
 /// Observe whether the managed unit's process completed initialize.
@@ -1433,7 +1445,7 @@ pub fn installed_service_process_proof(
     let unit = read_service_unit(&service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    let state = ServiceRunner::current()?.service_state(&socket_path)?;
+    let state = ServiceRunner::current(profile)?.service_state(&socket_path)?;
     if !state.is_running() {
         return Ok(DaemonProcessProofV1::Unproven {
             detail: "managed daemon unit is not running".to_owned(),
@@ -1457,7 +1469,7 @@ pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()
     let unit = read_service_unit(&service_path)?;
     let socket_path =
         socket_path_from_unit_text(&unit).unwrap_or(default_socket_path(profile.data_dir())?);
-    let runner = ServiceRunner::current()?;
+    let runner = ServiceRunner::current(profile)?;
     let pre_start_state = runner.service_state(&socket_path)?;
     runner.start(&service_path, &socket_path, expected_version)?;
     if matches!(runner, ServiceRunner::WindowsTask) {
@@ -1495,7 +1507,7 @@ pub fn stop_service(profile: &ProfileRoot, expected_version: &str) -> Result<()>
             message: "no TraceDecay daemon service is installed".to_string(),
         });
     }
-    ServiceRunner::current()?.stop(expected_version)
+    ServiceRunner::current(profile)?.stop(expected_version)
 }
 
 /// Waits for a strict maintenance command to observe the exact managed-service
@@ -1511,7 +1523,7 @@ pub fn wait_for_installed_service_state(
 ) -> Result<()> {
     wait_for_installed_service_state_with_runner(
         profile,
-        &ServiceRunner::current()?,
+        &ServiceRunner::current(profile)?,
         expected,
         expected_version,
     )
@@ -1677,7 +1689,7 @@ fn uninstall_service_under_lease(
     stop: bool,
     expected_version: &str,
 ) -> Result<PathBuf> {
-    let runner = ServiceRunner::current()?;
+    let runner = ServiceRunner::current(profile)?;
     let service_path = service_unit_path(profile)?;
     runner.before_uninstall(stop, expected_version)?;
     remove_service_unit(&service_path)?;
@@ -1701,7 +1713,7 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
         |e| format!("unavailable: {e}"),
         |path| path.display().to_string(),
     );
-    let runner = ServiceRunner::current();
+    let runner = ServiceRunner::current(profile);
     let service_manager = match runner
         .as_ref()
         .map(|runner| runner.observe_service_state(&transport_path))

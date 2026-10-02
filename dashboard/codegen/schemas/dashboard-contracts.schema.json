@@ -231,16 +231,25 @@
       "type": "string"
     },
     "AgentTaskFailureClass": {
-      "enum": [
-        "retryable",
-        "permanent",
-        "timeout",
-        "unavailable",
-        "denied",
-        "disconnected",
-        "malformed_output"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "retryable",
+            "permanent",
+            "timeout",
+            "unavailable",
+            "denied",
+            "disconnected",
+            "malformed_output"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "input_too_large",
+          "description": "The backend refused the request because it exceeds its input or\ncontext-window limit.",
+          "type": "string"
+        }
+      ]
     },
     "AgentTaskKind": {
       "enum": [
@@ -1563,6 +1572,26 @@
             "kind",
             "producer",
             "generation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The code graph's engine or catalog was released for memory and was\nstill warming again when the read's budget ran out;\n`retry_after_millis` is the measured warm-up it still needs.",
+          "properties": {
+            "kind": {
+              "const": "code_graph_rewarming",
+              "type": "string"
+            },
+            "retry_after_millis": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "retry_after_millis"
           ],
           "type": "object"
         },

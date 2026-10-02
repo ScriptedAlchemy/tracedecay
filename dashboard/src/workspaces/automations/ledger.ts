@@ -185,6 +185,7 @@ export function failureClassTone(classification: AgentTaskFailureClass): Tone {
       return DEGRADED;
     case 'permanent':
     case 'malformed_output':
+    case 'input_too_large':
       return REFUSED;
     case 'denied':
       return DENIED;

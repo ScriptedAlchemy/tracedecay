@@ -435,7 +435,8 @@ fn encode_once(
     let mut evidence_pack = Vec::new();
     let manifest = generation.encode_partitioned_sealed(|publication| {
         match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {

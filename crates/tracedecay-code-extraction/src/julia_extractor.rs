@@ -5,8 +5,8 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::{ComplexityMetrics, JULIA_COMPLEXITY, count_complexity};
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 pub struct JuliaExtractor;
@@ -125,7 +125,7 @@ impl JuliaExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
@@ -354,16 +354,6 @@ impl JuliaExtractor {
             return Some(state.node_text(prev).trim_matches('"').trim().to_string());
         }
         None
-    }
-
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
     }
 }
 

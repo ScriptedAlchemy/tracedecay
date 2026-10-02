@@ -258,6 +258,7 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
                 graph_db_relpath: "tracedecay.db".into(),
                 sessions_db_relpath: "sessions.db".into(),
                 branch_meta_relpath: "branch-meta.json".into(),
+                sessions_schema_digest: None,
             },
         )
         .unwrap();

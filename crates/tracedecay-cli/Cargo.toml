@@ -50,6 +50,11 @@ path = "tests/retained_parse_heap.rs"
 required-features = ["alloc-mimalloc"]
 
 [[test]]
+name = "process_allocator_heaps"
+path = "tests/process_allocator_heaps.rs"
+required-features = ["alloc-mimalloc"]
+
+[[test]]
 name = "refresh_memory_journey"
 path = "tests/refresh_memory_journey.rs"
 required-features = ["alloc-mimalloc"]

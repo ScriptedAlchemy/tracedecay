@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -646,6 +646,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
                 {},
+                (SELECT p.observation_id
+                 FROM observation_projection_provenance p
+                 WHERE p.projector_version = ?2
+                   AND p.output_provider = m.provider
+                   AND p.output_message_id = m.message_id
+                 ORDER BY p.output_ordinal
+                 LIMIT 1) AS observation_id,
                 bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
              FROM lcm_raw_messages_fts
              JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id
@@ -653,7 +660,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
              WHERE lcm_raw_messages_fts MATCH ?1",
             message_record_select_columns("m")
         );
-        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
+        let mut query_params = vec![
+            Value::Text(fts_query),
+            Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+            Value::Text(provider.to_owned()),
+        ];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
             push_project_identity_predicate(&mut sql, &mut query_params, project_key);
@@ -677,6 +688,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         );
 
         let mut transcript_results = Vec::new();
+        let mut transcript_observations = BTreeMap::new();
         let mut rows = snapshot
             .query(&sql, query_params)
             .await
@@ -691,8 +703,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             let message = row_to_message(&row, 13)
                 .map_err(|message| session_db_operation_message(OPERATION, message))?;
             let score = -row
-                .get::<f64>(26)
+                .get::<f64>(27)
                 .map_err(|error| session_db_operation_error(OPERATION, error))?;
+            if let Some(observation_id) = row
+                .get::<Option<String>>(26)
+                .map_err(|error| session_db_operation_error(OPERATION, error))?
+            {
+                transcript_observations.insert(observation_id, transcript_results.len());
+            }
             transcript_results.push(SessionMessageSearchResult {
                 session,
                 message,
@@ -700,8 +718,39 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?;
+        let mut workflow_results: Vec<SessionMessageSearchResult> = Vec::new();
+        let mut workflow_observations: BTreeMap<String, usize> = BTreeMap::new();
+        let anchored_observations = transcript_observations
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for (observation_id, fact) in search_workflow_facts(
+            &snapshot,
+            provider,
+            project_key,
+            query,
+            fetch_limit,
+            &anchored_observations,
+        )
+        .await?
+        {
+            if let Some(&index) = transcript_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut transcript_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            if let Some(&index) = workflow_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut workflow_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            workflow_observations.insert(observation_id, workflow_results.len());
+            workflow_results.push(fact);
+        }
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -856,6 +905,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 }
 
+fn append_observation_text(text: &mut String, fact_text: &str) {
+    if fact_text.is_empty() || text.contains(fact_text) {
+        return;
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(fact_text);
+}
+
 #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
@@ -863,7 +922,8 @@ async fn search_workflow_facts(
     project_key: Option<&str>,
     query: &str,
     limit: usize,
-) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
+    anchored_observations: &[&str],
+) -> tracedecay_domain::errors::Result<Vec<(String, SessionMessageSearchResult)>> {
     const OPERATION: &str = "search registered workflow facts";
     let terms = query
         .split_whitespace()
@@ -879,18 +939,18 @@ async fn search_workflow_facts(
         return Ok(Vec::new());
     }
 
-    let mut sql = "SELECT
-            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-            s.is_subagent, s.agent_id, s.parent_tool_use_id,
-            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
-            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
-            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
-            w.source_sequence, w.native_timestamp, w.observation_sequence,
-            w.ordering_domain, w.content_json, w.content_text
-         FROM observation_workflow_facts w
-         JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-         WHERE w.projector_version = ?1"
+    let mut sql = "WITH matching_observations AS (
+            SELECT
+                w.provider,
+                w.observation_id,
+                MIN(CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END) AS item_order_missing,
+                MIN(w.item_order) AS first_item_order,
+                MAX(w.native_timestamp) AS latest_timestamp,
+                MAX(w.observation_sequence) AS latest_sequence,
+                MIN(w.fact_ordinal) AS first_fact_ordinal
+            FROM observation_workflow_facts w
+            JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+            WHERE w.projector_version = ?1"
         .to_owned();
     let mut query_params = vec![
         Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
@@ -908,14 +968,71 @@ async fn search_workflow_facts(
             query_params.len()
         ));
     }
-    let _ = write!(sql, " AND ({})", term_predicates.join(" AND "));
+    let matching_predicate = term_predicates.join(" OR ");
+    let _ = write!(sql, " AND ({matching_predicate})");
+    // An observation qualifies on its own only when every term appears in at
+    // least one of its facts (master's AND, lifted from fact to observation,
+    // the unit a search row now stands for). Observations the transcript
+    // search already returned are anchored: any term-matching fact of theirs
+    // only enriches that existing row.
+    let every_term = term_predicates
+        .iter()
+        .map(|predicate| format!("SUM({predicate}) > 0"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let _ = write!(
+        sql,
+        " GROUP BY w.provider, w.observation_id HAVING ({every_term})"
+    );
+    if !anchored_observations.is_empty() {
+        let mut anchored_params = Vec::with_capacity(anchored_observations.len());
+        for observation_id in anchored_observations {
+            query_params.push(Value::Text((*observation_id).to_owned()));
+            anchored_params.push(format!("?{}", query_params.len()));
+        }
+        let _ = write!(
+            sql,
+            " OR w.observation_id IN ({})",
+            anchored_params.join(", ")
+        );
+    }
+    // The row leads with the observation's fact that matches the most terms,
+    // so its metadata names the item the query asked for.
+    let matched_terms = term_predicates
+        .iter()
+        .map(|predicate| format!("({predicate})"))
+        .collect::<Vec<_>>()
+        .join(" + ");
     query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
-        " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
-                  w.item_order, (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
-                  w.observation_sequence DESC, w.fact_ordinal
-          LIMIT ?{}",
+        " ORDER BY item_order_missing, first_item_order,
+                   (latest_timestamp IS NULL) ASC, latest_timestamp DESC,
+                   latest_sequence DESC, first_fact_ordinal
+          LIMIT ?{}
+        )
+        SELECT
+            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+            s.is_subagent, s.agent_id, s.parent_tool_use_id,
+            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+            w.source_sequence, w.native_timestamp, w.observation_sequence,
+            w.ordering_domain, w.content_json, w.content_text
+        FROM matching_observations matched
+        JOIN observation_workflow_facts w
+          ON w.provider = matched.provider
+         AND w.observation_id = matched.observation_id
+         AND w.projector_version = ?1
+        JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+        ORDER BY matched.item_order_missing, matched.first_item_order,
+                 (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
+                 matched.latest_sequence DESC, matched.first_fact_ordinal,
+                 ({matched_terms}) DESC,
+                 CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END, w.item_order,
+                 (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
+                 w.fact_ordinal",
         query_params.len()
     );
 
@@ -931,13 +1048,19 @@ async fn search_workflow_facts(
     {
         let session = row_to_session(&row)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
+        let observation_id = row
+            .get::<String>(14)
+            .map_err(|error| session_db_operation_error(OPERATION, error))?;
         let message = row_to_workflow_message(&row, 13)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
-        results.push(SessionMessageSearchResult {
-            session,
-            message,
-            score: 0.0,
-        });
+        results.push((
+            observation_id,
+            SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            },
+        ));
     }
     Ok(results)
 }

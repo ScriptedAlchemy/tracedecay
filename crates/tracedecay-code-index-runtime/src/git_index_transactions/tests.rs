@@ -357,6 +357,42 @@ fn configuration_and_filesystem_capability_digests_are_distinct() {
 }
 
 #[test]
+fn sparse_digest_tracks_sparse_checkout_authority() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    let initial = runner.sparse_digest().expect("initial sparse digest");
+
+    fs::write(
+        directory.path().join(".git/info/sparse-checkout"),
+        b"/src/\n",
+    )
+    .expect("sparse checkout patterns");
+    let with_patterns = runner.sparse_digest().expect("pattern sparse digest");
+    assert_ne!(initial, with_patterns);
+
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "core.sparseCheckout", "true"])
+            .status()
+            .expect("git config starts")
+            .success()
+    );
+    assert_ne!(
+        with_patterns,
+        runner.sparse_digest().expect("enabled sparse digest")
+    );
+}
+
+#[test]
 fn repository_control_redirection_never_retargets_a_retained_runner() {
     let retained = tempdir().expect("retained repository");
     let foreign = tempdir().expect("foreign repository");

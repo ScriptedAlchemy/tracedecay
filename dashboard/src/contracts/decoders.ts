@@ -1063,7 +1063,7 @@ export const AdmitWorkSynthesisCommandSchema: z.ZodObject<{
 /** Strongly typed canonical identity: `AgentInstanceId`. */
 export const AgentInstanceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
 
-export const AgentTaskFailureClassSchema: z.ZodEnum<["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]> = z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]);
+export const AgentTaskFailureClassSchema: z.ZodType<"denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large", z.ZodTypeDef, unknown> = z.union([z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]), z.literal("input_too_large")]);
 
 export const AgentTaskKindSchema: z.ZodEnum<["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
 
@@ -1500,6 +1500,9 @@ export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<["denied", "mal
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("code_graph_rewarming"),
+  retry_after_millis: z.number().int().safe().min(0),
+}).strict(), z.object({
   kind: z.literal("daemon_unreachable"),
   named_by: z.string().nullable(),
   service_unit: z.lazy(() => DaemonServiceUnitObservationV1Schema),

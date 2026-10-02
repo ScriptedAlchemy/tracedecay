@@ -1043,4 +1043,45 @@ mod tests {
             assert_eq!(problem["legal_actions"], legal_actions, "{error}");
         }
     }
+
+    /// A graph read whose budget ended inside a re-warm tells the caller when
+    /// to retry from the measured warm-up, not the canonical default delay.
+    #[test]
+    fn a_rewarming_graph_read_retries_after_its_measured_warm_up() {
+        let error = tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Rewarming {
+                retry_after_millis: 7_940,
+            },
+        );
+        let problem = tracedecay_contracts::ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.graph-problem.v1").unwrap(), 1)
+                .unwrap(),
+            RequestId::new("request.mcp.graph-rewarming").unwrap(),
+            super::graph_tool_error_problem(&error),
+        )
+        .unwrap();
+        let refusal = settle_graph_tool_result(
+            ApplicationSurfaceOperation::Signature,
+            BindingId::new("binding.mcp.signature.v1").unwrap(),
+            Err(problem),
+        )
+        .unwrap()
+        .expect_err("a re-warming read is a refusal record");
+        let rendered = refusal.render(None, &json!({"format": "json"})).unwrap();
+
+        let problem = &rendered.value["structuredContent"]["problem"];
+        assert_eq!(problem["kind"], "unavailable");
+        assert_eq!(problem["code"], "application.code-graph.rewarming");
+        assert_eq!(problem["retry"], "after_delay");
+        assert_eq!(problem["retry_after_millis"], 7_940);
+        assert_eq!(
+            problem["detail"],
+            json!({"kind": "code_graph_rewarming", "retry_after_millis": 7_940})
+        );
+        assert_eq!(
+            problem["message"],
+            "The project's code graph was released for memory and is warming again; retry \
+             after 7940ms."
+        );
+    }
 }

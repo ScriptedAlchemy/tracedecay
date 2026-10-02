@@ -348,6 +348,9 @@ pub enum SessionRetrievalUnavailableReason {
     /// operator problem from a store that is not present at all.
     TemporalStoreReadFailed,
     HydrationUnavailable,
+    /// The temporal kernel refused the request, its cursor, or the projected
+    /// index it read. The store answered; what it was handed is defective.
+    TemporalKernelRefused,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

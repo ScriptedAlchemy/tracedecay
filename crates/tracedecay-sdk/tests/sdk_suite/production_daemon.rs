@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -15,6 +16,9 @@ use tempfile::TempDir;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
+};
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, LegalAction, PolicyDecisionRef,
     RequestId, ResolvedScope, RetryDirective,
@@ -236,7 +240,6 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
     fs::write(&first_private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
     fs::write(&second_certificate, REMOTE_TLS_ALTERNATE_CERTIFICATE).unwrap();
     fs::write(&second_private_key, REMOTE_TLS_ALTERNATE_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&first_private_key, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&second_private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -408,7 +411,6 @@ fn enrolled_remote_failover_without_a_published_writer_is_a_typed_refusal() {
     let private_key = scratch.path().join("localhost.key.pem");
     fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
     fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
     let binary = production_binary();
@@ -533,6 +535,227 @@ fn enrolled_remote_failover_without_a_published_writer_is_a_typed_refusal() {
             &json!("writer_authority_unpublished")
         ),
         "{authority_state}"
+    );
+
+    stop_daemon(&mut daemon);
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    let profile = home.join(".tracedecay");
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname=\"remote-publication-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub const FIXTURE: bool = true;\n",
+    )
+    .unwrap();
+    run(Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project));
+    let certificate = scratch.path().join("localhost.crt.pem");
+    let private_key = scratch.path().join("localhost.key.pem");
+    fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
+    fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let binary = production_binary();
+    let (mut daemon, authority, remote) = spawn_remote_daemon(
+        &binary,
+        &home,
+        &profile,
+        &project,
+        &certificate,
+        &private_key,
+    );
+    let mut init = Command::new(&binary);
+    init.arg("init").current_dir(&project);
+    isolated(&mut init, &home, &profile);
+    run(&mut init);
+    let mut context_command = Command::new(&binary);
+    context_command
+        .args(["projects", "context"])
+        .arg(&project)
+        .arg("--json")
+        .current_dir(&project);
+    isolated(&mut context_command, &home, &profile);
+    let context: Value = serde_json::from_slice(&run(&mut context_command)).unwrap();
+    let project_id = context["project"]["project_id"].as_str().unwrap();
+    let local_base = format!(
+        "http://{}",
+        authority["http_application_endpoint"].as_str().unwrap()
+    );
+    let local_token = authority["auth_token"].as_str().unwrap();
+    Client::builder(ConnectionMode::local(&local_base, project_id, local_token))
+        .build()
+        .unwrap()
+        .execute::<WorkflowListDefinitions>(
+            &serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!(
+                {}
+            ))
+            .unwrap(),
+        )
+        .expect("the daemon serves the project before its writer is published");
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let brain_id = BrainId::new(authority["brain_id"].as_str().unwrap()).unwrap();
+    let node_id = BrainNodeId::new("node.remote-sdk-production").unwrap();
+    let mut grant = remote_grant(
+        brain_id.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    let operator = reqwest::blocking::Client::new();
+    let local_post = |path: &str, body: &Value| {
+        let response = operator
+            .post(format!("{local_base}{path}"))
+            .bearer_auth(local_token)
+            .header(reqwest::header::ORIGIN, &local_base)
+            .json(body)
+            .send()
+            .unwrap();
+        let status = response.status();
+        let body = response.text().unwrap();
+        (status, body)
+    };
+    let (status, body) = local_post(
+        "/remote-nodes/provision",
+        &json!({"grant": grant, "admission": remote_admission(&grant)}),
+    );
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
+    let endpoint = format!("https://{remote}/remote/");
+    EnrolledRemoteClient::new_with_root_certificate(
+        &endpoint,
+        grant_credential,
+        Duration::from_secs(5),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap()
+    .enroll(&enrollment_request(&grant), enrollment_credential)
+    .unwrap()
+    .result
+    .expect("the node is enrolled before its writer is published");
+
+    let previous_writer: RemoteWriterFenceV1 = serde_json::from_value(json!({
+        "brain_id": brain_id.as_str(),
+        "shard_id": "shard.remote-sdk-production",
+        "generation_id": "generation.remote-sdk-production",
+        "placement_revision": 1,
+        "authority_epoch": 1,
+        "authority_node_id": "node.remote-sdk-previous-writer"
+    }))
+    .unwrap();
+    let writer = json!({
+        "project_id": project_id,
+        "scope": grant.scope,
+        "authority": {
+            "fence": previous_writer,
+            "credential_revision": 1,
+            "observed_at": now_micros(),
+        },
+    });
+    let publication = json!({
+        "node_id": node_id,
+        "writer": writer,
+        "replay_policy": replay_policy(&grant.scope),
+    });
+
+    let mut unregistered = publication.clone();
+    unregistered["node_id"] = json!("node.remote-sdk-unregistered");
+    assert_eq!(
+        local_post("/remote-nodes/writer-authority", &unregistered),
+        (
+            reqwest::StatusCode::NOT_FOUND,
+            json!({"code": "node_not_registered"}).to_string()
+        )
+    );
+    let mut unprovisioned_scope = grant.scope.clone();
+    unprovisioned_scope.repository_id = RepositoryId::new("repository.remote-sdk-other").unwrap();
+    let mut unprovisioned = publication.clone();
+    unprovisioned["writer"]["scope"] = json!(unprovisioned_scope);
+    unprovisioned["replay_policy"] = json!(replay_policy(&unprovisioned_scope));
+    assert_eq!(
+        local_post("/remote-nodes/writer-authority", &unprovisioned),
+        (
+            reqwest::StatusCode::FORBIDDEN,
+            json!({"code": "scope_not_provisioned"}).to_string()
+        )
+    );
+    for attempt in ["publication", "exact replay"] {
+        let (status, body) = local_post("/remote-nodes/writer-authority", &publication);
+        assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{attempt}: {body}");
+    }
+
+    let sent_at = now_micros();
+    let failover = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-sdk-failover").unwrap(),
+        brain_id,
+        node_id.clone(),
+        1,
+        Some(previous_writer),
+        sent_at,
+        PromotionConfirmationV1 {
+            preview_id: "promotion.remote-sdk-failover".to_owned(),
+            expected_authority_epoch: 1,
+            expected_placement_revision: 1,
+            expires_at_micros: sent_at.0.saturating_add(60_000_000),
+        },
+    )
+    .unwrap();
+    let response = EnrolledRemoteClient::new_with_root_certificate(
+        &endpoint,
+        enrollment_credential,
+        Duration::from_secs(30),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap()
+    .failover(&failover)
+    .expect("failover over a published writer is a canonical protocol response");
+    let receipt = response
+        .result
+        .as_ref()
+        .expect("the enrolled node is promoted over the published writer")
+        .outcome
+        .payload()
+        .expect("an admitted promotion carries its compare-and-swap receipt");
+    assert_eq!(
+        (
+            receipt.previous_epoch,
+            receipt.installed_epoch,
+            receipt.old_authority_fenced
+        ),
+        (1, 2, true)
+    );
+    let promoted = serde_json::to_value(&response.authority).unwrap();
+    assert_eq!(
+        (
+            &promoted["state"],
+            &promoted["value"]["fence"]["authority_node_id"],
+            &promoted["value"]["fence"]["authority_epoch"],
+        ),
+        (&json!("available"), &json!(node_id.as_str()), &json!(2)),
+        "{promoted}"
+    );
+
+    assert_eq!(
+        local_post("/remote-nodes/writer-authority", &publication),
+        (
+            reqwest::StatusCode::CONFLICT,
+            json!({"code": "conflict"}).to_string()
+        ),
+        "publication must never roll a promoted lineage back to its first writer"
     );
 
     stop_daemon(&mut daemon);
@@ -670,6 +893,33 @@ fn remote_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvide
         Deadline::new(UtcMicros(now.0.saturating_add(600_000_000))).unwrap(),
     )
     .unwrap()
+}
+
+fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
+    let digest = ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap();
+    RemoteReplayPolicyEvidenceV1 {
+        scope: ResolvedScope::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            scope.reference.clone(),
+        )
+        .unwrap(),
+        repository_scope: scope.clone(),
+        policy_revision: 1,
+        decision: RemoteReplayPolicyDecisionV1::Admit,
+        policy: PolicyDecisionRef::new(
+            "policy.remote-sdk-production.replay",
+            1,
+            digest.clone(),
+            ComponentVersion::new("policy.remote-sdk-production.replay.v1").unwrap(),
+        )
+        .unwrap(),
+        configuration_digest: digest.clone(),
+        catalog_digest: digest.clone(),
+        privacy_digest: digest,
+        revalidated_at: now_micros(),
+    }
 }
 
 fn enrollment_request(grant: &EnrollmentGrantV1) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {

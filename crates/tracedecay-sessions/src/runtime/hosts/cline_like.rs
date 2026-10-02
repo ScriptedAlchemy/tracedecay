@@ -33,8 +33,8 @@ use crate::runtime::shared::{
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
     SnapshotCaptureOutcome, StableMessageIdDomains, bounded_snapshot_input_len,
-    capture_snapshot_observations, non_durable_snapshot_record, read_snapshot_text_bounded,
-    snapshot_message_fields, stable_snapshot_message_id,
+    capture_snapshot_observations, insert_snapshot_location, non_durable_snapshot_record,
+    read_snapshot_text_bounded, snapshot_message_fields, stable_snapshot_message_id,
 };
 #[cfg(test)]
 use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
@@ -844,8 +844,11 @@ fn snapshot_native_payload(
         payload.remove("role");
         payload.remove("text");
         payload.remove("model");
-    } else if let Some(tool_names) = &message.tool_names {
-        payload.insert("tool_names".to_string(), Value::String(tool_names.clone()));
+    } else {
+        insert_snapshot_location(&mut payload, metadata, CLINE_LIKE_LOCATION_KEYS);
+        if let Some(tool_names) = &message.tool_names {
+            payload.insert("tool_names".to_string(), Value::String(tool_names.clone()));
+        }
     }
     if let Some(usage) = metadata
         .and_then(|value| value.get("usage"))

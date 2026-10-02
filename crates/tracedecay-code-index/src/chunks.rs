@@ -2260,6 +2260,9 @@ fn resolve_file_references(
     };
     let mut resolved = Vec::new();
     let mut retained = Vec::new();
+    // A receiver call is gap evidence only; one site per caller and callee
+    // spelling is all of it, so a minified loop does not retain thousands.
+    let mut typescript_receiver_calls = HashSet::new();
     for reference in unresolved {
         let candidates = if reference.reference_name.contains("::") {
             by_file_relative_name.get(reference.reference_name.as_str())
@@ -2365,7 +2368,17 @@ fn resolve_file_references(
                     &by_node_id,
                     &imported_locals,
                     &rust_root_modules,
-                ) {
+                ) && !(typescript
+                    && (candidate
+                        .reference_name
+                        .starts_with(TYPESCRIPT_COMPUTED_RECEIVER)
+                        || typescript_member_call_path(&candidate.reference_name)
+                            .is_some_and(|(head, _)| !imported_locals.contains(head)))
+                    && !typescript_receiver_calls.insert((
+                        candidate.from_occurrence.clone(),
+                        candidate.reference_name.clone(),
+                    )))
+                {
                     retained.push(candidate);
                 }
             }
@@ -2394,8 +2407,8 @@ fn resolve_file_references(
 /// The retained cross-file form of one reference the file could not bind, or
 /// `None` when the reference can never bind cross-file: blocklisted names,
 /// relation kinds outside the canonical graph contract, and references whose
-/// enclosing symbol is not uniquely identified. Rust receiver calls remain as
-/// limitation evidence; Python, Go, Java, and Ruby qualified calls remain for
+/// enclosing symbol is not uniquely identified. Rust and TypeScript receiver
+/// calls remain as limitation evidence; Python, Go, Java, and Ruby qualified calls remain for
 /// import-module binding at sealing; a dotted name never grants edge
 /// authority by itself.
 fn cross_file_reference_candidate(
@@ -2408,9 +2421,6 @@ fn cross_file_reference_candidate(
     rust_root_modules: &HashSet<&str>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
     let rust = reference.file_path.ends_with(".rs");
-    let receiver_call = reference.reference_kind == EdgeKind::Calls
-        && rust
-        && reference.reference_name.contains('.');
     let typescript = typescript_family_path(&reference.file_path);
     let module_import = module_import_language_path(&reference.file_path);
     let explicitly_imported = (typescript || module_import)
@@ -2421,6 +2431,18 @@ fn cross_file_reference_candidate(
         && reference.reference_kind == EdgeKind::Calls
         && typescript_member_call_path(&reference.reference_name)
             .is_some_and(|(head, _)| imported_locals.contains(head));
+    let computed_member = (typescript && reference.reference_kind == EdgeKind::Calls)
+        .then(|| typescript_computed_member(&reference.reference_name))
+        .flatten();
+    // A call on a local, `this`, global, or computed receiver binds nothing
+    // by name, so it stays as limitation evidence.
+    let receiver_call = reference.reference_kind == EdgeKind::Calls
+        && reference.reference_name.contains('.')
+        && (rust
+            || computed_member.is_some()
+            || (typescript
+                && typescript_member_call_path(&reference.reference_name)
+                    .is_some_and(|(head, _)| !imported_locals.contains(head))));
     // A qualified call in an import-module language binds at sealing
     // through the file's imports, its package, or its loaded files; one the
     // seal cannot bind remains a disclosed caller gap.
@@ -2446,9 +2468,19 @@ fn cross_file_reference_candidate(
     let from = (*by_node_id.get(reference.from_node_id.as_str())?)?;
     Some(CodeIndexUnresolvedReferenceV1 {
         from_occurrence: from.occurrence.clone(),
-        reference_name: reference.reference_name.clone(),
+        reference_name: computed_member.map_or_else(
+            || reference.reference_name.clone(),
+            |member| format!("{TYPESCRIPT_COMPUTED_RECEIVER}{member}"),
+        ),
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
+            .map(|span| match computed_member {
+                Some(member) => SourceSpan {
+                    start_byte: span.end_byte - member.len() as u64,
+                    ..span
+                },
+                None => span,
+            })
             .unwrap_or(from.span),
         unmodeled_import: reference.unmodeled_import,
         argument_count: reference.argument_count,
@@ -2460,14 +2492,30 @@ fn cross_file_reference_candidate(
 /// callee expression (calls, indexing, optional chaining).
 pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str, &str)> {
     let (head, members) = reference_name.split_once('.')?;
-    let identifier = |segment: &str| {
-        !segment.is_empty()
-            && !segment.starts_with(|c: char| c.is_ascii_digit())
-            && segment
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    };
-    (identifier(head) && members.split('.').all(identifier)).then_some((head, members))
+    (typescript_identifier(head) && members.split('.').all(typescript_identifier))
+        .then_some((head, members))
+}
+
+const TYPESCRIPT_COMPUTED_RECEIVER: &str = "<computed>.";
+
+/// The member a TypeScript call invokes on an expression receiver rather
+/// than an identifier path (`[1, 2].map`, `make().run`, `rows[0].save`,
+/// `x?.y`). Its gap is retained as `<computed>.member` at the member token,
+/// because the receiver text is unbounded.
+fn typescript_computed_member(reference_name: &str) -> Option<&str> {
+    if typescript_member_call_path(reference_name).is_some() {
+        return None;
+    }
+    let (_, member) = reference_name.rsplit_once('.')?;
+    typescript_identifier(member).then_some(member)
+}
+
+fn typescript_identifier(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.starts_with(|c: char| c.is_ascii_digit())
+        && segment
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Whether a path is a TypeScript-family source the TypeScript extractor

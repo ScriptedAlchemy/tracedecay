@@ -33,6 +33,9 @@ pub(super) const CHECKPOINT_ENTRY_BYTES: usize = 100;
 pub(super) const CHECKPOINT_REWRITE_FRAME_THRESHOLD: u32 = 64;
 pub(super) const CHECKPOINT_REWRITE_BYTE_THRESHOLD: u64 = 256 * 1024;
 
+/// Names the records file, not its bytes. Open re-derives the covered prefix
+/// digest and every append re-checks it, so an equal revision never stands in
+/// for reading the records and needs no change-time settledness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RecordsFileRevisionV1 {

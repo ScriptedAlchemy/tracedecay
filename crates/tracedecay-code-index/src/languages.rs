@@ -232,7 +232,8 @@ impl StaticLanguageRegistry {
             // Rust v17 gives `const`/`static` initializers their calls. Rust
             // v18 keeps the path or receiver of a call inside macro arguments
             // and spells in-file `self::`/`super::`/`crate::` calls by their
-            // bare name, so both bind.
+            // bare name, so both bind. Rust v19 spells a `Self::f` call by
+            // its enclosing impl or trait type, so it binds exactly.
             // TypeScript v7 records `export … from` forwarding as public
             // import evidence and retains explicitly imported ubiquitous names
             // as cross-file candidates, so barrels and workspace packages bind.
@@ -273,12 +274,18 @@ impl StaticLanguageRegistry {
             // `attrs_start_line` keeps, as Rust always has. Java v8 records
             // call argument counts and declared parameter lists, so a call
             // binds the one overload that accepts its arguments.
+            // TypeScript v12 (Svelte and Astro v8) retains a member call on a
+            // local, `this`, or global receiver as a disclosed caller gap.
+            // TypeScript v13 (Svelte and Astro v9) extracts exported, nested,
+            // dotted, and `module` namespaces, and retains a member call on a
+            // computed receiver as a disclosed caller gap.
             let extractor_revision = match language.as_str() {
-                "rust" => 18,
-                "typescript" => 11,
+                "rust" => 19,
+                "typescript" => 13,
+                "svelte" | "astro" => 9,
                 "go" => 9,
                 "java" => 8,
-                "ruby" | "protobuf" | "python" | "svelte" | "astro" => 7,
+                "ruby" | "protobuf" | "python" => 7,
                 "sql" | "dart" | "kotlin" | "csharp" => 6,
                 "c" | "cpp" | "metal" | "objc" | "glsl" | "pascal" | "qbasic" | "quickbasic" => 6,
                 _ => 5,
@@ -480,7 +487,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v18");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v19");
 
         assert_eq!(
             registry

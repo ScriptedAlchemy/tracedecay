@@ -69,6 +69,7 @@
         "test:core_cli_suite",
         "test:work_route_exposure_conformance",
         "test:c_library_allocator",
+        "test:process_allocator_heaps",
         "test:retained_parse_heap",
         "test:refresh_memory_journey"
       ],

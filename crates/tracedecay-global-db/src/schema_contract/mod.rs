@@ -4,10 +4,16 @@ mod pragma;
 mod validation;
 
 use tracedecay_domain::canonical_text::canonical_framed_sha256;
+use tracedecay_lcm::schema::LCM_SCHEMA_VERSION;
 use tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION;
-use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
+use tracedecay_rusqlite_runtime::workflow::{
+    WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_VERSION_V1, WORKFLOW_TABLE_CONTRACTS_V1,
+};
+use tracedecay_session_temporal_store::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
+use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
 use crate::configuration::{CONFIGURATION_FORMAT_REVISION, TOPOLOGY_POLICY_SCHEMA_VERSION};
+use crate::observation::OBSERVATION_ADMISSION_MARKERS;
 
 /// Domain tag for [`expected_admitted_schema_fingerprint`]. Distinct from the
 /// graph-database final-shape domain so the two identities are not interchangeable.
@@ -20,6 +26,33 @@ const ADMITTED_SCHEMA_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.admitted-store-sc
 /// of those constants changes this digest; callers do not keep a second list.
 pub fn expected_admitted_schema_fingerprint() -> String {
     hash_admitted_schema(None).0
+}
+
+/// Domain tag for [`registered_schema_admission_digest`].
+const REGISTERED_SCHEMA_ADMISSION_DIGEST_DOMAIN: &[u8] =
+    b"tracedecay.registered-schema-admission.v1";
+
+/// Digest of every contract registered-schema admission can refuse a store
+/// on: the admitted authority fingerprint plus the LCM, session-temporal,
+/// git-correlation, workflow, and observation identities admission compares a
+/// store against. A store admitted under this digest is admitted again by any
+/// binary that computes the same one; additive install stages never refuse.
+pub fn registered_schema_admission_digest() -> String {
+    let mut parts = vec![
+        format!("admitted:{}", expected_admitted_schema_fingerprint()),
+        format!("lcm:{LCM_SCHEMA_VERSION}"),
+        format!("session_temporal:{SESSION_TEMPORAL_SCHEMA_VERSION}"),
+        format!("git_correlation:{GIT_CORRELATION_SCHEMA_VERSION}"),
+        format!("workflow:{WORKFLOW_SCHEMA_VERSION_V1}:{WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"),
+    ];
+    for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+        parts.push(format!("workflow_table:{}:{}", table.name, table.sql));
+    }
+    for marker in OBSERVATION_ADMISSION_MARKERS {
+        parts.push(format!("observation_marker:{marker}"));
+    }
+    let bytes: Vec<&[u8]> = parts.iter().map(String::as_bytes).collect();
+    canonical_framed_sha256(REGISTERED_SCHEMA_ADMISSION_DIGEST_DOMAIN, &bytes)
 }
 
 /// Fingerprint of the admitted contract with one column constant removed.

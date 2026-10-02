@@ -531,26 +531,57 @@ pub async fn create_managed_skill(
     Ok(skill)
 }
 
+/// Why one managed skill record could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ManagedSkillReadError {
+    /// The requested id is not a safe managed skill id.
+    #[error(transparent)]
+    InvalidId(TraceDecayError),
+    /// No record exists for the id.
+    #[error("managed skill '{id}' not found")]
+    NotFound { id: String },
+    /// The store or the stored record failed.
+    #[error(transparent)]
+    Failed(#[from] TraceDecayError),
+}
+
+impl From<ManagedSkillReadError> for TraceDecayError {
+    fn from(error: ManagedSkillReadError) -> Self {
+        match error {
+            ManagedSkillReadError::NotFound { id } => {
+                config_error(format!("managed skill '{id}' not found"))
+            }
+            ManagedSkillReadError::InvalidId(error) | ManagedSkillReadError::Failed(error) => error,
+        }
+    }
+}
+
 #[hotpath::measure(label = "automation.managed_skill.load", future = true)]
-pub async fn load_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+pub async fn load_managed_skill(
+    profile_root: &Path,
+    id: &str,
+) -> std::result::Result<ManagedSkill, ManagedSkillReadError> {
     let _lock = lock_skill_store_async(profile_root).await?;
     load_managed_skill_unlocked(profile_root, id)
 }
 
-fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
-    let dir = managed_skill_dir(profile_root, id)?;
+fn load_managed_skill_unlocked(
+    profile_root: &Path,
+    id: &str,
+) -> std::result::Result<ManagedSkill, ManagedSkillReadError> {
+    let dir = managed_skill_dir(profile_root, id).map_err(ManagedSkillReadError::InvalidId)?;
     let path = dir.join("skill.json");
     let bytes = std::fs::read(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            config_error(format!("managed skill '{id}' not found"))
+            ManagedSkillReadError::NotFound { id: id.to_owned() }
         } else {
-            config_error(format!(
+            ManagedSkillReadError::Failed(config_error(format!(
                 "failed to read managed skill record '{}': {e}",
                 path.display()
-            ))
+            )))
         }
     })?;
-    decode_managed_skill_record(&path, &bytes)
+    Ok(decode_managed_skill_record(&path, &bytes)?)
 }
 
 /// A stored record that fails to parse or validate is one typed `Config`

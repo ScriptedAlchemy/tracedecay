@@ -560,6 +560,9 @@ impl ApplicationProblemRecord {
         };
         let diagnostic = source.diagnostic().cloned();
         let detail = source.detail().cloned();
+        let measured_delay = detail
+            .as_ref()
+            .and_then(ApplicationProblemDetailV1::retry_after_millis);
         let committed_receipt = source.committed_receipt().cloned();
         let code = diagnostic
             .as_ref()
@@ -581,10 +584,14 @@ impl ApplicationProblemRecord {
             // An `after_delay` directive promises a delay: the serialized
             // contract (enforced by every generated SDK client) rejects the
             // directive with a null delay, so the canonical default fills it
-            // here at the single construction authority. Callers that know a
-            // better figure override via `with_retry_after_millis`.
-            retry_after_millis: (retry == RetryDirective::AfterDelay)
-                .then_some(DEFAULT_RETRY_AFTER_MILLIS),
+            // here at the single construction authority. A detail that
+            // measured its delay carries it; other callers that know a better
+            // figure override via `with_retry_after_millis`.
+            retry_after_millis: (retry == RetryDirective::AfterDelay).then_some(
+                measured_delay.map_or(DEFAULT_RETRY_AFTER_MILLIS, |delay| {
+                    delay.min(MAX_RETRY_AFTER_MILLIS)
+                }),
+            ),
             cancellation_stage: source.cancellation_stage(),
             unavailable_classification: source.unavailable_classification(),
             execution_failure_classification: source.execution_failure_classification(),

@@ -6,7 +6,10 @@ use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::runtime::SessionProvider;
 
 use crate::codex::write_jsonl;
-use crate::restart_atomicity::{ingest_global_sources_for_provider, open_project_session_db};
+use crate::restart_atomicity::{
+    assert_secret_absent_from_observation_sinks, ingest_global_sources_for_provider,
+    open_project_session_db,
+};
 use crate::support::setup;
 
 fn write_codex_rollout_with_non_goal_response_item(
@@ -44,6 +47,136 @@ fn write_codex_rollout_with_non_goal_response_item(
     );
     std::fs::write(&path, contents).unwrap();
     path
+}
+
+#[tokio::test]
+async fn codex_response_item_tool_calls_are_searchable_by_their_arguments() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-20-codex-tool-args.jsonl");
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:20.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-tool-args", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:20.500Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Merge the PR and patch the file"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:21.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call-merge",
+                "arguments": "{\"cmd\":\"gh pr merge 366 --squash\"}"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:22.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call-patch",
+                "input": "*** Begin Patch\n*** Update File: src/quarkonium.rs\n*** End Patch"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:23.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "zirconium lattice constant"}
+            }
+        }),
+    ];
+    write_jsonl(&path, &lines);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+
+    let merge = db
+        .search_session_messages("codex", None, "gh pr merge 366", 10)
+        .await
+        .into_iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("exec_command"))
+        .expect("the exec_command arguments must be searchable");
+    assert_eq!(merge.message.kind.as_deref(), Some("tool_invocation"));
+    assert!(
+        merge.message.text.contains("gh pr merge 366 --squash"),
+        "tool invocation text must carry the command: {:?}",
+        merge.message.text
+    );
+
+    let patch = db
+        .search_session_messages("codex", None, "quarkonium", 10)
+        .await
+        .into_iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("apply_patch"))
+        .expect("the apply_patch input must be searchable");
+    assert_eq!(patch.message.kind.as_deref(), Some("tool_invocation"));
+
+    let search = db
+        .search_session_messages("codex", None, "zirconium lattice", 10)
+        .await
+        .into_iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("web_search"))
+        .expect("the web_search action must be searchable");
+    assert_eq!(search.message.kind.as_deref(), Some("tool_invocation"));
+}
+
+#[tokio::test]
+async fn codex_response_item_tool_arguments_are_sanitized_before_observation_and_projection() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-30-codex-tool-secret.jsonl");
+    let secret = "sk-proj-codex-canary-1234567890";
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:30.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-tool-secret", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:30.500Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Deploy the service"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:31.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call-secret",
+                "arguments": format!("{{\"cmd\":\"curl deploy-hook\",\"token\":\"{secret}\"}}")
+            }
+        }),
+    ];
+    write_jsonl(&path, &lines);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+
+    let hit = db
+        .search_session_messages("codex", None, "curl deploy-hook", 10)
+        .await
+        .into_iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("exec_command"))
+        .expect("the non-secret part of the command must stay searchable");
+    assert_eq!(hit.message.kind.as_deref(), Some("tool_invocation"));
+    assert!(!hit.message.text.contains(secret));
+
+    assert_secret_absent_from_observation_sinks(&db, "codex", secret).await;
 }
 
 #[tokio::test]
@@ -198,6 +331,21 @@ Budget:
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:08.500Z",
+            "type": "turn_context",
+            "payload": {"cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.600Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "developer-context",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX"}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.700Z",
             "type": "response_item",
             "payload": {
                 "type": "message",
@@ -221,7 +369,7 @@ Budget:
             "payload": {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "ordinary response item duplicate should stay skipped"}]
+                "content": [{"type": "output_text", "text": "Visible assistant reply"}]
             }
         }),
         serde_json::json!({
@@ -267,6 +415,41 @@ Budget:
     assert_eq!(metadata["source_role"], "user");
     assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
+
+    let developer_hits = db
+        .search_session_messages(
+            "codex",
+            Some(db.project_id().as_str()),
+            "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX",
+            10,
+        )
+        .await;
+    assert!(
+        developer_hits.is_empty(),
+        "developer context must not be searchable: {developer_hits:?}"
+    );
+
+    let assistant_hits = db
+        .search_session_messages(
+            "codex",
+            Some(db.project_id().as_str()),
+            "Visible assistant reply",
+            10,
+        )
+        .await
+        .into_iter()
+        .map(|hit| (hit.message.role, hit.message.kind, hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_hits,
+        vec![(
+            "assistant".to_owned(),
+            Some("message".to_owned()),
+            "Visible assistant reply".to_owned(),
+        )],
+        "the event message is searchable once; its response_item echo and empty protocol rows are not"
+    );
+
     assert_eq!(
         db.get_parse_offset(path.to_string_lossy().as_ref()).await,
         Some(legacy_cursor),

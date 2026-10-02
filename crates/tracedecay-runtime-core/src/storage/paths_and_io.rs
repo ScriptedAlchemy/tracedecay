@@ -31,6 +31,7 @@ impl StoreManifest {
             graph_db_relpath: relative_to_data_root(&layout.graph_db_path, &layout.data_root),
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
             branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
+            sessions_schema_digest: None,
         }
     }
 }
@@ -339,24 +340,6 @@ impl PrivateStoreIo {
             hotpath::gauge!("runtime_core.storage.durable_write_failures").inc(1.0);
         })?;
         Ok(())
-    }
-
-    /// Synchronizes the durable members of one `SQLite` WAL family. The SHM
-    /// coordination file is intentionally excluded because `SQLite` rebuilds it.
-    #[hotpath::measure(label = "runtime_core.storage.sqlite_family_sync")]
-    pub fn sync_sqlite_family(path: &Path) -> io::Result<()> {
-        reject_symlink_components(path, "private SQLite store")?;
-        for member in [
-            path.to_path_buf(),
-            PathBuf::from(format!("{}-wal", path.display())),
-        ] {
-            match fs::OpenOptions::new().read(true).write(true).open(&member) {
-                Ok(file) => file.sync_all()?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        sync_parent_directory(path)
     }
 
     pub fn copy_artifact(source: &Path, target: &Path) -> io::Result<u64> {

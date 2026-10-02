@@ -165,6 +165,7 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
         branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
+        sessions_schema_digest: None,
     };
     std::fs::write(
         store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
@@ -458,6 +459,7 @@ async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window()
         graph_db_relpath: PathBuf::from("tracedecay.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
         branch_meta_relpath: PathBuf::from("branch-meta.json"),
+        sessions_schema_digest: None,
     };
     let seed = |name: &str, project_root: Option<&Path>| {
         let data_root = profile_root.join("projects").join(name);

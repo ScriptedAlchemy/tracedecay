@@ -77,7 +77,7 @@ export type AdmitWorkSynthesisCommand = {
 
 export type AgentInstanceId = string;
 
-export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable";
+export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large";
 
 export type AgentTaskKind = "combined_review" | "memory_curator" | "session_reflector" | "skill_writer" | "user_job";
 
@@ -321,6 +321,10 @@ export type AnalyticsUsageSummaryV1 = {
 export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" | "permanent";
 
 export type ApplicationProblemDetailV1 = 
+  | {
+    kind: "code_graph_rewarming";
+    retry_after_millis: number;
+  }
   | {
     kind: "daemon_unreachable";
     named_by: string | null;

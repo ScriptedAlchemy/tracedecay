@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::runtime::host_scan::HostScanBudget;
+use crate::runtime::hosts::codex::SettledTranscript;
 use crate::runtime::source::{
     FileDiscoveryReport, TranscriptIngestResult, canonical_framed_sha256,
 };
@@ -36,6 +37,18 @@ pub(super) struct KimiDiscoveryReport {
     /// A partial sweep must not advance the durable discovery frontier.
     pub(super) scan_complete: bool,
     pub(super) reached_end: bool,
+    /// Session state files whose agent transcripts this pass still has to
+    /// admit. Each is finished once those transcripts are covered, so the
+    /// next history wake does not open `state.json` to rediscover them.
+    pub(super) state_gates: Vec<KimiStateGate>,
+}
+
+/// One Kimi `state.json` that becomes converged when `pending_wires` are
+/// admitted through the identity `settled` observed.
+pub(super) struct KimiStateGate {
+    pub(super) path: PathBuf,
+    pub(super) settled: SettledTranscript,
+    pub(super) pending_wires: Vec<PathBuf>,
 }
 
 impl KimiDiscoveryReport {
