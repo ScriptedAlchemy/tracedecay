@@ -64,13 +64,13 @@ const MEMORY_TOOLS: &[MemoryTool] = &[
     MemoryTool {
         operation: "fact_store_remove",
         title: "Fact Store Remove",
-        description: "Remove one holographic memory fact by exact fact id.",
+        description: "Remove one holographic memory fact by exact fact id. An unknown fact id returns `outcome: not_found`, an idempotent success rather than a refusal.",
         write: true,
     },
     MemoryTool {
         operation: "fact_store_supersede",
         title: "Fact Store Supersede",
-        description: "Mark one holographic memory fact as superseded by another fact id. The old fact leaves default list/search/probe results but stays readable by id through its history; payload and trust are untouched. Use this when a newer fact corrects an older one instead of removing the old one.",
+        description: "Mark one holographic memory fact as superseded by another fact id. The old fact leaves default list/search/probe results but stays readable by id through its history; payload and trust are untouched. Use this when a newer fact corrects an older one instead of removing the old one. An unknown fact id returns `outcome: not_found`, an idempotent success rather than a refusal.",
         write: true,
     },
     MemoryTool {
