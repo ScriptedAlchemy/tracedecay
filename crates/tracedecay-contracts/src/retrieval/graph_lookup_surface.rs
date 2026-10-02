@@ -9,7 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::result::{EvidenceCoverage, Omission};
-use crate::retrieval::{NodeExpansionCostV1, PrimitiveSymbolLocationV1};
+use crate::retrieval::{
+    NodeExpansionCostV1, PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1, SearchCoverageV1,
+};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +40,14 @@ pub struct FindExactSymbolMatchV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FindExactSymbolResultV1 {
+    /// Freshness of the served code generation, derived from the graph lane
+    /// this lookup read and the daemon scheduler's worktree state.
+    pub freshness: PrimitiveSearchFreshnessV1,
+    /// The sealed code generation these matches came from.
+    pub code_generation: String,
+    /// Per-lane recall of this lookup. Only the graph lane is queried;
+    /// unqueried lanes report `unavailable` with reason `not_queried`.
+    pub coverage: SearchCoverageV1,
     pub name: String,
     pub count: u64,
     pub matches: Vec<FindExactSymbolMatchV1>,

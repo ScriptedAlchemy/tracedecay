@@ -197,7 +197,10 @@ impl GraphToolResultV1 {
     /// result settled. The seat freshness recorded at graph open is then an
     /// earlier, second reading and is not reported beside it.
     pub fn carries_freshness_verdict(&self) -> bool {
-        matches!(self, Self::Search(_) | Self::Context(_))
+        matches!(
+            self,
+            Self::Search(_) | Self::Context(_) | Self::FindExactSymbol(_)
+        )
     }
 
     /// The result body alone, the shape its catalog result schema names.

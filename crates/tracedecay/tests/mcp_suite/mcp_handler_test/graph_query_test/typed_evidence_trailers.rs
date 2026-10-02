@@ -101,6 +101,51 @@ async fn search_results_end_with_the_accounting_footer_for_their_files() {
     shutdown_graph_fixture(fixture).await;
 }
 
+/// `find_exact_symbol` carries the same freshness and coverage envelope as
+/// `search`: the verdict, the served generation, and per-lane coverage whose
+/// unqueried lanes report `unavailable` instead of an implied three-lane run.
+#[tokio::test]
+async fn find_exact_symbol_carries_the_search_freshness_and_coverage_envelope() {
+    let fixture = trailer_fixture().await;
+    let arguments = json!({"name": "known", "format": "json"});
+    let mut texts = call(&fixture, "tracedecay_find_exact_symbol", arguments.clone()).await;
+    for _ in 0..60 {
+        let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+        if payload["freshness"] == json!({"state": "fresh"}) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        texts = call(&fixture, "tracedecay_find_exact_symbol", arguments.clone()).await;
+    }
+    let body = body_before_footer(&texts, 637);
+    let payload: Value = serde_json::from_str(&body[0]).unwrap();
+    assert_eq!(payload["matches"][0]["name"], "known", "{payload:#}");
+    assert!(
+        payload["code_generation"]
+            .as_str()
+            .is_some_and(|generation| generation.starts_with("generation.")),
+        "{payload:#}"
+    );
+    assert_eq!(
+        (
+            &payload["freshness"],
+            &payload["coverage"]["graph"],
+            &payload["coverage"]["exact"],
+            &payload["coverage"]["lexical"],
+            &payload["coverage"]["recall"],
+        ),
+        (
+            &json!({"state": "fresh"}),
+            &json!("complete"),
+            &json!({"status": "unavailable", "reason": "not_queried"}),
+            &json!({"status": "unavailable", "reason": "not_queried"}),
+            &json!("full"),
+        ),
+        "{payload:#}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
 #[tokio::test]
 async fn plan_context_returns_its_plan_sections_and_the_accounting_footer() {
     let fixture = trailer_fixture().await;

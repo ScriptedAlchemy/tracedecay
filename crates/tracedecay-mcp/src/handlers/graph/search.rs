@@ -104,7 +104,7 @@ fn preserve_complete_search_after_lazy_admission(result: Result<()>) -> Result<(
 
 /// The per-lane recall marker every search response carries, so "no
 /// matches" is told apart from "the matching lane was not running".
-fn search_coverage(coverage: &CodeIndexSearchCoverageV1) -> SearchCoverageV1 {
+pub(super) fn search_coverage(coverage: &CodeIndexSearchCoverageV1) -> SearchCoverageV1 {
     fn lane(status: &CodeIndexLaneStatusV1) -> SearchLaneStatusV1 {
         match status {
             CodeIndexLaneStatusV1::Complete => {

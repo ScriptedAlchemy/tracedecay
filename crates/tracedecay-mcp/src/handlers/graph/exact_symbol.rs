@@ -3,14 +3,21 @@
 use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    FindExactSymbolMatchV1, FindExactSymbolResultV1, FindExactSymbolSurfaceRequestV1,
+    CodeGraphReadFreshnessV1, FindExactSymbolMatchV1, FindExactSymbolResultV1,
+    FindExactSymbolSurfaceRequestV1, PrimitiveRecallV1,
 };
 use tracedecay_domain::errors::Result;
+use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
 
 use crate::McpToolContext;
 use crate::handlers::dependency_hints;
 use crate::handlers::support::decode_primitive_request;
 
+use super::search::search_coverage;
+use super::search_freshness::{
+    ServedGenerationV1, lanes_under_scheduler_freshness, search_freshness,
+    worktree_freshness_from_payload,
+};
 use super::{
     graph_symbol_paths, graph_symbols_in_scope, graph_tool_completion, required_graph_file_path,
     required_graph_metadata, user_line,
@@ -74,8 +81,51 @@ pub async fn compute_find_exact_symbol(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+
+    // The same freshness verdict `tracedecay_search` carries: this lookup
+    // reads only the graph lane, so its coverage reports that lane's seat and
+    // the exact and lexical lanes as unqueried rather than implying a
+    // three-lane answer ran.
+    let freshness_payload = ctx.freshness().await;
+    let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
+    let code_generation = graph.generation().as_str().to_owned();
+    let lanes = lanes_under_scheduler_freshness(
+        CodeIndexSearchCoverageV1 {
+            exact: CodeIndexLaneStatusV1::Unavailable {
+                reason: "not_queried",
+            },
+            lexical: CodeIndexLaneStatusV1::Unavailable {
+                reason: "not_queried",
+            },
+            graph: match graph.freshness() {
+                CodeGraphReadFreshnessV1::Current => CodeIndexLaneStatusV1::Complete,
+                CodeGraphReadFreshnessV1::LastCompleteStale { .. } => {
+                    CodeIndexLaneStatusV1::Stale {
+                        generation: code_generation.clone(),
+                    }
+                }
+            },
+        },
+        &code_generation,
+        &worktree_freshness,
+    );
+    let freshness = search_freshness(
+        ServedGenerationV1::Served(&code_generation),
+        &lanes,
+        &worktree_freshness,
+    );
+    let mut coverage = search_coverage(&lanes);
+    coverage.recall = if lanes.graph == CodeIndexLaneStatusV1::Complete {
+        PrimitiveRecallV1::Full
+    } else {
+        PrimitiveRecallV1::Partial
+    };
+
     Ok(graph_tool_completion(
         GraphToolResultV1::FindExactSymbol(FindExactSymbolResultV1 {
+            freshness,
+            code_generation,
+            coverage,
             name: request.name.clone(),
             count: matches.len() as u64,
             matches,
