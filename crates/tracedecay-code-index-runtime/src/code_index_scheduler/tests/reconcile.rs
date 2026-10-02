@@ -3340,8 +3340,7 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
 /// A persistent publication seats its graph head on the text owner before the
 /// serving decode, and the holder that decode usually meets is the pass's own
 /// text projection, gone before the follow-up pass. The predecessor's decoded
-/// seat must not outlive that refusal, or the follow-up pass reads the
-/// occupied slot as nothing owed and the generation never seats.
+/// seat must not make the follow-up pass treat the successor as already seated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refused_decode_of_a_graph_serving_publication_seats_on_the_follow_up_pass() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -3418,6 +3417,14 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+    let predecessor = registry
+        .latest_complete_serving_for_test(fixture.path())
+        .await
+        .expect("the predecessor still serves before the failed decode")
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
 
     let pointer: serde_json::Value = serde_json::from_slice(
         &std::fs::read(held.scoped_store.join("active-code-generation-v1.json"))
@@ -3489,6 +3496,14 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
             .await
             .is_none_or(|seat| seat.generation().manifest().generation_id.as_str() != second),
         "a corrupt generation never seats"
+    );
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat.generation().manifest().generation_id.clone()),
+        Some(predecessor),
+        "a permanently undecodable successor keeps the predecessor serving"
     );
     registry.shutdown().await;
 }
