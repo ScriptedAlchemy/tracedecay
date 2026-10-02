@@ -729,8 +729,13 @@ pub(super) async fn finalize_skill_writer_success(
         );
         record.status = crate::automation::run_ledger::AutomationRunStatus::Failed;
         record.error = Some(error.to_string());
-        record.error_classification = Some(AgentTaskFailureClass::Permanent);
-        record.error_retryable = Some(false);
+        let error_classification = if deployment_failed {
+            AgentTaskFailureClass::Retryable
+        } else {
+            AgentTaskFailureClass::Permanent
+        };
+        record.error_classification = Some(error_classification);
+        record.error_retryable = Some(error_classification.is_retryable());
         record.applied_ops = Some(json!({
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),

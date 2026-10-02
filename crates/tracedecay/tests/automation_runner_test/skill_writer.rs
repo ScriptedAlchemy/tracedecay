@@ -735,6 +735,94 @@ async fn skill_writer_runner_activates_validated_skills() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn skill_writer_host_deployment_failure_is_retried_after_cooldown() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let backend = SkillJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [{
+            "id": "scheduler-review",
+            "title": "Scheduler review",
+            "summary": "Review scheduler decisions before enabling automation.",
+            "routing_description": "Review scheduler decisions before enabling automation.",
+            "routing_validation": skill_routing_validation("scheduler-review"),
+            "category": "workflow",
+            "body_markdown": "Check interval gates, cooldowns, locks, and run ledgers before changing schedules.",
+            "reason": "Session evidence repeats scheduler review."
+        }]
+    }));
+    let mut config = enabled_skill_writer_config();
+    config.tasks.skill_writer.schedule = Some("interval".to_string());
+    config.tasks.skill_writer.interval_secs = Some(1);
+    config.tasks.skill_writer.cooldown_secs = Some(300);
+    let context = cg.automation_project_context(None).unwrap();
+
+    let result = run_skill_writer_with_backend_and_retrieval(
+        &context,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            provider: "cursor".to_string(),
+            query: "automation".to_string(),
+            evidence_limit: 5,
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await;
+    let record = match result {
+        Err(AutomationRunError::PartialEffect {
+            ledger_record: Some(record),
+            ..
+        }) => *record,
+        other => panic!("expected a recorded partial effect, got {other:?}"),
+    };
+
+    assert_eq!(record.status, AutomationRunStatus::Failed);
+    assert_eq!(
+        record
+            .validation_report
+            .as_ref()
+            .and_then(|report| report["status"].as_str()),
+        Some("failed_after_partial_effects")
+    );
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Retryable)
+    );
+    assert_eq!(record.error_retryable, Some(true));
+    assert_eq!(
+        load_managed_skill(&profile_root, "scheduler-review")
+            .await
+            .unwrap()
+            .metadata
+            .state,
+        ManagedSkillState::Active
+    );
+    let completed_at = record.completed_at.parse::<i64>().unwrap();
+    assert!(
+        tracedecay_automation_runtime::automation::scheduler::schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SkillWriter,
+            &[record],
+            tracedecay_automation_runtime::automation::scheduler::SessionActivity::at(
+                completed_at + 1
+            ),
+            completed_at + config.tasks.skill_writer.cooldown_secs.unwrap() as i64 + 1,
+        )
+        .is_due()
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
