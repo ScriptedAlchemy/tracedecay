@@ -34,9 +34,10 @@
 //!
 //! Surfaces are driven the way a client drives them: the live daemon's
 //! published HTTP application endpoint, the real `tracedecay serve` MCP server
-//! over stdio, and the real `tracedecay tool` command listing. Nothing here
-//! inspects source files or shells out to a scanner; each assertion is a
-//! product call.
+//! over stdio, the real `tracedecay tool` command listing, a Content-Length
+//! framed `tracedecay lsp bridge` session, and a live `tracedecay dashboard`
+//! server. Nothing here inspects source files or shells out to a scanner; each
+//! assertion is a product call.
 
 use crate::common;
 use crate::common::run_ok;
@@ -266,8 +267,8 @@ fn ast_grep_executable() -> PathBuf {
         .expect("ast-grep must be on the test PATH to grade the ast-grep bindings")
 }
 
-/// The dashboard server's closed operation->route table, restated here as the
-/// reverse authority the catalog must not be derived from.
+/// The dashboard server's closed operation->route table, restated in the test
+/// so the probe does not derive its routes from the catalog it grades.
 ///
 /// The dashboard adapter mounts three dispatch surfaces: the configuration
 /// router at `/api/dashboard/application/configuration/{operation}`, the
@@ -402,11 +403,15 @@ fn read_lsp_frame(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
 ///
 /// The bridge forwards each frame to a daemon-owned LSP session. Dispatch
 /// gates catalog-routable methods on the session's catalog binding before
-/// reaching a handler, so the wire verdict is exact: an operation whose name
-/// the method table does not parse, or whose catalog binding the session
-/// cannot resolve, answers `Method unavailable` (-32601); every implemented
-/// mount answers with a result or a non--32601 error from the handler or the
-/// parameter parsers beneath it.
+/// reaching a handler, so the absence verdict is exact: an operation whose
+/// catalog binding the session cannot resolve, or a method the surface
+/// explicitly defers, answers `Method unavailable` (-32601) with
+/// `explicitlyUnavailable` in the error data. Parameter-parse errors,
+/// capability negotiation, and provider unavailability come back with
+/// different codes or reasons from the handler layer beneath the gate, which
+/// is what marks the operation mounted. Catalog admission rejects unroutable
+/// operation names at construction, so every declared binding reaches this
+/// gate.
 struct LspBridgeProbe {
     _process: common::TestChildProcess,
     stdin: ChildStdin,
@@ -926,7 +931,8 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                 }
                 BindingSurface::Lsp => format!(
                     "{note}: the live lsp bridge answered Method unavailable \
-                     (-32601) for this catalog-declared operation"
+                     (-32601 explicitlyUnavailable) for this catalog-declared \
+                     operation"
                 ),
                 BindingSurface::Dashboard => format!(
                     "{note}: no route in the dashboard server's closed \
