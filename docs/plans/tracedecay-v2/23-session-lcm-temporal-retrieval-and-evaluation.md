@@ -431,9 +431,9 @@ reads.
 - `crates/tracedecay-store/src/session/common.rs` owns
   `SessionFrozenWatermarksV1`, expanded to the sorted per-session/per-source
   manifest.
-- `projection.rs::SessionTemporalProjectionStore` owns generation writes,
-  derived records/members, count/digest receipts, ready/active transitions, and
-  immutable replay.
+- `projection.rs` owns the bounded projection batch and its count/digest
+  receipt contracts; candidate generations are written, activated, and
+  replayed only through the refresh port below.
 - `retrieval.rs::SessionRetrievalStore` owns frozen compact reads and
   `expand_derived_members(snapshot, id, after_ordinal, limit)`.
 - `summary.rs::SessionSummaryStore` owns immutable summary publication and leaf

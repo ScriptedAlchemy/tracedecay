@@ -519,6 +519,83 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     assert_mounted_git_sync(&run_with_timeout(command, cli_timeout()), false);
 }
 
+fn dashboard_session_authority(capabilities_url: &str) -> String {
+    let capabilities: serde_json::Value = ureq::get(capabilities_url)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {capabilities_url} failed: {error}"))
+        .into_body()
+        .read_json()
+        .unwrap_or_else(|error| panic!("GET {capabilities_url} returned no JSON: {error}"));
+    capabilities["session_authority"]
+        .as_str()
+        .unwrap_or_else(|| panic!("capabilities carry no session_authority: {capabilities}"))
+        .to_owned()
+}
+
+/// A dashboard started while the project's open is held after core
+/// publication reports its session authority as opening, and mounts the
+/// session store when the full server's publication lands.
+#[test]
+fn dashboard_started_while_the_project_opens_mounts_sessions_on_publication() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+
+    let hold = canonical_temp_path(home.path()).join("hold-after-core-publish");
+    std::fs::write(&hold, b"hold").unwrap();
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), {
+        let hold = hold.clone();
+        move |command| {
+            command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
+        }
+    });
+    // The dashboard request opens the project; the core server answers it
+    // while the open is held before the full server publishes.
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["dashboard", "--host", "127.0.0.1", "--port", "0"]);
+    let dashboard = run_with_timeout(command, cli_timeout());
+    assert!(entered.is_file(), "core publication was not held");
+    let stdout = String::from_utf8_lossy(&dashboard.stdout);
+    let launch_url = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("tracedecay dashboard listening on "))
+        .unwrap_or_else(|| {
+            panic!(
+                "dashboard announced no URL:\n{stdout}\n{}",
+                String::from_utf8_lossy(&dashboard.stderr)
+            )
+        });
+    let (origin, token) = launch_url
+        .trim()
+        .split_once("/?token=")
+        .unwrap_or_else(|| panic!("dashboard launch URL carries no token: {launch_url}"));
+    let authority = origin
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("dashboard launch URL is not loopback HTTP: {launch_url}"));
+    let capabilities_url = format!("http://tracedecay:{token}@{authority}/api/capabilities");
+    for _ in 0..3 {
+        assert_eq!(dashboard_session_authority(&capabilities_url), "opening");
+    }
+
+    std::fs::remove_file(&hold).unwrap();
+    let published = Instant::now() + cli_timeout();
+    loop {
+        let state = dashboard_session_authority(&capabilities_url);
+        if state == "ready" {
+            break;
+        }
+        assert_eq!(state, "opening", "the open must publish its session store");
+        assert!(
+            Instant::now() < published,
+            "the session store never mounted after the open was released"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

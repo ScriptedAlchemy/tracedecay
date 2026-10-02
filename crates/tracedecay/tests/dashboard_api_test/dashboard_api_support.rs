@@ -2,7 +2,6 @@ pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::process::Command;
 pub(crate) use std::sync::Arc;
-pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) use std::thread;
 pub(crate) use std::time::{Duration, Instant};
 
@@ -173,6 +172,46 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     )
 }
 
+type ProjectOpenPublicationSlot = (
+    tokio::sync::watch::Sender<tracedecay_dashboard_api::DashboardSessionResolutionV1>,
+    tracedecay_dashboard_api::DashboardSessionAuthoritiesV1,
+);
+
+/// The daemon's side of a dashboard started while its project is opening:
+/// the fixture attaches the project's publication channel and the session
+/// authorities the open will admit, and the test publishes the outcome.
+#[derive(Clone, Default)]
+pub(crate) struct ProjectOpenPublication(Arc<std::sync::Mutex<Option<ProjectOpenPublicationSlot>>>);
+
+impl ProjectOpenPublication {
+    fn attach(
+        &self,
+        publication: tokio::sync::watch::Sender<
+            tracedecay_dashboard_api::DashboardSessionResolutionV1,
+        >,
+        admitted: tracedecay_dashboard_api::DashboardSessionAuthoritiesV1,
+    ) {
+        *self.0.lock().unwrap() = Some((publication, admitted));
+    }
+
+    /// The open published the full server with its session store.
+    pub(crate) fn publish_ready(&self) {
+        let slot = self.0.lock().unwrap();
+        let (publication, admitted) = slot.as_ref().expect("dashboard attached its publication");
+        publication.send_replace(
+            tracedecay_dashboard_api::DashboardSessionResolutionV1::Ready(admitted.clone()),
+        );
+    }
+
+    /// The open finished without session authorities.
+    pub(crate) fn publish_unavailable(&self) {
+        let slot = self.0.lock().unwrap();
+        let (publication, _) = slot.as_ref().expect("dashboard attached its publication");
+        publication
+            .send_replace(tracedecay_dashboard_api::DashboardSessionResolutionV1::Unavailable);
+    }
+}
+
 /// Test-only mount point for a fake `DashboardDeliveryReadPortV1` and a fake
 /// code-index freshness reader. Proximity join is a method on that same port,
 /// not a second authority.
@@ -194,7 +233,7 @@ fn spawn_dashboard_server_with_runner(
     git_correlation_authority: Option<
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
-    project_open: Option<Arc<AtomicBool>>,
+    project_open: Option<ProjectOpenPublication>,
     endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1<'static>,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -236,17 +275,11 @@ fn spawn_dashboard_server_with_runner(
             };
             let authority = match project_open {
                 Some(project_open) => {
-                    let admitted = authority.project_session_authorities();
-                    authority.with_opening_project_sessions(Arc::new(move || {
-                        let resolution = if project_open.load(Ordering::SeqCst) {
-                            tracedecay_dashboard_api::DashboardSessionResolutionV1::Ready(
-                                admitted.clone(),
-                            )
-                        } else {
-                            tracedecay_dashboard_api::DashboardSessionResolutionV1::Opening
-                        };
-                        Box::pin(async move { resolution })
-                    }))
+                    let (publication, receiver) = tokio::sync::watch::channel(
+                        tracedecay_dashboard_api::DashboardSessionResolutionV1::Opening,
+                    );
+                    project_open.attach(publication, authority.project_session_authorities());
+                    authority.with_opening_project_sessions(receiver)
                 }
                 None => authority,
             };
@@ -991,9 +1024,9 @@ pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
 
 /// Starts a session-read fixture over seeded sessions, composed the way the
 /// daemon composes a dashboard whose project is still opening: its session
-/// authorities mount once `project_open` is set.
+/// authorities mount once `project_open` publishes them.
 pub(crate) async fn start_dashboard_fixture_while_opening(
-    project_open: Arc<AtomicBool>,
+    project_open: ProjectOpenPublication,
 ) -> DashboardFixture {
     start_dashboard_fixture_with_options_and_delivery(
         true,
@@ -1046,7 +1079,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     git_correlation_authority: Option<
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
-    project_open: Option<Arc<AtomicBool>>,
+    project_open: Option<ProjectOpenPublication>,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = canonical_existing_identity(tmp.path())

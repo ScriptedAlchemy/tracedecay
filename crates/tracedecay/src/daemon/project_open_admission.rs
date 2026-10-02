@@ -210,6 +210,45 @@ pub(super) enum ProjectOpenTypedFailure {
         retryable: bool,
         detail: String,
     },
+    ProjectOpen {
+        kind: ProjectOpenFailureKind,
+        detail: String,
+    },
+}
+
+impl ProjectOpenTypedFailure {
+    fn from_error(error: &TraceDecayError) -> Option<Self> {
+        Some(match error {
+            TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => Self::ProfileResetRequired {
+                component,
+                found_version: *found_version,
+                required_version: *required_version,
+            },
+            TraceDecayError::ResetRequired { authority, reason } => Self::ResetRequired {
+                authority: authority.clone(),
+                reason: reason.clone(),
+            },
+            TraceDecayError::ProjectRoute {
+                reason_code,
+                retryable,
+                detail,
+                ..
+            } => Self::ProjectRoute {
+                reason_code: reason_code.clone(),
+                retryable: *retryable,
+                detail: detail.clone(),
+            },
+            TraceDecayError::ProjectOpen { kind, detail } => Self::ProjectOpen {
+                kind: *kind,
+                detail: detail.clone(),
+            },
+            _ => return None,
+        })
+    }
 }
 
 pub(super) enum ProjectOpenTaskClaim {
@@ -301,24 +340,6 @@ async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver
     }
 }
 
-/// Whether the authority audit failed because it could not read the database,
-/// rather than because it judged what it read.
-///
-/// These are the only failures under that audit whose answer can differ on the
-/// next open without anything being repaired.
-fn is_database_read_failure(message: &str) -> bool {
-    const DRIVER_FAILURES: [&str; 5] = [
-        "database is locked",
-        "database is busy",
-        "disk I/O error",
-        "unable to open database file",
-        "interrupted",
-    ];
-    DRIVER_FAILURES
-        .iter()
-        .any(|failure| message.contains(failure))
-}
-
 /// How long a failed project-open route declines reopening, or `None` when the
 /// failure may clear on its own.
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
@@ -328,43 +349,25 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
         {
             Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
         }
-        // This audit's whole job is to read persisted rows and judge them, so
-        // its verdict is a property of the stored data: a row rejected now is
-        // rejected identically 250ms from now. Back off for the whole family
-        // and name the exceptions, rather than listing the failures that
-        // deserve a backoff, that ordering meant every newly surfaced
-        // invariant message spun warm-up at the debounce cadence until someone
-        // noticed the CPU. Decode failures and column-versus-JSON
-        // disagreements both land here without being enumerated.
-        TraceDecayError::Database { message, operation } => {
-            // A failed code-shard open may already have published its typed
-            // resolver authority. Retrying cannot repair a conflicting binding
-            // and previously repeated the whole warm-up on every hook request.
-            if operation == "register code-shard authority"
-                && message.starts_with("DuplicateCodeAuthority {")
-            {
-                return Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF);
-            }
+        TraceDecayError::ProjectOpen { kind, .. } => match kind {
             // Code-runtime capacity may clear after another project retires,
             // but rebuilding this route for every concurrent request only
             // prolongs the resource pressure that rejected it.
-            if operation == "open registered session runtime"
-                && message.starts_with("ProjectCodeBudgetExhausted {")
-            {
-                return Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF);
+            ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { .. } => {
+                Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
             }
-            if operation != "ensure global database authority invariants" {
-                return None;
-            }
-            if is_database_read_failure(message) {
-                return None;
-            }
-            // A migration still in flight can be what leaves these mutable.
-            if message.contains("session temporal receipts or cursor keys are mutable") {
-                return Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF);
-            }
-            Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
-        }
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: true,
+            } => Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
+            // The audit judged persisted rows: a row rejected now is rejected
+            // identically 250ms from now.
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            } => Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
+            ProjectOpenFailureKind::IdentityUnregistered
+            | ProjectOpenFailureKind::IndexMissing
+            | ProjectOpenFailureKind::BackedOff { .. } => None,
+        },
         TraceDecayError::ProfileResetRequired { .. } | TraceDecayError::ResetRequired { .. } => {
             Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
         }
@@ -405,40 +408,11 @@ impl ProjectOpenFailure {
                 None => ProjectOpenStatusReasonV1::Unavailable,
             },
         };
-        let (message, typed) = match error {
-            TraceDecayError::ProfileResetRequired {
-                component,
-                found_version,
-                required_version,
-            } => (
-                error.to_string(),
-                Some(ProjectOpenTypedFailure::ProfileResetRequired {
-                    component,
-                    found_version: *found_version,
-                    required_version: *required_version,
-                }),
-            ),
-            TraceDecayError::ResetRequired { authority, reason } => (
-                error.to_string(),
-                Some(ProjectOpenTypedFailure::ResetRequired {
-                    authority: authority.clone(),
-                    reason: reason.clone(),
-                }),
-            ),
-            TraceDecayError::ProjectRoute {
-                reason_code,
-                retryable,
-                detail,
-                ..
-            } => (
-                detail.clone(),
-                Some(ProjectOpenTypedFailure::ProjectRoute {
-                    reason_code: reason_code.clone(),
-                    retryable: *retryable,
-                    detail: detail.clone(),
-                }),
-            ),
-            _ => (error.to_string(), None),
+        let typed = ProjectOpenTypedFailure::from_error(error);
+        let message = match error {
+            TraceDecayError::ProjectRoute { detail, .. }
+            | TraceDecayError::ProjectOpen { detail, .. } => detail.clone(),
+            _ => error.to_string(),
         };
         Self {
             message,
@@ -510,19 +484,32 @@ impl ProjectOpenFailure {
                     detail.clone(),
                 );
             }
-            None => {}
+            Some(ProjectOpenTypedFailure::ProjectOpen { kind, detail })
+                if self.retry_at.is_none() =>
+            {
+                return TraceDecayError::project_open(*kind, detail.clone());
+            }
+            Some(ProjectOpenTypedFailure::ProjectOpen { .. }) | None => {}
         }
-        let message = match self.retry_at {
-            Some(retry_at) => format!(
-                "{PROJECT_OPEN_FAILURE_RETRY_HINT}; retry after {} ms: {}",
-                retry_at
-                    .saturating_duration_since(Instant::now())
-                    .as_millis(),
+        let Some(retry_at) = self.retry_at else {
+            return TraceDecayError::Config {
+                message: self.message.clone(),
+            };
+        };
+        let retry_after_ms = u64::try_from(
+            retry_at
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        TraceDecayError::project_open(
+            ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            format!(
+                "project route open is backed off after a rejected open; retry after \
+                 {retry_after_ms} ms: {}",
                 self.message
             ),
-            None => self.message.clone(),
-        };
-        TraceDecayError::Config { message }
+        )
     }
 }
 
@@ -1073,31 +1060,34 @@ pub(super) fn project_server_requirement(
     match classify_mcp_method(&request.method) {
         McpMethod::HookEvent => ProjectServerRequirement::RegisteredHostIngest,
         McpMethod::ToolsCall => match projectless_tool_call(request.params.as_ref()) {
-            Ok((tool_name, arguments))
-                if tool_name
-                    == tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime
-                        .mcp_tool_name() =>
-            {
-                hook_runtime_requirement(arguments.as_object())
+            Ok((tool_name, arguments)) => {
+                match tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(
+                    tool_name,
+                ) {
+                    Some(operation) => graph_tool_requirement(
+                        operation,
+                        arguments.as_object().unwrap_or(&serde_json::Map::new()),
+                    ),
+                    None => ProjectServerRequirement::Core,
+                }
             }
-            _ => ProjectServerRequirement::Core,
+            Err(_) => ProjectServerRequirement::Core,
         },
         _ => ProjectServerRequirement::Core,
     }
 }
 
-/// The server a hook call needs: the full one whose session stores it
-/// records evidence in, or the core one for an action that records none.
-pub(super) fn hook_runtime_requirement(
-    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+/// The server a tool call needs: the full one when the call declares the
+/// project session stores only that server mounts, or the core one.
+pub(super) fn graph_tool_requirement(
+    operation: tracedecay_tool_catalog::ApplicationSurfaceOperation,
+    arguments: &serde_json::Map<String, serde_json::Value>,
 ) -> ProjectServerRequirement {
-    match arguments {
-        Some(arguments)
-            if !tracedecay_contracts::retrieval::hook_runtime_needs_session_stores(arguments) =>
-        {
-            ProjectServerRequirement::Core
+    match tracedecay_mcp::handlers::graph_tool::graph_tool_owner_stores(operation, arguments) {
+        tracedecay_tool_catalog::OwnerStoresV1::ProjectGraph => ProjectServerRequirement::Core,
+        tracedecay_tool_catalog::OwnerStoresV1::ProjectSessions => {
+            ProjectServerRequirement::RegisteredHostIngest
         }
-        _ => ProjectServerRequirement::RegisteredHostIngest,
     }
 }
 
@@ -1237,14 +1227,20 @@ fn assert_cached_graph_schema_reset(failure: &ProjectOpenFailure) {
 }
 
 #[cfg(test)]
-fn assert_backed_off_database_refusal(error: &TraceDecayError, recorded: &str) {
-    let TraceDecayError::Config { message } = error else {
-        panic!("untyped database refusals are served as config errors: {error}");
+fn assert_backed_off_refusal(error: &TraceDecayError, recorded: &str) {
+    let TraceDecayError::ProjectOpen {
+        kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+        detail,
+    } = error
+    else {
+        panic!("a backed-off refusal is served as the typed backoff: {error:?}");
     };
-    let prefix = "project route open is backed off after an invariant rejection; retry after ";
-    assert!(
-        message.starts_with(prefix) && message.ends_with(&format!(" ms: {recorded}")),
-        "backed-off refusal must preserve the database error: {message}"
+    assert_eq!(
+        detail,
+        &format!(
+            "project route open is backed off after a rejected open; retry after \
+             {retry_after_ms} ms: {recorded}"
+        ),
     );
 }
 
@@ -1346,31 +1342,29 @@ mod refused_store_invalidation_tests {
         let db_path = seed_refused_store(&profile_root, &project_root);
         let route = route_for(&profile_root, &project_root);
         let tasks = ProjectOpenTasks::default();
-        let claim = tasks.start_cancellable(route.clone(), |_| async {
-            Err(TraceDecayError::Database {
-                operation: "ensure global database authority invariants".to_string(),
-                message: "persisted row violates an invariant".to_string(),
-            })
+        let recorded = "persisted row violates an invariant";
+        let claim = tasks.start_cancellable(route.clone(), move |_| async move {
+            Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                },
+                recorded,
+            ))
         });
         let ProjectOpenTaskClaim::InFlight(state) = claim else {
             panic!("the first open must start a tracked task");
         };
-        let recorded = TraceDecayError::Database {
-            operation: "ensure global database authority invariants".to_owned(),
-            message: "persisted row violates an invariant".to_owned(),
-        }
-        .to_string();
         let error = ProjectOpenTasks::wait_for_completion(state)
             .await
-            .expect_err("the scripted open must record its database refusal");
-        assert_backed_off_database_refusal(&error, &recorded);
+            .expect_err("the scripted open must record its verdict");
+        assert_backed_off_refusal(&error, recorded);
 
         std::fs::remove_file(&db_path).unwrap();
 
         let failure = tasks
             .cached_failure(&route)
             .expect("non-ResetRequired backoffs are time-based and must survive file churn");
-        assert!(failure.typed.is_none() && failure.message == recorded);
+        assert!(failure.refused_store.is_none() && failure.message == recorded);
     }
 }
 
@@ -1409,10 +1403,12 @@ mod status_tests {
 
         let failed_route = route("unrepairable");
         let ProjectOpenTaskClaim::InFlight(failed) = tasks.start(failed_route.clone(), async {
-            Err(TraceDecayError::Database {
-                message: "released projection row is invalid".to_owned(),
-                operation: "ensure global database authority invariants".to_owned(),
-            })
+            Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                },
+                "released projection row is invalid",
+            ))
         }) else {
             panic!("failing route must be tracked");
         };
@@ -1427,11 +1423,9 @@ mod status_tests {
             ProjectOpenStatusReasonV1::UnrepairableVerdict
         );
         assert!(stalled.retry_after_ms.is_some_and(|delay| delay > 1_000));
-        assert!(
-            stalled
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("released projection row is invalid"))
+        assert_eq!(
+            stalled.detail.as_deref(),
+            Some("released projection row is invalid")
         );
 
         let deferred_route = route("deferred-discovery");

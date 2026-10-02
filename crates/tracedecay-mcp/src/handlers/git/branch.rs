@@ -286,13 +286,13 @@ pub async fn compute_branch_search(
     let cancellation = ctx.cancellation().cloned();
     let branch = Some(request.branch)
         .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: branch".to_string(),
+        .ok_or_else(|| {
+            TraceDecayError::missing_required_parameter("missing required parameter: branch")
         })?;
     let query = Some(request.query)
         .filter(|query| !query.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: query".to_string(),
+        .ok_or_else(|| {
+            TraceDecayError::missing_required_parameter("missing required parameter: query")
         })?;
     let limit = request.limit.map_or(10, |value| {
         usize::try_from(value).map_or(500, |value| value.min(500))
@@ -527,8 +527,8 @@ pub async fn compute_branch_diff(
     let cancellation = ctx.cancellation().cloned();
     let base_name = Some(request.base)
         .filter(|base| !base.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: base".to_string(),
+        .ok_or_else(|| {
+            TraceDecayError::missing_required_parameter("missing required parameter: base")
         })?;
     let head_name = request
         .head

@@ -1010,6 +1010,50 @@ fn retirement_is_elapsed_time_modelled_and_never_retires_the_floor() {
 }
 
 #[test]
+fn serial_reads_after_a_burst_reuse_one_reader_and_let_the_burst_retire() {
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 4;
+    let retire_after = Duration::from_millis(budget.idle_burst_retire_ms);
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let mut burst = (0..4)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    for lease in &mut burst {
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        assert!(!healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+    }
+    drop(burst);
+    let burst_released = Instant::now();
+    Connection::open(&store.path)
+        .unwrap()
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+
+    // Reusing a warm connection must never reuse its snapshot: every serial
+    // read begins after the commit and observes it.
+    for _ in 0..8 {
+        let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        assert!(healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+    }
+
+    // At this instant only workers untouched since the burst have been idle
+    // for the whole retirement window. Serial reads must keep landing on the
+    // same warm worker rather than rotating through the burst, or no burst
+    // worker would ever age out and the lane would never shrink to its floor.
+    assert_eq!(pool.retire_idle_at(burst_released + retire_after), 2);
+    let state = pool.snapshot();
+    assert_eq!(state.general_workers, 2);
+    assert_eq!(state.available_general, 2);
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
+    assert!(healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+}
+
+#[test]
 fn dropping_snapshot_and_reader_lease_restores_capacity() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();

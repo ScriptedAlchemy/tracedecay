@@ -33,7 +33,7 @@ use tracedecay_domain::{
     ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
     RetrievalAnchorRecord, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
+    SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_mcp::McpTransport;
@@ -51,13 +51,9 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
-    SessionGenerationRebuildRequestV1, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshStore,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-#[cfg(feature = "test-transport")]
-use tracedecay_temporal_query::execution::ExecutionControl;
 
 #[cfg(feature = "test-transport")]
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
@@ -537,69 +533,48 @@ pub(crate) async fn activate_test_temporal_generation(
         .map(|input| input.source_frontier)
         .max()
         .expect("temporal fixture requires canonical observations");
-    let snapshot_at = inputs
-        .iter()
-        .map(|input| input.occurrence.knowledge_at.0)
-        .max()
-        .unwrap_or_default()
-        .max(99)
-        .saturating_add(1);
-    let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
-    let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
-    let cursor_key = runtime
-        .ensure_session_cursor_key_for_test(HostAdmissionScope::Project)
-        .await
-        .expect("registered project cursor key");
-    let watermarks =
-        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0)
-            .with_cursor_key(cursor_key);
-    let snapshot = SessionTemporalSnapshotV1::new(
-        session_id.clone(),
-        UtcMicros(snapshot_at),
-        watermarks.clone(),
-        SessionTemporalCapabilitiesV1::new([
-            SessionTemporalCapabilityV1::FrozenWatermarks,
-            SessionTemporalCapabilityV1::GenerationRebuild,
-        ]),
-    );
     let store = runtime
         .session_temporal_store_for_test(HostAdmissionScope::Project)
         .expect("registered project temporal store");
     store
-        .begin_session_generation_rebuild(
-            SessionGenerationRebuildRequestV1::new(
-                session_id.clone(),
-                candidate_generation,
-                snapshot.clone(),
-            )
-            .unwrap(),
-        )
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(source_frontier, 0).unwrap(),
+        ))
         .await
         .unwrap();
+    let mut projected = Vec::new();
+    let candidate_generation = loop {
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .expect("refresh must be running");
+        let Some((progress, batch)) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .unwrap()
+        else {
+            break recovery.candidate_generation();
+        };
+        projected.extend_from_slice(batch.occurrences());
+        store
+            .persist_session_refresh_projection_batch(progress, batch)
+            .await
+            .unwrap();
+    };
+    let mut expected = inputs
+        .into_iter()
+        .map(|input| input.occurrence)
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
+    projected.sort_by(|left, right| left.occurrence_id.cmp(&right.occurrence_id));
+    assert_eq!(
+        projected, expected,
+        "refresh must project exactly the fixture inputs"
+    );
     store
-        .persist_session_temporal_projection_batch(
-            SessionTemporalProjectionBatchV1::new(
-                session_id.clone(),
-                candidate_generation,
-                watermarks,
-                inputs.into_iter().map(|input| input.occurrence).collect(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id,
-                candidate_generation,
-                snapshot,
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
+        .complete_running_session_refresh_for_test(&session_id)
         .await
         .unwrap();
     candidate_generation.value()
