@@ -264,15 +264,19 @@ impl ProfileRoot {
         }
     }
 
-    /// Whether `dir` itself is a project root initialised in this profile,
+    /// Whether `dir` itself is a project root this profile holds a store for,
     /// judged verbatim: no ancestor walk and no ambient-root filter. This is
     /// the check for an explicit path (rule 1 of
-    /// [`ProfileRoot::discover_project_root`]), where the caller named the
-    /// directory and only needs to know whether a project lives there.
+    /// [`ProfileRoot::discover_project_root`]) and for listing or wiping this
+    /// profile's projects. A repository identity marker counts only when this
+    /// profile holds the shard it names, since another profile may have
+    /// written it.
     pub fn is_initialized_project_root(&self, dir: &Path) -> bool {
         let at_worktree_root =
             crate::worktree::git_worktree_root(dir).is_some_and(|root| paths_same(dir, &root));
-        directory_hosts_initialized_project(&self.data_dir, dir, at_worktree_root)
+        crate::storage::has_path_local_profile_store(&self.data_dir, dir)
+            || (at_worktree_root
+                && crate::storage::has_repository_profile_store(&self.data_dir, dir))
     }
 }
 
