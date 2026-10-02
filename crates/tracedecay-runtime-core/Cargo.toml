@@ -22,7 +22,7 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 # dependent crates' test builds. Never gates production code or forwards a
 # dependency feature. Distinct from `test-transport`, which gates in-process
 # transport doubles and forwards a dependency feature.
-test-helpers = []
+test-helpers = ["dep:tracing-subscriber"]
 
 [dependencies]
 hotpath.workspace = true
@@ -47,6 +47,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7.19"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt"] }
 
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
@@ -68,6 +69,14 @@ criterion = "0.5"
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[[test]]
+name = "tracing_capture_keepalive"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "git_discovery_authority"
+required-features = ["test-helpers"]
 
 [[bench]]
 name = "exact_sql_writer_workload"

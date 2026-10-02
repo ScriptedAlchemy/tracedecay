@@ -44,16 +44,13 @@
 //! context and duplicate the `item_completed`/legacy message turns, so
 //! ingesting them would double-count the conversation. Goal context blocks are
 //! cataloged as compact `goal_context` rows because real rollouts often record
-//! them only in `response_item` form. This append-only JSONL is read with the
-//! shared byte-offset machinery and scoped per turn by the latest Codex cwd
-//! context.
+//! them only in `response_item` form. This append-only JSONL is admitted as
+//! canonical observations by [`observation`], scoped per turn by the latest
+//! Codex cwd context.
 
 mod context;
-mod events;
-mod goals;
 mod meta;
 mod observation;
-mod records;
 #[cfg(test)]
 mod tests;
 
@@ -72,6 +69,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
@@ -79,29 +77,21 @@ use tracedecay_runtime_core::resident_memory::{
 };
 use tracedecay_store::ParseOffset;
 
-use context::CodexContextState;
-use goals::{codex_goal_event_from_line, goal_context_from_line, goal_event_message};
 use meta::session_meta;
-use records::{
-    compacted_summary_from_line, message_from_line, response_item_goal_context_from_line,
-    response_item_tool_event_from_line, timestamp_from_record,
-};
 
 use crate::runtime::jsonl_observation_admission::{
-    SharedJsonlPathPin, install_shared_jsonl_preparation_authority,
-    namespace_replacement_message_ids, pin_shared_jsonl_paths, preflight_and_parse_new,
+    SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
     reserve_shared_jsonl_bytes,
 };
-use crate::runtime::shared::{
-    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
-    title_from_messages,
-};
+use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptCursorKey,
-    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    jsonl_change_token_settled, jsonl_file_change_token, stream_new_jsonl,
+    FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource, jsonl_change_token_settled,
+    jsonl_file_change_token, run_blocking_transcript_section,
 };
 
+#[cfg(test)]
+pub(crate) use context::{evict_prior_context_for_test, prior_context_scan_count_for_test};
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
@@ -116,6 +106,19 @@ pub use observation::{
     try_admit_codex_jsonl_observations_for_project_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };
+
+/// Project membership from a rollout's leading `session_meta` cwd.
+///
+/// `None` means the header could not be read. Callers may leave a rollout for
+/// a later pass only on a definitive [`ProjectMembership::NoMatch`]; an
+/// `Unknown` git timeout stays in the current pass.
+pub(crate) fn codex_rollout_project_membership(
+    path: &Path,
+    project_root: &Path,
+) -> Option<ProjectMembership> {
+    let meta = session_meta(path)?;
+    Some(TranscriptScopeMatcher::project(project_root).membership(Some(&meta.cwd)))
+}
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.
@@ -156,6 +159,7 @@ pub struct CodexDiscoveryState {
 #[derive(Clone, Default)]
 pub struct CodexDiscoveryHub {
     inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
+    scan_released: watch::Sender<u64>,
 }
 
 #[derive(Default)]
@@ -174,6 +178,131 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
+    /// Transcript files, of any host, this consumer's scope admitted through
+    /// end of file or decided are outside it, by the settled identity they
+    /// had before that pass read them. A later pass that finds one unchanged
+    /// skips it unopened.
+    ///
+    /// ponytail: a deleted file's entry lives until the consumer deregisters;
+    /// prune against discovery if corpora churn enough for that to matter.
+    converged: HashMap<PathBuf, (SettledFileWitness, ProcessSharedMemoryReservationV1)>,
+}
+
+impl CodexDiscoveryConsumerState {
+    fn holds_converged(&self, path: &Path, witness: SettledFileWitness) -> bool {
+        self.converged
+            .get(path)
+            .is_some_and(|(recorded, _)| *recorded == witness)
+    }
+}
+
+/// A transcript file's corpus identity, taken only once its change time is
+/// settled so that an equal later identity proves the bytes unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SettledFileWitness {
+    identity: [u8; 32],
+    len: u64,
+}
+
+impl SettledFileWitness {
+    /// `None` while the file's change time is inside the timestamp quantum,
+    /// or where no stat field witnesses a rewrite, or once the file is gone:
+    /// the pass then reads it as before.
+    fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
+        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
+            return Ok(None);
+        };
+        if !metadata.is_file() || !jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            identity: codex_corpus_identity(path, &metadata)?,
+            len: metadata.len(),
+        }))
+    }
+}
+
+/// A delivered transcript file its discovery consumer still has to read.
+///
+/// Every host's history pass for a scope runs under that scope's discovery
+/// consumer, so one per-consumer record proves a file unchanged for all of
+/// them.
+pub(crate) struct PendingTranscript<'a> {
+    convergence: Option<(&'a CodexDiscoveryHub, &'a str, SettledFileWitness)>,
+}
+
+impl<'a> PendingTranscript<'a> {
+    /// `None` when the consumer already finished this exact file, so the
+    /// pass skips it without opening it.
+    pub(crate) fn observe(
+        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+        path: &Path,
+    ) -> TranscriptIngestResult<Option<Self>> {
+        run_blocking_transcript_section(|| Self::observe_blocking(discovery, path))
+    }
+
+    /// [`Self::observe`] for a caller already on a blocking thread.
+    pub(crate) fn observe_blocking(
+        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+        path: &Path,
+    ) -> TranscriptIngestResult<Option<Self>> {
+        let Some((hub, consumer)) = discovery else {
+            return Ok(Some(Self { convergence: None }));
+        };
+        let witness = SettledFileWitness::settled(path)?;
+        if let Some(witness) = witness
+            && hub.file_converged(consumer, path, witness)
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            convergence: witness.map(|witness| (hub, consumer, witness)),
+        }))
+    }
+
+    /// Records convergence once admission covered every byte the witness
+    /// measured; a deferred or shorter admission reads the file again.
+    pub(crate) fn admitted(
+        self,
+        path: &Path,
+        source_deferred: bool,
+        covered_through: u64,
+    ) -> TranscriptIngestResult<()> {
+        match self.convergence {
+            Some((hub, consumer, witness))
+                if !source_deferred && covered_through == witness.len =>
+            {
+                hub.record_file_converged(consumer, path, witness)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Records that the pass read this file and found nothing the
+    /// consumer's scope will ever admit from it unchanged (it is outside the
+    /// scope, or every source it names already converged), so later passes
+    /// do not re-read it to decide again.
+    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
+        match self.convergence {
+            Some((hub, consumer, witness)) => hub.record_file_converged(consumer, path, witness),
+            None => Ok(()),
+        }
+    }
+}
+
+fn stat_if_present(
+    path: &Path,
+    operation: &'static str,
+) -> TranscriptIngestResult<Option<std::fs::Metadata>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(TranscriptIngestError::ScanIo {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 enum CodexDiscoveryConsumerMode {
@@ -203,7 +332,6 @@ enum CodexDiscoveryWork {
         source_key: CodexDiscoverySourceKey,
         state: CodexDiscoveryState,
         frontier: CodexDiscoveryFrontier,
-        generation: u128,
     },
 }
 
@@ -364,6 +492,12 @@ impl CodexDiscoveryHub {
         install_shared_jsonl_preparation_authority(memory, background_cpu)
     }
 
+    /// Advances each time a discovery scan step ends, releasing the scanner a
+    /// consumer reported `Waiting` behind.
+    pub(crate) fn subscribe_scan_release(&self) -> watch::Receiver<u64> {
+        self.scan_released.subscribe()
+    }
+
     pub fn register(&self, consumer: &str, source_home: Option<&Path>) {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let source_key = source_home
@@ -401,6 +535,7 @@ impl CodexDiscoveryHub {
                 mode,
                 awaiting_ack: None,
                 _memory: None,
+                converged: HashMap::new(),
             },
         );
         hotpath::gauge!("codex_discovery_consumers").set(inner.consumers.len() as f64);
@@ -456,8 +591,15 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let delivery = tokio::task::spawn_blocking(move || {
-            hub.discover_blocking(&consumer, &source, bounds, frontier)
+        let (delivery, prefetch) = tokio::task::spawn_blocking(move || {
+            let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
+            let prefetch = match &delivery {
+                CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
+                    hub.unconverged_paths(&consumer, &pass.report.paths)?
+                }
+                _ => Vec::new(),
+            };
+            Ok::<_, TranscriptIngestError>((delivery, prefetch))
         })
         .await
         .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
@@ -466,7 +608,7 @@ impl CodexDiscoveryHub {
         if let CodexDiscoveryDelivery::Ready(pass) = &delivery
             && let Some(pin) = &pass._shared_page_pin
         {
-            pin.start_prefetches(&pass.report.paths);
+            pin.start_prefetches(&prefetch);
         }
         Ok(delivery)
     }
@@ -630,7 +772,6 @@ impl CodexDiscoveryHub {
                         source_key,
                         state,
                         frontier: index.frontier,
-                        generation: index.generation,
                     }
                 } else {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -681,16 +822,14 @@ impl CodexDiscoveryHub {
                 }
             };
 
-            let (mut discovery, base, replay_generation, replay_source) = match work {
-                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None, None),
+            let (mut discovery, base, replay_source) = match work {
+                CodexDiscoveryWork::Shared { state, frontier } => (state, frontier, None),
                 CodexDiscoveryWork::Replay {
                     source_key,
                     state,
                     frontier,
-                    generation,
-                } => (state, frontier, Some(generation), Some(source_key)),
+                } => (state, frontier, Some(source_key)),
             };
-            let shared = replay_generation.is_none();
             // Page preparation capacity bounds concurrent JSONL reservations
             // and prefetch workers. It must not shrink this retained scan.
             // Clamping `max_files` to that width spends the structural budget
@@ -703,7 +842,9 @@ impl CodexDiscoveryHub {
                     detail: "Codex discovery hub lock is poisoned",
                 }
             })?;
-            if shared {
+            self.scan_released
+                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
                 let mut pass = result?;
@@ -743,16 +884,7 @@ impl CodexDiscoveryHub {
                 }
                 drop(inner);
                 continue;
-            }
-
-            let source_key =
-                replay_source.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay source authority is missing",
-                })?;
-            let generation =
-                replay_generation.ok_or(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay generation authority is missing",
-                })?;
+            };
             let retire_source = inner
                 .replay_indexes
                 .get(&source_key)
@@ -772,11 +904,9 @@ impl CodexDiscoveryHub {
                     detail: "Codex replay index disappeared while scanning",
                 },
             )?;
-            if index.generation != generation {
-                return Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-                    detail: "Codex replay index generation changed while scanning",
-                });
-            }
+            // Only the scanner holding `scanning` advances the index
+            // generation, and a source deregistered mid-scan is retired above
+            // rather than removed, so the index is still the one it scanned.
             index.scanning = false;
             index.discovery = Some(discovery);
             let pass = result?;
@@ -875,6 +1005,78 @@ impl CodexDiscoveryHub {
             }
             return Ok(CodexDiscoveryDelivery::Waiting);
         }
+    }
+
+    /// Whether `consumer` already finished `path` while it had exactly
+    /// `witness`.
+    fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let converged = inner
+            .consumers
+            .get(consumer)
+            .is_some_and(|state| state.holds_converged(path, witness));
+        if converged {
+            hotpath::gauge!("codex_discovery_converged_skips").inc(1.0);
+        }
+        converged
+    }
+
+    /// The delivered paths `consumer` would still read, in delivery order, so
+    /// speculative page reads never open a rollout admission will skip.
+    fn unconverged_paths(
+        &self,
+        consumer: &str,
+        paths: &[PathBuf],
+    ) -> TranscriptIngestResult<Vec<PathBuf>> {
+        let witnesses = paths
+            .iter()
+            .map(|path| SettledFileWitness::settled(path))
+            .collect::<TranscriptIngestResult<Vec<_>>>()?;
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = inner.consumers.get(consumer);
+        Ok(paths
+            .iter()
+            .zip(witnesses)
+            .filter(|(path, witness)| {
+                !witness.is_some_and(|witness| {
+                    state.is_some_and(|state| state.holds_converged(path, witness))
+                })
+            })
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+
+    /// Records that `consumer` finished `path` while it had `witness`.
+    /// Without capacity to retain the record the file is simply read again
+    /// by the next pass that finds it.
+    fn record_file_converged(
+        &self,
+        consumer: &str,
+        path: &Path,
+        witness: SettledFileWitness,
+    ) -> TranscriptIngestResult<()> {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = inner.consumers.get_mut(consumer) else {
+            return Ok(());
+        };
+        if let Some((recorded, _)) = state.converged.get_mut(path) {
+            *recorded = witness;
+            return Ok(());
+        }
+        let charge = candidate_charge(
+            path,
+            u64::try_from(std::mem::size_of::<(PathBuf, SettledFileWitness)>()).unwrap_or(u64::MAX),
+        )?;
+        let Some(reservation) =
+            reserve_shared_jsonl_bytes(charge, "converged transcript index capacity")?
+        else {
+            hotpath::gauge!("codex_discovery_converged_unrecorded").inc(1.0);
+            return Ok(());
+        };
+        state
+            .converged
+            .insert(path.to_path_buf(), (witness, reservation));
+        Ok(())
     }
 
     pub(crate) fn acknowledge(&self, consumer: &str) {
@@ -1026,11 +1228,6 @@ impl CodexRetainedScan {
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
-    user_scope: Option<UserCodexScope>,
-    /// Source-lifetime cache of project-root matchers and cwd worktree
-    /// resolutions, so one scan pass runs git identity discovery once per
-    /// root/cwd instead of once per transcript record.
-    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1218,12 +1415,6 @@ impl CodexExactSessionPathAuthority {
         });
         Ok(source.requested.len().saturating_sub(1))
     }
-}
-
-#[derive(Clone)]
-struct UserCodexScope {
-    session_id: Option<String>,
-    registered_roots: Vec<PathBuf>,
 }
 
 impl CodexSource {
@@ -1558,23 +1749,7 @@ impl CodexSource {
         Self {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
-            user_scope: None,
-            project_matchers: ProjectRootMatcherCache::default(),
         }
-    }
-
-    /// Restricts ingestion to sessions that cannot be attributed to a registered project.
-    #[must_use]
-    pub fn for_user_scope(
-        mut self,
-        session_id: Option<String>,
-        registered_roots: Vec<PathBuf>,
-    ) -> Self {
-        self.user_scope = Some(UserCodexScope {
-            session_id,
-            registered_roots,
-        });
-        self
     }
 
     /// Bounded discovery for long-lived schedulers. The caller must
@@ -2115,7 +2290,6 @@ fn retained_scan_step(
                 )?;
                 match listed.next() {
                     Some(entry) => {
-                        directory_work += 1;
                         let entry = entry.map_err(|source| TranscriptIngestError::ScanIo {
                             operation: "read Codex transcript directory entry",
                             path: dir.clone(),
@@ -2129,7 +2303,12 @@ fn retained_scan_step(
                                     path: entry.path(),
                                     source,
                                 })?;
+                        // Rollout files are not structural work. Charging them
+                        // here spends the pass on names that are not child
+                        // directories, so the newest sessions are not emitted
+                        // until every older day has been listed.
                         if file_type.is_dir() && !file_type.is_symlink() {
+                            directory_work += 1;
                             if *depth >= MAX_SCAN_DEPTH {
                                 return Err(TranscriptIngestError::ScanIo {
                                     operation: "traverse Codex transcript directory depth",
@@ -2505,16 +2684,8 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
 }
 
 fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<DirectoryStatWitness>> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(TranscriptIngestError::ScanIo {
-                operation: "stat Codex transcript directory",
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    let Some(metadata) = stat_if_present(path, "stat Codex transcript directory")? else {
+        return Ok(None);
     };
     if !metadata.is_dir() {
         return Err(TranscriptIngestError::ScanIo {
@@ -2752,10 +2923,6 @@ impl TranscriptSource for CodexSource {
             .paths
     }
 
-    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        codex_cursor_key(transcript_path)
-    }
-
     fn discover_transcript_paths(
         &self,
         _project_root: &Path,
@@ -2776,237 +2943,5 @@ impl TranscriptSource for CodexSource {
                 }
             }
         }
-    }
-
-    #[hotpath::measure(label = "sessions.hosts.codex.parse")]
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        // `session_meta` (line 1) is authoritative for session identity and the
-        // initial cwd. Later context records can move one rollout between scopes.
-        let meta = session_meta(path)?;
-        if self
-            .user_scope
-            .as_ref()
-            .and_then(|scope| scope.session_id.as_deref())
-            .is_some_and(|session_id| session_id != meta.session_id)
-        {
-            return None;
-        }
-
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let mut messages = Vec::new();
-        // Collapses identical consecutive goal states within this parse pass:
-        // `thread_goal_updated` fires on every token/time tick, so only an
-        // objective- or status-change opens a new `goal` row.
-        let mut last_goal_key: Option<(String, Option<String>)> = None;
-        let mut structured = events::CodexStructuredState::new();
-        // Namespacing follows the stored cursor generation, so every batch of a
-        // rewritten file is namespaced; prior-context recovery follows this
-        // batch's own resume point, which is zero only at the file head.
-        let namespace_replacement = new.replacement_generation;
-        let mut context_state = if new.start_offset > 0 {
-            CodexContextState::scan_prior(path, new.start_offset, &meta)
-        } else {
-            CodexContextState::from_meta(&meta)
-        };
-        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
-            project_root,
-            self.user_scope
-                .as_ref()
-                .map(|scope| scope.registered_roots.as_slice()),
-            &self.project_matchers,
-        );
-        let mut last_in_scope_cwd = None;
-        let mut last_in_scope_git = None;
-        let push_annotated = |messages: &mut Vec<_>,
-                              mut message,
-                              cwd: Option<&Path>,
-                              git: Option<&serde_json::Value>| {
-            context::annotate_message(&mut message, cwd, git, &self.project_matchers);
-            messages.push(message);
-        };
-        for line in &new.lines {
-            let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            // `Unknown` means a bounded git timeout left this record's scope
-            // undecided: abort before any cursor can be persisted so the same
-            // bytes are re-parsed (and re-resolved) on the next scan pass.
-            let in_scope = match scope_matcher.membership(context_state.cwd.as_deref()) {
-                ProjectMembership::Match => true,
-                ProjectMembership::NoMatch => false,
-                ProjectMembership::Unknown => return None,
-            };
-            if !in_scope {
-                if compacted_summary_from_line(
-                    &line.value,
-                    &meta,
-                    context_state.model.as_deref(),
-                    path,
-                    line.offset,
-                    context_state.compaction_depth + 1,
-                )
-                .is_some()
-                {
-                    context_state.compaction_depth += 1;
-                }
-                continue;
-            }
-            last_in_scope_cwd.clone_from(&context_state.cwd);
-            last_in_scope_git.clone_from(&context_state.git);
-            let cwd = context_state.cwd.as_deref();
-            let git = context_state.git.as_ref();
-            // Non-consuming: harvest session-level policy/effort/rate-limit
-            // summary before the line is routed to its owning handler below.
-            structured.observe_summary(&line.value);
-            if is_context_record {
-                continue;
-            }
-            if let Some(rows) = structured.event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                for message in rows {
-                    push_annotated(&mut messages, message, cwd, git);
-                }
-                continue;
-            }
-            if let Some(event) = codex_goal_event_from_line(&line.value) {
-                let key = event.dedup_key();
-                if last_goal_key.as_ref() == Some(&key) {
-                    continue;
-                }
-                last_goal_key = Some(key);
-                push_annotated(
-                    &mut messages,
-                    goal_event_message(
-                        &meta,
-                        context_state.model.as_deref(),
-                        path,
-                        line.offset,
-                        timestamp_from_record(&line.value),
-                        &event,
-                    ),
-                    cwd,
-                    git,
-                );
-                continue;
-            }
-            if let Some(message) = response_item_goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = response_item_tool_event_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = compacted_summary_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-                context_state.compaction_depth + 1,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                context_state.compaction_depth += 1;
-                continue;
-            }
-            if let Some(message) = goal_context_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-                continue;
-            }
-            if let Some(message) = message_from_line(
-                &line.value,
-                &meta,
-                context_state.model.as_deref(),
-                path,
-                line.offset,
-            ) {
-                push_annotated(&mut messages, message, cwd, git);
-            }
-        }
-        // Emit any `exec_command` calls whose paired output never arrived in
-        // this pass so the tool call is not silently dropped.
-        for message in structured.flush_pending(&meta, path) {
-            push_annotated(
-                &mut messages,
-                message,
-                last_in_scope_cwd.as_deref(),
-                last_in_scope_git.as_ref(),
-            );
-        }
-
-        // A truncate-and-rewrite can reuse every byte offset from the previous
-        // file generation. Legacy projection keys are offset-based, so keep
-        // replacement rows distinct instead of overwriting retained history.
-        if namespace_replacement {
-            namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
-        }
-
-        let project = self.user_scope.as_ref().map_or_else(
-            || project_root.to_string_lossy().to_string(),
-            |_| "user".to_string(),
-        );
-        let draft = SessionDraft {
-            session_id: meta.session_id.clone(),
-            project_key: project.clone(),
-            project_path: project,
-            title: title_from_messages(&messages),
-            // The summary is session-wide and may include evidence observed
-            // after Codex changed cwd into a registered project. User scope
-            // stores only the filtered message rows, never that mixed summary.
-            metadata_json: context::session_metadata_json(
-                &meta,
-                self.user_scope.is_none().then_some(&structured.summary),
-                &self.project_matchers,
-            ),
-            parent_session_id: meta.parent_session_id.clone(),
-            is_subagent: meta.is_subagent,
-            agent_id: meta.agent_id.clone(),
-            parent_tool_use_id: None,
-        };
-
-        Some(ParsedTranscript {
-            draft,
-            messages,
-            new_cursor: new.new_cursor,
-        })
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
-            self.parse_new(path, prev, project_root, max_new_bytes)
-        })
     }
 }

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, EntityId,
-    ProjectionGenerationId, RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
-    RemoteWriterFenceV1, ShardId, UtcMicros,
+    ProjectionGenerationId, RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1,
+    RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, ShardId, UtcMicros,
 };
 use tracedecay_tool_catalog::SchemaId;
 
@@ -516,6 +516,21 @@ pub enum RemoteProtocolFailureV1 {
     AuthorityReachable,
     SpoolSaturated,
     AuthorityUnavailable,
+    WriterAuthorityUnpublished,
+}
+
+impl RemoteProtocolFailureV1 {
+    /// Authority reason reported beside a failure that never read a current
+    /// writer: an unpublished writer is known absent, anything else leaves
+    /// the placement unknown.
+    pub const fn unavailable_reason(self) -> RemoteAuthorityUnavailableReasonV1 {
+        match self {
+            Self::WriterAuthorityUnpublished => {
+                RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished
+            }
+            _ => RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+        }
+    }
 }
 
 pub fn remote_protocol_problem(
@@ -573,6 +588,16 @@ pub fn remote_protocol_problem(
             )?,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        },
+        RemoteProtocolFailureV1::WriterAuthorityUnpublished => ApplicationProblem::Unavailable {
+            classification: crate::ApplicationUnavailableClassV1::Authority,
+            diagnostic: safe_diagnostic(
+                "remote.writer_authority_unpublished",
+                "No writer authority has been published for this Remote Brain",
+            )?,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
             detail: None,
         },
     };

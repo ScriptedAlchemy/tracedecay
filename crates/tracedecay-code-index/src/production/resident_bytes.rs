@@ -26,9 +26,9 @@ use crate::chunks::{
 use crate::lineage::{LineageSymbolRecordV1, SymbolLineageCandidateV1};
 
 /// An `Arc` allocation: two reference counts before the value.
-pub(super) const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
+pub(crate) const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
 
-pub(super) fn vec_bytes<T>(values: &[T], capacity: usize, heap: impl Fn(&T) -> usize) -> usize {
+pub(crate) fn vec_bytes<T>(values: &[T], capacity: usize, heap: impl Fn(&T) -> usize) -> usize {
     values
         .iter()
         .fold(capacity.saturating_mul(size_of::<T>()), |bytes, value| {
@@ -36,8 +36,40 @@ pub(super) fn vec_bytes<T>(values: &[T], capacity: usize, heap: impl Fn(&T) -> u
         })
 }
 
-fn opt(value: Option<&str>) -> usize {
+pub(crate) fn opt(value: Option<&str>) -> usize {
     value.map_or(0, str::len)
+}
+
+/// Control bytes a SwissTable probes per group: SSE2 groups on x86, NEON
+/// groups on aarch64, one machine word otherwise.
+const SWISS_GROUP_WIDTH: usize = if cfg!(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "sse2"
+)) {
+    16
+} else if cfg!(all(target_arch = "aarch64", target_feature = "neon")) {
+    8
+} else {
+    size_of::<usize>()
+};
+
+/// The table a std `HashMap<K, V>` or `HashSet<T>` (with `T = (K, V)` or the
+/// element) of the given `capacity()` allocates. std's map is a SwissTable
+/// whose capacity is all but one of a power-of-two bucket count below eight
+/// buckets and seven eighths of it from eight up; the one allocation holds
+/// every bucket's entry, padded to the control alignment, then a control
+/// byte per bucket and one trailing group.
+pub(crate) fn hash_table_bytes<T>(capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    let buckets = if capacity < 8 {
+        capacity + 1
+    } else {
+        capacity / 7 * 8
+    };
+    let control_align = std::mem::align_of::<T>().max(SWISS_GROUP_WIDTH);
+    (size_of::<T>() * buckets).next_multiple_of(control_align) + buckets + SWISS_GROUP_WIDTH
 }
 
 /// A `BTreeMap` allocates leaves of eleven slots (and internal nodes above
@@ -91,7 +123,15 @@ fn exact_term_bytes(term: &ExactTechnicalTermV1) -> usize {
 pub(super) fn symbol_bytes(symbol: &LineageSymbolRecordV1) -> usize {
     ARC_HEADER_BYTES
         .saturating_add(size_of::<LineageSymbolRecordV1>())
-        .saturating_add(symbol.occurrence.as_str().len())
+        .saturating_add(symbol_heap_bytes(symbol))
+}
+
+/// The strings and lists a symbol record owns, beyond its inline body.
+pub(crate) fn symbol_heap_bytes(symbol: &LineageSymbolRecordV1) -> usize {
+    symbol
+        .occurrence
+        .as_str()
+        .len()
         .saturating_add(symbol.identity.as_str().len())
         .saturating_add(symbol.qualified_name.capacity())
         .saturating_add(symbol.simple_name.capacity())
@@ -122,7 +162,7 @@ fn abstention_heap_bytes(abstention: &CodeIndexEdgeAbstentionV1) -> usize {
         .saturating_add(abstention.target_node_id.capacity())
 }
 
-pub(super) fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
+pub(crate) fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
     import
         .logical_path
         .capacity()
@@ -132,7 +172,7 @@ pub(super) fn import_heap_bytes(import: &CodeIndexImportEvidenceV1) -> usize {
         .saturating_add(opt(import.local_name.as_deref()))
 }
 
-pub(super) fn unresolved_heap_bytes(reference: &CodeIndexUnresolvedReferenceV1) -> usize {
+pub(crate) fn unresolved_heap_bytes(reference: &CodeIndexUnresolvedReferenceV1) -> usize {
     reference
         .from_occurrence
         .as_str()
@@ -213,7 +253,7 @@ fn receipt_heap_bytes(receipt: &CodeChunkProjectionReceiptV1) -> usize {
             .map(|digest| digest.as_str())))
 }
 
-fn snapshot_file_heap_bytes(file: &SanitizedCodeFileV1) -> usize {
+pub(crate) fn snapshot_file_heap_bytes(file: &SanitizedCodeFileV1) -> usize {
     file.file_occurrence_id
         .as_str()
         .len()
@@ -338,6 +378,11 @@ pub(super) fn file_bytes(file: &FileGenerationArtifactsV1) -> usize {
             &artifacts.unresolved_references,
             artifacts.unresolved_references.capacity(),
             unresolved_heap_bytes,
+        ))
+        .saturating_add(vec_bytes(
+            &artifacts.callable_arities,
+            artifacts.callable_arities.capacity(),
+            |row| row.occurrence.as_str().len(),
         ))
         .saturating_add(exact_authority_bytes)
 }

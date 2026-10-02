@@ -381,7 +381,6 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     assert_eq!(meta.default_branch, "main");
     assert_eq!(meta.branches.len(), 1);
     let default = meta.branches.get("main").unwrap();
-    assert_eq!(default.db_file, crate::config::DB_FILENAME);
     assert!(default.parent.is_none());
     assert!(default.created_at.parse::<u64>().unwrap() > 0);
     assert_eq!(default.last_synced_at, default.created_at);

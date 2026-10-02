@@ -4,7 +4,6 @@ use tracedecay_runtime_core::storage::{ProjectStorageLocation, classify_registry
 
 pub use tracedecay_sessions::runtime::{
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
-    TranscriptBatch,
 };
 
 /// Total savings + call count for a project (or all projects when `project` is None).
@@ -242,7 +241,6 @@ pub struct GraphScopeUpsert {
     pub project_id: String,
     pub store_id: String,
     pub branch_name: String,
-    pub db_relpath: String,
     pub parent_scope_id: Option<String>,
     pub last_synced_at: Option<i64>,
     pub writable: bool,
@@ -254,7 +252,6 @@ pub struct GraphScopeRecord {
     pub project_id: String,
     pub store_id: String,
     pub branch_name: String,
-    pub db_relpath: String,
     pub parent_scope_id: Option<String>,
     pub last_synced_at: Option<i64>,
     pub writable: bool,

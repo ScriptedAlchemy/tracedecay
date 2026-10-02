@@ -3,7 +3,6 @@ import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/gen
 import { workGraphRead, workGraphTimeline } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from './workApi.ts';
 import {
-  WORK_EVIDENCE_PAGE_SIZE,
   workEvidenceAuthorityKey,
   workEvidenceRequest,
   workEvidenceTemporalMode,
@@ -18,17 +17,18 @@ function current(): WorkResult<WorkGraphReadV1> {
 
 describe('TaskSession evidence requests', () => {
   it('binds the task and selected temporal mode to the exact current graph authority', () => {
-    const graph = current();
-    const request = workEvidenceRequest(graph, 'task.alpha', { kind: 'evolution' }, null, 123);
+    const request = workEvidenceRequest(current(), 'task.alpha', { kind: 'evolution' }, null, 123);
     expect(request).toEqual({
       selection: { selection: 'profile_owned_no_git' },
       task_id: 'task.alpha',
-      verified_version:
-        graph.outcome === 'value' && graph.value.mode === 'current'
-          ? graph.value.snapshot.verified_version
-          : undefined,
+      verified_version: {
+        event_sequence: 12,
+        graph_version: 4,
+        recovered_graph_digest: 'digest-graph',
+        source_watermark: {},
+      },
       temporal: { kind: 'evolution' },
-      page_size: WORK_EVIDENCE_PAGE_SIZE,
+      page_size: 25,
       expansion: null,
       continuation: null,
       observed_at: 123,
@@ -47,21 +47,29 @@ describe('TaskSession evidence requests', () => {
       ),
     };
 
-    expect(workEvidenceAuthorityKey(first, 'task.alpha', { kind: 'current' })).not.toBe(
-      workEvidenceAuthorityKey(second, 'task.alpha', { kind: 'current' }),
+    expect(workEvidenceAuthorityKey(first, 'task.alpha', { kind: 'current' })).toBe(
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"current"},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+    );
+    expect(workEvidenceAuthorityKey(second, 'task.alpha', { kind: 'current' })).toBe(
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"current"},"verified_version":{"event_sequence":12,"graph_version":2,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
     );
   });
 
   it('separates cache authority for every temporal mode and exact as-of cutoff', () => {
     const graph = current();
-    const keys = [
+    expect([
       workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'current' }),
       workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'as_of', cutoff: 100 }),
       workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'as_of', cutoff: 101 }),
       workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'evolution' }),
       workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'forensic' }),
-    ];
-    expect(new Set(keys).size).toBe(keys.length);
+    ]).toEqual([
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"current"},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"as_of","cutoff":100},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"as_of","cutoff":101},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"evolution"},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+      '{"selection":{"selection":"profile_owned_no_git"},"task_id":"task.alpha","temporal":{"kind":"forensic"},"verified_version":{"event_sequence":12,"graph_version":4,"recovered_graph_digest":"digest-graph","source_watermark":{}}}',
+    ]);
   });
 
   it('converts an explicit UTC cutoff to canonical microseconds without a default', () => {

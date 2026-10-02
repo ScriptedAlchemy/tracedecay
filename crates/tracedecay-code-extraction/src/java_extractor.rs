@@ -7,7 +7,8 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{declaration_start, local_node_id};
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+    CallableArityV1, ExtractedCallableArityV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+    ImportBindingV1, ImportNamespaceV1,
 };
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -32,6 +33,7 @@ struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
+    callable_arities: Vec<ExtractedCallableArityV1>,
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
@@ -51,6 +53,7 @@ impl<'s> ExtractionState<'s> {
             nodes: Vec::new(),
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
+            callable_arities: Vec::new(),
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
@@ -173,11 +176,11 @@ impl JavaExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
-            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports),
-            scope,
-            metrics,
-        )
+        let callable_arities = std::mem::take(&mut state.callable_arities);
+        let mut artifact =
+            ExtractionArtifactV1::with_imports(Self::build_result(state, start), imports);
+        artifact.callable_arities = callable_arities;
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(artifact, scope, metrics)
     }
 
     /// `import a.b.C;` binds type `C` from package `a.b`; `import static
@@ -395,6 +398,7 @@ impl JavaExtractor {
             column: start_column,
             file_path: state.file_path.clone(),
             unmodeled_import: None,
+            argument_count: None,
         });
     }
 
@@ -776,6 +780,7 @@ impl JavaExtractor {
             parent_id: None,
         };
         state.nodes.push(graph_node);
+        Self::record_arity(state, node, &id);
 
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
@@ -841,6 +846,7 @@ impl JavaExtractor {
             parent_id: None,
         };
         state.nodes.push(graph_node);
+        Self::record_arity(state, node, &id);
 
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
@@ -854,6 +860,40 @@ impl JavaExtractor {
         Self::extract_type_refs(state, node, &id);
 
         Self::extract_call_sites(state, node, &id);
+    }
+
+    /// Record the parameter list of a method or constructor declaration.
+    /// A receiver parameter (`Outer this`) is no argument.
+    fn record_arity(state: &mut ExtractionState, node: TsNode<'_>, node_id: &str) {
+        let Some(parameters) = node.child_by_field_name("parameters") else {
+            return;
+        };
+        let mut cursor = parameters.walk();
+        let kinds = parameters
+            .named_children(&mut cursor)
+            .map(|parameter| parameter.kind())
+            .filter(|kind| matches!(*kind, "formal_parameter" | "spread_parameter"))
+            .collect::<Vec<_>>();
+        state.callable_arities.push(ExtractedCallableArityV1 {
+            node_id: node_id.to_owned(),
+            arity: CallableArityV1 {
+                parameters: kinds.len() as u32,
+                variadic: kinds.last() == Some(&"spread_parameter"),
+            },
+        });
+    }
+
+    /// Arguments a call passes; `None` without a parsed argument list.
+    fn argument_count(node: TsNode<'_>) -> Option<u32> {
+        let arguments = node
+            .child_by_field_name("arguments")
+            .filter(|arguments| !arguments.has_error())?;
+        let mut cursor = arguments.walk();
+        let count = arguments
+            .named_children(&mut cursor)
+            .filter(|argument| !argument.is_extra())
+            .count();
+        Some(count as u32)
     }
 
     /// Extract field declarations. Each `variable_declarator` in the field becomes a Field node.
@@ -1122,6 +1162,7 @@ impl JavaExtractor {
                                     column: inner_child.start_position().column as u32,
                                     file_path: state.file_path.clone(),
                                     unmodeled_import: None,
+                                    argument_count: None,
                                 });
                                 break;
                             }
@@ -1177,6 +1218,7 @@ impl JavaExtractor {
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                         unmodeled_import: None,
+                        argument_count: None,
                     });
                 } else if child.kind() == "type_list" {
                     Self::extract_type_list_as_implements(state, child, class_id);
@@ -1375,6 +1417,7 @@ impl JavaExtractor {
                     column: node.start_position().column as u32,
                     file_path: state.file_path.clone(),
                     unmodeled_import: None,
+                    argument_count: None,
                 });
             }
             return;
@@ -1408,6 +1451,7 @@ impl JavaExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: Self::argument_count(child),
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
@@ -1421,6 +1465,7 @@ impl JavaExtractor {
                             column: child.start_position().column as u32,
                             file_path: state.file_path.clone(),
                             unmodeled_import: None,
+                            argument_count: None,
                         });
                         Self::extract_call_sites(state, child, fn_node_id);
                     }

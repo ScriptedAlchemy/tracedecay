@@ -80,7 +80,7 @@ pub fn resources_list_result() -> Value {
             {
                 "uri": "tracedecay://branches",
                 "name": "Tracked Branches",
-                "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
+                "description": "List of tracked branches with parent branch and last sync time. Empty if multi-branch is not active.",
                 "mimeType": "application/json"
             },
             {

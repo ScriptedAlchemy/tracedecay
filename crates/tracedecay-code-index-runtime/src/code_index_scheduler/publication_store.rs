@@ -8,10 +8,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
+
+#[cfg(any(test, feature = "hotpath"))]
+use std::sync::atomic::AtomicUsize;
 
 use same_file::Handle;
 use sha2::{Digest, Sha256};
@@ -65,25 +68,25 @@ static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodeIndexBytePoolStatsV1 {
-    pub inserted: u64,
-    pub reused: u64,
     pub parse_chunk_inserted: u64,
     pub parse_chunk_reused: u64,
+    /// Source allocations the pool keeps, live or not.
+    pub source_allocations: usize,
+    /// Those some capture or generation still holds.
+    pub live_sources: usize,
 }
 
+/// Captured sources by content, shared by every capture in the process.
+///
+/// Entries are weak, and a `Weak<[u8]>` keeps its whole allocation, bytes
+/// included, after the last `Arc` dropped. Each pass therefore drops the
+/// entries its capture let go of, see [`Self::release_dead_entries`].
 pub struct SharedCodeIndexBytePoolV1 {
     bytes: ProfiledStdMutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
     pub(super) physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     /// Decoded generation pages by content, so linked worktrees that sealed
     /// identical trees hold one decode between them.
     pub(super) decoded_content: SharedDecodedContentPoolV1,
-    inserted: AtomicU64,
-    reused: AtomicU64,
-    /// Map length recorded after the last dead-entry prune. Weak entries whose
-    /// `Arc` dropped are never removed by lookups, so `intern` prunes them once
-    /// the map doubles past this baseline, bounding growth over the daemon
-    /// lifetime at amortized O(1) per insert.
-    last_prune_len: AtomicUsize,
 }
 
 impl Default for SharedCodeIndexBytePoolV1 {
@@ -95,9 +98,6 @@ impl Default for SharedCodeIndexBytePoolV1 {
             ),
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
             decoded_content: SharedDecodedContentPoolV1::default(),
-            inserted: AtomicU64::new(0),
-            reused: AtomicU64::new(0),
-            last_prune_len: AtomicUsize::new(0),
         }
     }
 }
@@ -116,33 +116,40 @@ impl SharedCodeIndexBytePoolV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(shared) = pool.get(&digest).and_then(Weak::upgrade) {
-            self.reused.fetch_add(1, Ordering::Relaxed);
             return (digest, shared);
         }
         let shared: Arc<[u8]> = Arc::from(bytes);
         pool.insert(digest.clone(), Arc::downgrade(&shared));
-        self.inserted.fetch_add(1, Ordering::Relaxed);
-        if pool.len()
-            > self
-                .last_prune_len
-                .load(Ordering::Relaxed)
-                .saturating_mul(2)
-        {
-            pool.retain(|_, entry| entry.strong_count() > 0);
-            self.last_prune_len
-                .store(pool.len().max(1), Ordering::Relaxed);
-        }
         (digest, shared)
+    }
+
+    /// Drop the entries no capture or generation holds any more, which frees
+    /// their sources, and the physical artifact pool's likewise. A dead entry
+    /// can never be reused, so this gives up nothing. Runs once a pass let go
+    /// of its capture and build.
+    pub(super) fn release_dead_entries(&self) {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| entry.strong_count() > 0);
+        self.physical_artifacts.release_dead_entries();
     }
 
     #[cfg(test)]
     pub(super) fn stats(&self) -> CodeIndexBytePoolStatsV1 {
         let physical_artifacts = self.physical_artifacts.stats();
+        let bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         CodeIndexBytePoolStatsV1 {
-            inserted: self.inserted.load(Ordering::Relaxed),
-            reused: self.reused.load(Ordering::Relaxed),
             parse_chunk_inserted: physical_artifacts.inserted,
             parse_chunk_reused: physical_artifacts.reused,
+            source_allocations: bytes.len(),
+            live_sources: bytes
+                .values()
+                .filter(|entry| entry.strong_count() > 0)
+                .count(),
         }
     }
 }
@@ -156,17 +163,6 @@ impl SharedCodeIndexBytePoolV1 {
 /// every unpinned query and must not be evictable by cursor traffic over
 /// superseded generations.
 pub(super) const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
-/// The exact detail a contended store-lock refusal carries, exclusive or
-/// shared.
-///
-/// The store lock is a bounded shared resource: a concurrent publication or
-/// retention pass in the same store root holds it and releases it on its own,
-/// and a shared reader is refused only while such a writer holds it. Every
-/// producer of that refusal and
-/// [`CodeIndexSchedulerErrorV1::is_transient_capacity_failure`] read this one
-/// token, so the retry classification cannot drift from the refusal it names.
-pub(super) const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
-    "code-generation store has an active owner";
 
 /// Whether one generation resolution may enter the single-flight sealed-decode.
 ///
@@ -909,7 +905,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         );
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?
-            .ok_or_else(|| std::io::Error::other("code-generation store has an active owner"))?;
+            .ok_or(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::StoreLockContended,
+            ))?;
         // Scope reconciliation only sees this directory's hash; the record
         // lets it collect the scope as soon as the checkout is deleted rather
         // than after the stranding age.
@@ -1078,7 +1076,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         try_acquire_code_generation_store_read_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))
+            .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)
     }
 
     /// Only this scope's temporaries: the store lock held by the caller proves
@@ -2424,12 +2422,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 None => return Ok(None),
             },
         };
+        let watermark = admission.resident_memory.admission_watermark_bytes();
         let admissible = || -> Result<(), String> {
-            let snapshot = admission.resident_memory.snapshot();
-            let pressure = admission.resident_memory.pressure();
-            let observed = pressure.measure_admission_bytes();
-            let watermark = pressure.high_watermark_bytes().min(snapshot.limit_bytes);
-            let available = watermark.saturating_sub(snapshot.used_bytes.max(observed));
+            let available = admission
+                .resident_memory
+                .headroom_below(watermark)
+                .available_bytes;
             if requested.get() <= available {
                 Ok(())
             } else {
@@ -2458,7 +2456,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 refused = %detail,
                 "generation decode shed retained state before re-measuring headroom"
             );
-            admissible().map_err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused)?;
+            admissible().map_err(|detail| {
+                admission
+                    .resident_memory
+                    .wait_for_headroom(requested.get(), watermark);
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(detail)
+            })?;
         }
         let component = ResidentMemoryComponentIdV1::new(component).map_err(Self::unavailable)?;
         admission
@@ -2650,7 +2653,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         let store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))?;
+            .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
         let receipt = reset_code_index_scope_store(&store_lock).map_err(Self::unavailable)?;
         std::fs::create_dir_all(&self.generations_root).map_err(Self::unavailable)?;
         tracedecay_code_index_retention::code_index_generations::record_scope_root(
@@ -2758,7 +2761,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         };
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))?;
+            .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
         let prior_pointer = if let Some(expected) = undecoded_expectation.as_ref() {
             if expected_active_generation.is_some() {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);

@@ -273,67 +273,6 @@ fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
 }
 
 #[test]
-fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session-redacted.jsonl");
-    let event = json!({"session_id": "session-redacted"});
-    std::fs::write(
-        &path,
-        "{\"role\":\"user\",\"content\":\"first generation\"}\n",
-    )
-    .unwrap();
-
-    let first = parse_cursor_jsonl(
-        &event,
-        "session-redacted",
-        &path,
-        StoredCursor::default(),
-        None,
-        false,
-    )
-    .unwrap();
-    assert_eq!(first.messages.len(), 1);
-    assert!(!first.messages[0].message_id.contains(":generation:"));
-
-    // Truncate-and-rewrite, then read the replacement one record per batch
-    // so the second batch no longer starts at the file head.
-    std::fs::write(
-        &path,
-        "{\"role\":\"user\",\"content\":\"replacement head\"}\n\
-         {\"role\":\"user\",\"content\":\"replacement tail\"}\n",
-    )
-    .unwrap();
-
-    let head = parse_cursor_jsonl(
-        &event,
-        "session-redacted",
-        &path,
-        first.new_cursor,
-        Some(1),
-        false,
-    )
-    .unwrap();
-    assert_eq!(head.messages.len(), 1);
-    let suffix = format!(":generation:{}", head.new_cursor.file_id);
-    assert!(head.messages[0].message_id.ends_with(&suffix));
-
-    let tail = parse_cursor_jsonl(
-        &event,
-        "session-redacted",
-        &path,
-        head.new_cursor,
-        Some(1),
-        false,
-    )
-    .unwrap();
-    assert_eq!(tail.messages.len(), 1);
-    // Without the stored generation the tail would re-mint the bare
-    // `<session>:<offset>` id and overwrite retained pre-rewrite history.
-    assert!(tail.messages[0].message_id.ends_with(&suffix));
-    assert_ne!(tail.messages[0].message_id, first.messages[0].message_id);
-}
-
-#[test]
 fn user_scope_selects_one_physical_authority_for_a_mirrored_session() {
     let home = tempfile::tempdir().unwrap();
     let first = home

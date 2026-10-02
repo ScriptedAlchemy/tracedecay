@@ -1,41 +1,23 @@
 #[cfg(any(test, feature = "hotpath"))]
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
 use tracedecay_private_fs::RewriteWitness;
 
 use super::{
     StoredCursor, TranscriptIngestError, TranscriptIngestResult, file_mtime_secs,
-    log_jsonl_decode_skip, log_jsonl_oversized_skip, log_source_skip, should_resume_jsonl,
-    stable_jsonl_file_id,
+    should_resume_jsonl, stable_jsonl_file_id,
 };
-
-pub struct JsonlLine {
-    pub offset: i64,
-    pub value: Value,
-}
-
-pub struct NewJsonl {
-    pub lines: Vec<JsonlLine>,
-    pub new_cursor: StoredCursor,
-    /// Absolute source offset this batch resumed from.
-    pub start_offset: u64,
-    /// Whether `new_cursor.file_id` names a replacement (truncate-and-rewrite)
-    /// generation instead of the file's append-only identity. It is a property
-    /// of the stored cursor, so every batch of one replacement generation
-    /// reports it -- not just the batch that starts at offset zero.
-    pub replacement_generation: bool,
-}
 
 pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 
@@ -76,7 +58,7 @@ impl JsonlFrameDeferral {
 pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Default strict-scan budget keeps recovery bounded even without a hook cap.
 pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
-pub(super) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
+pub(in crate::runtime) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
 const UNCHANGED_GENERATION_CACHE_CAP: usize = 4096;
 
@@ -540,6 +522,48 @@ pub struct JsonlResumeState {
     pub fingerprint: u64,
 }
 
+/// Record-end prefix checkpoint that one generation of a source committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JsonlPrefixCheckpoint {
+    pub generation: u64,
+    pub position: u64,
+    pub fingerprint: u64,
+}
+
+/// What a scan does when the recorded resume prefix no longer matches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum JsonlPrefixRecovery {
+    /// Stop before reading content and report the divergence, so the caller
+    /// can load the source's committed checkpoints.
+    Report,
+    /// Resume the rewritten generation after the longest prefix that still
+    /// hashes to one of these checkpoints; none matching rescans from zero.
+    Checkpoints(Arc<[JsonlPrefixCheckpoint]>),
+}
+
+impl JsonlPrefixRecovery {
+    pub fn rescan() -> Self {
+        Self::Checkpoints(Arc::from([]))
+    }
+
+    /// Checkpoints carried by a source's committed byte-ordered cursors.
+    pub fn committed(cursors: &[ObservationSourceCursorV1]) -> Self {
+        Self::Checkpoints(
+            cursors
+                .iter()
+                .filter(|cursor| cursor.ordering_domain() == ObservationOrderingDomainV1::FileBytes)
+                .filter_map(|cursor| {
+                    Some(JsonlPrefixCheckpoint {
+                        generation: cursor.generation().generation_id(),
+                        position: cursor.position(),
+                        fingerprint: cursor.resume_fingerprint()?,
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawJsonlFrame {
     Eof,
@@ -636,6 +660,123 @@ pub(in crate::runtime) fn jsonl_prefix_digest<R: Read + Seek>(
     Ok((digest, hashed))
 }
 
+/// Longest checkpointed prefix of `file` whose digest still matches, or
+/// `recorded` itself as soon as it matches, since resuming the recorded
+/// generation needs no replacement.
+///
+/// Checkpoints of one generation share one byte stream, so its first mismatch
+/// rules out every later checkpoint of that generation; hashing stops once
+/// every generation has diverged instead of walking the whole extent.
+fn longest_retained_jsonl_prefix<R: Read + Seek>(
+    file: &mut R,
+    checkpoints: &[JsonlPrefixCheckpoint],
+    recorded: Option<JsonlPrefixCheckpoint>,
+    extent: u64,
+) -> std::io::Result<(Option<(JsonlPrefixCheckpoint, ResumeDigest)>, u64)> {
+    let mut ordered = checkpoints
+        .iter()
+        .copied()
+        .chain(recorded)
+        .filter(|checkpoint| checkpoint.position > 0 && checkpoint.position <= extent)
+        .collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|checkpoint| {
+        (
+            checkpoint.position,
+            checkpoint.generation,
+            checkpoint.fingerprint,
+        )
+    });
+    ordered.dedup();
+    let generations = ordered
+        .iter()
+        .map(|checkpoint| checkpoint.generation)
+        .collect::<HashSet<_>>();
+    let mut diverged = HashSet::new();
+    let mut digest = ResumeDigest::new();
+    let mut hashed = 0_u64;
+    let mut retained = None;
+    let mut buffer = vec![0_u8; JSONL_HASH_CHUNK_BYTES];
+    file.seek(SeekFrom::Start(0))?;
+    for checkpoint in ordered {
+        if diverged.len() == generations.len() {
+            break;
+        }
+        if diverged.contains(&checkpoint.generation) {
+            continue;
+        }
+        while hashed < checkpoint.position {
+            let requested =
+                usize::try_from((checkpoint.position - hashed).min(buffer.len() as u64))
+                    .unwrap_or(buffer.len());
+            let read = file.read(&mut buffer[..requested])?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "JSONL prefix ended during checkpoint hashing",
+                ));
+            }
+            digest.extend(&buffer[..read]);
+            hashed = hashed.saturating_add(read as u64);
+        }
+        if digest.fingerprint(checkpoint.position) == checkpoint.fingerprint {
+            if Some(checkpoint) == recorded {
+                return Ok((Some((checkpoint, digest)), hashed));
+            }
+            retained = Some((checkpoint, digest.clone()));
+        } else {
+            diverged.insert(checkpoint.generation);
+        }
+    }
+    Ok((retained, hashed))
+}
+
+enum RecordedPrefix {
+    /// The recorded cursor still resumes; the digest seeds the scanner when
+    /// this pass computed it.
+    Resumes(Option<ResumeDigest>),
+    /// The recorded prefix changed; carries the longest committed checkpoint
+    /// that still matches when checkpoints were supplied.
+    Diverged(Option<(JsonlPrefixCheckpoint, ResumeDigest)>),
+}
+
+fn match_recorded_prefix(
+    file: &mut MeasuredJsonlFile<'_>,
+    path: &Path,
+    recorded: Option<JsonlPrefixCheckpoint>,
+    prefix_recovery: &JsonlPrefixRecovery,
+    extent: u64,
+    io: &mut JsonlIoAccounting,
+) -> TranscriptIngestResult<RecordedPrefix> {
+    match (recorded, prefix_recovery) {
+        (None, JsonlPrefixRecovery::Report) => Ok(RecordedPrefix::Diverged(None)),
+        (Some(recorded), JsonlPrefixRecovery::Report) => {
+            match jsonl_prefix_digest(file, recorded.position) {
+                Ok((digest, hashed)) => {
+                    io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+                    if digest.fingerprint(recorded.position) == recorded.fingerprint {
+                        Ok(RecordedPrefix::Resumes(Some(digest)))
+                    } else {
+                        Ok(RecordedPrefix::Diverged(None))
+                    }
+                }
+                Err(_) => Ok(RecordedPrefix::Diverged(None)),
+            }
+        }
+        (_, JsonlPrefixRecovery::Checkpoints(checkpoints)) => {
+            let (retained, hashed) =
+                longest_retained_jsonl_prefix(file, checkpoints, recorded, extent)
+                    .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+            Ok(match retained {
+                Some((checkpoint, digest)) if Some(checkpoint) == recorded => {
+                    RecordedPrefix::Resumes(Some(digest))
+                }
+                other => RecordedPrefix::Diverged(other),
+            })
+        }
+    }
+}
+
 /// Memoized [`bounded_jsonl_snapshot_fingerprint`]: the hash walks the whole
 /// extent, so callers compute it at most once per scan and only on paths that
 /// actually consume it.
@@ -721,10 +862,12 @@ fn next_replacement_jsonl_generation(file_identity: u64, previous_generation: u6
     replacement_jsonl_generation(file_identity, counter)
 }
 
+/// `content_fingerprint` is the whole-extent snapshot for a rescan from zero,
+/// or the retained prefix's resume fingerprint for a proportional resume.
 fn rewritten_jsonl_generation(
     previous: JsonlResumeState,
     file_identity: u64,
-    snapshot_fingerprint: u64,
+    content_fingerprint: u64,
     file_size: u64,
     mtime: u64,
 ) -> u64 {
@@ -732,7 +875,7 @@ fn rewritten_jsonl_generation(
     hasher.update(b"tracedecay-jsonl-rewrite-generation-v1");
     hasher.update(previous.generation.to_le_bytes());
     hasher.update(file_identity.to_le_bytes());
-    hasher.update(snapshot_fingerprint.to_le_bytes());
+    hasher.update(content_fingerprint.to_le_bytes());
     hasher.update(file_size.to_le_bytes());
     hasher.update(mtime.to_le_bytes());
     digest_prefix_u64(hasher.finalize()).max(1)
@@ -853,152 +996,15 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
     }
 }
 
-/// Strict framing result used by providers that must retry invalid records.
-#[cfg(test)]
-pub enum StrictJsonlOutcome {
-    Complete(NewJsonl),
-    Deferred {
-        parsed: NewJsonl,
-        reason: JsonlFrameDeferral,
-    },
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum MalformedJsonlPolicy {
-    Skip,
-    Defer,
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RawJsonlScanRequest {
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
     max_frames: usize,
-    oversized_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     witness: RewriteWitness,
-}
-
-/// **`ByteOffset`** reader for append-only JSONL.
-///
-/// Seeks to `prev.position` (when the file has only grown and its mtime has not
-/// regressed) and streams complete, newline-terminated lines, decoding each as
-/// JSON. Blank and undecodable lines still advance the offset (so they are not
-/// re-read) but are omitted from `lines`. A trailing line without a newline is a
-/// partial write and is left unconsumed for the next call.
-///
-/// Returns `None` when the file cannot be stat-ed/opened. `max_new_bytes` is a
-/// nominal batch cap: a capped read finishes at most one bounded complete record
-/// that crosses the cap, then leaves the remaining backlog for a later call.
-/// This guarantees cursor progress without allowing a second record past the cap.
-pub fn stream_new_jsonl(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-) -> Option<NewJsonl> {
-    let (parsed, deferred, start_offset) = stream_new_jsonl_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        MalformedJsonlPolicy::Skip,
-        MAX_JSONL_RECORD_BYTES,
-    )?;
-    if matches!(deferred, Some(JsonlFrameDeferral::Backlog { .. }))
-        && parsed.new_cursor.position == start_offset
-    {
-        None
-    } else {
-        Some(parsed)
-    }
-}
-
-/// Reads complete Claude-style JSONL frames with strict malformed-frame deferral.
-///
-/// Malformed JSON stops at that frame's start. Bounded oversized raw frames
-/// advance without payload but stop the batch before exposing their suffix.
-/// `max_record_bytes` includes the terminating newline. Other providers retain
-/// [`stream_new_jsonl`]'s skip-and-advance behavior.
-#[cfg(test)]
-pub fn stream_new_jsonl_strict(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    max_record_bytes: usize,
-) -> Option<StrictJsonlOutcome> {
-    let (parsed, reason, _) = stream_new_jsonl_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        MalformedJsonlPolicy::Defer,
-        max_record_bytes,
-    )?;
-    Some(match reason {
-        Some(reason) => StrictJsonlOutcome::Deferred { parsed, reason },
-        None => StrictJsonlOutcome::Complete(parsed),
-    })
-}
-
-#[hotpath::measure(label = "sessions.source.stream_jsonl")]
-pub(super) fn stream_new_jsonl_with_policy(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    malformed_policy: MalformedJsonlPolicy,
-    max_record_bytes: usize,
-) -> Option<(NewJsonl, Option<JsonlFrameDeferral>, u64)> {
-    let mut raw = match try_stream_new_jsonl_raw_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        malformed_policy,
-        max_record_bytes,
-        None,
-    ) {
-        Ok(raw) => raw,
-        Err(error) => {
-            log_source_skip(path, "scan jsonl transcript", &error);
-            return None;
-        }
-    };
-    let mut lines = Vec::new();
-    let mut covered_through = raw.new_cursor.position;
-
-    for frame in raw.frames.drain(..) {
-        if frame.bytes.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match serde_json::from_slice::<Value>(&frame.bytes) {
-            Ok(value) => lines.push(JsonlLine {
-                offset: frame.offset as i64,
-                value,
-            }),
-            Err(error) => match malformed_policy {
-                MalformedJsonlPolicy::Skip => {
-                    log_jsonl_decode_skip(path, frame.offset, &error);
-                }
-                MalformedJsonlPolicy::Defer => {
-                    covered_through = frame.offset;
-                    raw.deferred = Some(JsonlFrameDeferral::Malformed {
-                        offset: frame.offset,
-                    });
-                    break;
-                }
-            },
-        }
-    }
-    raw.new_cursor.position = covered_through;
-
-    Some((
-        NewJsonl {
-            lines,
-            new_cursor: raw.new_cursor,
-            start_offset: raw.start_offset,
-            replacement_generation: raw.replacement_generation,
-        },
-        raw.deferred,
-        raw.start_offset,
-    ))
 }
 
 /// One bounded, complete raw JSONL frame with its exact source byte range.
@@ -1013,6 +1019,9 @@ pub struct RawJsonlRecord {
 pub enum RawJsonlSkippedReason {
     Whitespace,
     Oversized,
+    /// Leading bytes of a rewritten generation that match a committed
+    /// checkpoint; their records stay under the generation that admitted them.
+    RetainedPrefix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1037,7 +1046,28 @@ pub struct RawNewJsonl {
     /// the append-only identity of the scanned file.
     pub replacement_generation: bool,
     pub deferred: Option<JsonlFrameDeferral>,
+    /// Set only under [`JsonlPrefixRecovery::Report`]: the recorded prefix no
+    /// longer matches and nothing past validation was read.
+    pub prefix_diverged: bool,
     pub io: JsonlIoAccounting,
+}
+
+impl RawNewJsonl {
+    /// Nothing read past validation: the cursor stays where it was.
+    fn prefix_diverged(previous: StoredCursor, file_identity: u64, io: JsonlIoAccounting) -> Self {
+        Self {
+            frames: Vec::new(),
+            skipped: Vec::new(),
+            start_offset: previous.position,
+            read_through: previous.position,
+            file_identity,
+            new_cursor: previous,
+            replacement_generation: false,
+            deferred: None,
+            prefix_diverged: true,
+            io,
+        }
+    }
 }
 
 /// Strict bounded framing used by Claude's single-parse privacy boundary.
@@ -1051,7 +1081,7 @@ pub fn stream_new_jsonl_raw_strict(
     match try_stream_new_jsonl_raw_strict(path, prev, max_new_bytes, max_record_bytes) {
         Ok(raw) => Some(raw),
         Err(error) => {
-            log_source_skip(path, "scan strict jsonl transcript", &error);
+            super::log_source_skip(path, "scan strict jsonl transcript", &error);
             None
         }
     }
@@ -1067,6 +1097,7 @@ pub fn try_stream_new_jsonl_raw_strict(
     try_stream_new_jsonl_raw_strict_with_resume(path, prev, max_new_bytes, max_record_bytes, None)
 }
 
+#[cfg(test)]
 pub fn try_stream_new_jsonl_raw_strict_with_resume(
     path: &Path,
     prev: StoredCursor,
@@ -1080,6 +1111,7 @@ pub fn try_stream_new_jsonl_raw_strict_with_resume(
         max_new_bytes,
         max_record_bytes,
         resume_state,
+        JsonlPrefixRecovery::rescan(),
         MAX_JSONL_FRAMES_PER_BATCH,
     )
 }
@@ -1090,49 +1122,31 @@ pub(in crate::runtime) fn try_stream_new_jsonl_raw_strict_with_resume_and_frame_
     max_new_bytes: Option<u64>,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
     let one_record_bytes = u64::try_from(max_record_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     let recovery_batch_bytes = STRICT_JSONL_BATCH_BYTES.max(one_record_bytes);
-    try_stream_new_jsonl_raw_with_policy_and_frame_limit(
+    try_stream_new_jsonl_raw_with_frame_limit(
         path,
         prev,
         Some(max_new_bytes.unwrap_or(recovery_batch_bytes)),
-        MalformedJsonlPolicy::Defer,
         max_record_bytes,
         resume_state,
+        prefix_recovery,
         max_frames,
     )
 }
 
-fn try_stream_new_jsonl_raw_with_policy(
+fn try_stream_new_jsonl_raw_with_frame_limit(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
-    oversized_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
-) -> TranscriptIngestResult<RawNewJsonl> {
-    try_stream_new_jsonl_raw_with_policy_and_frame_limit(
-        path,
-        prev,
-        max_new_bytes,
-        oversized_policy,
-        max_record_bytes,
-        resume_state,
-        MAX_JSONL_FRAMES_PER_BATCH,
-    )
-}
-
-fn try_stream_new_jsonl_raw_with_policy_and_frame_limit(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    oversized_policy: MalformedJsonlPolicy,
-    max_record_bytes: usize,
-    resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
     #[cfg(test)]
@@ -1149,9 +1163,9 @@ fn try_stream_new_jsonl_raw_with_policy_and_frame_limit(
             previous: prev,
             max_new_bytes,
             max_frames: max_frames.clamp(1, MAX_JSONL_FRAMES_PER_BATCH),
-            oversized_policy,
             max_record_bytes,
             resume_state,
+            prefix_recovery,
             witness: RewriteWitness::NATIVE,
         },
         || {},
@@ -1170,6 +1184,10 @@ struct JsonlScanGeneration {
     witness: RewriteWitness,
     file_id: u64,
     file_identity: u64,
+    /// Identity of the file this scan opened. It differs from `file_identity`
+    /// only when a replaced file resumed its recorded generation, and it is
+    /// what revalidation compares the file against after the read.
+    physical_identity: u64,
     /// `None` only when the scan proved it would read nothing, so no batch,
     /// and therefore no revalidation, consumes it.
     snapshot_fingerprint: Option<u64>,
@@ -1186,18 +1204,31 @@ struct PreparedJsonlScan<'a> {
     /// same digest to seed the reader, so carrying it forward keeps one scan to
     /// one pass over the prefix instead of hashing those bytes a second time.
     validated_prefix: Option<(u64, ResumeDigest)>,
+    /// `[0, seek_to)` of a rewritten generation proven equal to a committed
+    /// checkpoint. The first batch covers it before any new record.
+    retained_prefix: Option<RawJsonlSkippedRange>,
+}
+
+enum JsonlCapture<'a> {
+    Scan(Box<PreparedJsonlScan<'a>>),
+    PrefixDiverged { file_identity: u64 },
 }
 
 impl<'a> PreparedJsonlScan<'a> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is an independent scan input chosen per call"
+    )]
     fn capture(
         path: &Path,
         mut file: MeasuredJsonlFile<'a>,
         previous: StoredCursor,
         resume_state: Option<JsonlResumeState>,
+        prefix_recovery: &JsonlPrefixRecovery,
         witness: RewriteWitness,
         after_generation_capture: impl FnOnce(),
         io: &mut JsonlIoAccounting,
-    ) -> TranscriptIngestResult<Self> {
+    ) -> TranscriptIngestResult<JsonlCapture<'a>> {
         let metadata = file
             .inner()
             .metadata()
@@ -1212,13 +1243,14 @@ impl<'a> PreparedJsonlScan<'a> {
             .filter(|key| {
                 unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
             });
-        let (file_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
+        let (physical_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
             (key.stable_file_identity, 0)
         } else {
             let (identity, read) = stable_jsonl_file_id(file.inner_mut(), &metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
             (identity, read)
         };
+        let mut file_identity = physical_identity;
         io.identity_window_bytes = identity_window_bytes;
         // The snapshot fingerprint hashes the whole extent, so it is captured
         // lazily: only rewrite-marker minting and scans that will actually
@@ -1228,51 +1260,87 @@ impl<'a> PreparedJsonlScan<'a> {
         // Retains the digest computed below so the scanner can seed its reader
         // from it instead of walking the same prefix a second time.
         let mut validated_prefix: Option<(u64, ResumeDigest)> = None;
+        let mut retained_prefix = None;
         let (seek_to, file_id) = if let Some(resume_state) = resume_state {
-            let identity_matches = previous.position > 0
+            // The consumed prefix digest, not the physical file identity, proves
+            // a resume: a transcript replaced by rename keeps its generation and
+            // recorded identity when its first `position` bytes are unchanged.
+            let recorded = (previous.position > 0
                 && previous.file_id == resume_state.generation
-                && file_size >= previous.position
-                && file_identity == resume_state.file_identity;
-            let resume_matches = identity_matches
-                && (cached_unchanged.is_some()
-                    || match jsonl_prefix_digest(&mut file, previous.position) {
-                        Ok((digest, hashed)) => {
-                            io.prefix_validation_bytes =
-                                io.prefix_validation_bytes.saturating_add(hashed);
-                            let matched =
-                                digest.fingerprint(previous.position) == resume_state.fingerprint;
-                            if matched {
-                                validated_prefix = Some((previous.position, digest));
-                            }
-                            matched
-                        }
-                        Err(_) => false,
-                    });
-            if resume_matches {
-                (previous.position, resume_state.generation)
+                && file_size >= previous.position)
+                .then_some(JsonlPrefixCheckpoint {
+                    generation: resume_state.generation,
+                    position: previous.position,
+                    fingerprint: resume_state.fingerprint,
+                });
+            // Under `Checkpoints` the recorded cursor is one more candidate of
+            // a single forward walk that stops past the first changed record,
+            // rather than a whole-prefix hash that can only say "changed".
+            let (resume_matches, recovered) = if recorded.is_some() && cached_unchanged.is_some() {
+                (true, None)
             } else {
+                match match_recorded_prefix(
+                    &mut file,
+                    path,
+                    recorded,
+                    prefix_recovery,
+                    file_size,
+                    io,
+                )? {
+                    RecordedPrefix::Resumes(digest) => {
+                        validated_prefix = digest.map(|digest| (previous.position, digest));
+                        (true, None)
+                    }
+                    RecordedPrefix::Diverged(recovered) => (false, recovered),
+                }
+            };
+            if resume_matches {
+                file_identity = resume_state.file_identity;
+                (previous.position, resume_state.generation)
+            } else if previous.position > 0 && prefix_recovery == &JsonlPrefixRecovery::Report {
+                return Ok(JsonlCapture::PrefixDiverged { file_identity });
+            } else if let Some((JsonlPrefixCheckpoint { position, .. }, digest)) = recovered {
+                // Checkpoints are this source's own committed prefixes, so a
+                // match proves the bytes whether or not the file was replaced.
+                let resume_fingerprint = digest.fingerprint(position);
+                retained_prefix = Some(RawJsonlSkippedRange {
+                    offset: 0,
+                    end_offset: position,
+                    resume_fingerprint,
+                    reason: RawJsonlSkippedReason::RetainedPrefix,
+                });
+                validated_prefix = Some((position, digest));
+                (
+                    position,
+                    rewritten_jsonl_generation(
+                        resume_state,
+                        file_identity,
+                        resume_fingerprint,
+                        file_size,
+                        mtime,
+                    ),
+                )
+            } else if file_identity == resume_state.file_identity {
                 (
                     0,
-                    if file_identity == resume_state.file_identity {
-                        rewritten_jsonl_generation(
-                            resume_state,
-                            file_identity,
-                            memoized_jsonl_snapshot_fingerprint(
-                                &mut snapshot_fingerprint,
-                                &mut io.snapshot_hash_bytes,
-                                &mut file,
-                                file_size,
-                            )
-                            .map_err(|error| {
-                                TranscriptIngestError::scan_io("fingerprint", path, error)
-                            })?,
+                    rewritten_jsonl_generation(
+                        resume_state,
+                        file_identity,
+                        memoized_jsonl_snapshot_fingerprint(
+                            &mut snapshot_fingerprint,
+                            &mut io.snapshot_hash_bytes,
+                            &mut file,
                             file_size,
-                            mtime,
                         )
-                    } else {
-                        file_identity
-                    },
+                        .map_err(|error| {
+                            TranscriptIngestError::scan_io("fingerprint", path, error)
+                        })?,
+                        file_size,
+                        mtime,
+                    ),
                 )
+            } else {
+                (0, file_identity)
             }
         } else if should_resume_jsonl(previous, file_size, mtime, file_identity) {
             // Carry the stored generation forward: a replacement marker minted
@@ -1338,7 +1406,7 @@ impl<'a> PreparedJsonlScan<'a> {
         } else {
             JsonlChangeKind::Appended
         };
-        Ok(Self {
+        Ok(JsonlCapture::Scan(Box::new(Self {
             file,
             generation: JsonlScanGeneration {
                 file_size,
@@ -1347,13 +1415,15 @@ impl<'a> PreparedJsonlScan<'a> {
                 witness,
                 file_id,
                 file_identity,
+                physical_identity,
                 snapshot_fingerprint,
                 seek_to,
                 replacement,
             },
             cached_unchanged,
             validated_prefix,
-        })
+            retained_prefix,
+        })))
     }
 
     fn is_complete(&self) -> bool {
@@ -1389,7 +1459,7 @@ impl<'a> PreparedJsonlScan<'a> {
             io.identity_window_bytes = io
                 .identity_window_bytes
                 .saturating_add(identity_window_bytes);
-            if final_file_identity != self.generation.file_identity
+            if final_file_identity != self.generation.physical_identity
                 || metadata.len() != self.generation.file_size
                 || jsonl_file_change_token_under(&metadata, self.generation.witness)
                     != self.generation.change
@@ -1441,7 +1511,7 @@ impl<'a> PreparedJsonlScan<'a> {
         let generation = self.generation;
         Ok(RawNewJsonl {
             frames: Vec::new(),
-            skipped: Vec::new(),
+            skipped: self.retained_prefix.into_iter().collect(),
             start_offset: generation.seek_to,
             read_through: generation.seek_to,
             file_identity: generation.file_identity,
@@ -1452,6 +1522,7 @@ impl<'a> PreparedJsonlScan<'a> {
             },
             replacement_generation: generation.replacement,
             deferred: None,
+            prefix_diverged: false,
             io: *io,
         })
     }
@@ -1531,7 +1602,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 .saturating_add(1),
             max_record_bytes,
             frames: Vec::new(),
-            skipped: Vec::new(),
+            skipped: prepared.retained_prefix.into_iter().collect(),
             offset: generation.seek_to,
             read_through: generation.seek_to,
             continuing_oversized,
@@ -1558,12 +1629,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         Ok(previous[0] != b'\n')
     }
 
-    fn scan(
-        mut self,
-        path: &Path,
-        oversized_policy: MalformedJsonlPolicy,
-        io: &mut JsonlIoAccounting,
-    ) -> TranscriptIngestResult<Self> {
+    fn scan(mut self, path: &Path, io: &mut JsonlIoAccounting) -> TranscriptIngestResult<Self> {
         loop {
             if let Some(step) = self.boundary_step() {
                 self.apply_step(&step);
@@ -1592,13 +1658,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 RawJsonlFrame::Oversized {
                     byte_len,
                     terminated,
-                } => self.handle_oversized(
-                    path,
-                    oversized_policy,
-                    byte_len,
-                    terminated,
-                    resume_fingerprint,
-                ),
+                } => self.handle_oversized(byte_len, terminated, resume_fingerprint),
                 RawJsonlFrame::BudgetExhausted {
                     byte_len,
                     oversized,
@@ -1641,53 +1701,29 @@ impl<'a> RawJsonlBatchScanner<'a> {
 
     fn handle_oversized(
         &mut self,
-        path: &Path,
-        policy: MalformedJsonlPolicy,
         byte_len: u64,
         terminated: bool,
         resume_fingerprint: u64,
     ) -> JsonlScanStep {
         let next_offset = self.offset.saturating_add(byte_len);
-        match (policy, terminated) {
-            (MalformedJsonlPolicy::Skip, true) => {
-                if self.scan_end.is_some_and(|end| next_offset > end) {
-                    return JsonlScanStep::Stop(self.backlog_at(self.offset));
-                }
-                log_jsonl_oversized_skip(path, self.offset, byte_len);
-                self.offset = next_offset;
-                // Having consumed the tail of the record this scan resumed
-                // inside, restore the real record budget. Without this the
-                // reader keeps the zero limit it was resumed with and reports
-                // every subsequent valid record as oversized, skipping them and
-                // advancing the durable cursor past them for good.
-                if terminated && self.continuing_oversized {
-                    self.reader.set_max_record_bytes(self.max_record_bytes);
-                    self.continuing_oversized = false;
-                }
-                JsonlScanStep::Continue
-            }
-            (MalformedJsonlPolicy::Skip, false) => {
-                JsonlScanStep::Stop(Some(JsonlFrameDeferral::Partial {
-                    offset: self.offset,
-                }))
-            }
-            (MalformedJsonlPolicy::Defer, _) => {
-                self.push_skipped(
-                    next_offset,
-                    RawJsonlSkippedReason::Oversized,
-                    resume_fingerprint,
-                );
-                self.offset = next_offset;
-                if terminated && self.continuing_oversized {
-                    self.reader.set_max_record_bytes(self.max_record_bytes);
-                    self.continuing_oversized = false;
-                }
-                if self.offset < self.generation.file_size {
-                    JsonlScanStep::Stop(self.backlog_at(self.offset))
-                } else {
-                    JsonlScanStep::Continue
-                }
-            }
+        self.push_skipped(
+            next_offset,
+            RawJsonlSkippedReason::Oversized,
+            resume_fingerprint,
+        );
+        self.offset = next_offset;
+        // Having consumed the tail of the record this scan resumed inside,
+        // restore the real record budget. Without this the reader keeps the
+        // zero limit it was resumed with and reports every subsequent valid
+        // record as oversized.
+        if terminated && self.continuing_oversized {
+            self.reader.set_max_record_bytes(self.max_record_bytes);
+            self.continuing_oversized = false;
+        }
+        if self.offset < self.generation.file_size {
+            JsonlScanStep::Stop(self.backlog_at(self.offset))
+        } else {
+            JsonlScanStep::Continue
         }
     }
 
@@ -1839,7 +1875,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         } else {
             false
         };
-        if final_file_id != self.generation.file_identity
+        if final_file_id != self.generation.physical_identity
             || snapshot_changed
             || wrote_without_growing
             || changed_consumed_prefix
@@ -1884,6 +1920,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
             },
             replacement_generation: self.generation.replacement,
             deferred: self.deferred,
+            prefix_diverged: false,
             io: *io,
         })
     }
@@ -1899,9 +1936,9 @@ fn try_stream_new_jsonl_raw_from_file(
         previous,
         max_new_bytes,
         max_frames,
-        oversized_policy,
         max_record_bytes,
         resume_state,
+        prefix_recovery,
         witness,
     } = request;
     let scan_payload_reads = ScanPayloadMeter::new();
@@ -1909,15 +1946,21 @@ fn try_stream_new_jsonl_raw_from_file(
     let mut io = JsonlIoAccounting::default();
     let mut classified = false;
     let result = (|| {
-        let prepared = PreparedJsonlScan::capture(
+        let prepared = match PreparedJsonlScan::capture(
             path,
             file,
             previous,
             resume_state,
+            &prefix_recovery,
             witness,
             after_generation_capture,
             &mut io,
-        )?;
+        )? {
+            JsonlCapture::Scan(prepared) => *prepared,
+            JsonlCapture::PrefixDiverged { file_identity } => {
+                return Ok(RawNewJsonl::prefix_diverged(previous, file_identity, io));
+            }
+        };
         classified = true;
         if prepared.is_complete() {
             prepared.into_empty_outcome(path, &mut io)
@@ -1930,7 +1973,7 @@ fn try_stream_new_jsonl_raw_from_file(
                 max_record_bytes,
                 &mut io,
             )?
-            .scan(path, oversized_policy, &mut io)?
+            .scan(path, &mut io)?
             .revalidate(path, &mut io)
         }
     })();
@@ -2023,9 +2066,9 @@ mod tests {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
                 max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                prefix_recovery: JsonlPrefixRecovery::rescan(),
                 witness: RewriteWitness::NATIVE,
             },
             || {
@@ -2065,9 +2108,9 @@ mod tests {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
                 max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                prefix_recovery: JsonlPrefixRecovery::rescan(),
                 witness: RewriteWitness::NATIVE,
             },
             || std::fs::write(&path, replacement).unwrap(),
@@ -2105,9 +2148,9 @@ mod tests {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
                 max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
+                prefix_recovery: JsonlPrefixRecovery::rescan(),
                 witness: RewriteWitness::NATIVE,
             },
             || {
@@ -2282,7 +2325,7 @@ mod tests {
             fingerprint: first.frames.last().unwrap().resume_fingerprint,
         };
 
-        std::fs::write(&replacement, contents).unwrap();
+        std::fs::write(&replacement, b"{\"v\":1}\n").unwrap();
         std::fs::rename(&path, &old).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
 
@@ -2329,9 +2372,9 @@ mod tests {
                 previous: first.new_cursor,
                 max_new_bytes: None,
                 max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: Some(checkpoint),
+                prefix_recovery: JsonlPrefixRecovery::rescan(),
                 witness: RewriteWitness::NATIVE,
             },
             || std::fs::write(&path, replacement).unwrap(),
@@ -2367,9 +2410,9 @@ mod tests {
                     previous,
                     max_new_bytes: None,
                     max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                    oversized_policy: MalformedJsonlPolicy::Defer,
                     max_record_bytes: MAX_JSONL_RECORD_BYTES,
                     resume_state,
+                    prefix_recovery: JsonlPrefixRecovery::rescan(),
                     witness: RewriteWitness::Absent,
                 },
                 after_capture,

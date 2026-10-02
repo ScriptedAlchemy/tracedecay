@@ -34,6 +34,8 @@ use tracedecay_store::{
 
 #[path = "verified_generation_contract/code_graph_layout.rs"]
 mod code_graph_layout;
+#[path = "verified_generation_contract/layered_store.rs"]
+mod layered_store;
 #[path = "verified_generation_contract/metadata_replay.rs"]
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]

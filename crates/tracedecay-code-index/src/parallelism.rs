@@ -9,11 +9,13 @@ use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
 };
+use tracedecay_domain::process_heap::collect_calling_thread_allocator_v1;
 pub use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Operator override for the indexing width. It has higher precedence than
@@ -173,6 +175,31 @@ struct InstalledCodeIndexWorkerRuntimeV1 {
     plan: CodeIndexWorkerPlanV1,
     pool: rayon::ThreadPool,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
+    activity: PoolActivityV1,
+}
+
+/// Fan-outs running on the pool now, and whether its workers have freed
+/// pages to return since they last collected.
+#[derive(Default)]
+struct PoolActivityV1 {
+    running: AtomicUsize,
+    collect_pending: AtomicBool,
+}
+
+struct RunningFanOutV1<'pool>(&'pool PoolActivityV1);
+
+impl<'pool> RunningFanOutV1<'pool> {
+    fn new(activity: &'pool PoolActivityV1) -> Self {
+        activity.running.fetch_add(1, Ordering::AcqRel);
+        Self(activity)
+    }
+}
+
+impl Drop for RunningFanOutV1<'_> {
+    fn drop(&mut self) {
+        self.0.collect_pending.store(true, Ordering::Release);
+        self.0.running.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl InstalledCodeIndexWorkerRuntimeV1 {
@@ -193,8 +220,31 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
         F: FnOnce() -> R + Send,
         R: Send,
     {
+        let _running = RunningFanOutV1::new(&self.activity);
         self.background_cpu
             .with_yielded_permits(|| self.pool.install(operation))
+    }
+
+    fn collect_worker_heaps_when_idle(&self) {
+        self.activity.collect_pending.store(true, Ordering::Release);
+    }
+
+    /// Each worker returns its allocator pages once the pool has gone idle
+    /// after a fan-out. Workers allocate a build's rows and scratch; other
+    /// threads free most of it after the build, and those frees reach the
+    /// kernel only when the owning worker collects its heap. Measured on a
+    /// 36-worker daemon settled after a cold index: 233 MB of anonymous RSS
+    /// held that way, 6.5 MB per worker. The collection is queued behind
+    /// whatever the workers run next, so this never waits on a busy pool.
+    fn collect_idle_worker_heaps(&self) -> bool {
+        if self.activity.running.load(Ordering::Acquire) != 0
+            || !self.activity.collect_pending.swap(false, Ordering::AcqRel)
+        {
+            return false;
+        }
+        self.pool
+            .spawn_broadcast(|_| collect_calling_thread_allocator_v1());
+        true
     }
 
     /// Run one admitted work unit of `requested_units` on the calling thread.
@@ -285,6 +335,7 @@ impl CodeIndexWorkerRuntimeV1 {
             background_cpu: Arc::new(ProcessBackgroundCpuV1::new(
                 NonZeroUsize::new(plan.effective_workers).unwrap_or(NonZeroUsize::MIN),
             )),
+            activity: PoolActivityV1::default(),
         });
         owner.set(Arc::downgrade(&runtime)).map_err(|_| {
             CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
@@ -570,6 +621,27 @@ pub fn run_on_every_installed_worker(operation: fn()) {
     }
 }
 
+/// Have the installed pool's workers collect their heaps again once it is
+/// idle. A fan-out's rows outlive it: the build that ran it and the serving
+/// swap that retires the generation it replaced free them on other threads
+/// after the fan-out's own collection, and those pages reach the kernel only
+/// when the worker that owns them collects.
+pub fn collect_installed_worker_heaps_when_idle() {
+    if let Some(runtime) = WORKER_RUNTIME.get() {
+        runtime.0.collect_worker_heaps_when_idle();
+    }
+}
+
+/// Queue an allocator collection on every worker of the installed pool when
+/// it is idle and has a collection pending: a fan-out finished, or
+/// [`collect_installed_worker_heaps_when_idle`] asked. Returns whether a
+/// collection was queued.
+pub fn collect_idle_installed_worker_heaps() -> bool {
+    WORKER_RUNTIME
+        .get()
+        .is_some_and(|runtime| runtime.0.collect_idle_worker_heaps())
+}
+
 /// Canonical runtime status for configuration/dashboard projection.
 #[must_use]
 pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {
@@ -765,6 +837,9 @@ fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismE
 mod tests {
     use super::*;
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+    use tracedecay_domain::process_heap::{
+        ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
+    };
 
     /// Two owners in one process run concurrently, each under its own plan:
     /// its width, its pool, and the width its pool's leaves report.
@@ -799,6 +874,73 @@ mod tests {
                 .map(|worker| worker.join().expect("owner thread"))
         });
         assert_eq!(observed, [(1, (1, 1)), (2, (2, 2))]);
+    }
+
+    static COLLECTED_ON_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_worker_collect() {
+        if rayon::current_thread_index().is_some() {
+            COLLECTED_ON_WORKERS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn release_nothing() {}
+
+    /// Workers return their allocator heaps once per idle period: not while a
+    /// fan-out runs, once on every worker after it ends, and not again until
+    /// another fan-out ran or a release of what one built asked for it.
+    #[test]
+    fn an_idle_pool_collects_every_worker_heap_once_after_a_fan_out() {
+        install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
+            release: release_nothing,
+            collect_calling_thread: count_worker_collect,
+            owner_heaps: None,
+        })
+        .expect("the only allocator release installed in this binary");
+        let owner = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 2 },
+            2,
+            64 * 1024 * 1024 * 1024,
+        )
+        .expect("two-worker owner");
+        let runtime = &owner.0;
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                runtime.install(move || {
+                    started.send(()).expect("test waits for the fan-out");
+                    finish_rx.recv().expect("test ends the fan-out");
+                });
+            });
+            started_rx.recv().expect("fan-out started");
+            assert!(!runtime.collect_idle_worker_heaps());
+            finish.send(()).expect("fan-out waits for the test");
+        });
+        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 0);
+
+        assert!(runtime.collect_idle_worker_heaps());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while COLLECTED_ON_WORKERS.load(Ordering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 2);
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        runtime.collect_worker_heaps_when_idle();
+        assert!(runtime.collect_idle_worker_heaps());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while COLLECTED_ON_WORKERS.load(Ordering::SeqCst) < 4
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 4);
+        assert!(!runtime.collect_idle_worker_heaps());
     }
 
     #[test]

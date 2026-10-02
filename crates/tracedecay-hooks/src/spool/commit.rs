@@ -10,8 +10,11 @@
 //!
 //! The published extent names the records file it describes and is only a
 //! skip hint: a missing, torn, or foreign one makes the next committer sync.
-//! Any rewrite of the records file (compaction, torn-tail truncation, reset)
-//! happens under the commit lock and forgets the extent.
+//! Every records file is created or replaced without a directory barrier, so
+//! the first commit that finds no extent for a file also syncs its directory
+//! entry. A rewrite in place (torn-tail truncation, reset) happens under the
+//! commit lock and forgets the extent; a compaction forgets it before staging
+//! its replacement, so no extent can outlive its file into a reused identity.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -20,10 +23,11 @@ use std::time::Duration;
 
 use tracedecay_domain::framed_log::checksum as frame_checksum;
 use tracedecay_private_fs::FileLease;
+use tracedecay_private_fs::framed_log::{sync_directory, sync_file_data};
 
 use super::checkpoint::{read_transition, records_identity};
 use super::lease::lock_member;
-use super::{HookSpoolError, records_path};
+use super::{DIRECTORY_POLICY, HookSpoolError, records_path};
 
 pub(super) const COMMIT_FILE: &str = "commit.v1.lock";
 const IDENTITY_BYTES: usize = 32;
@@ -84,6 +88,14 @@ impl CommitLockV1 {
     }
 }
 
+/// Forgets the synced extent before a compaction stages its replacement.
+pub(super) fn forget_synced_extent(
+    root: &Path,
+    wait_budget: Duration,
+) -> Result<(), HookSpoolError> {
+    CommitLockV1::acquire(root, wait_budget)?.invalidate()
+}
+
 /// Makes the records file `identity` durable through `end`, sharing one sync
 /// with every committer whose frame was written before it.
 #[hotpath::measure(label = "hooks.spool.commit_records")]
@@ -94,11 +106,8 @@ pub(super) fn commit_records(
     wait_budget: Duration,
 ) -> Result<(), HookSpoolError> {
     let lock = CommitLockV1::acquire(root, wait_budget)?;
-    let records = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(records_path(root))
-    {
+    let path = records_path(root);
+    let records = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(records) => records,
         // A reset discarded the appended frames before they committed.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -106,15 +115,18 @@ pub(super) fn commit_records(
         }
         Err(_) => return Err(HookSpoolError::Io),
     };
-    if records_identity(&records)? != identity {
-        // Compaction republished every pending frame through a synced
-        // replacement while holding this lock.
+    let current = records_identity(&records)?;
+    if current != identity {
+        // A compaction republished every pending frame through a synced
+        // replacement; only its directory entry may still be volatile.
+        if lock.synced_through(current)?.is_none() {
+            sync_records_directory(root)?;
+            lock.publish(current, 0)?;
+        }
         return Ok(());
     }
-    if lock
-        .synced_through(identity)?
-        .is_some_and(|synced| synced >= end)
-    {
+    let synced = lock.synced_through(identity)?;
+    if synced.is_some_and(|synced| synced >= end) {
         hotpath::gauge!("hooks.spool.commit.shared").inc(1);
         return Ok(());
     }
@@ -130,7 +142,16 @@ pub(super) fn commit_records(
             transition.current_revision.length.max(end)
         })
         .min(written);
-    hotpath::measure_block!("hooks.spool.fsync.commit", records.sync_data())
+    hotpath::measure_block!("hooks.spool.fsync.commit", sync_file_data(&path, &records))
         .map_err(|_| HookSpoolError::Io)?;
+    if synced.is_none() {
+        sync_records_directory(root)?;
+    }
     lock.publish(identity, claim)
+}
+
+fn sync_records_directory(root: &Path) -> Result<(), HookSpoolError> {
+    hotpath::measure_block!("hooks.spool.fsync.commit_directory", {
+        sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
+    })
 }

@@ -145,6 +145,7 @@ pub enum RemoteRecoveryOperationErrorV1 {
     RecoveryRequired,
     Unavailable,
     Corruption,
+    WriterAuthorityUnpublished,
 }
 
 /// Durable recovery authority. Implementations must return the original
@@ -432,6 +433,9 @@ fn map_operation_error(error: RemoteRecoveryOperationErrorV1) -> RemoteProtocolF
         | RemoteRecoveryOperationErrorV1::Unavailable
         | RemoteRecoveryOperationErrorV1::Corruption => {
             RemoteProtocolFailureV1::AuthorityUnavailable
+        }
+        RemoteRecoveryOperationErrorV1::WriterAuthorityUnpublished => {
+            RemoteProtocolFailureV1::WriterAuthorityUnpublished
         }
     }
 }

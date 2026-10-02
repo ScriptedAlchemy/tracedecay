@@ -18,8 +18,8 @@ use crate::common::tracedecay_command_with_home;
 use crate::serve_harness::runtime_project_root;
 #[cfg(unix)]
 use crate::serve_harness::{
-    assert_unenrolled_cwd_serve_session, canonical_path_string, run_serve_requests,
-    run_serve_runtime, unenrolled_cwd_serve_requests,
+    assert_unenrolled_cwd_serve_session, canonical_path_string, json_rpc_response,
+    run_serve_requests, run_serve_runtime, unenrolled_cwd_serve_requests,
 };
 #[cfg(unix)]
 use crate::serve_harness::{init_project_under, register_global_project};
@@ -989,6 +989,137 @@ async fn explicit_unenrolled_path_completes_initialize_and_types_the_tool_call_r
     );
 
     assert_unenrolled_cwd_serve_session(&output, explicit.path());
+}
+
+#[cfg(unix)]
+fn configuration_get_request(id: i64, key: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_configuration_get",
+            "arguments": { "key": key, "format": "json" }
+        }
+    })
+}
+
+/// A session served without any project still reads and writes the profile's
+/// user settings over MCP: discovery lists the configuration tools that can
+/// name a user key, `configuration_get` answers from the profile store, and a
+/// project-scoped key is the typed `project_required` refusal.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
+    let home = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let _daemon = common::spawn_tracedecay_daemon(&home);
+    let enable = tracedecay_command_with_home(&home)
+        .current_dir(&home)
+        .arg("enable-upload-counter")
+        .stdin(Stdio::null())
+        .output()
+        .expect("enable-upload-counter should run");
+    assert!(enable.status.success(), "{enable:?}");
+
+    // The home directory is the ambient root, so the handshake names no project.
+    let output = run_serve_requests(
+        &home,
+        &home,
+        None,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            configuration_get_request(2, "user.upload_enabled.v1"),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+            configuration_get_request(4, "index.max_file_size.v1"),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let setting = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(
+        (
+            &setting["outcome"]["value"]["payload"]["key"],
+            &setting["outcome"]["value"]["payload"]["effective_value"],
+        ),
+        (
+            &json!("user.upload_enabled.v1"),
+            &json!({ "kind": "boolean", "value": true }),
+        ),
+        "{setting}"
+    );
+
+    let tools = json_rpc_response(&output.stdout, 3);
+    let names: std::collections::BTreeSet<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"))
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for tool in [
+        "tracedecay_configuration_get",
+        "tracedecay_configuration_set",
+        "tracedecay_configuration_unset",
+        "tracedecay_configuration_batch",
+    ] {
+        assert!(
+            names.contains(tool),
+            "projectless discovery must list {tool}: {names:?}"
+        );
+    }
+
+    let refusal = json_rpc_response(&output.stdout, 4);
+    assert_eq!(
+        (
+            &refusal["error"]["data"]["reason_code"],
+            &refusal["error"]["data"]["retryable"],
+        ),
+        (&json!("project_required"), &json!(false)),
+        "{refusal}"
+    );
+}
+
+/// A directory the profile never enrolled names a route, not a project: the
+/// user setting still answers from the profile store, and a project key keeps
+/// the typed not-enrolled state.
+#[cfg(unix)]
+#[tokio::test]
+async fn unenrolled_directory_session_serves_user_settings() {
+    let home = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let unenrolled = TempDir::new().unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(&home);
+    let enable = tracedecay_command_with_home(&home)
+        .current_dir(unenrolled.path())
+        .arg("enable-upload-counter")
+        .stdin(Stdio::null())
+        .output()
+        .expect("enable-upload-counter should run");
+    assert!(enable.status.success(), "{enable:?}");
+
+    let output = run_serve_requests(
+        &home,
+        unenrolled.path(),
+        None,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            configuration_get_request(2, "user.upload_enabled.v1"),
+            configuration_get_request(3, "index.max_file_size.v1"),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let setting = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(
+        setting["outcome"]["value"]["payload"]["effective_value"],
+        json!({ "kind": "boolean", "value": true }),
+        "{setting}"
+    );
+    let refusal = json_rpc_response(&output.stdout, 3);
+    assert_eq!(
+        refusal["error"]["data"]["reason_code"],
+        json!("project_not_enrolled"),
+        "{refusal}"
+    );
 }
 
 #[cfg(unix)]

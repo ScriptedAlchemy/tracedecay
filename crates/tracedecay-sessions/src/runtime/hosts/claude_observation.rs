@@ -35,8 +35,9 @@ use crate::runtime::observation::jsonl_observation_admission::is_deterministic_c
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
-    TranscriptIngestError, persist_host_provider_coverage, run_blocking_transcript_section,
+    HostProviderCoverage, JsonlPrefixRecovery, JsonlResumeState, STRICT_JSONL_BATCH_BYTES,
+    TranscriptDiscoveryBounds, TranscriptIngestError, persist_host_provider_coverage,
+    run_blocking_transcript_section,
 };
 use tracedecay_privacy::PrivacySanitizerError;
 
@@ -72,6 +73,18 @@ pub struct ClaudeObservationIngestStats {
 }
 
 impl ClaudeObservationIngestStats {
+    /// Committed coverage a later pass resumes after. Duplicates re-commit
+    /// what an earlier pass already covered, and a deferred source commits
+    /// nothing however many bytes it read.
+    #[must_use]
+    pub fn advanced_coverage(&self) -> bool {
+        self.observations_committed > 0
+            || self.cursor_advances > 0
+            || self.records_rejected > 0
+            || self.records_quarantined > 0
+            || self.projections_completed > 0
+    }
+
     #[must_use]
     fn merge(mut self, other: Self) -> Self {
         self.transcript = self.transcript.merge(other.transcript);
@@ -636,18 +649,33 @@ where
             fingerprint: cursor.resume_fingerprint()?,
         })
     });
-    let Some(mut scan) = hotpath::measure_block!(
-        "sessions.hosts.claude.scan_blocking",
-        run_blocking_transcript_section(|| {
-            try_scan_claude_source_frames_with_resume(
-                identity,
-                previous,
-                max_new_bytes,
-                resume_state,
-            )
-        })
-    )?
-    else {
+    let mut prefix_recovery = JsonlPrefixRecovery::Report;
+    let scan = loop {
+        let scan = hotpath::measure_block!(
+            "sessions.hosts.claude.scan_blocking",
+            run_blocking_transcript_section(|| {
+                try_scan_claude_source_frames_with_resume(
+                    identity.clone(),
+                    previous,
+                    max_new_bytes,
+                    resume_state,
+                    prefix_recovery.clone(),
+                )
+            })
+        )?;
+        // Only `Report` stops at a diverged prefix, and the retry supplies
+        // checkpoints, so this runs at most twice.
+        if !scan.as_ref().is_some_and(|scan| scan.prefix_diverged) {
+            break scan;
+        }
+        let committed = context
+            .admission
+            .committed_source_cursors(&source, context.scope)
+            .await
+            .map_err(|outcome| host_admission_error("claude", outcome))?;
+        prefix_recovery = JsonlPrefixRecovery::committed(&committed);
+    };
+    let Some(mut scan) = scan else {
         return Ok(SourcePreparation::Finished(
             ClaudeObservationIngestStats::default(),
         ));
@@ -731,10 +759,11 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
             let reason = match skipped.reason {
                 ClaudeSkippedFrameReason::Whitespace => ObservationCoverageReason::BlankFrame,
                 ClaudeSkippedFrameReason::OutOfScope => ObservationCoverageReason::OutOfScope,
-                ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized => {
-                    stats.deferred_sources = 1;
-                    return Ok(false);
+                ClaudeSkippedFrameReason::RetainedPrefix => {
+                    ObservationCoverageReason::RetainedPrefix
                 }
+                ClaudeSkippedFrameReason::Malformed => ObservationCoverageReason::MalformedFrame,
+                ClaudeSkippedFrameReason::Oversized => ObservationCoverageReason::OversizedFrame,
             };
             advance_non_durable_covered_range(
                 admission,
@@ -1198,11 +1227,13 @@ fn claude_rotation_deferred(total: usize, byte_offset: u64, discovery_truncated:
     deferred
 }
 
+/// The pass's window of sources, the sources it defers, and whether the
+/// listing is longer than one window, so the frontier must keep rotating.
 async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
-) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
+) -> Result<(Vec<PathBuf>, usize, bool), ClaudeObservationIngestError> {
     let discovery = hotpath::measure_block!(
         "sessions.hosts.claude.discover_blocking",
         run_blocking_transcript_section(|| {
@@ -1214,7 +1245,7 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
-        return Ok((paths, 0));
+        return Ok((paths, 0, false));
     }
     let frontier = admission
         .get_parse_offset(scope, CLAUDE_SOURCE_FRONTIER_KEY)
@@ -1225,8 +1256,9 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % total;
     paths.rotate_left(start);
     let deferred = claude_rotation_deferred(total, frontier.byte_offset, discovery_truncated);
+    let rotating = total > MAX_CLAUDE_SOURCES_PER_PASS;
     paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
-    Ok((paths, deferred))
+    Ok((paths, deferred, rotating))
 }
 
 async fn advance_source_frontier<A: HostAdmission + ?Sized>(
@@ -1280,7 +1312,7 @@ where
         scope: &scope,
         cancellation: &cancellation,
     };
-    let (paths, deferred) = scheduled_source_paths(admission, &scope, source).await?;
+    let (paths, deferred, rotating) = scheduled_source_paths(admission, &scope, source).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
@@ -1336,7 +1368,7 @@ where
         }
         stats = stats.merge(outcome);
     }
-    if (deferred > 0 || attempted_sources < scheduled_source_count)
+    if (rotating || deferred > 0 || attempted_sources < scheduled_source_count)
         && let Err(error) = advance_source_frontier(admission, &scope, attempted_sources).await
     {
         return Err(terminal_error_after_progress(stats, error));

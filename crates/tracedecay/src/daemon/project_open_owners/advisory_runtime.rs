@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
@@ -114,7 +115,7 @@ use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 mod deferred;
 mod model;
 
-pub(super) use deferred::wait_for_generation_change;
+use deferred::{AdvisoryMountPublisherV1, AdvisoryMountStateV1};
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
@@ -461,6 +462,15 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                 )
                 .await
                 .map_err(|failure| {
+                    if failure.is_invalid_request() {
+                        return ApplicationProblem::invalid_request(
+                            "feedback.advisory-cycle.invalid-request",
+                            format!(
+                                "The advisory feedback cycle request is invalid ({})",
+                                failure.class()
+                            ),
+                        );
+                    }
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: "feedback.advisory-cycle.execution".to_owned(),
                         message: format!(
@@ -1349,12 +1359,14 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         return Ok(());
     }
     register_project_delivery_read_authority(invocation, project_root, &state).await?;
+    let (mount_publisher, mount_state) = AdvisoryMountPublisherV1::channel();
     // Proximity is a typed read over session/git correlation and the current
     // code graph. Like Delivery, it must be available before a sealed
     // generation mounts the full advisory cycle, otherwise HTTP
     // `/api/feedback/proximity` answers `feedback.proximity.unavailable`
     // while Work/application are already serving.
-    register_project_proximity_read_authority(invocation, project_root, &state).await?;
+    register_project_proximity_read_authority(invocation, project_root, &state, mount_state)
+        .await?;
     let indexed_generation =
         selected_feedback_generation(invocation, project_root, &state.scope).await;
     if let (Some(lsp_session_factory), Some(indexed_generation)) =
@@ -1389,9 +1401,11 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
                 invocation.clone(),
                 project_root.to_path_buf(),
                 state,
+                mount_publisher,
             );
             return Ok(());
         }
+        mount_publisher.publish(AdvisoryMountStateV1::Mounted);
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1441,6 +1455,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         invocation.clone(),
         project_root.to_path_buf(),
         state,
+        mount_publisher,
     );
     Ok(())
 }
@@ -1975,6 +1990,7 @@ async fn register_project_proximity_read_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
+    mount_state: watch::Receiver<AdvisoryMountStateV1>,
 ) -> Result<()> {
     let feedback_scope = match resolve_project_feedback_scope_v1(project_root, &state.scope) {
         Ok(scope) => scope,
@@ -2016,6 +2032,7 @@ async fn register_project_proximity_read_authority(
             feedback_scope,
             proximity_read,
             code_index_schedulers: invocation.code_index_schedulers.clone(),
+            mount_state,
         }) as Arc<dyn DaemonAdvisoryCycleInvocationPort>,
     );
     invocation
@@ -2044,6 +2061,7 @@ struct ProjectOpenProximityReadOwnerV1 {
     feedback_scope: FeedbackScopeV1,
     proximity_read: FeedbackProximityReadRuntimeV1,
     code_index_schedulers: CodeIndexSchedulerRegistryV1,
+    mount_state: watch::Receiver<AdvisoryMountStateV1>,
 }
 
 impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
@@ -2069,6 +2087,9 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
                     LegalAction::CorrectRequest,
                 ));
             }
+            if let AdvisoryMountStateV1::Failed(failure) = *self.mount_state.borrow() {
+                return Err(failure.problem());
+            }
             if self
                 .code_index_schedulers
                 .reconciled_without_generation_for_scope(&self.scope)
@@ -2087,25 +2108,27 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
         })
     }
 
-    /// With a ready sealed generation the deferred mount is already upgrading
-    /// this owner, so a request waits for that publication instead of taking
-    /// the retryable warming answer.
-    // ponytail: a deferred mount that fails terminally leaves this owner in
-    // place, so such a request waits out its own deadline before the warming
-    // answer; surfacing the terminal mount failure here would end it early.
+    /// While the project-open mount is upgrading this owner a request waits
+    /// for that publication instead of taking the retryable warming answer;
+    /// a mount still awaiting its first generation, or one that failed,
+    /// answers at once.
     fn mount(&self) -> DaemonAdvisoryCycleMountFuture<'_> {
+        let mut mount_state = self.mount_state.clone();
         Box::pin(async move {
-            if code_index_disabled_for_scope(&self.code_index_schedulers, &self.scope) {
-                return DaemonAdvisoryCycleMountV1::Answers;
+            let state = *mount_state.borrow_and_update();
+            match state {
+                AdvisoryMountStateV1::AwaitingGeneration | AdvisoryMountStateV1::Failed(_) => {
+                    return DaemonAdvisoryCycleMountV1::Answers;
+                }
+                AdvisoryMountStateV1::Mounting | AdvisoryMountStateV1::Mounted => {}
             }
-            match self
-                .code_index_schedulers
-                .latest_feedback_generation_for_scope(&self.project_root, &self.scope)
-                .await
-            {
-                Some(_) => DaemonAdvisoryCycleMountV1::Mounting,
-                None => DaemonAdvisoryCycleMountV1::Answers,
-            }
+            DaemonAdvisoryCycleMountV1::Mounting(Box::pin(async move {
+                // Only a `Mounted` publisher closes without a later state; the
+                // replacement owner's publication wakes that waiter instead.
+                if mount_state.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }))
         })
     }
 

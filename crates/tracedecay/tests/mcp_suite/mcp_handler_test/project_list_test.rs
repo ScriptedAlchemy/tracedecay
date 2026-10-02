@@ -95,7 +95,6 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
                 project_id: alpha.project_id,
                 store_id: store.store_id.clone(),
                 branch_name: "release".to_string(),
-                db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
                 parent_scope_id: None,
                 last_synced_at: Some(1_700_000_005),
                 writable: true,

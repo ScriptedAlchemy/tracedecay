@@ -56,7 +56,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
-use crate::generation::{physical_namespace_projection_map, verify_sealed_copy_generation};
+use crate::generation::{
+    GraphRowDigestSum, physical_namespace_projection_map, recovered_digest_from_row_sum,
+    verify_sealed_copy_generation,
+};
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
 use crate::schema::{
@@ -64,6 +67,10 @@ use crate::schema::{
     SCHEMA_PROPERTY, SEQUENCE_PROPERTY, decode_entity, edge_properties, entity_labels,
     entity_properties, projection_properties, relation_locator_labels, relation_properties,
     relation_type_for_kind,
+};
+use crate::sealed_layer::{
+    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
+    LayeredReads, SealedBaseFilesV1, SealedBaseReceiptV1, SealedLayer,
 };
 use crate::state::{
     EndpointIdentityCache, latest_projection, load_relation_by_locator_cached,
@@ -73,9 +80,17 @@ use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphRelation, GraphWriteBatch, NeverCancelled,
-    SpilledGraphGeneration,
+    GraphProjectionIdentity, GraphRelation, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, SpilledGraphGeneration,
 };
+
+/// A sealed generation opened without the shared staging database.
+pub(crate) struct DirectSealedGenerationV1 {
+    pub(crate) lease: crate::GraphDbLeaseV1,
+    pub(crate) identity: GraphGenerationManifestIdentity,
+    /// A layered generation's store, whose delta `lease` holds.
+    pub(crate) layered: Option<Arc<SealedGenerationStore>>,
+}
 
 /// Opens and verifies one dependency-free sealed generation without opening
 /// the shared mutable staging database.
@@ -87,7 +102,7 @@ pub(crate) fn open_direct_sealed_generation(
     expected: &GraphRecoveredGenerationDigestV1,
     authority_lease: Arc<dyn tracedecay_store::RetainedGraphStoreLeaseV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Option<(crate::GraphDbLeaseV1, GraphGenerationManifestIdentity)>, GraphDbError> {
+) -> Result<Option<DirectSealedGenerationV1>, GraphDbError> {
     if sealed_store_disabled() {
         return Ok(None);
     }
@@ -149,6 +164,20 @@ pub(crate) fn open_direct_sealed_generation(
             Vec::new(),
         )
     };
+    if receipt.base.is_some() {
+        // A layered store serves through its two engines; the direct
+        // snapshot routes its head reads through the proven store.
+        let _ = database.close();
+        let store = open_sealed_store_checked(&directory, &identity, expected, check, None)?
+            .ok_or_else(|| GraphDbError::unavailable("layered sealed generation is absent"))?;
+        let lease =
+            crate::owner::issue_derived_read_lease(Arc::clone(&store.database), authority_lease)?;
+        return Ok(Some(DirectSealedGenerationV1 {
+            lease,
+            identity,
+            layered: Some(store),
+        }));
+    }
     // Same marker-aware proof as registry adoption: a boot that reopens the
     // exact bytes an earlier open already proved resolves by marker, and a
     // fresh or changed container pays the full row proof and files the marker.
@@ -162,7 +191,11 @@ pub(crate) fn open_direct_sealed_generation(
     }
     database.mark_sealed_read_only();
     let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
-    Ok(Some((lease, identity)))
+    Ok(Some(DirectSealedGenerationV1 {
+        lease,
+        identity,
+        layered: None,
+    }))
 }
 
 /// Rows loaded from the shared staging database per read-guard hold while a
@@ -173,7 +206,7 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
-const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
+pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
 /// written before that proof is not release authority.
@@ -185,6 +218,8 @@ const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 /// the dictionary's marked entries. The post-reopen digest proof re-checks
 /// every row regardless.
 const SEALED_STORE_FORM_COMPACT: &str = "compact";
+/// A delta container over a hard-linked cold base; see [`crate::sealed_layer`].
+const SEALED_STORE_FORM_LAYERED: &str = "layered";
 
 /// Receipt binding a sealed store directory to the exact generation and
 /// recovered digest it was built from. Written after the compact container
@@ -208,6 +243,15 @@ struct SealedStoreReceiptV1 {
     /// rebuild discards every sealed generation that does not name the
     /// current format and keeps the ones this build already sealed.
     graph_format: u32,
+    /// The generation's row sum. Only a spilled flat build records one, and
+    /// only a store that records one can serve as a layered base.
+    row_sum: Option<String>,
+    /// The cold base a [`SEALED_STORE_FORM_LAYERED`] store's delta shadows.
+    base: Option<SealedBaseReceiptV1>,
+    /// The generation's source generation and watermark, which a refresh
+    /// layering over it names without opening its container.
+    source_generation: Option<String>,
+    watermark: Option<String>,
 }
 
 impl SealedStoreReceiptV1 {
@@ -273,6 +317,7 @@ pub(crate) struct SealedGenerationCensusV1 {
 /// A reopened, digest-verified, compacted single-generation store.
 pub(crate) struct SealedGenerationStore {
     locator: GenerationLocator,
+    identity: GraphGenerationManifestIdentity,
     recovered_digest: String,
     entity_count: usize,
     relation_count: usize,
@@ -281,6 +326,9 @@ pub(crate) struct SealedGenerationStore {
     canonical_bytes: u64,
     directory: PathBuf,
     database: Arc<GraphDb>,
+    row_sum: Option<GraphRowDigestSum>,
+    /// Set for a layered store: `database` holds the delta, this the base.
+    layer: Option<SealedLayer>,
 }
 
 impl std::fmt::Debug for SealedGenerationStore {
@@ -318,14 +366,117 @@ impl SealedGenerationStore {
     /// A retained sealed generation with no resident engine costs its
     /// identity and nothing else; this is the falsifiable form of that claim.
     pub(crate) fn engine_resident(&self) -> bool {
-        self.database.native_engine_open().unwrap_or(false)
+        self.engines()
+            .any(|database| database.native_engine_open().unwrap_or(false))
+    }
+
+    /// The engines this store serves from: its container, and a layered
+    /// store's base.
+    fn engines(&self) -> impl Iterator<Item = &Arc<GraphDb>> {
+        std::iter::once(&self.database).chain(self.layer.as_ref().map(SealedLayer::base_engine))
+    }
+
+    pub(crate) fn close(&self) -> Result<(), GraphDbError> {
+        let mut result = Ok(());
+        for database in self.engines() {
+            if let Err(error) = database.close() {
+                result = Err(error);
+            }
+        }
+        result
+    }
+
+    pub(crate) fn hibernate_if_lazy(&self) -> Result<(), GraphDbError> {
+        for database in self.engines() {
+            database.hibernate_if_lazy()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hibernate_if_lazy_when_idle(&self) -> Result<bool, GraphDbError> {
+        let mut released = true;
+        for database in self.engines() {
+            released &= database.hibernate_if_lazy_when_idle()?;
+        }
+        Ok(released)
+    }
+
+    pub(crate) fn native_engine_open(&self) -> Result<bool, GraphDbError> {
+        self.database.native_engine_open()
+    }
+
+    pub(crate) fn resident_engine_bytes(&self) -> Result<Option<u64>, GraphDbError> {
+        let mut total = None;
+        for database in self.engines() {
+            if let Some(bytes) = database.resident_engine_bytes()? {
+                total = Some(total.unwrap_or(0_u64).saturating_add(bytes));
+            }
+        }
+        Ok(total)
+    }
+
+    pub(crate) fn pin_serving_engine(&self) -> Result<crate::GraphServingEnginePin, GraphDbError> {
+        let pin = self.database.pin_serving_engine()?;
+        match &self.layer {
+            Some(layer) => Ok(pin.with_companion(layer.proven_base()?.pin_serving_engine()?)),
+            None => Ok(pin),
+        }
+    }
+
+    /// This store's layered reads, when it is a layered store.
+    pub(crate) fn layered_reads(&self) -> Option<LayeredReads<'_>> {
+        let layer = self.layer.as_ref()?;
+        Some(LayeredReads {
+            delta: &self.database,
+            layer,
+            namespace: self.locator.physical_namespace().ok()?,
+            projection: &self.locator.projection,
+        })
+    }
+
+    /// The cold base a refresh of this generation layers over: this store
+    /// itself when it is a spilled cold build, or its own base when layered.
+    fn sealed_base(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
+        if let Some(layer) = &self.layer {
+            let receipt = &layer.base_receipt;
+            let files = match SealedBaseFilesV1::layered(&self.directory) {
+                Ok(files) => files,
+                Err(absence) => return Ok(Err(absence)),
+            };
+            return GraphSealedBaseV1::open(
+                receipt.identity(&self.locator.projection)?,
+                receipt.recovered_digest.clone(),
+                (receipt.entities, receipt.relations),
+                GraphRowDigestSum::from_hex(&receipt.row_sum)?,
+                files,
+                check,
+            );
+        }
+        let Some(row_sum) = self.row_sum else {
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
+        };
+        let files = match SealedBaseFilesV1::flat(&self.directory) {
+            Ok(files) => files,
+            Err(absence) => return Ok(Err(absence)),
+        };
+        GraphSealedBaseV1::open(
+            self.identity.clone(),
+            self.recovered_digest.clone(),
+            (self.entity_count, self.relation_count),
+            row_sum,
+            files,
+            check,
+        )
     }
 
     /// Best-effort teardown used only when the generation is quarantined or
     /// retired, or before staging rows become releasable. A sealed-only head
     /// is never discarded through this path while it remains serveable.
     fn discard(&self) {
-        let _ = self.database.close();
+        let _ = self.close();
         remove_sealed_directory(&self.directory);
     }
 }
@@ -397,6 +548,7 @@ pub fn census_sealed_store(
         Err(error) => return Err(error),
     };
     let mut census = SealedStoreCensusV1::default();
+    let mut counted = std::collections::HashSet::new();
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -404,7 +556,7 @@ pub fn census_sealed_store(
             continue;
         }
         let path = entry.path();
-        let bytes = directory_bytes(&path)?;
+        let bytes = directory_bytes(&path, &mut counted)?;
         let name = entry.file_name();
         if name
             .to_str()
@@ -432,7 +584,13 @@ pub fn census_sealed_store(
     Ok(census)
 }
 
-fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
+/// Bytes under `directory` not already counted in `counted`: a layered
+/// generation's base container is a hard link to bytes another directory
+/// already holds, so each file is charged once per census.
+fn directory_bytes(
+    directory: &Path,
+    counted: &mut std::collections::HashSet<(u64, u64)>,
+) -> std::io::Result<u64> {
     let mut total = 0u64;
     let mut pending = vec![directory.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -441,9 +599,18 @@ fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
             let metadata = entry.metadata()?;
             if metadata.is_dir() {
                 pending.push(entry.path());
-            } else {
-                total = total.saturating_add(metadata.len());
+                continue;
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = &counted;
+            total = total.saturating_add(metadata.len());
         }
     }
     Ok(total)
@@ -992,7 +1159,7 @@ impl GraphDb {
             .map_err(|_| GraphDbError::unavailable("sealed generation store lock is poisoned"))?
             .remove(&locator);
         if let Some(store) = removed {
-            store.database().close()?;
+            store.close()?;
         }
         Ok(())
     }
@@ -1089,6 +1256,7 @@ impl GraphDb {
                 SealedRowSource::Manifest(manifest)
             }
             GraphGenerationRows::Spilled(spilled) => SealedRowSource::Spilled(spilled),
+            GraphGenerationRows::Layered(layered) => SealedRowSource::Layered(layered),
         };
         let identity = rows.identity();
         if !identity.dependencies.is_empty() {
@@ -1151,6 +1319,11 @@ impl GraphDb {
         &self,
         projection: GraphProjectionIdentity,
     ) -> Result<GraphGenerationRowSpill, GraphDbError> {
+        GraphGenerationRowSpill::create(self.row_spill_directory()?, projection)
+    }
+
+    /// A fresh spill directory name under this store's sealed root.
+    fn row_spill_directory(&self) -> Result<PathBuf, GraphDbError> {
         static NEXT_SPILL: AtomicU64 = AtomicU64::new(0);
         let database_path = self
             .inner
@@ -1163,12 +1336,118 @@ impl GraphDb {
         let root = sealed_store_root(database_path);
         std::fs::create_dir_all(&root)
             .map_err(|error| sealed_store_io_failure("row spill root create failed", error))?;
-        let directory = root.join(format!(
+        Ok(root.join(format!(
             "{ROW_SPILL_PREFIX}{}-{}",
             std::process::id(),
             NEXT_SPILL.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        GraphGenerationRowSpill::create(directory, projection)
+        )))
+    }
+
+    /// The cold base a refresh replacing `locator` may layer over: from its
+    /// installed sealed store, or, when this process has not installed it
+    /// (a head recovered straight from its artifact), from its proven
+    /// artifact on disk.
+    pub(crate) fn sealed_generation_base(
+        &self,
+        locator: &GenerationLocator,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
+        match self.sealed_generation_reader(locator) {
+            Some(store) => store.sealed_base(check),
+            None => self.sealed_base_from_disk(locator, check),
+        }
+    }
+
+    /// A proven sealed artifact of `locator` on disk as a layered base. Its
+    /// container is not opened: the refresh reads only its row index, bound
+    /// here to the receipt's row sum, and a layer proves the container
+    /// before its first base read.
+    fn sealed_base_from_disk(
+        &self,
+        locator: &GenerationLocator,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<GraphSealedBaseV1, GraphSealedBaseAbsenceV1>, GraphDbError> {
+        if sealed_store_disabled() {
+            return Ok(Err(GraphSealedBaseAbsenceV1::SealedStoreUnavailable));
+        }
+        let Some(database_path) = self
+            .inner
+            .reopen
+            .as_ref()
+            .and_then(|reopen| reopen.config.path.clone())
+        else {
+            return Ok(Err(GraphSealedBaseAbsenceV1::SealedStoreUnavailable));
+        };
+        let physical_namespace = locator.physical_namespace()?;
+        let directory =
+            sealed_generation_directory(&sealed_store_root(&database_path), &physical_namespace);
+        let Some(receipt) = load_sealed_store_receipt(&directory)? else {
+            return Ok(Err(GraphSealedBaseAbsenceV1::NoArtifact));
+        };
+        if receipt.version != SEALED_STORE_RECEIPT_VERSION
+            || receipt.graph_format != GraphFormatVersion::current().get()
+            || receipt.physical_namespace != physical_namespace.as_str()
+        {
+            return Ok(Err(GraphSealedBaseAbsenceV1::SupersededArtifact));
+        }
+        if !sealed_store_check_matches(&directory, &receipt.recovered_digest)? {
+            return Ok(Err(GraphSealedBaseAbsenceV1::UnprovenArtifact));
+        }
+        let projection = &locator.projection;
+        let files = match &receipt.base {
+            Some(_) => SealedBaseFilesV1::layered(&directory),
+            None => SealedBaseFilesV1::flat(&directory),
+        };
+        let files = match files {
+            Ok(files) => files,
+            Err(absence) => return Ok(Err(absence)),
+        };
+        let (digest, counts, row_sum, identity) = match &receipt.base {
+            Some(base) => (
+                base.recovered_digest.clone(),
+                (base.entities, base.relations),
+                GraphRowDigestSum::from_hex(&base.row_sum)?,
+                base.identity(projection)?,
+            ),
+            None => {
+                let Some(row_sum) = receipt.row_sum.as_deref() else {
+                    return Ok(Err(GraphSealedBaseAbsenceV1::NoRowSum));
+                };
+                let (Some(source_generation), Some(watermark)) =
+                    (&receipt.source_generation, &receipt.watermark)
+                else {
+                    return Ok(Err(GraphSealedBaseAbsenceV1::SupersededArtifact));
+                };
+                (
+                    receipt.recovered_digest.clone(),
+                    (receipt.entities, receipt.relations),
+                    GraphRowDigestSum::from_hex(row_sum)?,
+                    GraphGenerationManifestIdentity::new(
+                        projection.clone(),
+                        locator.generation.clone(),
+                        SourceGeneration::new(source_generation.clone())?,
+                        GraphWatermark::new(watermark.clone())?,
+                        Vec::new(),
+                    ),
+                )
+            }
+        };
+        let expected = GraphRecoveredGenerationDigestV1::new(digest.clone())
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        if recovered_digest_from_row_sum(&identity, row_sum, check)? != expected {
+            return Ok(Err(GraphSealedBaseAbsenceV1::RowSumMismatch));
+        }
+        GraphSealedBaseV1::open(identity, digest, counts, row_sum, files, check)
+    }
+
+    /// A row spill for a delta of `projection` over `base`, pinning the
+    /// base's bytes until the delta seals.
+    pub(crate) fn layered_row_spill(
+        &self,
+        projection: GraphProjectionIdentity,
+        base: GraphSealedBaseV1,
+    ) -> Result<GraphLayeredRowSpill, GraphDbError> {
+        GraphLayeredRowSpill::create(self.row_spill_directory()?, projection, base)
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -1207,7 +1486,7 @@ impl GraphDb {
         let physical_namespace = identity.physical_namespace()?;
         let root = sealed_store_root(&database_path);
         let directory = sealed_generation_directory(&root, &physical_namespace);
-        match open_sealed_store_checked(&directory, identity, expected, check) {
+        match open_sealed_store_checked(&directory, identity, expected, check, None) {
             Ok(Some(store)) => self.install_sealed_generation_store(locator, store),
             Ok(None) => Ok(()),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => Err(error),
@@ -1234,7 +1513,7 @@ impl GraphDb {
         if let Some(previous) = superseded {
             // The replacement shares the artifact directory, so only the
             // superseded handle is closed; the files stay for the new reader.
-            let _ = previous.database.close();
+            let _ = previous.close();
         }
         // Newly installed generation aside, every other retained sealed
         // reader is now a non-serving owner. Step each idle one down to its
@@ -1269,7 +1548,7 @@ impl GraphDb {
         drop(sealed);
         let mut released = 0usize;
         for store in candidates {
-            match store.database.hibernate_if_lazy_when_idle() {
+            match store.hibernate_if_lazy_when_idle() {
                 Ok(true) => released += 1,
                 Ok(false) => {}
                 Err(error) => {
@@ -1397,6 +1676,9 @@ pub(crate) enum SealedRowSource<'a> {
     /// The same rows, merged on disk by a batch producer. Always
     /// dependency-free, and recoverable from the same journal.
     Spilled(&'a SpilledGraphGeneration),
+    /// A delta over a sealed cold base, also recoverable from the journal:
+    /// a cold replay of the same code generation records the same digest.
+    Layered(&'a LayeredGraphGeneration),
 }
 
 /// Builds (or adopts) the sealed store for `identity` and returns the
@@ -1418,10 +1700,22 @@ fn build_or_open_sealed_store(
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
+    // A layered build names the base it derived its digest from; its reopen
+    // proves the delta now and the base before the layer's first base read.
+    let trusted_base = match rows {
+        SealedRowSource::Layered(layered) => Some(layered.base_receipt()),
+        _ => None,
+    };
     // Idempotent replay: an artifact from an earlier seal of this exact
     // generation is adopted if its receipt binds the same digest. Adoption
     // never enumerates `source`'s rows, so it yields no staging proof.
-    match open_sealed_store(&directory, identity, expected) {
+    match open_sealed_store_checked(
+        &directory,
+        identity,
+        expected,
+        &|| Ok(()),
+        trusted_base.as_ref(),
+    ) {
         Ok(Some(store)) => return Ok((store, None)),
         Ok(None) => {}
         Err(_) => remove_sealed_directory(&directory),
@@ -1439,21 +1733,8 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let built = build_sealed_container(rows, identity, &staging, check)
-        .inspect_err(|_| remove_sealed_directory(&staging));
-    let (entities, relations) = built?;
-    let receipt = SealedStoreReceiptV1 {
-        version: SEALED_STORE_RECEIPT_VERSION,
-        form: SEALED_STORE_FORM_COMPACT.to_owned(),
-        namespace: identity.projection.namespace.as_str().to_owned(),
-        projection: identity.projection.projection.as_str().to_owned(),
-        generation: identity.generation.as_str().to_owned(),
-        physical_namespace: physical_namespace.as_str().to_owned(),
-        recovered_digest: expected.as_str().to_owned(),
-        entities,
-        relations,
-        graph_format: GraphFormatVersion::current().get(),
-    };
+    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
+        .inspect_err(|_| remove_sealed_directory(&staging))?;
     let encoded = serde_json::to_vec_pretty(&receipt)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;
     std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
@@ -1469,7 +1750,13 @@ fn build_or_open_sealed_store(
     }
     match hotpath::measure_block!(
         "code_index.seal.verify",
-        open_sealed_store(&directory, identity, expected)
+        open_sealed_store_checked(
+            &directory,
+            identity,
+            expected,
+            &|| Ok(()),
+            trusted_base.as_ref(),
+        )
     ) {
         // When this call enumerated the staging database's rows into the
         // copy and the reopen digest matched the authority's expectation,
@@ -1490,6 +1777,68 @@ fn build_or_open_sealed_store(
             Err(error)
         }
     }
+}
+
+/// Builds the artifact directory `staging` holds for `rows`: the container,
+/// a layered store's base links and hidden rows or a flat store's producer
+/// attachment, and the receipt that binds them, unwritten.
+fn stage_sealed_artifact(
+    rows: SealedRowSource<'_>,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    staging: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SealedStoreReceiptV1, GraphDbError> {
+    let (row_sum, base_files, layered) = match rows {
+        SealedRowSource::Spilled(spilled) => (
+            Some(spilled.row_sum()),
+            spilled.attachment().zip(spilled.row_index()),
+            None,
+        ),
+        SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None, Some(layered)),
+        SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None, None),
+        SealedRowSource::Staging(_) => (None, None, None),
+    };
+    let container_rows = match rows {
+        SealedRowSource::Layered(layered) => SealedRowSource::Spilled(layered.delta()),
+        rows => rows,
+    };
+    let (mut entities, mut relations) =
+        build_sealed_container(container_rows, identity, staging, check)?;
+    if let Some(layered) = layered {
+        layered.install_base_files(staging)?;
+        (entities, relations) = layered.row_counts();
+    }
+    if let Some((attachment, row_index)) = &base_files {
+        for (source, name) in [
+            (attachment, crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
+            (row_index, crate::row_index::ROW_INDEX_FILE),
+        ] {
+            std::fs::hard_link(source, staging.join(name))
+                .map_err(|error| sealed_store_io_failure("base file link failed", error))?;
+        }
+    }
+    Ok(SealedStoreReceiptV1 {
+        version: SEALED_STORE_RECEIPT_VERSION,
+        form: if layered.is_some() {
+            SEALED_STORE_FORM_LAYERED
+        } else {
+            SEALED_STORE_FORM_COMPACT
+        }
+        .to_owned(),
+        namespace: identity.projection.namespace.as_str().to_owned(),
+        projection: identity.projection.projection.as_str().to_owned(),
+        generation: identity.generation.as_str().to_owned(),
+        physical_namespace: identity.physical_namespace()?.as_str().to_owned(),
+        recovered_digest: expected.as_str().to_owned(),
+        entities,
+        relations,
+        graph_format: GraphFormatVersion::current().get(),
+        row_sum: row_sum.map(GraphRowDigestSum::to_hex),
+        base: layered.map(LayeredGraphGeneration::base_receipt),
+        source_generation: Some(identity.source_generation.as_str().to_owned()),
+        watermark: Some(identity.watermark.as_str().to_owned()),
+    })
 }
 
 /// Streams the generation's verified rows into a compact store and writes it
@@ -1531,6 +1880,16 @@ fn build_sealed_container(
                 SealedRowSource::Spilled(spilled) => {
                     let counts = push_spilled_rows(
                         spilled,
+                        identity,
+                        &physical_namespace,
+                        &mut sealed,
+                        check,
+                    )?;
+                    Ok((counts.0, counts.1, BTreeMap::new()))
+                }
+                SealedRowSource::Layered(layered) => {
+                    let counts = push_spilled_rows(
+                        layered.delta(),
                         identity,
                         &physical_namespace,
                         &mut sealed,
@@ -1951,13 +2310,14 @@ fn push_staged_rows(
 ///
 /// Returns `Ok(None)` when no artifact exists, `Err` when one exists but is
 /// unreadable or bound to a different digest.
+#[cfg(test)]
 #[hotpath::measure(label = "graph_db.sealed_store.open")]
 fn open_sealed_store(
     directory: &Path,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
 ) -> Result<Option<Arc<SealedGenerationStore>>, GraphDbError> {
-    open_sealed_store_checked(directory, identity, expected, &|| Ok(()))
+    open_sealed_store_checked(directory, identity, expected, &|| Ok(()), None)
 }
 
 fn load_sealed_store_receipt(
@@ -1999,6 +2359,7 @@ fn open_sealed_store_checked(
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    trusted_base: Option<&SealedBaseReceiptV1>,
 ) -> Result<Option<Arc<SealedGenerationStore>>, GraphDbError> {
     let database_path = directory.join(SEALED_STORE_DATABASE_FILE);
     let Some(receipt) = load_sealed_store_receipt(directory)? else {
@@ -2011,6 +2372,13 @@ fn open_sealed_store_checked(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
+    let row_sum = receipt
+        .row_sum
+        .as_deref()
+        .map(GraphRowDigestSum::from_hex)
+        .transpose()?;
+    let container_expected =
+        container_proof_digest(&receipt, row_sum, identity, expected, trusted_base, check)?;
     // Lazily: installing a sealed reader must not retain a whole in-memory
     // graph. grafeo's store is heap resident, so an eager open here kept the
     // artifact's entire block log in RAM for every generation this process
@@ -2034,7 +2402,7 @@ fn open_sealed_store_checked(
     // the full row proof and files the marker for the next open. `expected`
     // still comes from the relational authority, exactly as on the staging
     // container.
-    let canonical_bytes = match sealed_copy_proof(&database, identity, expected, check) {
+    let canonical_bytes = match sealed_copy_proof(&database, identity, &container_expected, check) {
         Ok(canonical_bytes) => canonical_bytes,
         Err(error) => {
             let _ = database.close();
@@ -2045,6 +2413,25 @@ fn open_sealed_store_checked(
         }
     };
     database.mark_sealed_read_only();
+    let layer = match &receipt.base {
+        Some(base) => {
+            match open_layer_base(
+                directory,
+                identity,
+                base,
+                trusted_base.is_none(),
+                &database,
+                check,
+            ) {
+                Ok(layer) => Some(layer),
+                Err(error) => {
+                    let _ = database.close();
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
     // The proof materialized the engine, whether it streamed the rows or
     // resolved by marker against the container that engine opened. The proof
     // is filed now, so the engine is pure resident cost until a read actually
@@ -2062,13 +2449,118 @@ fn open_sealed_store_checked(
     }
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
+        identity: identity.clone(),
         recovered_digest: expected.as_str().to_owned(),
         entity_count: receipt.entities,
         relation_count: receipt.relations,
         canonical_bytes,
         directory: directory.to_path_buf(),
         database,
+        row_sum: if receipt.base.is_some() {
+            None
+        } else {
+            row_sum
+        },
+        layer,
     })))
+}
+
+/// The digest the artifact's own container proves against: the head's for a
+/// flat store; for a layered store, the digest of its delta rows, derived
+/// from the receipt's row sums after the head's digest binds them.
+fn container_proof_digest(
+    receipt: &SealedStoreReceiptV1,
+    row_sum: Option<GraphRowDigestSum>,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    trusted_base: Option<&SealedBaseReceiptV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
+    match (&receipt.base, receipt.form.as_str()) {
+        (None, SEALED_STORE_FORM_COMPACT) => Ok(expected.clone()),
+        (Some(base), SEALED_STORE_FORM_LAYERED) => {
+            let row_sum = row_sum.ok_or_else(|| {
+                GraphDbError::unavailable("layered sealed receipt records no row sum")
+            })?;
+            if recovered_digest_from_row_sum(identity, row_sum, check)? != *expected {
+                return Err(GraphDbError::unavailable(
+                    "layered sealed receipt row sum does not digest to its verified head",
+                ));
+            }
+            if trusted_base.is_some_and(|trusted| trusted != base) {
+                return Err(GraphDbError::unavailable(
+                    "layered sealed receipt names a different base",
+                ));
+            }
+            let mut delta = row_sum;
+            delta.merge(GraphRowDigestSum::from_hex(&base.hidden_row_sum)?);
+            delta.subtract(GraphRowDigestSum::from_hex(&base.row_sum)?)?;
+            recovered_digest_from_row_sum(identity, delta, check)
+        }
+        _ => Err(GraphDbError::unavailable(
+            "sealed generation receipt names an unknown form",
+        )),
+    }
+}
+
+/// Opens a layered store's hard-linked base. `prove_now` proves it against
+/// the digest its receipt records before returning, by marker or by
+/// streaming its rows; otherwise the layer proves it before its first base
+/// read, which lets a freshly sealed layer install without loading its base.
+fn open_layer_base(
+    directory: &Path,
+    identity: &GraphGenerationManifestIdentity,
+    base: &SealedBaseReceiptV1,
+    prove_now: bool,
+    delta: &GraphDb,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SealedLayer, GraphDbError> {
+    let base_identity = base.identity(&identity.projection)?;
+    let base_digest = GraphRecoveredGenerationDigestV1::new(base.recovered_digest.clone())
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    if recovered_digest_from_row_sum(
+        &base_identity,
+        GraphRowDigestSum::from_hex(&base.row_sum)?,
+        check,
+    )? != base_digest
+    {
+        return Err(GraphDbError::unavailable(
+            "layered base row sum does not digest to the base it names",
+        ));
+    }
+    let database = Arc::new(
+        GraphDb::open_lazy_with_store_state(
+            sealed_artifact_database_options(crate::sealed_layer::base_database_path(directory)),
+            PersistentGraphStoreState::Existing,
+        )
+        .map_err(|error| sealed_store_failure("layered base reopen failed", error))?,
+    );
+    if prove_now
+        && let Err(error) = sealed_copy_proof(&database, &base_identity, &base_digest, check)
+    {
+        let _ = database.close();
+        return Err(sealed_store_failure(
+            "layered base verification failed",
+            error,
+        ));
+    }
+    database.mark_sealed_read_only();
+    let layer = SealedLayer::open(
+        directory,
+        Arc::clone(&database),
+        base.clone(),
+        delta,
+        identity,
+        prove_now,
+    );
+    if let Err(error) = database.hibernate_if_lazy() {
+        let _ = database.close();
+        return Err(sealed_store_failure(
+            "layered base hibernation failed",
+            error,
+        ));
+    }
+    layer
 }
 
 /// Resolves the recovered-digest proof for a reopened sealed copy: by the
@@ -2077,7 +2569,7 @@ fn open_sealed_store_checked(
 /// otherwise. A full proof files the marker so the next open of unchanged
 /// bytes resolves by marker. Returns the canonical byte count the proof
 /// covers.
-fn sealed_copy_proof(
+pub(crate) fn sealed_copy_proof(
     database: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
@@ -2617,6 +3109,13 @@ mod hibernation_tests {
         parent.inner.sealed_generations.write().unwrap().insert(
             locator.clone(),
             Arc::new(SealedGenerationStore {
+                identity: crate::GraphGenerationManifestIdentity::new(
+                    locator.projection.clone(),
+                    locator.generation.clone(),
+                    crate::SourceGeneration::new("source-g1").unwrap(),
+                    crate::GraphWatermark::new("watermark-g1").unwrap(),
+                    Vec::new(),
+                ),
                 locator,
                 recovered_digest: format!("sha256:{}", "a".repeat(64)),
                 entity_count: 0,
@@ -2624,6 +3123,8 @@ mod hibernation_tests {
                 canonical_bytes: 0,
                 directory: temp.path().join("sealed-reader"),
                 database: Arc::clone(&child),
+                row_sum: None,
+                layer: None,
             }),
         );
 

@@ -570,11 +570,14 @@ impl RegisteredTemporalHarness {
             .execute(
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    source_provider, projection_output_ordinal, retrieval_anchor_id,
-                    message_id, role, knowledge_at, valid_time_json, evidence_json,
+                    source_sequence, source_provider, projection_output_ordinal,
+                    retrieval_anchor_id, message_id, copied_from_anchor_ids_json,
+                    role, knowledge_at, valid_time_json, evidence_json,
                     sanitized_content_digest, sanitized_content_bytes, index_text
                  ) VALUES (
-                    ?1, 1, ?2, ?3, ?4, 0, ?5, ?6, 'assistant', ?7, ?8, ?9,
+                    ?1, 1, ?2, ?3,
+                    (SELECT sequence FROM observations WHERE observation_id = ?3),
+                    ?4, 0, ?5, ?6, '[]', 'assistant', ?7, ?8, ?9,
                     ?10, ?11, ?12
                  )",
                 params![

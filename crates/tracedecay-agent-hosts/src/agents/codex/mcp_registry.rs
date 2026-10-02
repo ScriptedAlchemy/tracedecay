@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use crate::agents::host_bundle::HostComponentV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{CODEX_MCP_SERVER_ARGS, CODEX_MCP_SERVER_ENV, codex_config_path};
+use super::{CODEX_MCP_SERVER_ARGS, codex_config_path};
 
 /// Name of Codex's own CLI, which owns the MCP registry.
 const CODEX_CLI: &str = "codex";
@@ -120,10 +120,10 @@ pub(super) fn require_codex_cli() -> Result<PathBuf> {
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
 ///
-/// The launch contract (`--env` pairs, then `--`, then command and arguments)
-/// is built from [`CODEX_MCP_SERVER_ENV`] and [`CODEX_MCP_SERVER_ARGS`], the
-/// same constants the plugin bundle's `.mcp.json` writer consumes, so the two
-/// spellings of the same server cannot drift apart.
+/// The launch contract (`--`, then command and arguments) is built from
+/// [`CODEX_MCP_SERVER_ARGS`], the same constant the plugin bundle's
+/// `.mcp.json` writer consumes, so the two spellings of the same server cannot
+/// drift apart.
 ///
 /// The bundle additionally pins `startup_timeout_sec`/`tool_timeout_sec`, which
 /// `codex mcp add` exposes no flag for. Those are deliberately *not* emulated by
@@ -136,15 +136,7 @@ pub(super) fn codex_mcp_add_with(
     home: &Path,
     tracedecay_bin: &str,
 ) -> Result<()> {
-    // Owned first: `args` borrows from this for the length of the call.
-    let env_pairs: Vec<String> = CODEX_MCP_SERVER_ENV
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect();
     let mut args = vec!["mcp", "add", CODEX_MCP_SERVER_NAME];
-    for pair in &env_pairs {
-        args.extend(["--env", pair.as_str()]);
-    }
     // Everything after `--` is the server's own launch command, so a launch
     // argument can never be re-read as a `codex mcp add` option.
     args.push("--");
@@ -390,8 +382,7 @@ exit 0"#;
     /// The argv the registered contract must produce, in one place: every
     /// invocation assertion below compares against this exact string.
     #[cfg(unix)]
-    const EXPECTED_ADD_INVOCATION: &str =
-        "mcp add tracedecay --env TRACEDECAY_ENABLE_GLOBAL_DB=1 -- /bin/tracedecay serve";
+    const EXPECTED_ADD_INVOCATION: &str = "mcp add tracedecay -- /bin/tracedecay serve";
 
     #[cfg(unix)]
     #[test]
@@ -408,9 +399,8 @@ exit 0"#;
         assert_eq!(
             recorded_invocations(&log),
             vec![EXPECTED_ADD_INVOCATION.to_string()],
-            "activation must add the server through Codex's own registry, naming it, passing \
-             each environment entry as `--env KEY=VALUE`, and separating the launch command \
-             with `--`"
+            "activation must add the server through Codex's own registry, naming it and \
+             separating the launch command with `--`"
         );
         assert!(
             codex_config_path(home.path()).exists(),

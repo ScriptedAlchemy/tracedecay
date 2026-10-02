@@ -13,6 +13,8 @@ use tracedecay_agent_hosts::agents::host_bundle::{
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 use tracedecay_runtime_core::test_executable::link_or_copy_executable;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
@@ -1003,6 +1005,72 @@ fn production_cli_installs_vibe_project_components_without_touching_siblings() {
     assert!(prompt.contains("## Prefer tracedecay MCP tools"));
 }
 
+/// `plugin_api.py` loads its embed helpers from the sibling `embed_proxy.py`,
+/// so every install, update, and opt-out must carry or remove the pair.
+#[cfg(unix)]
+#[test]
+fn hermes_dashboard_deploys_embed_helpers_beside_plugin_api() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    seed_host(case, &cli);
+    let python = std::env::split_paths(&hermetic_path::<&Path>(&[]))
+        .map(|dir| dir.join("python3"))
+        .find(|candidate| candidate.is_file())
+        .expect("python3 in a system dir");
+    let plugins = [
+        cli.home.path().join(".hermes/plugins/tracedecay"),
+        cli.home
+            .path()
+            .join(".hermes/profiles/review/plugins/tracedecay"),
+    ];
+    let deployed_upstream = |plugin: &Path| {
+        let loader = r#"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("deployed_embed_proxy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.dashboard_upstream("http://127.0.0.1:7341/?token=ab12"))
+"#;
+        let output = Command::new(&python)
+            .args(["-I", "-B", "-c", loader])
+            .arg(plugin.join("dashboard/embed_proxy.py"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            plugin.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let expected = "('http://127.0.0.1:7341', {'Authorization': 'Basic dHJhY2VkZWNheTphYjEy'})\n";
+
+    assert_success(
+        case.id,
+        "install",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    for plugin in &plugins {
+        assert!(plugin.join("dashboard/plugin_api.py").is_file());
+        assert_eq!(deployed_upstream(plugin), expected);
+    }
+
+    fs::remove_file(plugins[0].join("dashboard/embed_proxy.py")).unwrap();
+    assert_success(case.id, "update", cli.run(&["update-plugin"]));
+    assert_eq!(deployed_upstream(&plugins[0]), expected);
+
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    for plugin in &plugins {
+        assert!(plugin.join("plugin.yaml").is_file());
+        assert!(!plugin.join("dashboard").exists(), "{}", plugin.display());
+    }
+}
+
 #[test]
 fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     let cli = IsolatedCli::new();
@@ -1035,6 +1103,7 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
             assert!(skill.starts_with("---\nname: tracedecay\n"), "{skill}");
             assert!(!plugin.join("dashboard/manifest.json").exists());
             assert!(!plugin.join("dashboard/plugin_api.py").exists());
+            assert!(!plugin.join("dashboard/embed_proxy.py").exists());
             assert!(!plugin.join("dashboard/dist/index.js").exists());
         }
         let config: toml::Value =
@@ -1810,11 +1879,7 @@ fn assert_no_plugin_backups(root: &std::path::Path) {
 /// fake never runs.
 #[cfg(unix)]
 fn install_kimi_cli(cli: &IsolatedCli) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = cli.bin_dir.join("kimi");
-    fs::write(&path, "#!/bin/sh\nexit 64\n").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable_script(&cli.bin_dir.join("kimi"), "#!/bin/sh\nexit 64\n").unwrap();
 }
 
 /// Without Kimi Code on `PATH` the install is skipped and stages nothing;

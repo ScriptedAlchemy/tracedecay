@@ -1107,14 +1107,13 @@ impl RegisteredGlobalDb {
         transaction
             .execute(
                 "INSERT INTO graph_scopes
-                 (graph_scope_id, project_id, store_id, branch_name, db_relpath,
+                 (graph_scope_id, project_id, store_id, branch_name,
                   parent_scope_id, last_synced_at, writable)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(graph_scope_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     store_id = excluded.store_id,
                     branch_name = excluded.branch_name,
-                    db_relpath = excluded.db_relpath,
                     parent_scope_id = excluded.parent_scope_id,
                     last_synced_at = excluded.last_synced_at,
                     writable = excluded.writable",
@@ -1123,7 +1122,6 @@ impl RegisteredGlobalDb {
                     upsert.project_id.as_str(),
                     upsert.store_id.as_str(),
                     upsert.branch_name.as_str(),
-                    upsert.db_relpath.as_str(),
                     upsert.parent_scope_id.as_deref(),
                     upsert.last_synced_at,
                     i64::from(upsert.writable)

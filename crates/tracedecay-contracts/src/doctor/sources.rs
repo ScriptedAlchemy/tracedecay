@@ -36,6 +36,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::configuration::SettingKey;
 use tracedecay_domain::{
     CodeGenerationId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
     FeedbackFindingLifecycleV1, FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
@@ -43,6 +44,7 @@ use tracedecay_domain::{
 };
 
 use crate::RequestContext;
+use crate::configuration::ConfigurationSettingFindingV1;
 use crate::error::ApplicationContractError;
 use crate::storage::findings::truncate_at_char_boundary;
 
@@ -123,7 +125,7 @@ fn clean_finding(
 }
 
 /// The observed drift between desired and effective configuration.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationDriftV1 {
     /// Desired and effective configuration agree.
@@ -132,6 +134,32 @@ pub enum ConfigurationDriftV1 {
     Drifted,
     /// A requested pin could not be honored by the authority.
     PinUnavailable,
+    /// The resolved configuration stores values the effective configuration
+    /// leaves unapplied.
+    Unapplied(Vec<UnappliedConfigurationSettingV1>),
+}
+
+/// One stored setting value the effective configuration does not apply.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnappliedConfigurationSettingV1 {
+    pub key: SettingKey,
+    pub finding: ConfigurationSettingFindingV1,
+}
+
+fn unapplied_statement(settings: &[UnappliedConfigurationSettingV1]) -> String {
+    let statements = settings.iter().map(|setting| {
+        let key = setting.key.as_str();
+        match &setting.finding {
+            ConfigurationSettingFindingV1::InvalidIndexPathPattern {
+                pattern, message, ..
+            } => format!(
+                "{key} stores pattern {pattern:?} that does not compile ({message}); indexing \
+                 runs without it. Set {key} to patterns that compile or unset it \
+                 (tracedecay_configuration_set / tracedecay_configuration_unset)"
+            ),
+        }
+    });
+    bounded_statement(&statements.collect::<Vec<_>>().join("; "))
 }
 
 /// One configuration-authority resolve/pin health read.
@@ -160,28 +188,32 @@ pub fn configuration_finding(
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::Configuration;
     match read {
-        ConfigurationAuthorityReadV1::Resolved { drift, coverage } => match drift {
-            ConfigurationDriftV1::InSync => clean_finding(
-                family,
-                "configuration.resolved.in-sync",
-                *coverage,
-                "effective configuration matches the resolved authority",
-            ),
-            ConfigurationDriftV1::Drifted => source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "configuration.resolved.drifted",
-                *coverage,
-                "effective configuration diverges from the desired authority",
-            ),
-            ConfigurationDriftV1::PinUnavailable => source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "configuration.resolved.pin-unavailable",
-                *coverage,
-                "a requested configuration pin could not be honored",
-            ),
-        },
+        ConfigurationAuthorityReadV1::Resolved { drift, coverage } => {
+            let (reference, statement) = match drift {
+                ConfigurationDriftV1::InSync => {
+                    return clean_finding(
+                        family,
+                        "configuration.resolved.in-sync",
+                        *coverage,
+                        "effective configuration matches the resolved authority",
+                    );
+                }
+                ConfigurationDriftV1::Drifted => (
+                    "configuration.resolved.drifted",
+                    Cow::Borrowed("effective configuration diverges from the desired authority"),
+                ),
+                ConfigurationDriftV1::PinUnavailable => (
+                    "configuration.resolved.pin-unavailable",
+                    Cow::Borrowed("a requested configuration pin could not be honored"),
+                ),
+                ConfigurationDriftV1::Unapplied(settings) => (
+                    "configuration.resolved.unapplied",
+                    Cow::Owned(unapplied_statement(settings)),
+                ),
+            };
+            let state = DoctorEvidenceStateV1::Degraded;
+            source_finding(family, state, reference, *coverage, &statement)
+        }
         ConfigurationAuthorityReadV1::Unsupported => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Unsupported,
@@ -370,6 +402,12 @@ pub enum ProfileAuthorityReadV1 {
         profile_sessions_attached: bool,
         coverage: DoctorCoverageCompletenessV1,
     },
+    /// The profile session store is held in its typed reset-required state:
+    /// session features are off until the operator resets it, which the
+    /// daemon's reset census names as a pending operator action.
+    ProfileSessionsResetRequired {
+        registry_attached: bool,
+    },
     Denied,
     Unavailable,
 }
@@ -462,6 +500,15 @@ fn profile_authority_finding(
     read: &ProfileAuthorityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::StorageRuntime;
+    let incomplete = |coverage| {
+        source_finding(
+            family,
+            DoctorEvidenceStateV1::Degraded,
+            "profile.authority.incomplete",
+            coverage,
+            "the exact registered profile authority is only partially attached",
+        )
+    };
     match read {
         ProfileAuthorityReadV1::Observed {
             registry_attached: true,
@@ -473,12 +520,19 @@ fn profile_authority_finding(
             *coverage,
             "the exact registered profile and profile-session authorities are attached",
         ),
-        ProfileAuthorityReadV1::Observed { coverage, .. } => source_finding(
+        ProfileAuthorityReadV1::Observed { coverage, .. } => incomplete(*coverage),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: false,
+        } => incomplete(DoctorCoverageCompletenessV1::Complete),
+        ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+            registry_attached: true,
+        } => source_finding(
             family,
-            DoctorEvidenceStateV1::Degraded,
-            "profile.authority.incomplete",
-            *coverage,
-            "the exact registered profile authority is only partially attached",
+            DoctorEvidenceStateV1::Stale,
+            "profile.authority.sessions-reset-required",
+            DoctorCoverageCompletenessV1::Complete,
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`",
         ),
         ProfileAuthorityReadV1::Denied => unobservable_finding(
             family,
@@ -1756,17 +1810,20 @@ pub trait ResidentMemoryDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, ResidentMemoryReadV1>;
 }
 
-/// Count of durably refused source records for one provider and coverage
-/// reason, read from the observation authority's cursor-advance ledger.
+/// One durably refused source record, read from a live observation store's
+/// cursor-advance ledger.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IngestRefusalCountV1 {
-    /// Session provider that produced the refused records (e.g. `cursor`).
+pub struct IngestRefusalV1 {
+    /// Session provider that produced the refused record (e.g. `cursor`).
     pub provider: String,
+    /// Provider-native session whose transcript holds the record.
+    pub session_id: String,
     /// Known durable coverage reason or an opaque SHA-256 fingerprint of an
     /// unrecognized value. Doctor never formats arbitrary reason text.
     pub reason: String,
-    /// Refused source records carried under this provider/reason pair.
-    pub count: u64,
+    /// Source range the refusal covered, in the source's ordering domain.
+    pub start: u64,
+    pub end: u64,
 }
 
 /// Census of durable ingest-coverage refusals (Observability family).
@@ -1774,39 +1831,45 @@ pub struct IngestRefusalCountV1 {
 /// Deterministic refusals advance coverage with a durable typed reason so the
 /// stream converges instead of re-reporting the same records; the plans treat
 /// those refusals as visible typed outcomes, never silent drops. This read
-/// surfaces the recorded counts truthfully. Re-admission of a deterministic
+/// names each recorded refusal truthfully. Re-admission of a deterministic
 /// refusal would deterministically fail again, so Doctor reports rather than
 /// retries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum IngestRefusalCensusReadV1 {
-    /// The cursor-advance ledger was consulted; an empty census means no
-    /// source record was durably refused.
-    Observed { refusals: Vec<IngestRefusalCountV1> },
+    /// The cursor-advance ledgers of the live stores were consulted; an empty
+    /// census means no source record there was durably refused.
+    Observed { refusals: Vec<IngestRefusalV1> },
     /// The ledger could not be consulted.
     Unknown,
 }
 
-/// Render only a known durable reason code or a previously established opaque
-/// fingerprint. The Doctor port accepts strings across crate boundaries, so
-/// this last presentation boundary conservatively fingerprints unexpected
-/// input instead of formatting it into a public finding.
+/// Why a refusal with a known durable reason was skipped. Every known refusal
+/// is terminal by design: re-reading the record refuses it again and no
+/// operator command admits it, so each is informational. `None` is a reason
+/// this build does not recognize.
+fn known_refusal_cause(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "observation_identity_collision" => {
+            "a different record with the same identity is already retained"
+        }
+        "admission_refused" => "admission refused its content deterministically",
+        "sanitizer_rejected" => "the privacy sanitizer rejected it",
+        "sanitizer_quarantined" => "the privacy sanitizer quarantined it",
+        "malformed_frame" => "the host wrote a malformed record",
+        "oversized_frame" => "the record exceeds the admission size bound",
+        "unknown_version" => "the host wrote a record version this build does not read",
+        _ => return None,
+    })
+}
+
+/// Render only a known refusal reason code or a previously established
+/// opaque fingerprint. The Doctor port accepts strings across crate
+/// boundaries, so this last presentation boundary conservatively
+/// fingerprints unexpected input instead of formatting it into a public
+/// finding.
 fn doctor_visible_refusal_reason(reason: &str) -> Cow<'_, str> {
-    const KNOWN_REASON_CODES: &[&str] = &[
-        "blank_frame",
-        "out_of_scope",
-        "malformed_frame",
-        "oversized_frame",
-        "unknown_version",
-        "unsupported_fact",
-        "duplicate_observation",
-        "canonical_payload_revision",
-        "sanitizer_rejected",
-        "sanitizer_quarantined",
-        "admission_refused",
-        "observation_identity_collision",
-    ];
-    if KNOWN_REASON_CODES.contains(&reason)
+    if known_refusal_cause(reason).is_some()
         || tracedecay_domain::canonical_text::is_tagged_lowercase_hex(reason, "sha256:", 64)
     {
         return Cow::Borrowed(reason);
@@ -1819,7 +1882,38 @@ fn doctor_visible_refusal_reason(reason: &str) -> Cow<'_, str> {
     )
 }
 
+/// Name the first refusals and summarize the rest, so the bounded (512-byte)
+/// coverage statement always constructs.
+fn refusal_listing(refusals: &[IngestRefusalV1]) -> String {
+    const MAX_LISTED: usize = 2;
+    let mut listed: Vec<String> = refusals
+        .iter()
+        .take(MAX_LISTED)
+        .map(|refusal| {
+            format!(
+                "{} session {} range {}..{} {} ({})",
+                refusal.provider,
+                refusal.session_id,
+                refusal.start,
+                refusal.end,
+                doctor_visible_refusal_reason(&refusal.reason),
+                known_refusal_cause(&refusal.reason)
+                    .unwrap_or("reason not recognized by this build"),
+            )
+        })
+        .collect();
+    if refusals.len() > MAX_LISTED {
+        listed.push(format!("+{} more", refusals.len() - MAX_LISTED));
+    }
+    listed.join("; ")
+}
+
 /// Map the durable refusal census into its `Observability` finding.
+///
+/// A refusal with a known reason is informational and never an issue: it
+/// names its provider, session, covered range, typed cause, and why nothing
+/// needs doing. Only a reason this build cannot classify leaves the finding
+/// unknown.
 #[hotpath::measure(label = "application.doctor_sources.ingest_refusal")]
 pub fn ingest_refusal_finding(
     read: &IngestRefusalCensusReadV1,
@@ -1833,45 +1927,38 @@ pub fn ingest_refusal_finding(
             "durable ingest coverage records no refused source records",
         ),
         IngestRefusalCensusReadV1::Observed { refusals } => {
-            // The coverage statement is bounded (512 bytes); list the largest
-            // provider/reason pairs and summarize the rest so the finding
-            // always constructs.
-            const MAX_LISTED_PAIRS: usize = 6;
-            let total: u64 = refusals.iter().map(|entry| entry.count).sum();
-            let mut ordered = refusals.clone();
-            ordered.sort_unstable_by(|a, b| b.count.cmp(&a.count).then_with(|| a.cmp(b)));
-            let mut breakdown: Vec<String> = ordered
+            let total = refusals.len();
+            let unrecognized = refusals
                 .iter()
-                .take(MAX_LISTED_PAIRS)
-                .map(|entry| {
+                .filter(|refusal| known_refusal_cause(&refusal.reason).is_none())
+                .count();
+            let (state, reference, verdict) = if unrecognized == 0 {
+                (
+                    DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                    "observability.ingest-coverage.refused-informational",
                     format!(
-                        "{} {}={}",
-                        entry.provider,
-                        doctor_visible_refusal_reason(&entry.reason),
-                        entry.count
-                    )
-                })
-                .collect();
-            if ordered.len() > MAX_LISTED_PAIRS {
-                breakdown.push(format!("+{} more", ordered.len() - MAX_LISTED_PAIRS));
-            }
-            // The cursor-advance ledger keeps only the rows that still support
-            // a source's current frontier, so this counts sources whose newest
-            // covered record was refused, not every refusal ever recorded; the
-            // count is bounded by sources × scopes and cannot grow unbounded.
-            let statement = format!(
-                "durable ingest coverage rests on {total} refused source records ({}): each is \
-                 the newest covered record of one transcript source and was skipped, not \
-                 silently dropped; the daemon log names each one (WARN `admission refused`, \
-                 fields reason/cause/offset)",
-                breakdown.join(", ")
-            );
+                        "durable ingest coverage converged past {total} refused source \
+                         record(s), informational, nothing needs doing: each was skipped by \
+                         design and re-reading it would refuse it again"
+                    ),
+                )
+            } else {
+                (
+                    DoctorEvidenceStateV1::Unknown,
+                    "observability.ingest-coverage.unrecognized-refusal",
+                    format!(
+                        "{unrecognized} of {total} refused source record(s) carry a coverage \
+                         reason this build does not recognize, so Doctor cannot say whether \
+                         they need action"
+                    ),
+                )
+            };
             source_finding(
                 family,
-                DoctorEvidenceStateV1::Degraded,
-                "observability.ingest-coverage.durably-refused",
+                state,
+                reference,
                 DoctorCoverageCompletenessV1::Complete,
-                &bounded_statement(&statement),
+                &bounded_statement(&format!("{verdict}; {}", refusal_listing(refusals))),
             )
         }
         IngestRefusalCensusReadV1::Unknown => unobservable_finding(
@@ -2300,59 +2387,69 @@ mod tests {
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
     }
 
+    fn refusal(provider: &str, session_id: &str, reason: &str, start: u64) -> IngestRefusalV1 {
+        IngestRefusalV1 {
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            reason: reason.to_owned(),
+            start,
+            end: start + 848,
+        }
+    }
+
     #[test]
-    fn ingest_refusals_surface_as_a_degraded_observed_finding() {
+    fn a_live_identity_collision_is_informational_and_names_its_record() {
         let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
-            refusals: vec![
-                IngestRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 160,
-                },
-                IngestRefusalCountV1 {
-                    provider: "codex".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 27,
-                },
-            ],
+            refusals: vec![refusal(
+                "cursor",
+                "445777ad-0c9a-4c0e-bb98-7e8f7fb500ce",
+                "observation_identity_collision",
+                364_052,
+            )],
         })
         .expect("finding");
+
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
-        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
         assert_eq!(
             finding.evidence()[0].reference().as_str(),
-            "observability.ingest-coverage.durably-refused"
+            "observability.ingest-coverage.refused-informational"
         );
-        let statement = finding.coverage().statement().to_owned();
-        assert!(
-            statement.contains("187 refused source records"),
-            "statement must carry the total: {statement}"
-        );
-        assert!(
-            statement.contains("cursor admission_refused=160")
-                && statement.contains("codex admission_refused=27"),
-            "statement must break counts down per provider and reason: {statement}"
+        assert_eq!(
+            finding.coverage().statement(),
+            "durable ingest coverage converged past 1 refused source record(s), \
+             informational, nothing needs doing: each was skipped by design and re-reading it \
+             would refuse it again; cursor session 445777ad-0c9a-4c0e-bb98-7e8f7fb500ce range \
+             364052..364900 observation_identity_collision (a different record with the same \
+             identity is already retained)"
         );
     }
 
     #[test]
-    fn identity_collision_refusals_keep_their_durable_reason_code_in_doctor() {
+    fn many_refusals_name_the_first_and_count_the_rest() {
         let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
-            refusals: vec![IngestRefusalCountV1 {
-                provider: "cursor".to_owned(),
-                reason: "observation_identity_collision".to_owned(),
-                count: 1,
-            }],
+            refusals: vec![
+                refusal("codex", "c1", "admission_refused", 0),
+                refusal("cursor", "k1", "sanitizer_quarantined", 10),
+                refusal("cursor", "k2", "oversized_frame", 20),
+            ],
         })
         .expect("finding");
 
-        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
-        assert!(
-            finding
-                .coverage()
-                .statement()
-                .contains("cursor observation_identity_collision=1"),
-            "Doctor must retain the bounded terminal refusal reason"
+        assert_eq!(
+            finding.state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            finding.coverage().statement(),
+            "durable ingest coverage converged past 3 refused source record(s), \
+             informational, nothing needs doing: each was skipped by design and re-reading it \
+             would refuse it again; codex session c1 range 0..848 admission_refused (admission \
+             refused its content deterministically); cursor session k1 range 10..858 \
+             sanitizer_quarantined (the privacy sanitizer quarantined it); +1 more"
         );
     }
 
@@ -2362,16 +2459,8 @@ mod tests {
         let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
         let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
             refusals: vec![
-                IngestRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: short_secret.to_owned(),
-                    count: 1,
-                },
-                IngestRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: long_secret.clone(),
-                    count: 1,
-                },
+                refusal("cursor", "s", short_secret, 0),
+                refusal("cursor", "s", &long_secret, 1),
             ],
         })
         .expect("finding");
@@ -2379,10 +2468,54 @@ mod tests {
         let serialized = serde_json::to_string(&finding).expect("serialize finding");
         assert!(!serialized.contains(short_secret));
         assert!(!serialized.contains(&long_secret));
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Unknown);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.unrecognized-refusal"
+        );
+        assert!(
+            finding
+                .coverage()
+                .statement()
+                .starts_with("2 of 2 refused source record(s) carry a coverage reason this build does not recognize"),
+            "{}",
+            finding.coverage().statement()
+        );
         assert!(
             finding.coverage().statement().contains("sha256:"),
             "Doctor must retain an opaque corruption classification"
         );
+    }
+
+    #[test]
+    fn a_reset_required_profile_session_store_is_a_pending_reset_not_a_degraded_authority() {
+        let findings = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: true,
+            },
+        })
+        .expect("findings");
+
+        assert_eq!(findings[1].state(), DoctorEvidenceStateV1::Stale);
+        assert_eq!(
+            findings[1].evidence()[0].reference().as_str(),
+            "profile.authority.sessions-reset-required"
+        );
+        assert_eq!(
+            findings[1].coverage().statement(),
+            "the registered profile authority is attached; the profile session store requires \
+             reset, so session features are off until `tracedecay wipe --stale --yes`"
+        );
+
+        let detached = operational_audit_findings(&OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::ProfileSessionsResetRequired {
+                registry_attached: false,
+            },
+        })
+        .expect("findings");
+        assert_eq!(detached[1].state(), DoctorEvidenceStateV1::Degraded);
     }
 
     #[test]

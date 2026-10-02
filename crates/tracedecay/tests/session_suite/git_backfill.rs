@@ -202,22 +202,18 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_switch", "m2", T_BASE + 850),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_switch", "m1", T_BASE + 50),
+    )
+    .await
+    .unwrap();
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_switch", "m2", T_BASE + 850),
+    )
+    .await
+    .unwrap();
 
     // s_main only overlaps the first main stretch.
     assert!(
@@ -228,14 +224,12 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_main", "m3", T_BASE + 200),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_main", "m3", T_BASE + 200),
+    )
+    .await
+    .unwrap();
 
     (tmp, db, project)
 }
@@ -740,14 +734,12 @@ async fn backfill_skips_non_worktree_sessions() {
         .await
         .unwrap()
     );
-    assert!(
-        db.upsert_session_message_for_test(
-            HostAdmissionScope::Project,
-            &message("s_orphan", "m1", T_BASE + 50),
-        )
-        .await
-        .unwrap()
-    );
+    db.upsert_session_message_for_test(
+        HostAdmissionScope::Project,
+        &message("s_orphan", "m1", T_BASE + 50),
+    )
+    .await
+    .unwrap();
 
     let git = FakeGit {
         timeline: vec![],

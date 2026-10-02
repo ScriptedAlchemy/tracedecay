@@ -1,4 +1,4 @@
-//! Codex rollout parser and observation-normalization tests.
+//! Codex rollout discovery and observation-normalization tests.
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -7,14 +7,10 @@ use tracedecay_domain::{
 };
 
 use super::CodexSource;
-use super::goals::{codex_goal_event_from_line, goal_event_message};
-use super::meta::{CodexMeta, session_meta_with_provenance};
+use super::meta::session_meta_with_provenance;
 use super::observation::{
     CodexObservationAdmission, codex_native_record_id, normalize_codex_observation,
 };
-use super::records::response_item_tool_metadata;
-use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::TranscriptSource;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -23,17 +19,11 @@ mod goal_event_tests {
 
     use super::*;
     use serde_json::json;
-    use tracedecay_domain::{
-        CanonicalObservationEnvelopeV1, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-        ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
-    };
-    use tracedecay_privacy::parse_normalized_observation_record_v1;
-    use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
+    use tracedecay_domain::{CanonicalObservationEnvelopeV1, ObservationScopeV1};
 
     use crate::admission::HostAdmission;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::observation::{CaptureObservationRequest, ObservationCancellation};
+    use crate::observation::ObservationCancellation;
     use crate::runtime::hosts::codex::{
         try_admit_codex_jsonl_observations_for_project_window,
         try_admit_codex_jsonl_observations_for_project_with_admission,
@@ -41,122 +31,6 @@ mod goal_event_tests {
     use crate::runtime::ingest::project_provider::ProjectProviderRun;
     use crate::runtime::source::{HostProviderCoverage, read_host_provider_coverage};
     use crate::runtime::{SessionProvider, with_transcript_source_profile};
-
-    fn goal_event_line(objective: &str, status: &str) -> Value {
-        json!({
-            "timestamp": "2026-07-08T08:49:29.711Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "thread_goal_updated",
-                "threadId": "thread-1",
-                "goal": {
-                    "threadId": "thread-1",
-                    "objective": objective,
-                    "status": status,
-                    "tokensUsed": 42,
-                    "timeUsedSeconds": 7,
-                    "createdAt": 1_783_500_569i64,
-                    "updatedAt": 1_783_500_600i64
-                }
-            }
-        })
-    }
-
-    #[test]
-    fn parses_goal_event_into_row_with_metadata() {
-        let event =
-            codex_goal_event_from_line(&goal_event_line("ship the parser", "active")).unwrap();
-        let meta = CodexMeta {
-            cwd: std::path::PathBuf::from("/tmp/project"),
-            session_id: "sess-1".to_string(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
-        };
-        let message = goal_event_message(
-            &meta,
-            Some("gpt-5.5"),
-            std::path::Path::new("/tmp/rollout.jsonl"),
-            128,
-            Some(1_783_500_600),
-            &event,
-        );
-        assert_eq!(message.role, "system");
-        assert_eq!(message.kind.as_deref(), Some("goal"));
-        assert_eq!(message.text, "ship the parser");
-        assert_eq!(message.ordinal, 128);
-        let metadata: Value =
-            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["source"], "codex_thread_goal");
-        assert_eq!(metadata["source_event"], "thread_goal_updated");
-        assert_eq!(metadata["status"], "active");
-        assert_eq!(metadata["thread_id"], "thread-1");
-        assert_eq!(metadata["tokens_used"], 42);
-        assert_eq!(metadata["time_used_seconds"], 7);
-        assert_eq!(metadata["created_at"], 1_783_500_569i64);
-        assert_eq!(metadata["updated_at"], 1_783_500_600i64);
-    }
-
-    #[test]
-    fn consecutive_identical_states_share_a_dedup_key() {
-        let a = codex_goal_event_from_line(&goal_event_line("same goal", "active")).unwrap();
-        // Same objective+status, only token/time drift -> same dedup key (skipped).
-        let mut drift = goal_event_line("same goal", "active");
-        drift["payload"]["goal"]["tokensUsed"] = json!(9999);
-        drift["payload"]["goal"]["timeUsedSeconds"] = json!(321);
-        let b = codex_goal_event_from_line(&drift).unwrap();
-        assert_eq!(a.dedup_key(), b.dedup_key());
-        // A status transition is a distinct key (new row).
-        let c = codex_goal_event_from_line(&goal_event_line("same goal", "paused")).unwrap();
-        assert_ne!(a.dedup_key(), c.dedup_key());
-    }
-
-    #[test]
-    fn missing_status_and_objective_are_handled_gracefully() {
-        // No status key at all -> status None, still a valid goal row.
-        let mut no_status = goal_event_line("objective only", "active");
-        no_status["payload"]["goal"]
-            .as_object_mut()
-            .unwrap()
-            .remove("status");
-        let event = codex_goal_event_from_line(&no_status).unwrap();
-        assert!(event.status.is_none());
-        assert!(!event.metadata().as_object().unwrap().contains_key("status"));
-        // Empty objective -> no goal row (nothing to catalog).
-        let empty = goal_event_line("   ", "active");
-        assert!(codex_goal_event_from_line(&empty).is_none());
-    }
-
-    #[test]
-    fn non_goal_event_lines_are_ignored() {
-        let token_count = json!({
-            "type": "event_msg",
-            "payload": {"type": "token_count", "info": {}}
-        });
-        assert!(codex_goal_event_from_line(&token_count).is_none());
-        let user = json!({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "hi"}
-        });
-        assert!(codex_goal_event_from_line(&user).is_none());
-    }
-
-    #[test]
-    fn exposed_reasoning_carries_visibility_without_claiming_hidden_content() {
-        let payload = json!({
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "visible summary"}],
-        });
-        let metadata = response_item_tool_metadata("reasoning", &payload, None, None);
-        assert_eq!(metadata["reasoning_visibility"], "provider_exposed");
-        assert_eq!(metadata["reasoning_retention"], "provider_exposed");
-        assert!(metadata.get("encrypted_content").is_none());
-    }
 
     #[test]
     fn observation_admission_routes_project_and_profile_records_by_cwd() {
@@ -313,16 +187,6 @@ mod goal_event_tests {
         assert_eq!(first_meta.meta.agent_id.as_deref(), Some("Euler"));
         assert_eq!(renamed_meta.meta.agent_id.as_deref(), Some("Gauss"));
 
-        let source = CodexSource::with_home(temp.path());
-        let first_parsed = source
-            .parse_new(&first_path, StoredCursor::default(), &project, None)
-            .unwrap();
-        let renamed_parsed = source
-            .parse_new(&renamed_path, StoredCursor::default(), &project, None)
-            .unwrap();
-        assert_eq!(first_parsed.draft.agent_id.as_deref(), Some("Euler"));
-        assert_eq!(renamed_parsed.draft.agent_id.as_deref(), Some("Gauss"));
-
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         let first_record_id = codex_native_record_id("child-thread", &first_native).unwrap();
         let renamed_record_id = codex_native_record_id("child-thread", &renamed_native).unwrap();
@@ -381,10 +245,6 @@ mod goal_event_tests {
         assert_eq!(meta.meta.session_id, "rollout-filename");
         assert!(meta.native_thread_id.is_none());
         assert_eq!(meta.meta.agent_id.as_deref(), Some("mutable-label"));
-        let parsed = CodexSource::with_home(temp.path())
-            .parse_new(&path, StoredCursor::default(), &project, None)
-            .unwrap();
-        assert_eq!(parsed.draft.agent_id.as_deref(), Some("mutable-label"));
 
         let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
         let record_id = codex_native_record_id("rollout-filename", &native).unwrap();
@@ -1002,408 +862,329 @@ mod goal_event_tests {
         );
     }
 
+    /// The newest in-project day is admitted, and its message text is durable,
+    /// before any older out-of-project day is opened.
+    ///
+    /// Search reads the published projection of those admitted messages. A pass
+    /// that keeps walking older days writes their coverage cursors before that
+    /// projection can run, so the newest day stays invisible until the older
+    /// sweep finishes. The follow-up pass must still open the older day, or
+    /// the yield would retry the same page forever.
     #[tokio::test]
-    async fn legacy_current_message_migration_records_receipted_duplicate_coverage() {
+    async fn newest_day_messages_are_durable_before_older_days_are_opened() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
         std::fs::create_dir_all(&project).unwrap();
-        let transcript = temp.path().join("rollout.jsonl");
-        let session_id = "session-legacy-current";
-        let session_meta = json!({
-            "timestamp": "2026-09-04T12:00:00.000Z",
-            "type": "session_meta",
-            "payload": {"id": session_id, "cwd": project}
-        })
-        .to_string();
-        let current = json!({
-            "timestamp": "2026-09-04T12:00:01.004Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "thread_id": session_id,
-                "turn_id": "turn-1",
-                "item": {
-                    "type": "UserMessage",
-                    "id": "user-item-legacy",
-                    "content": [{"type": "text", "text": "recover this prompt"}]
-                }
-            }
-        });
-        let current_line = current.to_string();
-        std::fs::write(&transcript, format!("{session_meta}\n{current_line}\n")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let marker = "NEWEST_DAY_MARKER cobalt orchard scheduler is ready";
+        let newest = [
+            ("2026", "08", "29", "newest-a"),
+            ("2026", "08", "29", "newest-b"),
+        ];
+        let older = [
+            ("2026", "08", "28", "older-a"),
+            ("2026", "08", "28", "older-b"),
+        ];
+        for (year, month, day, session_id) in newest {
+            write_scoped_rollout(&home, year, month, day, session_id, &project, marker);
+        }
+        for (year, month, day, session_id) in older {
+            write_scoped_rollout(
+                &home,
+                year,
+                month,
+                day,
+                session_id,
+                &other,
+                "OLDER_DAY_MARKER should stay unopened",
+            );
+        }
 
-        let source = ObservationSourceIdentityV1::for_provider(
-            ProviderId::new("codex").unwrap(),
-            SessionId::new(session_id).unwrap(),
-        )
-        .unwrap();
-        let project_id = ProjectId::new("project-legacy-current").unwrap();
+        let project_id = ProjectId::new("project-newest-before-older").unwrap();
         let scope = ObservationScopeV1::Project {
             project_id: project_id.clone(),
         };
-        let scanned = crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume(
-            &transcript,
-            StoredCursor::default(),
-            None,
-            crate::runtime::source::MAX_JSONL_RECORD_BYTES,
-            None,
-        )
-        .unwrap();
-        assert_eq!(scanned.frames.len(), 2);
-        let generation = ObservationSourceGenerationV1::new(scanned.new_cursor.file_id).unwrap();
-        let meta_end = u64::try_from(session_meta.len() + 1).unwrap();
-        let current_end = u64::try_from(session_meta.len() + 1 + current_line.len() + 1).unwrap();
-        let meta_range = ObservationSourceRangeV1::new(0, meta_end).unwrap();
-        let current_range = ObservationSourceRangeV1::new(meta_end, current_end).unwrap();
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
-        admission
-            .advance_non_durable_source_cursor(
-                ObservationCursorAdvance::new(
-                    source.clone(),
-                    scope.clone(),
-                    generation,
-                    None,
-                    meta_range,
-                    ObservationCoverageReason::UnsupportedFact,
-                )
-                .unwrap()
-                .with_resume_checkpoint(
-                    scanned.file_identity,
-                    scanned.frames[0].resume_fingerprint,
-                ),
-                cancellation.clone(),
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
             )
-            .await
-            .unwrap();
-
-        let native_record_id = codex_native_record_id(session_id, &current).unwrap();
-        let envelope = normalize_codex_observation(
-            &current,
-            session_id,
-            Some(session_id),
-            native_record_id.clone(),
-            current_range,
-        )
-        .unwrap();
-        let parsed = parse_normalized_observation_record_v1(
-            format!("{current_line}\n").as_bytes(),
-            current_range,
-            ObservationOrderingDomainV1::FileBytes,
-            |_| Ok(envelope),
-        )
-        .unwrap();
-        let identity = ObservationIdentityMaterialV1::for_native_record(
-            source,
-            scope.clone(),
-            generation,
-            current_range,
-            ObservationOrderingDomainV1::FileBytes,
-            native_record_id,
-        )
-        .unwrap();
-        let expected = admission
-            .get_source_cursor(identity.source(), &scope)
-            .await
-            .unwrap();
-        admission
-            .capture_observation(
-                CaptureObservationRequest::new(
-                    parsed,
-                    identity,
-                    expected,
-                    RetentionClass::new("retention.provider-observation").unwrap(),
-                    cancellation,
-                )
-                .unwrap()
-                .with_resume_checkpoint(
-                    scanned.file_identity,
-                    scanned.frames[1].resume_fingerprint,
-                ),
-            )
-            .await
-            .unwrap();
-        let original = admission.observations();
-        assert_eq!(original.len(), 1);
-        let original_receipt = original[0].observation().receipt().clone();
-
-        let progress = try_admit_codex_jsonl_observations_for_project_with_admission(
-            &transcript,
-            &project,
-            project_id,
-            &admission,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(progress.frames_persisted, 0);
-        assert_eq!(admission.observations().len(), 1);
-        let duplicate_advances = admission
-            .non_durable_advances()
-            .into_iter()
-            .filter(|advance| advance.reason() == ObservationCoverageReason::DuplicateObservation)
-            .collect::<Vec<_>>();
-        assert_eq!(duplicate_advances.len(), 1);
-        assert_eq!(
-            duplicate_advances[0].sanitization_receipt(),
-            Some(&original_receipt)
-        );
-        assert_eq!(duplicate_advances[0].covered(), current_range);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod message_record_tests {
-    use std::path::Path;
-
-    use serde_json::json;
-
-    use super::super::records::{message_from_line, response_item_goal_context_from_line};
-    use super::{CodexMeta, CodexSource, StoredCursor, TranscriptSource};
-
-    fn meta() -> CodexMeta {
-        CodexMeta {
-            cwd: "/tmp/project".into(),
-            session_id: "session-1".to_string(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
-        }
-    }
-
-    #[test]
-    fn malformed_duplicate_source_and_non_user_items_are_not_messages() {
-        let current_response_duplicate = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "same prompt"}]
-            }
-        });
-        let missing_item_id = json!({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "UserMessage",
-                    "content": [{"type": "text", "text": "no stable identity"}]
-                }
-            }
-        });
-        let agent_item = json!({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "AgentMessage",
-                    "id": "agent-item-1",
-                    "content": [{"type": "Text", "text": "assistant reply"}]
-                }
-            }
-        });
-        let no_visible_text = json!({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "UserMessage",
-                    "id": "image-only-item",
-                    "content": [{"type": "image", "image_url": "redacted"}]
-                }
-            }
-        });
-
-        for record in [
-            current_response_duplicate,
-            missing_item_id,
-            agent_item,
-            no_visible_text,
-        ] {
-            assert!(
-                message_from_line(&record, &meta(), None, Path::new("/tmp/rollout.jsonl"), 42,)
-                    .is_none()
-            );
-        }
-    }
-
-    #[test]
-    fn current_goal_context_keeps_paired_shapes_for_transactional_reconciliation() {
-        let goal = concat!(
-            "<codex_internal_context source=\"goal\">",
-            "<objective>finish the canonical admission fix</objective>\n",
-            "Token budget: 12000\nTokens remaining: 11000",
-            "</codex_internal_context>"
-        );
-        let current = json!({
-            "timestamp": "2026-09-04T12:00:01.004Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "UserMessage",
-                    "id": "goal-user-item-1",
-                    "content": [{"type": "text", "text": goal}]
-                }
-            }
-        });
-        let message =
-            message_from_line(&current, &meta(), None, Path::new("/tmp/rollout.jsonl"), 42)
-                .unwrap();
-        assert_eq!(message.kind.as_deref(), Some("goal_context"));
-        assert_eq!(message.message_id, "session-1:goal-user-item-1");
-
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let transcript = temp.path().join("rollout.jsonl");
-        let response = json!({
-            "timestamp": "2026-09-04T12:00:01.000Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "id": "msg-goal-1",
-                "role": "user",
-                "content": [{"type": "input_text", "text": goal}]
-            }
-        });
-        let lines = [
-            json!({
-                "timestamp": "2026-09-04T12:00:00.000Z",
-                "type": "session_meta",
-                "payload": {"id": "session-1", "cwd": project}
-            }),
-            response,
-            current.clone(),
-            current,
-        ];
-        std::fs::write(
-            &transcript,
-            lines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n",
-        )
-        .unwrap();
-
-        let parsed = CodexSource::with_home(temp.path())
-            .parse_new(&transcript, StoredCursor::default(), &project, None)
-            .unwrap();
-        let goal_rows = parsed
-            .messages
-            .iter()
-            .filter(|message| message.kind.as_deref() == Some("goal_context"))
-            .collect::<Vec<_>>();
-        assert_eq!(goal_rows.len(), 3);
-        assert_eq!(goal_rows[0].message_id, "session-1:msg-goal-1");
-        assert_eq!(goal_rows[1].message_id, "session-1:goal-user-item-1");
-        assert_eq!(goal_rows[2].message_id, "session-1:goal-user-item-1");
-    }
-    #[test]
-    fn direct_goal_context_parser_rejects_non_user_response_items() {
-        let native = json!({
-            "timestamp": "2026-01-01T00:00:15.100Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{
-                    "type": "output_text",
-                    "text": "<codex_internal_context source=\"goal\"><objective>not user input</objective></codex_internal_context>"
-                }]
-            }
-        });
-        let meta = CodexMeta {
-            cwd: std::path::PathBuf::from("/project"),
-            session_id: "codex-role-check".to_owned(),
-            model: None,
-            git: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            agent_nickname: None,
-            agent_role: None,
-            thread_source: None,
         };
 
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        let admitted = session_ids_of(&admission.observations());
+        assert_eq!(
+            admitted,
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
         assert!(
-            response_item_goal_context_from_line(
-                &native,
-                &meta,
-                None,
-                std::path::Path::new("rollout.jsonl"),
-                42,
-            )
-            .is_none()
+            admission.observations().iter().any(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message { content, .. }
+                            if content.as_str() == Some(marker)
+                    )
+                })
+            }),
+            "the newest day's message text must be durable before older days are opened"
+        );
+        for session_id in ["older-a", "older-b"] {
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2(session_id).unwrap();
+            assert!(
+                admission
+                    .get_source_cursor(&source, &scope)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{session_id} was opened in the pass that admitted the newest day"
+            );
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Partial)
+        );
+
+        let mut older_opened = false;
+        for _ in 0..3 {
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            let source =
+                crate::runtime::hosts::codex::codex_observation_source_v2("older-a").unwrap();
+            if admission
+                .get_source_cursor(&source, &scope)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                older_opened = true;
+                break;
+            }
+        }
+        assert!(
+            older_opened,
+            "deferring the older day must still open it on a later pass"
+        );
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["newest-a".to_owned(), "newest-b".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "out-of-project days stay out of the project observation set"
         );
     }
-}
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod source_matcher_cache_tests {
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use serde_json::json;
-    use tempfile::TempDir;
-
-    use super::CodexSource;
-    use crate::runtime::shared::{ProjectRootMatcherCache, StoredCursor};
-    use crate::runtime::source::TranscriptSource;
-    use tracedecay_runtime_core::git_discovery::{
-        GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
-    };
-
-    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-    fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
-        let root = path
-            .ancestors()
-            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
-            .unwrap_or(path);
-        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
-            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
+    /// An out-of-project rollout inside the day being admitted does not end
+    /// the pass. On a profile that interleaves projects, ending there admits a
+    /// few rollouts per pass and rediscovers the same page each time.
+    #[tokio::test]
+    async fn a_mixed_day_is_admitted_in_one_pass_before_older_days_are_opened() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for (session_id, cwd) in [
+            ("mixed-a", &project),
+            ("mixed-m", &other),
+            ("mixed-z", &project),
+        ] {
+            write_scoped_rollout(&home, "2026", "08", "29", session_id, cwd, "mixed day");
         }
-        GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
-            worktree_root: root.to_path_buf(),
-            git_dir: root.join(".git"),
-            common_dir: root.join(".git"),
-        })
+        write_scoped_rollout(&home, "2026", "08", "28", "older-x", &other, "older day");
+
+        let project_id = ProjectId::new("project-mixed-day").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let outcome = with_transcript_source_profile(
+            tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+            ProjectProviderRun {
+                project_root: &project,
+                project_id: &project_id,
+                facade: &admission,
+                scope: &scope,
+                candidate: SessionProvider::Codex,
+                max_new_bytes: u64::MAX,
+                cancellation: &ObservationCancellation::default(),
+                codex_discovery: None,
+            }
+            .run_codex(),
+        )
+        .await;
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            ["mixed-a".to_owned(), "mixed-z".to_owned()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let older = crate::runtime::hosts::codex::codex_observation_source_v2("older-x").unwrap();
+        assert!(
+            admission
+                .get_source_cursor(&older, &scope)
+                .await
+                .unwrap()
+                .is_none(),
+            "the older out-of-project day belongs to the next pass"
+        );
     }
 
-    fn write_rollout(path: &Path, session_id: &str, cwd: &Path) {
+    /// A session that appends to today's rollout between passes must not keep
+    /// the pass yielding at yesterday's out-of-project day. The yield exists
+    /// for a rollout opened this pass; a resumed live tail already has its
+    /// earlier window searchable, so the pass walks on, admits the older
+    /// in-project day, and commits its frontier.
+    #[tokio::test]
+    async fn a_live_tail_does_not_starve_older_in_project_days() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let other = home.join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        write_scoped_rollout(&home, "2026", "08", "29", "live", &project, "live day");
+        write_scoped_rollout(&home, "2026", "08", "28", "other-a", &other, "other day");
+        write_scoped_rollout(&home, "2026", "08", "27", "oldest", &project, "oldest day");
+        let live_rollout = home.join(".codex/sessions/2026/08/29/rollout-live.jsonl");
+
+        let project_id = ProjectId::new("project-live-tail").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run_pass = || {
+            with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+        };
+
+        let first = run_pass().await;
+        assert!(first.failures.is_empty(), "{:?}", first.failures);
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned()]),
+            "the newest day yields before the older out-of-project day is opened"
+        );
+
+        let appends = 3;
+        for ordinal in 0..appends {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&live_rollout)
+                .unwrap();
+            std::io::Write::write_all(
+                &mut file,
+                format!(
+                    "{}\n",
+                    json!({
+                        "timestamp": format!("2026-08-29T12:00:{:02}.000Z", ordinal + 2),
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": format!("live append {ordinal}")}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let outcome = run_pass().await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        }
+
+        assert_eq!(
+            session_ids_of(&admission.observations()),
+            BTreeSet::from(["live".to_owned(), "oldest".to_owned()]),
+            "a live tail appending every pass starved the older in-project day"
+        );
+        assert_eq!(
+            admission
+                .observations()
+                .iter()
+                .filter(|stored| {
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                    envelope.relations().session_id().as_str() == "live"
+                })
+                .count(),
+            2 + appends,
+            "every live append is admitted exactly once"
+        );
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
+        );
+    }
+
+    fn write_scoped_rollout(
+        home: &std::path::Path,
+        year: &str,
+        month: &str,
+        day: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        message: &str,
+    ) {
+        let directory = home
+            .join(".codex/sessions")
+            .join(year)
+            .join(month)
+            .join(day);
+        std::fs::create_dir_all(&directory).unwrap();
         let lines = [
             json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
+                "timestamp": format!("{year}-{month}-{day}T12:00:00.000Z"),
                 "type": "session_meta",
-                "payload": {
-                    "id": session_id,
-                    "cwd": cwd,
-                    "model": "gpt-5.5"
-                }
+                "payload": {"id": session_id, "cwd": cwd}
             }),
             json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
+                "timestamp": format!("{year}-{month}-{day}T12:00:01.000Z"),
                 "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": format!("message from {session_id}")
-                }
+                "payload": {"type": "user_message", "message": message}
             }),
         ];
         std::fs::write(
-            path,
+            directory.join(format!("rollout-{session_id}.jsonl")),
             lines
                 .iter()
                 .map(ToString::to_string)
@@ -1414,71 +1195,15 @@ mod source_matcher_cache_tests {
         .unwrap();
     }
 
-    #[test]
-    fn codex_source_reuses_project_matcher_across_parse_calls() {
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let first_path = temp.path().join("first.jsonl");
-        let second_path = temp.path().join("second.jsonl");
-        write_rollout(&first_path, "first-session", &nested_cwd);
-        write_rollout(&second_path, "second-session", &nested_cwd);
-        let source = CodexSource::with_home(temp.path());
-
-        let first = source
-            .parse_new(&first_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(first.messages.len(), 1);
-        let first_metadata: serde_json::Value =
-            serde_json::from_str(first.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        let first_worktree = first_metadata["codex_turn_worktree"].clone();
-        assert!(first_worktree.is_string());
-
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden")).unwrap();
-        let second = source
-            .parse_new(&second_path, StoredCursor::default(), &project_root, None)
-            .unwrap();
-        assert_eq!(second.messages.len(), 1);
-        let second_metadata: serde_json::Value =
-            serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
-    }
-
-    #[test]
-    fn codex_unknown_membership_retries_without_advancing_cursor() {
-        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
-        let temp = TempDir::new().unwrap();
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).unwrap();
-        let transcript = temp.path().join("retry.jsonl");
-        write_rollout(&transcript, "retry-session", &nested_cwd);
-        let mut source = CodexSource::with_home(temp.path());
-        source.project_matchers =
-            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
-
-        let previous = StoredCursor::default();
-        assert!(
-            source
-                .parse_new(&transcript, previous, &project_root, None)
-                .is_none(),
-            "unknown membership must abort before a new cursor can be persisted"
-        );
-
-        let retried = source
-            .parse_new(&transcript, previous, &project_root, None)
-            .expect("unknown membership must be resolved again on retry");
-        assert_eq!(retried.messages.len(), 1);
-        assert!(retried.new_cursor.position > previous.position);
-        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
+    fn session_ids_of(observations: &[tracedecay_store::StoredObservation]) -> BTreeSet<String> {
+        observations
+            .iter()
+            .map(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str().to_owned()
+            })
+            .collect()
     }
 }
 
@@ -2273,6 +1998,67 @@ mod recent_first_discovery_tests {
             "an over-cap backlog must report truncation so catch-up stays scheduled"
         );
         assert!(pass.report.paths.len() <= bounds.max_files);
+    }
+
+    /// A dated tree whose older days hold more rollouts than one structural
+    /// pass can charge must still surface today's session immediately. Listing
+    /// those older files is not allowed to postpone the newest rollout.
+    #[tokio::test]
+    async fn codex_catch_up_surfaces_the_newest_rollout_before_older_days_are_listed() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        for index in 0..800 {
+            write_dated_rollout(home, ("2026", "06", "01"), &format!("older-{index:04}"));
+        }
+        let newest = write_dated_rollout(home, ("2026", "09", "28"), "project-newest");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::default_walk();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut surfaced = false;
+        for _ in 0..2 {
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => {
+                    panic!("a single catch-up consumer must not wait on its own scan")
+                }
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+            if pass.report.paths.first() == Some(&newest) {
+                surfaced = true;
+                break;
+            }
+        }
+        assert!(
+            surfaced,
+            "catch-up must surface the newest rollout before it finishes listing older days"
+        );
+        for _ in 0..64 {
+            if frontier.is_complete() {
+                break;
+            }
+            let pass = match hub
+                .discover("project", &source, bounds, frontier)
+                .await
+                .unwrap()
+            {
+                CodexDiscoveryDelivery::Ready(pass) => pass,
+                CodexDiscoveryDelivery::Waiting => continue,
+            };
+            frontier = pass.next_frontier;
+            hub.acknowledge("project");
+        }
+        assert!(
+            frontier.is_complete(),
+            "catch-up must finish the rollout sweep after the newest session is visible"
+        );
     }
 
     #[test]

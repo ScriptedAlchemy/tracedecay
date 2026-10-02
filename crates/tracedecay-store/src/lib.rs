@@ -59,13 +59,13 @@ pub use external_source::{
     SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1,
     SourceAuthorityPublicationApplyOutcomeV1, SourceAuthorityPublicationReceiptV1,
     SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
-    SourceCommitReceiptV1, SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1,
-    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
-    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
-    SourceScheduledRefetchV1, SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1,
-    apply_source_authority_publication, apply_source_authority_publication_owned,
-    apply_source_commit, apply_source_commit_owned, apply_source_projection,
-    apply_source_projection_owned, build_source_projection,
+    SourceCommitReceiptV1, SourceCommitV1, SourceObjectCoverageV1, SourceObjectLineageV1,
+    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+    SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1,
+    SourceProjectionEffectV1, SourceScheduledRefetchV1, SourceStoreErrorV1, SourceStoreResult,
+    SourceStoreStateV1, apply_source_authority_publication,
+    apply_source_authority_publication_owned, apply_source_commit, apply_source_commit_owned,
+    apply_source_projection, apply_source_projection_owned, build_source_projection,
 };
 pub use git_index_transactions::{
     GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
@@ -256,5 +256,5 @@ pub use session::{
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,
-    TranscriptStoreResult, TranscriptWriteBatch, TranscriptWriteKind,
+    TranscriptStoreResult, TranscriptWriteBatch,
 };

@@ -2,14 +2,17 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
+use crate::schema_stages::RegisteredSchemaAttachmentV1;
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::{
+    cancellation::CancellationToken,
     db::{
         Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
         DatabaseOwnerWeakLeaseIssuerErrorV1, DatabaseOwnerWeakLeaseIssuerV1,
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
-        engine::{Executor, IntoParams, QueryExecutor, Rows},
+        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows},
     },
     shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
@@ -32,6 +35,41 @@ type SessionRelationGraphStateV1 = RwLock<
     )>,
 >;
 
+/// A session authority inside an admitted store whose persisted shape this
+/// binary refuses to read. The store serves its other authorities; every
+/// session feature gets [`Self::error`] until the store is reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefusedAuthorityV1 {
+    /// Rows or tables whose shape nothing converts.
+    Shape {
+        authority: &'static str,
+        reason: &'static str,
+    },
+    /// A recorded schema version other than the one this binary writes.
+    Version {
+        component: &'static str,
+        found_version: Option<i64>,
+        required_version: i64,
+    },
+}
+
+impl RefusedAuthorityV1 {
+    pub(crate) fn error(self) -> TraceDecayError {
+        match self {
+            Self::Shape { authority, reason } => TraceDecayError::reset_required(authority, reason),
+            Self::Version {
+                component,
+                found_version,
+                required_version,
+            } => TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            },
+        }
+    }
+}
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -41,6 +79,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -53,6 +92,7 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Weak<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -81,33 +121,61 @@ impl RegisteredGlobalDbOwnerV1 {
     ) -> tracedecay_domain::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
+        // Short-lived attaches have no daemon shutdown to observe.
+        let refused_authority = match super::schema_stages::ensure_attached_registered_schema(
+            &registered.database,
+            &CancellationToken::new(),
+        )
+        .await?
+        {
+            RegisteredSchemaAttachmentV1::Admitted(_) => {
+                super::schema_stages::converge_attached_registered_schema(&registered.database)
+                    .await?;
+                None
+            }
+            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
+        };
         drop(registered);
         Ok(Self {
             database,
             project_graph: Arc::new(OnceLock::new()),
             session_relation_graph: Arc::new(RwLock::new(None)),
+            refused_authority,
         })
     }
 
     /// Returns the resumable convergence plan for an already admitted schema
-    /// without retaining an unowned client lease.
+    /// without retaining an unowned client lease. A store admitted in its
+    /// typed reset-required state has no plan: its reset deletes it. A
+    /// `cancellation` observed before the admission transaction commits rolls
+    /// it back and fails with [`TraceDecayError::store_open_cancelled`].
     #[hotpath::measure(future = true, label = "global_db.registered.admit_daemon")]
     pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
-    ) -> tracedecay_domain::errors::Result<(Self, super::schema_stages::RegisteredSchemaConvergence)>
-    {
+        cancellation: &CancellationToken,
+    ) -> tracedecay_domain::errors::Result<(
+        Self,
+        Option<super::schema_stages::RegisteredSchemaConvergence>,
+    )> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        let convergence =
-            super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
+        let (convergence, refused_authority) =
+            match super::schema_stages::ensure_attached_registered_schema(
+                &registered.database,
+                cancellation,
+            )
+            .await?
+            {
+                RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
+                RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
+            };
         drop(registered);
         Ok((
             Self {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
                 session_relation_graph: Arc::new(RwLock::new(None)),
+                refused_authority,
             },
             convergence,
         ))
@@ -122,8 +190,16 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                self.refused_authority,
             ),
         ))
+    }
+
+    /// The typed reset refusal of the authority this admitted store refuses
+    /// to read, `None` when every authority it holds is admissible.
+    #[must_use]
+    pub fn reset_required(&self) -> Option<TraceDecayError> {
+        self.refused_authority.map(RefusedAuthorityV1::error)
     }
 
     /// Issues a mode-reduced client that can never regain write authority.
@@ -133,6 +209,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_read_only_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                self.refused_authority,
             ),
         ))
     }
@@ -145,6 +222,7 @@ impl RegisteredGlobalDbOwnerV1 {
             database: self.database.weak_lease_issuer(),
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
+            refused_authority: self.refused_authority,
         }
     }
 
@@ -193,6 +271,7 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
+                self.refused_authority,
             ),
         ))
     }
@@ -260,6 +339,7 @@ pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    refused_authority: Option<RefusedAuthorityV1>,
 }
 
 impl RegisteredGlobalDb {
@@ -306,6 +386,7 @@ impl RegisteredGlobalDb {
             database,
             Arc::new(OnceLock::new()),
             Arc::new(RwLock::new(None)),
+            None,
         )
     }
 
@@ -313,12 +394,21 @@ impl RegisteredGlobalDb {
         database: Database,
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
         session_relation_graph: Arc<SessionRelationGraphStateV1>,
+        refused_authority: Option<RefusedAuthorityV1>,
     ) -> Self {
         Self {
             database,
             project_graph,
             session_relation_graph,
+            refused_authority,
         }
+    }
+
+    /// The typed reset refusal of the authority the store behind this client
+    /// refuses to read, `None` when every authority it holds is admissible.
+    #[must_use]
+    pub fn reset_required(&self) -> Option<TraceDecayError> {
+        self.refused_authority.map(RefusedAuthorityV1::error)
     }
 
     /// Wraps an already-published guarded database for WAL maintenance tests.
@@ -411,12 +501,8 @@ impl RegisteredGlobalDb {
 
     /// Opens the reader capacity reserved for health diagnostics.
     #[hotpath::skip]
-    pub async fn health_read_snapshot(
-        &self,
-    ) -> tracedecay_domain::errors::Result<DatabaseEngineReadSnapshot> {
-        self.database
-            .begin_engine_health_read_snapshot("open registered database health read snapshot")
-            .await
+    pub async fn health_read_snapshot(&self) -> EngineResult<DatabaseEngineReadSnapshot> {
+        self.database.begin_engine_health_read_snapshot().await
     }
 
     /// Rebuilds the registered observation projection through this client's
@@ -569,7 +655,7 @@ impl RegisteredGlobalDb {
         generation: Option<&str>,
         config: &super::observation::retention::ObservationRetentionConfig,
         mode: super::observation::retention::RetentionMode,
-        now: i64,
+        now: UtcMicros,
     ) -> tracedecay_domain::errors::Result<super::observation::retention::ObservationRetentionReport>
     {
         if matches!(mode, super::observation::retention::RetentionMode::Apply) {

@@ -6,11 +6,8 @@
  * fixtures stay consistent across test transports.
  *
  * Shapes are hand-matched, endpoint by endpoint, to the Rust producers in
- * `src/dashboard/*`, and two suites hold them there: `data.test.ts` parses
- * every fixture against the generated contract for its route, and
- * `src/workspaces/endpoint-fixtures.test.ts` parses it against what the
- * consuming workspace decodes and how densely the surface needs it populated.
- * Every route the 12 workspaces read is modeled with data-dense, wire-true
+ * `src/dashboard/*`, and `data.test.ts` holds them there by parsing every
+ * fixture against the generated contract for its route. Every route the 12 workspaces read is modeled with data-dense, wire-true
  * payloads so audited surfaces render populated content rather than empty /
  * "unsupported schema" states.
  *
@@ -2714,47 +2711,21 @@ function automationOutcomesPayload(): Record<string, unknown> {
   };
 }
 
-function automaticCuratorRunPayload(): Record<string, unknown> {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: 'binding.http.fact_store_curate.v1',
-      contract: {
-        schema_id: 'schema.application.retained.fact-store-curate.result',
-        schema_revision: 1,
-      },
-      request_id: 'request.story.fact-store-curate',
-      scope: {
-        project_id: 'project.story',
-        repository_id: 'repository.story',
-        worktree_id: 'worktree.story',
-        reference: null,
-        scope_digest:
-          'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
-      },
-      outcome: {
-        outcome: 'effect',
-        value: {
-          payload: {
-            run_id: 'run-story-memory-curator',
-            task: 'memory_curator',
-            request_digest:
-              'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
-            terminal: {
-              status: 'completed',
-              summary: {
-                reviewed_count: 0,
-                accepted_count: 0,
-                rejected_count: 0,
-                skipped_count: 0,
-              },
-            },
-            committed_receipts: [],
-          },
-        },
-      },
+/** `FactStoreCurateResultV1`: the admitted run's receipt; its terminal is the
+ * run-ledger row for `run_id`. */
+function automaticCuratorReceiptPayload(): Record<string, unknown> {
+  return applicationEnvelope({
+    binding: 'binding.http.fact_store_curate.v1',
+    schema: 'schema.application.retained.fact-store-curate.result',
+    request: 'request.story.fact-store-curate',
+    outcome: 'effect',
+    payload: {
+      run_id: 'run-story-memory-curator',
+      task: 'memory_curator',
+      request_digest: 'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
+      state: 'started',
     },
-  };
+  });
 }
 
 const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
@@ -3351,7 +3322,6 @@ const settingsPayload: Record<string, unknown> = {
       max_file_size: 1_048_576,
       extract_docstrings: true,
       track_call_sites: true,
-      git_ignore: true,
       context_scout: false,
       telemetry: { timings: false },
       sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },
@@ -3390,13 +3360,13 @@ const settingsPayload: Record<string, unknown> = {
     host_mode: 'standalone_backend',
   },
   environment: {
-    global_accounting_mode: 'auto',
+    global_accounting_mode: 'default',
     global_accounting_enabled: true,
     // Pricing is an immutable bundled authority and never performs a network
     // read, so this is a capability fact rather than an environment override.
     pricing_offline: true,
     variables: [
-      { name: 'TRACEDECAY_ENABLE_GLOBAL_DB', active: false, value: null, description: 'Force-enables or disables global savings-ledger recording.' },
+      { name: 'TRACEDECAY_DISABLE_GLOBAL_DB', active: false, value: null, description: 'A truthy value disables global savings/accounting recording.' },
       { name: 'TRACEDECAY_DATA_DIR', active: false, value: null, description: 'Pins the user-level TraceDecay data directory.' },
     ],
   },
@@ -4778,7 +4748,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
   '/api/automation/runs': automationRunsPayload(),
   '/api/automation/outcomes': automationOutcomesPayload(),
-  '/api/application/retained/fact_store_curate': automaticCuratorRunPayload(),
+  '/api/application/retained/fact_store_curate': automaticCuratorReceiptPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric
   // set the real projector emits rather than a fully-populated one.
@@ -5144,26 +5114,44 @@ function listTaskHandoffsPayload(): Record<string, unknown> {
  * ========================================================================== */
 
 /** The application envelope, in the shape `workPayload()` walks. */
-function workEnvelope(payload: unknown): Record<string, unknown> {
+/** The application `HttpJsonEnvelope` success around one payload. Reads
+ * answer as evidence; commands as effects. Both put the contract in the same
+ * place, which is why `workApi.ts` checks the tag for presence and does not
+ * branch on it. */
+function applicationEnvelope(spec: {
+  binding: string;
+  schema: string;
+  request: string;
+  outcome: 'evidence' | 'effect';
+  payload: unknown;
+}): Record<string, unknown> {
   return {
     kind: 'success',
     value: {
-      binding_id: 'binding.http.work.fixture',
-      contract: { schema_id: 'schema.work.fixture.result', schema_revision: 1 },
-      request_id: 'request.work.fixture',
+      binding_id: spec.binding,
+      contract: { schema_id: spec.schema, schema_revision: 1 },
+      request_id: spec.request,
       scope: {
         project_id: 'project.tracedecay',
         repository_id: 'repository.tracedecay',
         worktree_id: 'worktree.primary',
         reference: null,
-        scope_digest: 'sha256:work-fixture-scope',
+        scope_digest:
+          'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
       },
-      // Reads answer as evidence; commands as effects. Both put the contract
-      // in the same place, which is why `workApi.ts` checks the tag for
-      // presence and does not branch on it.
-      outcome: { outcome: 'evidence', value: { payload } },
+      outcome: { outcome: spec.outcome, value: { payload: spec.payload } },
     },
   };
+}
+
+function workEnvelope(payload: unknown): Record<string, unknown> {
+  return applicationEnvelope({
+    binding: 'binding.http.work.fixture',
+    schema: 'schema.work.fixture.result',
+    request: 'request.work.fixture',
+    outcome: 'evidence',
+    payload,
+  });
 }
 
 /* --------------------------------------------------------------------------

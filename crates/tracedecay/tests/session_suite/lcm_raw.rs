@@ -1,14 +1,12 @@
-use std::path::{Path, PathBuf};
-
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::SessionMessageRecord;
-use tracedecay_sessions::runtime::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
-};
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
+use tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission;
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,
@@ -19,63 +17,6 @@ async fn open_registered_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
         .await
         .expect("registered profile session runtime")
-}
-
-struct FakeTranscriptSource {
-    path: PathBuf,
-    content: String,
-}
-
-impl TranscriptSource for FakeTranscriptSource {
-    fn provider(&self) -> &'static str {
-        "fake"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        vec![self.path.clone()]
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        _prev: StoredCursor,
-        project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id: "fake-session-1".to_string(),
-                project_key: project_root.to_string_lossy().to_string(),
-                project_path: project_root.to_string_lossy().to_string(),
-                title: Some("Fake raw ingest".to_string()),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages: vec![SessionMessageRecord {
-                provider: "fake".to_string(),
-                message_id: "fake-message-1".to_string(),
-                session_id: "fake-session-1".to_string(),
-                role: "assistant".to_string(),
-                timestamp: Some(1_715_000_030),
-                ordinal: 1,
-                text: self.content.clone(),
-                kind: Some("message".to_string()),
-                model: Some("fake-model".to_string()),
-                tool_names: None,
-                source_path: Some(path.to_string_lossy().to_string()),
-                source_offset: Some(0),
-                metadata_json: None,
-            }],
-            new_cursor: StoredCursor {
-                position: self.content.len() as u64,
-                mtime: 1,
-                file_id: 0,
-            },
-        })
-    }
 }
 
 #[tokio::test]
@@ -154,27 +95,40 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
 #[tokio::test]
 async fn transcript_ingest_preserves_lossless_raw_content() {
     let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let transcript = project.join("fake-transcript.jsonl");
-    std::fs::write(&transcript, "{}\n").unwrap();
+    let transcript_dir = home.join(".claude/projects/-lossless");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
+    let record = json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "lossless-session",
+        "uuid": "lossless-message",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "message": {"role": "user", "content": content}
+    });
+    std::fs::write(
+        transcript_dir.join("lossless-session.jsonl"),
+        format!("{record}\n"),
+    )
+    .unwrap();
 
     let db = open_registered_runtime(&tmp).await;
-    let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
-    let source = FakeTranscriptSource {
-        path: transcript,
-        content: content.clone(),
-    };
-
-    let stats = db
-        .ingest_profile_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.sessions_upserted, 1);
-    assert_eq!(stats.messages_upserted, 1);
+    ingest_source_with_observations_with_admission(
+        &ClaudeSource::with_home(&home),
+        &project,
+        ObservationScopeV1::Profile,
+        &db.facade(),
+        None,
+        ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
 
     let stored = db
-        .session_message_for_test(HostAdmissionScope::Profile, "fake", "fake-message-1")
+        .session_message_for_test(HostAdmissionScope::Profile, "claude", "lossless-message")
         .await
         .unwrap()
         .expect("session message should exist");
@@ -184,11 +138,10 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     );
 
     let raw = db
-        .lcm_load_raw_message_for_test("fake", "fake-message-1")
+        .lcm_load_raw_message_for_test("claude", "lossless-message")
         .await
         .expect("raw message should exist");
     assert_eq!(raw.content, content);
-    assert!(raw.content.ends_with("::lossless-tail"));
 }
 
 #[tokio::test]
@@ -207,11 +160,9 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
         "x".repeat(tracedecay_lcm::MAX_DERIVED_TEXT_CHARS * 5)
     );
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
-    assert!(
-        db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
-            .await
-            .unwrap()
-    );
+    db.upsert_session_message_for_test(HostAdmissionScope::Profile, &message)
+        .await
+        .unwrap();
 
     let results = db
         .search_session_messages_for_test(

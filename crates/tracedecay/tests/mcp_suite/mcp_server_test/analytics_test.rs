@@ -10,14 +10,11 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
     // Global accounting is a process-environment switch the cargo test
-    // profile turns off, so the journey runs in a child that enables it.
+    // profile turns off, so the journey runs in a child without the opt-out.
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(
             "mcp_server_test::analytics_test::search_call_writes_mcp_runtime_analytics_event",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }
@@ -261,7 +258,10 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
     )
     .await;
 
-    assert!(resp["error"].is_object(), "unknown tool should error");
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+    assert_eq!(resp["error"]["data"]["code"], "unknown_tool", "{resp}");
+    assert_eq!(resp["error"]["data"]["kind"], "invalid_request", "{resp}");
+    assert_eq!(resp["error"]["data"]["retryable"], false, "{resp}");
 
     server_handle.ledger_writes_settled().await;
     assert_eq!(
@@ -383,23 +383,18 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 }
 
 /// Regression test for the empty-ledger bug: the savings ledger must record
-/// **by default**, with no env opt-in. The holographic-fact-store commit
-/// made the global DB opt-in via `TRACEDECAY_ENABLE_GLOBAL_DB`, which
-/// silently disabled ledger writes for every default MCP-server install
-/// (dashboards showed "no events yet" while lifetime counters kept growing
-/// through the ungated CLI paths).
+/// **by default**, with no env opt-in. An opt-in gate once silently disabled
+/// ledger writes for every default MCP-server install (dashboards showed "no
+/// events yet" while lifetime counters kept growing through the ungated CLI
+/// paths).
 #[tokio::test]
 async fn ledger_records_by_default_without_env_opt_in() {
-    // Simulate a real (non-cargo) launch in a child process: neither the
-    // opt-in nor the cargo-test opt-out is present, so the default-on path is
-    // exercised.
+    // Simulate a real (non-cargo) launch in a child process: the cargo-test
+    // opt-out is absent, so the default-on path is exercised.
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(
             "mcp_server_test::analytics_test::ledger_records_by_default_without_env_opt_in",
-            &[
-                ("TRACEDECAY_ENABLE_GLOBAL_DB", None),
-                ("TRACEDECAY_DISABLE_GLOBAL_DB", None),
-            ],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }
@@ -452,9 +447,9 @@ async fn ledger_records_by_default_without_env_opt_in() {
     fixture.harness.shutdown().await;
 }
 
-/// The explicit opt-outs must still work: a falsy
-/// `TRACEDECAY_ENABLE_GLOBAL_DB` or a truthy `TRACEDECAY_DISABLE_GLOBAL_DB`
-/// disables global accounting.
+/// A truthy `TRACEDECAY_DISABLE_GLOBAL_DB` is the one opt-out: a falsy value
+/// leaves accounting on, and the retired `TRACEDECAY_ENABLE_GLOBAL_DB` no
+/// longer overrides it.
 #[tokio::test]
 async fn global_accounting_env_overrides() {
     use tracedecay_global_db::{AccountingMode, global_accounting_mode};
@@ -475,16 +470,15 @@ async fn global_accounting_env_overrides() {
     assert!(global_accounting_mode().enabled());
 
     {
-        let _disable = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
-        assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
-        // An explicit enable wins over the opt-out (the cargo-test default).
-        let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
-        assert_eq!(global_accounting_mode(), AccountingMode::EnabledByEnv);
+        let _falsy = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+        assert_eq!(global_accounting_mode(), AccountingMode::Default);
     }
 
-    let _enable_falsy = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+    let _disable = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("on"));
     assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
     assert!(!global_accounting_mode().enabled());
+    let _retired = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+    assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
 }
 
 /// The lifetime counter and the ledger must agree: both credit the net
@@ -494,14 +488,11 @@ async fn global_accounting_env_overrides() {
 #[tokio::test]
 async fn lifetime_counter_matches_ledger_net_savings() {
     // Global accounting is a process-environment switch the cargo test
-    // profile turns off, so the journey runs in a child that enables it.
+    // profile turns off, so the journey runs in a child without the opt-out.
     if !crate::common::in_child_test() {
         crate::common::rerun_test_in_child(
             "mcp_server_test::analytics_test::lifetime_counter_matches_ledger_net_savings",
-            &[(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                Some(std::ffi::OsStr::new("1")),
-            )],
+            &[("TRACEDECAY_DISABLE_GLOBAL_DB", None)],
         );
         return;
     }

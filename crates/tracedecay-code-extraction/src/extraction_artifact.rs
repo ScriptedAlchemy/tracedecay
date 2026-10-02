@@ -294,6 +294,34 @@ impl PartialOrd for ExtractedImportEvidenceV1 {
     }
 }
 
+/// The declared parameter list of a callable: `parameters` formal
+/// parameters, the last a variable-arity `T...` one when `variadic`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct CallableArityV1 {
+    pub parameters: u32,
+    pub variadic: bool,
+}
+
+impl CallableArityV1 {
+    /// Whether a call passing `arguments` arguments can invoke this callable.
+    pub fn accepts(self, arguments: u32) -> bool {
+        if self.variadic {
+            arguments.saturating_add(1) >= self.parameters
+        } else {
+            arguments == self.parameters
+        }
+    }
+}
+
+/// The parameter list of the callable node `node_id`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedCallableArityV1 {
+    pub node_id: String,
+    pub arity: CallableArityV1,
+}
+
 /// Legacy graph extraction plus structured evidence from the same traversal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,6 +331,10 @@ pub struct ExtractionArtifactV1 {
     pub clone_bodies: Vec<ExtractedCloneBodyV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_evidence: Option<ExtractedSchemaEvidenceV1>,
+    /// Parameter lists of the callables whose extractor records them, so a
+    /// call binds the overload that accepts its arguments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callable_arities: Vec<ExtractedCallableArityV1>,
 }
 
 impl ExtractionArtifactV1 {
@@ -312,6 +344,7 @@ impl ExtractionArtifactV1 {
             imports: Vec::new(),
             clone_bodies: Vec::new(),
             schema_evidence: None,
+            callable_arities: Vec::new(),
         }
     }
 
@@ -330,6 +363,7 @@ impl ExtractionArtifactV1 {
         self.result.canonicalize_order();
         self.imports.sort();
         crate::clone_body::canonicalize_clone_body_order(&mut self.clone_bodies);
+        self.callable_arities.sort();
         if let Some(evidence) = &mut self.schema_evidence {
             evidence.canonicalize_order();
         }
@@ -338,7 +372,27 @@ impl ExtractionArtifactV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImportModuleKindV1, import_module_kind};
+    use super::{CallableArityV1, ImportModuleKindV1, import_module_kind};
+
+    #[test]
+    fn a_variadic_callable_accepts_an_empty_or_longer_tail() {
+        let fixed = CallableArityV1 {
+            parameters: 2,
+            variadic: false,
+        };
+        let variadic = CallableArityV1 {
+            parameters: 2,
+            variadic: true,
+        };
+        assert_eq!(
+            (0..4).map(|n| fixed.accepts(n)).collect::<Vec<_>>(),
+            [false, false, true, false]
+        );
+        assert_eq!(
+            (0..4).map(|n| variadic.accepts(n)).collect::<Vec<_>>(),
+            [false, true, true, true]
+        );
+    }
 
     #[test]
     fn module_kind_uses_the_importing_language_syntax() {

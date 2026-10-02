@@ -59,7 +59,7 @@ use crate::{
         CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
         CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
         CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
-        SharedCodeIndexBytePoolV1,
+        RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
         classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
         feedback_document_identity_from_generation,
         freshness_witness::RestoreFreshnessWitnessV1,
@@ -935,7 +935,7 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         )
         .await
         .expect("mount worktree");
-    let initial = tokio::time::timeout(Duration::from_secs(2), publications.recv())
+    let initial = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, publications.recv())
         .await
         .expect("initial publication timeout")
         .expect("initial publication event");
@@ -970,7 +970,7 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
             .await,
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
-    let changed = tokio::time::timeout(Duration::from_secs(2), publications.recv())
+    let changed = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, publications.recv())
         .await
         .expect("changed publication timeout")
         .expect("changed publication event");
@@ -1082,17 +1082,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
         )
         .await
         .expect("remount worktree over the retained store");
-    let mut signals = OwnerSignals::subscribe(&restarted, fixture.path()).await;
-    let restored = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = restarted.latest_generation_id(fixture.path()).await {
-                break generation;
-            }
-            signals.changed().await;
-        }
-    })
-    .await
-    .expect("restart serves a generation");
+    let restored = wait_for_initial_generation(&restarted, fixture.path()).await;
     assert_eq!(
         restored, sealed,
         "the restart serves the retained generation, not a rebuilt one"
@@ -1105,7 +1095,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
             .await,
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
-    let first_broadcast = tokio::time::timeout(Duration::from_secs(5), publications.recv())
+    let first_broadcast = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, publications.recv())
         .await
         .expect("post-restart publication timeout")
         .expect("post-restart publication event");
@@ -1200,7 +1190,10 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
     let remount_root = canonical_existing_identity(fixture.path()).expect("canonical remount root");
     let (recovery_entered, release_successor) = restarted
-        .pause_next_retained_graph_recovery_before_successor(remount_root.clone())
+        .pause_next_retained_graph_recovery(
+            remount_root.clone(),
+            RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+        )
         .await;
     restarted
         .mount_worktree(
@@ -1810,7 +1803,7 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
 }
 
 /// Linked worktrees sealing identical content share its occurrence identity
-/// and physical artifacts; each worktree still seals its own snapshot and
+/// and physical parse artifacts; each worktree still seals its own snapshot and
 /// generation, and a worktree's generation never names content only its
 /// sibling holds.
 #[test]
@@ -1848,7 +1841,6 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
         .generation;
     let reuse = registry.byte_pool_stats();
 
-    assert!(reuse.reused >= 1, "sanitized source bytes must be shared");
     assert!(
         reuse.parse_chunk_reused >= 1,
         "matching parse/chunk artifacts must be physically shared"
@@ -3178,7 +3170,7 @@ async fn wait_for_ready_generation(
         .wait_for_readiness(
             path,
             CodeIndexReadinessTargetV1::Ready,
-            Duration::from_secs(10),
+            SERVING_SEAT_FAILURE_CEILING,
         )
         .await
         .expect("readiness wait");
@@ -3210,7 +3202,7 @@ impl HeldPublicationDecode {
     /// Let the held decode run and wait until it returned.
     async fn decode(self) -> (String, tokio::sync::oneshot::Sender<()>) {
         self.release_decode.send(()).expect("release the decode");
-        tokio::time::timeout(Duration::from_secs(10), self.after_decode)
+        tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, self.after_decode)
             .await
             .expect("the decode returns")
             .expect("decode gate stays armed");
@@ -3249,7 +3241,7 @@ async fn hold_second_publication_at_decode(
             .await,
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
-    tokio::time::timeout(Duration::from_secs(10), before_decode)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, before_decode)
         .await
         .expect("the publication reaches its serving decode")
         .expect("decode gate stays armed");
@@ -3257,12 +3249,17 @@ async fn hold_second_publication_at_decode(
     // for it so what the test does to the store reaches only the decode.
     let root = fixture.path();
     let first = first.as_str();
-    let text = wait_until_serving_seat(registry, root, Duration::from_secs(10), || async move {
-        registry
-            .latest_text_serving_for_root(root)
-            .await
-            .filter(|text| text.metadata().manifest().generation_id.as_str() != first)
-    })
+    let text = wait_until_serving_seat(
+        registry,
+        root,
+        SERVING_SEAT_FAILURE_CEILING,
+        || async move {
+            registry
+                .latest_text_serving_for_root(root)
+                .await
+                .filter(|text| text.metadata().manifest().generation_id.as_str() != first)
+        },
+    )
     .await;
     let second = text.metadata().manifest().generation_id.as_str().to_owned();
     assert_eq!(second.split('.').nth(3), Some("00000002"), "{second}");
@@ -3276,10 +3273,9 @@ async fn hold_second_publication_at_decode(
 }
 
 /// A publication's serving decode can meet another holder of the
-/// code-generation store lock. That holder releases without waking the
-/// worktree, so the refusal itself must re-arm the seat: once the lock is
-/// free the new generation seats and reads `ready`, instead of staying
-/// `indexing` on a sealed generation nothing retries.
+/// code-generation store lock. The holder's release is what seats the new
+/// generation: however long the lock stays held, the worktree neither parks
+/// nor needs a sync or edit, and it reads `ready` once the lock is free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -3290,10 +3286,30 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
     let holder = acquire_code_generation_store_lock(&held.scoped_store)
         .expect("hold the code-generation store lock");
     let (second, release_after_decode) = held.decode().await;
-    drop(holder);
     release_after_decode
         .send(())
         .expect("release graph prepare");
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let while_held = registry
+        .dashboard_freshness_read(fixture.path())
+        .await
+        .expect("freshness read")
+        .expect("mounted worktree");
+    assert_eq!(while_held.parked, None, "{while_held:?}");
+    assert_ne!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        Some(second.clone()),
+        "the generation cannot seat while the lock is held"
+    );
+    drop(holder);
 
     let ready = wait_for_ready_generation(&registry, fixture.path())
         .await
@@ -3522,7 +3538,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         )
         .await
         .expect("mount worktree");
-    tokio::time::timeout(Duration::from_secs(10), projection_started)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, projection_started)
         .await
         .expect("publication did not reach text projection")
         .expect("publication projection gate stays armed");
@@ -3541,9 +3557,12 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         .send(())
         .expect("release publication projection");
 
-    let ready = wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-        registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-    })
+    let ready = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
+    )
     .await;
     let generation = ready.generation().manifest().generation_id.clone();
     // Settle the mount-era passes so the pass observed below is the
@@ -3572,23 +3591,34 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     scheduler.release().await;
     drop(admission);
     assert_eq!(
-        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-            registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
-        })
+        wait_until_serving_seat(
+            &registry,
+            fixture.path(),
+            SERVING_SEAT_FAILURE_CEILING,
+            || { registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope) }
+        )
         .await
         .generation()
         .manifest()
         .generation_id,
         generation
     );
-    assert!(
-        registry
-            .event_to_ready_receipts()
-            .iter()
-            .skip(receipts_before)
-            .any(CodeIndexEventToReadyReceiptV1::is_noop),
-        "source verification records an unchanged-source receipt"
-    );
+    // The pass records its receipt after it seats the renewed proof.
+    wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "the source verification's unchanged-source receipt",
+        || async {
+            registry
+                .event_to_ready_receipts()
+                .iter()
+                .skip(receipts_before)
+                .any(CodeIndexEventToReadyReceiptV1::is_noop)
+                .then_some(())
+        },
+    )
+    .await;
 
     fixture.edit("src/lib.rs", "pub fn changed_after_seat() {}\n");
     assert!(
@@ -3898,10 +3928,17 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let project_root = fixture.path().to_path_buf();
     let request_task = tokio::spawn(async move {
         request_registry
-            .index_verified_ignored_dependency(&project_root, request, Arc::new(ActiveControl))
+            .index_verified_ignored_dependency(
+                &project_root,
+                request,
+                Arc::new(ActiveControl),
+                tokio::time::Instant::now() + Duration::from_mins(1),
+            )
             .await
     });
-    tokio::time::timeout(Duration::from_millis(100), async {
+    // The publication gate stays held until after this wait, so a request
+    // that waited on it first could never take the permit.
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         while global_admission.available_permits() != 0 {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -4376,7 +4413,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
         .await
         .expect("mount retained generation");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     loop {
         let freshness = registry
@@ -4723,7 +4760,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     // tail is finite: empty the slot until it stays empty.
     clear_pending_wake_until_quiet(&registry, &scope).await;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let expected = tokio::time::timeout(Duration::from_secs(5), async {
+    let expected = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
                 break progress;
@@ -4743,7 +4780,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     });
     locked_rx.await.expect("scheduler mutex holder started");
     let projected = tokio::time::timeout(
-        Duration::from_secs(1),
+        SERVING_SEAT_FAILURE_CEILING,
         registry.dashboard_freshness(fixture.path()),
     )
     .await
@@ -7363,14 +7400,15 @@ async fn fresh_wait_catches_an_unreported_save_and_returns_after_its_reindex() {
 
 /// The `fresh` sweep never waits for the scheduler mutex. While another
 /// holder owns it, a quiet tree is still verified and reached, and an
-/// unreported save is still found: the wait times out on the old generation
-/// refreshing instead of reaching it, and the save is indexed once the
-/// holder lets go.
+/// unreported save is still found: the wait's reading turns to the old
+/// generation refreshing instead of reaching it, a budgeted wait times out on
+/// that reading, and the save is indexed once the holder lets go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_wait_verifies_the_source_while_a_pass_holds_the_scheduler() {
     let (fixture, _store, registry) =
         settled_fresh_wait_fixture("pub fn source() -> u32 { 1 }\n").await;
-    let fresh = tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh;
+    let fresh = CodeIndexReadinessTargetV1::Fresh;
+    let refreshing = Some(CodeIndexStalenessStateV1::Refreshing);
     let before = registry
         .latest_generation_id(fixture.path())
         .await
@@ -7378,45 +7416,61 @@ async fn fresh_wait_verifies_the_source_while_a_pass_holds_the_scheduler() {
     let held = hold_scheduler_for_root(&registry, fixture.path()).await;
 
     let quiet = registry
-        .wait_for_readiness(fixture.path(), fresh, Duration::from_secs(1))
-        .await
-        .expect("freshness read");
-    fixture.edit("src/lib.rs", "pub fn source() -> u32 { 3 }\n");
-    let edited = registry
-        .wait_for_readiness(fixture.path(), fresh, Duration::from_millis(500))
-        .await
-        .expect("freshness read");
-    held.release().await;
-    assert!(
-        matches!(
-            quiet,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
-        ),
-        "{quiet:?}"
-    );
-    let tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::TimedOut {
-        last: Some(last),
-    } = edited
-    else {
-        panic!("an unreported save must not read as fresh: {edited:?}");
-    };
-    assert_eq!(
-        (last.staleness_state, last.latest_generation_id.as_deref()),
-        (
-            Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Refreshing),
-            Some(before.as_str())
-        )
-    );
-
-    let reindexed = registry
         .wait_for_readiness(fixture.path(), fresh, SERVING_SEAT_FAILURE_CEILING)
         .await
         .expect("freshness read");
     assert!(
-        matches!(
-            reindexed,
-            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
-        ),
+        matches!(quiet, CodeIndexReadinessWaitReadV1::Reached { .. }),
+        "{quiet:?}"
+    );
+    fixture.edit("src/lib.rs", "pub fn source() -> u32 { 3 }\n");
+    let edited_wait = tokio::spawn({
+        let registry = registry.clone();
+        let root = fixture.path().to_path_buf();
+        async move {
+            registry
+                .wait_for_readiness(&root, fresh, SERVING_SEAT_FAILURE_CEILING)
+                .await
+        }
+    });
+    // No hook reported the save, so only that wait's sweep can have found it.
+    let swept = wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "the swept save's refreshing reading",
+        || async {
+            registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .filter(|freshness| freshness.staleness_state == refreshing)
+        },
+    )
+    .await;
+    assert_eq!(swept.latest_generation_id.as_deref(), Some(before.as_str()));
+    let edited = registry
+        .wait_for_readiness(fixture.path(), fresh, Duration::from_millis(500))
+        .await
+        .expect("freshness read");
+    let CodeIndexReadinessWaitReadV1::TimedOut { last: Some(last) } = edited else {
+        panic!("an unreported save must not read as fresh: {edited:?}");
+    };
+    assert_eq!(
+        (last.staleness_state, last.latest_generation_id.as_deref()),
+        (refreshing, Some(before.as_str()))
+    );
+    assert!(
+        !edited_wait.is_finished(),
+        "the fresh wait cannot reach while the scheduler is held"
+    );
+    held.release().await;
+
+    let reindexed = edited_wait
+        .await
+        .expect("fresh wait task")
+        .expect("freshness read");
+    assert!(
+        matches!(reindexed, CodeIndexReadinessWaitReadV1::Reached { .. }),
         "{reindexed:?}"
     );
     assert_eq!(
@@ -10447,7 +10501,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         )
     };
 
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let ready_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let generation_a = loop {
         match registry
             .execute_query_search(&scope, core_search_request("alpha_0000"))
@@ -10467,7 +10521,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
     // A and legitimately leave one coalesced BusyFollowUp. Let that pass
     // settle before this test injects generation B's publication failure, so
     // the assertion below observes only the failed pass's restored hint.
-    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         let in_progress = registry
             .reconcile_in_progress_for_test(fixture.path())
@@ -10534,7 +10588,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         "changed source wakes the mounted graph-off owner"
     );
 
-    let attempt_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let attempt_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while !reconcile_in_progress.running() {
         assert!(
             std::time::Instant::now() <= attempt_deadline,
@@ -10542,7 +10596,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    let restore_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let restore_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while reconcile_in_progress.running() {
         assert!(
             std::time::Instant::now() <= restore_deadline,
@@ -10630,7 +10684,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         "retry wake reaches the restored source hint"
     );
 
-    let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let publication_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let generation_c = loop {
         let durable = match scheduler.try_lock() {
             Ok(scheduler) => scheduler
@@ -10658,7 +10712,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
 
-    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let progress_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let progress_c = loop {
         let progress = match scheduler.try_lock() {
             Ok(scheduler) => {
@@ -10707,7 +10761,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         );
     }
 
-    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let query_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let executed_c = loop {
         match registry
             .execute_query_search(&scope, core_search_request("beta_0000"))
@@ -11030,7 +11084,7 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
     drop(activation);
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let latest = loop {
         if let Some((latest, _)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
@@ -11254,7 +11308,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     // when the artifact build finishes and the Ready snapshot publishes in
     // the same step, so live build progress and ready text are sequential
     // states, never a simultaneous one.
-    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let progress_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let progress_mid_build = loop {
         let observed = {
             let scheduler = scheduler
@@ -11330,7 +11384,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         let _ = registry.notify_hook_overflow(fixture.path()).await;
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
-    let text_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let text_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let (text_owner_after_refresh, refreshed_generation_id) = loop {
         let generation_id = registry.latest_generation_id(fixture.path()).await;
@@ -11382,7 +11436,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     // A retryable failure still seats the changed generation; its graph stays
     // typed pending until a retry activates it.
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let seat_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let seat_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let seated = loop {
         if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
             && latest.generation().manifest().generation_id == refreshed_generation_id
@@ -11405,7 +11459,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     // seated generation without resealing it.
     super::super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, 0);
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while seated.code_graph_serving_readiness()
         != tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
     {
@@ -11756,21 +11810,12 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
     // Busy means a pass owns the worktree: wake one and let it park on the
     // held scheduler before the read.
     let _ = registry.notify_hook_overflow(fixture.path()).await;
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let busy_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !registry
-        .reconcile_in_progress_for_test(fixture.path())
-        .await
-    {
-        assert!(
-            std::time::Instant::now() <= busy_deadline,
-            "the woken pass never took the worktree"
-        );
-        signals.changed_before(busy_deadline).await;
-    }
+    wait_for_owner_pass(&registry, fixture.path()).await;
 
+    // The scheduler stays held until after this read, so a read that waited
+    // on it could never return.
     let latest = tokio::time::timeout(
-        Duration::from_millis(250),
+        SERVING_SEAT_FAILURE_CEILING,
         registry.latest_complete_fresh(fixture.path()),
     )
     .await
@@ -11784,7 +11829,7 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
     // The follow-up wake must produce its own cadence receipt after the lock
     // frees.
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         let receipts = registry.event_to_ready_receipts();
         if receipts

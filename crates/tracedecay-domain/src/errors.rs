@@ -2,6 +2,8 @@ use thiserror::Error;
 
 use crate::ApplicationProblemDetailV1;
 
+const STORE_OPEN_CANCELLED_REASON_CODE: &str = "store_open_cancelled";
+
 #[derive(Error, Debug)]
 #[error("{detail}")]
 struct HookRuntimeErrorContext {
@@ -90,6 +92,11 @@ pub enum TraceDecayError {
         typed_detail: Option<Box<ApplicationProblemDetailV1>>,
     },
 
+    /// A command answered with a typed refusal rather than failing; the
+    /// process boundary names the refusal and its stable code.
+    #[error(transparent)]
+    ToolRefused(Box<ToolRefusal>),
+
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
@@ -116,10 +123,108 @@ pub enum TraceDecayError {
 
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+/// `code` is the refusal record's own code when the result carries one.
+#[derive(Debug, Error)]
+#[error("{tool} refused the request{}", refusal_suffix(code.as_deref(), reason.as_deref()))]
+pub struct ToolRefusal {
+    pub tool: String,
+    pub code: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl TraceDecayError {
+    pub fn tool_refused(
+        tool: impl Into<String>,
+        code: Option<String>,
+        reason: Option<String>,
+    ) -> Self {
+        Self::ToolRefused(Box::new(ToolRefusal {
+            tool: tool.into(),
+            code,
+            reason,
+        }))
+    }
+}
+
+fn refusal_suffix(code: Option<&str>, reason: Option<&str>) -> String {
+    match (code, reason) {
+        (Some(code), Some(reason)) => format!(" ({code}): {reason}"),
+        (Some(code), None) => format!(" ({code})"),
+        (None, Some(reason)) => format!(": {reason}"),
+        (None, None) => String::new(),
+    }
+}
+
 /// The one command that resets every profile-scoped persisted shape. Refused
 /// shapes are never migrated or backed up: the reset deletes the old data and
 /// the next open creates the shape the running binary writes.
 pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
+
+/// Deletes exactly the stores the daemon reports in their typed
+/// reset-required state and nothing else; the next open recreates each one
+/// empty. Stores it cannot reset on their own name [`PROFILE_RESET_COMMAND`].
+pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
+
+/// A registered store [`STALE_STORE_RESET_COMMAND`] deletes on its own, named
+/// by the `store` label [`StoreResetRequiredV1`] carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResettableStoreV1 {
+    ProfileSessions,
+    ProjectSessions {
+        project_id: String,
+    },
+    /// Every host's Hook V2 admission ledger for profile-scoped events.
+    ProfileHookAdmissions,
+    /// Every host's Hook V2 admission ledger, and pre-ledger pending work,
+    /// in one project's hook data root.
+    ProjectHookAdmissions {
+        project_id: String,
+    },
+}
+
+impl ResettableStoreV1 {
+    const PROFILE_SESSIONS_LABEL: &'static str = "profile sessions";
+    const PROJECT_SESSIONS_PREFIX: &'static str = "project sessions ";
+    const PROFILE_HOOK_ADMISSIONS_LABEL: &'static str = "profile hook admissions";
+    const PROJECT_HOOK_ADMISSIONS_PREFIX: &'static str = "project hook admissions ";
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::ProfileSessions => Self::PROFILE_SESSIONS_LABEL.to_owned(),
+            Self::ProjectSessions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_SESSIONS_PREFIX)
+            }
+            Self::ProfileHookAdmissions => Self::PROFILE_HOOK_ADMISSIONS_LABEL.to_owned(),
+            Self::ProjectHookAdmissions { project_id } => {
+                format!("{}{project_id}", Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+            }
+        }
+    }
+
+    /// The store a [`Self::label`] names, `None` for a store that is not
+    /// resettable on its own.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            Self::PROFILE_SESSIONS_LABEL => return Some(Self::ProfileSessions),
+            Self::PROFILE_HOOK_ADMISSIONS_LABEL => return Some(Self::ProfileHookAdmissions),
+            _ => {}
+        }
+        let project_id = |prefix: &str| {
+            label
+                .strip_prefix(prefix)
+                .filter(|project_id| !project_id.is_empty())
+                .map(str::to_owned)
+        };
+        project_id(Self::PROJECT_SESSIONS_PREFIX)
+            .map(|project_id| Self::ProjectSessions { project_id })
+            .or_else(|| {
+                project_id(Self::PROJECT_HOOK_ADMISSIONS_PREFIX)
+                    .map(|project_id| Self::ProjectHookAdmissions { project_id })
+            })
+    }
+}
 
 /// A persisted store the daemon keeps mounted in a typed reset-required state
 /// instead of refusing to serve: every read against it returns the typed
@@ -201,9 +306,24 @@ impl TraceDecayError {
         Some((authority, reason))
     }
 
+    /// Whether this is a persisted-shape refusal a store is served in until
+    /// its reset.
+    #[must_use]
+    pub fn is_store_reset_required(&self) -> bool {
+        matches!(
+            self,
+            Self::ResetRequired { .. } | Self::ProfileResetRequired { .. }
+        )
+    }
+
     /// The typed reset-required state `store` is mounted in when this error is
     /// a profile-scoped persisted-shape refusal, `None` for any other failure.
-    pub fn store_reset_required(&self, store: impl Into<String>) -> Option<StoreResetRequiredV1> {
+    /// `remedy` is the command that resets `store`.
+    pub fn store_reset_required(
+        &self,
+        store: impl Into<String>,
+        remedy: &str,
+    ) -> Option<StoreResetRequiredV1> {
         let (authority, found_version, required_version) = match self {
             Self::ResetRequired { authority, .. } => (authority.clone(), None, None),
             Self::ProfileResetRequired {
@@ -223,7 +343,7 @@ impl TraceDecayError {
             found_version,
             required_version,
             reason: self.to_string(),
-            remedy: PROFILE_RESET_COMMAND.to_owned(),
+            remedy: remedy.to_owned(),
         })
     }
 
@@ -238,6 +358,21 @@ impl TraceDecayError {
             detail: detail.into(),
             typed_detail: None,
         }
+    }
+
+    /// Daemon shutdown stopped a store open or schema install at a safe point
+    /// and rolled back its uncommitted work.
+    pub fn store_open_cancelled(operation: impl std::fmt::Display) -> Self {
+        Self::project_route(
+            STORE_OPEN_CANCELLED_REASON_CODE,
+            true,
+            format!("{operation} was cancelled by daemon shutdown"),
+        )
+    }
+
+    pub fn is_store_open_cancelled(&self) -> bool {
+        self.project_route_context()
+            .is_some_and(|(reason_code, _, _)| reason_code == STORE_OPEN_CANCELLED_REASON_CODE)
     }
 
     pub fn project_route_with_detail(

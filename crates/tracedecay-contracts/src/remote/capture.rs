@@ -268,6 +268,8 @@ pub enum RemoteCapturePersistenceErrorV1 {
     SequenceGap,
     #[error("remote spool persistence failed")]
     Unavailable,
+    #[error("no remote writer authority has been published")]
+    WriterAuthorityUnpublished,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

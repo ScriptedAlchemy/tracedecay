@@ -71,7 +71,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@64956063446174b9f0989eecfb46ef0dcc9d5277
+        uses: ScriptedAlchemy/cargo-hauler@50341b006f8afd2a193e5d90f450d0644e4974ed
         with:
           mode: route
           token: ${{ github.token }}
@@ -224,6 +224,9 @@ jobs:
 
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
+
+      - name: Test the Hermes dashboard embed helpers
+        run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
       - name: Check Rust cache key lineage and the superseded-entry selection
         run: |

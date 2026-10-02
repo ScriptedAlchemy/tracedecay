@@ -16,14 +16,16 @@ use tracedecay_domain::{
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::cursor::{CursorSweepSource, cursor_project_slug};
+use tracedecay_sessions::runtime::hosts::cursor::{
+    cursor_project_slug, try_ingest_cursor_project_sweep_capped,
+};
 use tracedecay_sessions::runtime::hosts::cursor_composer::CursorComposerSource;
+use tracedecay_sessions::runtime::with_transcript_source_profile;
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, durable_table_count, ingest_global_sources_for_provider,
     mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
-    try_ingest_source,
 };
 use crate::support::{assert_path_text_eq, init_git_repo, init_project};
 
@@ -544,10 +546,18 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
 
     // JSONL sweep with the composer-owned skip set does not touch comp-1.
     let owned: HashSet<String> = outcome.owned_session_ids.clone();
-    let skipped_sweep = CursorSweepSource::with_home(&home).with_skip_session_ids(owned);
-    let skipped = try_ingest_source(&db, &skipped_sweep, &project, None)
-        .await
-        .unwrap();
+    let skipped = with_transcript_source_profile(
+        db.transcript_source_profile(),
+        try_ingest_cursor_project_sweep_capped(
+            &project,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+            None,
+            owned,
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         skipped.messages_upserted, 0,
         "owned session must be skipped"
@@ -563,10 +573,18 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
         )
         .await
         .expect("composer sweep");
-    let plain_sweep = CursorSweepSource::with_home(&home);
-    let plain = try_ingest_source(&db, &plain_sweep, &project, None)
-        .await
-        .unwrap();
+    let plain = with_transcript_source_profile(
+        db.transcript_source_profile(),
+        try_ingest_cursor_project_sweep_capped(
+            &project,
+            &db.runtime().facade(),
+            db.project_id().clone(),
+            None,
+            HashSet::new(),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         plain.messages_upserted, 1,
         "without the skip set the JSONL copy ingests"

@@ -42,6 +42,7 @@ impl DaemonEngine {
     )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
+        let store_open_cancel = self.store_administration.clone();
 
         let manual_branch_cancel = self.store_administration.clone();
         let manual_branch_join = self.store_administration.clone();
@@ -88,7 +89,9 @@ impl DaemonEngine {
             // An admitted open registers its owners with the invocation
             // registry, so it must settle before that registry drains: it
             // either registers in time to be released or stops at a
-            // cancellation boundary before registering anything.
+            // cancellation boundary before registering anything. The store
+            // mount it may be inside stops at its next safe point too, so the
+            // open never outlasts the cooperative window by finishing a mount.
             vec![ShutdownOwner::with_deadline_status(
                 "project_open",
                 {
@@ -96,6 +99,7 @@ impl DaemonEngine {
                     move || project_open_cancel.cancel_all()
                 },
                 move |_| async move {
+                    store_open_cancel.cancel_store_opens_for_shutdown().await;
                     if project_open.shutdown().await {
                         ShutdownStatus::Clean
                     } else {
@@ -263,33 +267,14 @@ impl DaemonEngine {
 
     pub(in crate::daemon) fn memory_graph_reconciliation_shutdown_owner(&self) -> ShutdownOwner {
         let administration = self.store_administration.clone();
-        let store_telemetry_sampling = self.store_administration.store_telemetry_sampling();
+        // Every step stays bounded by this owner's deadline, so a genuinely
+        // stuck pass still surfaces as a typed timeout.
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
             move |_| {
                 hotpath::future!(
-                    async move {
-                        // Ordering is the correctness contract here: close registry
-                        // admission, cancel reconciliation, JOIN the workers while
-                        // their runtimes are still alive, and only then drain the
-                        // retained owners and close the graphs. Closing before the
-                        // join leaves the standing owner attachments leased and the
-                        // close reports a structural Conflict on every shutdown.
-                        // Every step stays bounded by this owner's deadline, so a
-                        // genuinely stuck pass still surfaces as a typed timeout.
-                        let owner = administration
-                            .prepare_memory_graph_reconciliation_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        owner.cancel();
-                        owner.shutdown().await?;
-                        store_telemetry_sampling.release_retained_handles_for_shutdown();
-                        administration
-                            .close_retained_graph_runtimes_for_shutdown()
-                            .await
-                            .map_err(|error| error.to_string())
-                    },
+                    async move { administration.close_stores_for_shutdown().await },
                     label = "daemon.engine.memory_graph_reconciliation"
                 )
             },

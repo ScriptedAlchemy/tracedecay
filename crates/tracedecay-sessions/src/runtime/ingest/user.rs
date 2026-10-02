@@ -170,7 +170,6 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             committable_frontier: None,
         });
     };
-    let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
     let pass = match discovery_state {
         Some((hub, consumer)) => match hub
             .discover(
@@ -215,6 +214,9 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
+        let Some(pending) = codex::PendingTranscript::observe(discovery_state, path)? else {
+            continue;
+        };
         let progress =
             codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
                 path,
@@ -225,6 +227,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 cancellation,
             )
             .await?;
+        pending.admitted(path, progress.source_deferred, progress.covered_through)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
@@ -757,6 +760,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         units_completed: provider_runs.units_completed,
         units_failed: provider_runs.units_failed,
         byte_bounds_enforced: provider_runs.byte_bounds_enforced,
+        coverage_advanced: provider_runs.coverage_advanced || scheduling_state_written,
     }
 }
 

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::memory_facts_test::{
     close_test_graph, fact_store_server, invoke_production_tool, setup_project,
 };
-use crate::support::handle_real_server_tool_call_raw;
+use crate::support::{application_invalid_request_error, handle_real_server_tool_call_raw};
 
 const RELEASE_FACT: &str = "Phoenix release binds Amari Memory on the fifteenth";
 const TENTATIVE_FACT: &str = "A tentative note also links Phoenix and Amari Memory";
@@ -107,19 +107,12 @@ fn assert_invalid_entity_selection(problem: &Value) {
     );
 }
 
-fn decode_refusal(response: &Value) -> String {
-    assert_eq!(
-        response["error"]["code"], -32603,
-        "a request the reason schema rejects is an internal tool error: {response}"
-    );
-    assert_eq!(
-        response["error"]["data"]["tool"], "tracedecay_fact_store_reason",
-        "the refusal must name the tool: {response}"
-    );
-    response["error"]["message"]
-        .as_str()
-        .unwrap_or_else(|| panic!("decode refusal has no message: {response}"))
-        .to_owned()
+fn reason_refusal(detail: &str) -> Value {
+    application_invalid_request_error("tracedecay_fact_store_reason", detail)
+}
+
+fn decode_refusal(response: &Value) -> Value {
+    response["error"].clone()
 }
 
 fn observed_hit(hit: &Value) -> Value {
@@ -405,11 +398,11 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
 
     assert_eq!(
         decode_refusal(&call_reason(&fixture, json!({})).await),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: missing field `entities`"
+        reason_refusal("missing field `entities`")
     );
     assert_eq!(
         decode_refusal(&call_reason(&fixture, json!({"entities": "Project Phoenix"})).await),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: entities: invalid type: string \"Project Phoenix\", expected a sequence"
+        reason_refusal("entities: invalid type: string \"Project Phoenix\", expected a sequence")
     );
     assert_eq!(
         decode_refusal(
@@ -419,7 +412,7 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
             )
             .await,
         ),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: unknown field `query`"
+        reason_refusal("unknown field `query`")
     );
     assert_eq!(
         decode_refusal(
@@ -429,7 +422,10 @@ async fn fact_store_reason_refuses_an_unusable_entity_selection() {
             )
             .await,
         ),
-        "tool execution failed: config error: invalid retained application request for tracedecay_fact_store_reason: unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, `tool`, `decision`, `code_area`"
+        reason_refusal(
+            "unknown variant `pitfall`, expected one of `general`, `user_pref`, `project`, \
+             `tool`, `decision`, `code_area`"
+        )
     );
 
     close_test_graph(fixture).await;

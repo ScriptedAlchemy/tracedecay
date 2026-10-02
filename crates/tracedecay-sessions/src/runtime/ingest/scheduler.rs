@@ -31,7 +31,7 @@ pub const USER_INGEST_CODEX_HISTORY_EPOCH_KEY: &str =
     "tracedecay-internal:user-ingest-codex-history-epoch:v2";
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
-pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
+pub fn default_ingest_pass_bounds() -> IngestPassBounds {
     let jsonl_bytes = u64::try_from(MAX_JSONL_RECORD_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -213,13 +213,12 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_store::{
         ParseOffset, TranscriptStore, TranscriptStoreError, TranscriptStoreResult,
-        TranscriptWriteBatch, TranscriptWriteKind,
+        TranscriptWriteBatch,
     };
 
-    use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
+    use crate::runtime::hosts::codex;
     use crate::runtime::source::TranscriptDiscoveryBounds;
     use crate::runtime::store_port::TranscriptIngestStore;
-    use crate::runtime::{SessionRecord, hosts::codex};
 
     use super::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 
@@ -255,18 +254,7 @@ mod tests {
             &self,
             batch: TranscriptWriteBatch,
         ) -> impl std::future::Future<Output = TranscriptStoreResult<()>> + Send {
-            let (cursor_path, kind) = batch.into_parts();
-            let (expected, next) = match kind {
-                TranscriptWriteKind::AdvanceOffset {
-                    expected_offset,
-                    next_offset,
-                }
-                | TranscriptWriteKind::Upsert {
-                    expected_offset,
-                    next_offset,
-                    ..
-                } => (expected_offset, next_offset),
-            };
+            let (cursor_path, expected, next) = batch.into_parts();
             let mut offsets = self.offsets.lock().expect("offset lock");
             let actual = *offsets.get(&cursor_path).unwrap_or(&ParseOffset::default());
             let result = if actual == expected {
@@ -312,24 +300,6 @@ mod tests {
                 Ok(())
             };
             std::future::ready(result)
-        }
-
-        fn get_session(
-            &self,
-            _provider: &str,
-            _session_id: &str,
-        ) -> impl std::future::Future<Output = TranscriptStoreResult<Option<SessionRecord>>> + Send
-        {
-            std::future::ready(Ok(None))
-        }
-
-        fn persist_transcript_batch_with_git_evidence(
-            &self,
-            batch: TranscriptWriteBatch,
-            _commit_records: &[CommitSessionRecord],
-            _span_observations: &[SpanObservation],
-        ) -> impl std::future::Future<Output = TranscriptStoreResult<()>> + Send {
-            self.persist_transcript_batch(batch)
         }
     }
 

@@ -609,6 +609,7 @@ fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCapt
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::test_executable::write_executable_script;
 
     #[test]
     fn resolver_preserves_exact_absolute_override() {
@@ -616,10 +617,8 @@ mod tests {
         let executable = temporary
             .path()
             .join(if cfg!(windows) { "git.exe" } else { "git" });
-        std::fs::write(&executable, b"test executable").expect("write fake git executable");
-        #[cfg(unix)]
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake git executable");
+        write_executable_script(&executable, b"test executable")
+            .expect("write fake git executable");
 
         let resolved = resolve_git_program_from(
             Some(executable.as_os_str()),
@@ -638,10 +637,8 @@ mod tests {
         let executable = temporary
             .path()
             .join(if cfg!(windows) { "git.exe" } else { "git" });
-        std::fs::write(&executable, b"test executable").expect("write fake git executable");
-        #[cfg(unix)]
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake git executable");
+        write_executable_script(&executable, b"test executable")
+            .expect("write fake git executable");
         let path = std::env::join_paths([temporary.path()]).expect("fixture PATH");
 
         let resolved = resolve_git_program_from(

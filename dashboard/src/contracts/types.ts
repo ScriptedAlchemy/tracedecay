@@ -322,6 +322,12 @@ export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" |
 
 export type ApplicationProblemDetailV1 = 
   | {
+    kind: "daemon_unreachable";
+    named_by: string | null;
+    service_unit: DaemonServiceUnitObservationV1;
+    socket: string;
+  }
+  | {
     generation: string | null;
     kind: "diagnostics_pending";
     producer: string;
@@ -361,6 +367,11 @@ export type ApplicationProblemDetailV1 =
     committed: number;
     kind: "stale_refresh_frontier";
     requested: number;
+  }
+  | {
+    expected: string;
+    found: string;
+    kind: "workflow_placement_digest_stale";
   };
 
 export type ApplicationProblemEnvelope = {
@@ -1040,6 +1051,20 @@ export type CrossMergePolicyV1 = {
   allowed_modes: Array<CrossMergeModeV1>;
   default_mode: CrossMergeModeV1;
 };
+
+export type DaemonServiceUnitObservationV1 = 
+  | {
+    path: string;
+    serves: string;
+    state: "installed";
+  }
+  | {
+    state: "not_installed";
+  }
+  | {
+    error: string;
+    state: "unobservable";
+  };
 
 export type DashboardAuthorizationV1 = 
   | {
@@ -4020,7 +4045,6 @@ export type ProjectEditableSettingsV1 = {
   context_scout: boolean;
   exclude: Array<string>;
   extract_docstrings: boolean;
-  git_ignore: boolean;
   include: Array<string>;
   max_file_size: number;
   sync: SyncSettingsV1;
@@ -4081,7 +4105,6 @@ export type ProjectSettingsPatch = {
   exclude?: Array<string> | null | undefined;
   expected_revision_id: string;
   extract_docstrings?: boolean | null | undefined;
-  git_ignore?: boolean | null | undefined;
   idempotency_key: string;
   include?: Array<string> | null | undefined;
   max_file_size?: number | null | undefined;
@@ -4245,7 +4268,7 @@ export type ReleaseWorkPlacementCommand = {
   task_id: TaskId;
 };
 
-export type RemoteAuthorityMissingReasonV1 = "authority_authentication_failed" | "authority_unreachable" | "caller_authentication_failed" | "enrollment_expired" | "enrollment_revoked" | "fence_unverified" | "insufficient_capability" | "placement_unknown" | "protocol_incompatible" | "registry_unavailable" | "scope_mismatch";
+export type RemoteAuthorityMissingReasonV1 = "authority_authentication_failed" | "authority_unreachable" | "caller_authentication_failed" | "enrollment_expired" | "enrollment_revoked" | "fence_unverified" | "insufficient_capability" | "placement_unknown" | "protocol_incompatible" | "registry_unavailable" | "scope_mismatch" | "writer_authority_unpublished";
 
 export type RemoteAuthoritySummaryV1 = 
   | {

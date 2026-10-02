@@ -1,7 +1,7 @@
 //! Branch provenance resolution and opening a tracked branch snapshot.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::{
     install_usecase_runtime_configuration_authority,
@@ -20,18 +20,16 @@ use super::{TraceDecay, TraceDecayOpenOptions};
 impl TraceDecay {
     /// Resolves the serving-branch provenance for a given live branch.
     ///
-    /// Returns `(db_path, serving_branch, fallback_warning)`. Every branch is
-    /// served by the single project graph store, so `db_path` is always the
-    /// canonical main database; the branch argument only decides which
-    /// tracked branch's provenance the open is scoped to and whether the
-    /// caller must be warned about a fallback.
-    #[hotpath::measure(label = "lifecycle.resolve_db_for_branch")]
-    pub fn resolve_db_for_branch(
+    /// Returns `(serving_branch, fallback_warning)`: which tracked branch's
+    /// provenance the open is scoped to and whether the caller must be warned
+    /// about a fallback.
+    #[hotpath::measure(label = "lifecycle.resolve_serving_branch")]
+    pub fn resolve_serving_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
         branch: Option<&str>,
-    ) -> (PathBuf, Option<String>, Option<String>) {
-        tracedecay_application::tracedecay::resolve_db_for_branch(
+    ) -> (Option<String>, Option<String>) {
+        tracedecay_application::tracedecay::resolve_serving_branch(
             project_root,
             tracedecay_dir,
             branch,
@@ -128,7 +126,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_branch_with_registered_configuration(
             project_root,
@@ -249,7 +247,6 @@ impl TraceDecay {
             serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             fallback_warning: None,
             read_only,
-            db_path_cache: OnceLock::new(),
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
+#[cfg(test)]
+use super::collection::unbounded_deadline;
 use super::collection::{RegularFileSnapshot, read_regular_file};
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
@@ -129,15 +131,12 @@ pub(crate) fn newest_mtime_secs_controlled(
 }
 
 /// Total size in bytes of every file under `dir`. Best-effort: unreadable
-/// entries are skipped. Kept local to the lib because the binary-only
-/// `global::tracedecay_dir_size` is not reachable from this crate module.
+/// entries are skipped.
 ///
-/// Symlinks are never followed. `DirEntry::metadata` follows them, so a
-/// symlink pointing at an ancestor would recurse until the stack ran out, and
-/// one pointing outside the store would bill another directory's bytes to
-/// this one. `file_type` reports the link itself, so the walk stays inside
-/// the directory it was given.
-pub(crate) fn dir_size_bytes(dir: &Path) -> u64 {
+/// Symlinks are never followed: one pointing at an ancestor would recurse
+/// until the stack ran out, and one pointing outside the store would bill
+/// another directory's bytes to this one.
+pub fn dir_size_bytes(dir: &Path) -> u64 {
     walk_store_stats(dir).size_bytes
 }
 
@@ -250,13 +249,6 @@ async fn build_store_census_for_projects(
             if control.is_some_and(|control| control.completion().is_some()) {
                 return Ok(None);
             }
-            let graph_scope_relpaths = context
-                .stores
-                .iter()
-                .filter(|candidate| candidate.store.store_id == store.store_id)
-                .flat_map(|candidate| candidate.graph_scopes.iter())
-                .map(|scope| PathBuf::from(&scope.db_relpath))
-                .collect::<Vec<_>>();
             if store.storage_mode != "profile_sharded" {
                 continue;
             }
@@ -290,7 +282,6 @@ async fn build_store_census_for_projects(
                 expected_data_root_fence: cheap.expected_data_root_fence,
                 expected_content_fence: StoreContentFence::Missing,
                 expected_manifest_bytes: cheap.expected_manifest_bytes,
-                graph_scope_relpaths,
             });
         }
     }
@@ -446,7 +437,7 @@ pub(crate) async fn sweep_orphan_stores(
     apply: bool,
 ) -> tracedecay_domain::errors::Result<OrphanSweepReport> {
     let census = build_store_census(db, profile_root).await?;
-    let findings = classify_stores(&census, now);
+    let findings = classify_stores(&census, now, &std::collections::BTreeSet::new());
     let plan = plan_collection(findings, retention_secs);
 
     if !apply {
@@ -562,12 +553,15 @@ pub async fn census_unregistered_project_dirs(
             now,
             apply: false,
             cancellation: &cancellation,
-            deadline: MonotonicDeadline::at(
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-            ),
+            deadline: unbounded_deadline(),
         },
     )
     .await?;
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::Complete,
+        "an interrupted census must not read as an empty one"
+    );
     Ok(report
         .plan
         .collect
@@ -603,10 +597,11 @@ pub fn plan_unregistered_collection(
 }
 
 /// Whether the manifest under `data_root` names a project root this durable
-/// profile can never register again: one under the OS temp directory, or one
-/// that is definitively gone. A missing or unreadable manifest, a root that
-/// still exists, or an unreadable root all answer `false` and leave the
-/// retention window in charge.
+/// profile can never register again: one under the OS temp directory. A root
+/// that is gone from disk proves nothing, since its owner can still write
+/// into the store until it is retired and joined, so it, a missing or
+/// unreadable manifest, and every other root leave the retention window in
+/// charge.
 pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Path) -> bool {
     let Ok(manifest) = tracedecay_runtime_core::storage::read_store_manifest(
         &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
@@ -617,10 +612,6 @@ pub(crate) fn manifest_names_abandoned_root(data_root: &Path, profile_root: &Pat
         return false;
     }
     tracedecay_global_db::ephemeral_root_rejection(&manifest.project_root, profile_root).is_some()
-        || matches!(
-            std::fs::symlink_metadata(&manifest.project_root),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        )
 }
 
 /// Deletes unregistered directories after content/durable inspection and a

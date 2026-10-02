@@ -1427,6 +1427,28 @@
         },
         {
           "additionalProperties": false,
+          "description": "A workflow step effect named placement digest `found`, but the step's\ncurrent placement is `expected`: the effect was settled against a\nplacement the run has since replaced.",
+          "properties": {
+            "expected": {
+              "type": "string"
+            },
+            "found": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "workflow_placement_digest_stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expected",
+            "found"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A writer lock stayed held by other writers past its admission\ndeadline.",
           "properties": {
             "deadline_ms": {
@@ -1541,6 +1563,35 @@
             "kind",
             "producer",
             "generation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No TraceDecay daemon accepts connections on `socket`. `named_by` is\nthe environment variable that chose the socket, when one did;\n`service_unit` is what this client observed of the managed service.",
+          "properties": {
+            "kind": {
+              "const": "daemon_unreachable",
+              "type": "string"
+            },
+            "named_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "service_unit": {
+              "$ref": "#/$defs/DaemonServiceUnitObservationV1"
+            },
+            "socket": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "socket",
+            "named_by",
+            "service_unit"
           ],
           "type": "object"
         }
@@ -4798,6 +4849,64 @@
         "allow_cross_repository"
       ],
       "type": "object"
+    },
+    "DaemonServiceUnitObservationV1": {
+      "description": "The managed daemon service unit as a client observed it, from the unit\nfile alone.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "not_installed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The unit file could not be read.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unobservable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The unit file at `path` serves the socket `serves`.",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "serves": {
+              "type": "string"
+            },
+            "state": {
+              "const": "installed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "path",
+            "serves"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "DashboardAuthorizationV1": {
       "description": "Authorization outcome for the read. On the loopback single-user dashboard a\nlegal local read is [`Self::Authorized`]; the other variants are retained so\nthe contract can express `unauthorized` (identity absent/expired), `denied`\n(known identity lacks permission), and `redacted` reads without a schema\nchange.",
@@ -20417,9 +20526,6 @@
         "extract_docstrings": {
           "type": "boolean"
         },
-        "git_ignore": {
-          "type": "boolean"
-        },
         "include": {
           "items": {
             "type": "string"
@@ -20447,7 +20553,6 @@
         "max_file_size",
         "extract_docstrings",
         "track_call_sites",
-        "git_ignore",
         "telemetry",
         "sync",
         "context_scout"
@@ -20690,12 +20795,6 @@
           "type": "string"
         },
         "extract_docstrings": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "git_ignore": {
           "type": [
             "boolean",
             "null"
@@ -21455,6 +21554,7 @@
       "enum": [
         "registry_unavailable",
         "placement_unknown",
+        "writer_authority_unpublished",
         "authority_unreachable",
         "authority_authentication_failed",
         "caller_authentication_failed",

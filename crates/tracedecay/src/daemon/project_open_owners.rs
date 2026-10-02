@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use tracedecay_application::advisory::github_runtime::github_repository_from_remote_v1;
 use tracedecay_application::project_open_authorization::project_open_work_grant;
-use tracedecay_contracts::{ApplicationContractError, ResolvedScope, now_micros};
+use tracedecay_contracts::{
+    ApplicationContractError, ResolvedScope, TemporalRetrievalPort, now_micros,
+};
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
@@ -22,7 +24,6 @@ use tracedecay_agent_hosts::native_integration::{
     NativeIntegrationTargetV1,
 };
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_application::primitives::admitted_root_uri_for_project;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_service::{
@@ -37,6 +38,7 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV1;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod advisory_runtime;
@@ -96,15 +98,15 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project-open source edit preview scope denied: {error}"),
             })?;
-    let catalog = tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
+    let catalog = tracedecay_contracts::catalog_composition::application_catalog_snapshot()
         .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open source edit catalog is unavailable: {error}"),
-    })?;
+            message: format!("project-open source edit catalog is unavailable: {error}"),
+        })?;
     let authorization = ProjectSourceEditAuthorizationV1::new(
         project_root.to_path_buf(),
         scope,
         Arc::clone(graph.configuration_runtime()),
-        Arc::new(catalog),
+        Arc::clone(catalog),
         Arc::new(project_open_source_access_authority().map_err(|error| {
             TraceDecayError::Config {
                 message: format!("project-open source edit access authority is invalid: {error}"),
@@ -161,6 +163,116 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     .await?;
     mutation.mark_ready();
     Ok(true)
+}
+
+/// Registers the owners that serve code reads on an admitted route: the
+/// callable-code authorization and the primitive runtime. Returns the
+/// admitted root URI they were bound to.
+#[hotpath::measure(label = "daemon.project.owners.code_reads", future = true)]
+async fn register_project_code_read_owners(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    server: &McpServer,
+    graph: &tracedecay_project::project::TraceDecay,
+    access: &ProjectSourceAccessSnapshot,
+    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
+) -> Result<String> {
+    // Primitive reads are part of the admitted core route. Publish their
+    // runtime and callable-code authorization before the slower mutation,
+    // delivery, native-integration, and Work owners finish mounting.
+    match hotpath::future!(
+        invocation.feedback_runtime_registrar().open_and_register(
+            graph.db().clone(),
+            project_root.to_path_buf(),
+            graph.store_layout().response_handle_root.clone(),
+            access.scope.clone(),
+            access.clone(),
+            Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                project_root.to_path_buf(),
+                access.scope.clone(),
+                Arc::clone(graph.configuration_runtime()),
+            )),
+        ),
+        label = "daemon.project.open.owners.feedback"
+    )
+    .await
+    {
+        Ok(_) | Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered) => {}
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("project-open feedback runtime registration failed: {error:?}"),
+            });
+        }
+    }
+    let source = graph
+        .source_read_context()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open primitive runtime requires an exact registered source identity"
+                .to_owned(),
+        })?;
+    open_and_register_project_primitive_runtime(
+        invocation,
+        project_root,
+        source,
+        server,
+        session_db,
+        temporal,
+        access.clone(),
+    )
+    .await
+}
+
+/// Registers the code-read owners on a route whose full upgrade is refused
+/// because a session store is held in its typed reset-required state. Code
+/// reads serve from the retained core; session lookups answer the refusal.
+/// `session_store` is the project session store for its non-session
+/// authorities (the primitive cursor keys).
+#[hotpath::measure(
+    label = "daemon.project.owners.reset_required_code_reads",
+    future = true
+)]
+pub(super) async fn register_reset_required_route_code_read_owners(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    project_id: &str,
+    server: &McpServer,
+    session_store: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+) -> Result<()> {
+    let project_id =
+        ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
+            message: "project-open owners require an authoritative project identity".to_owned(),
+        })?;
+    let graph = server.cg().await;
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open resolved scope denied: {error}"),
+            })?;
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open configuration currentness failed: {error}"),
+        })?;
+    let access =
+        daemon_owned_project_source_access_at(&scope, project_root, &configuration, now_micros())
+            .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open source access denied: {error}"),
+        })?;
+    Box::pin(register_project_code_read_owners(
+        invocation,
+        project_root,
+        server,
+        &graph,
+        &access,
+        session_store,
+        Arc::new(primitive_runtime::ResetRequiredSessionLookupV1),
+    ))
+    .await
+    .map(drop)
 }
 
 /// Registers code-index-independent owners for one newly inserted project.
@@ -292,91 +404,51 @@ pub(super) async fn register_project_open_production_owners(
         })?;
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
-    // Primitive reads are part of the admitted core route. Publish their
-    // runtime and callable-code authorization before the slower mutation,
-    // delivery, native-integration, and Work owners finish mounting.
-    match hotpath::future!(
-        invocation.feedback_runtime_registrar().open_and_register(
-            database.clone(),
-            project_root.to_path_buf(),
-            graph.store_layout().response_handle_root.clone(),
-            scope.clone(),
-            access.clone(),
-            Arc::new(DaemonCallableCodeAuthorizationSource::production(
-                project_root.to_path_buf(),
-                scope.clone(),
-                Arc::clone(graph.configuration_runtime()),
-            )),
-        ),
-        label = "daemon.project.open.owners.feedback"
-    )
-    .await
-    {
-        Ok(_) | Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered) => {}
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!("project-open feedback runtime registration failed: {error:?}"),
-            });
-        }
-    }
-    tracing::info!(
-        event = "project_open_owner_phase",
-        project = %project_root.display(),
-        phase = "feedback_runtime_registered",
-        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
-        elapsed_ms = owner_registration_started.elapsed().as_millis(),
-    );
-    owner_phase_started = Instant::now();
-
-    let admitted_root_uri =
-        admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
-            message: format!("project-open admitted root URI denied: {error}"),
-        })?;
-    let source = graph
-        .source_read_context()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open primitive runtime requires an exact registered source identity"
-                .to_owned(),
-        })?;
-    open_and_register_project_primitive_runtime(
+    let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
+        server.project_session_application_retrieval_service(&access.scope)?,
+    ));
+    let admitted_root_uri = Box::pin(register_project_code_read_owners(
         invocation,
         project_root,
-        source,
         server,
+        &graph,
+        &access,
         session_db.clone(),
-        access.clone(),
-        &admitted_root_uri,
-    )
+        temporal,
+    ))
     .await?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "primitive_runtime_registered",
+        phase = "code_read_owners_registered",
         step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
 
-    // One worktree discovery serves both the Git transaction authority here
-    // and the native-integration mount below.
+    // One worktree discovery serves both the Git transaction owner here and
+    // the native-integration mount below.
     let repository_root = tracedecay_runtime_core::worktree::git_worktree_root(project_root);
     if let Some(repository_root) = repository_root.as_deref() {
+        // Mounting reconciles durable Git transaction records before the
+        // mutation lane below opens.
         hotpath::future!(
-            git_transactions.install_authority(
-                repository_root,
-                access.clone(),
+            git_transactions.mount(
                 session_db.clone(),
+                repository_root.to_path_buf(),
+                access.clone(),
+                now_micros(),
                 tokio::runtime::Handle::current(),
             ),
-            label = "daemon.project.open.owners.git_authority"
+            label = "daemon.project.open.owners.git_transactions"
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Git authority registration failed: {error}"),
+            message: format!("project-open Git transaction owner did not mount: {error}"),
         })?;
     }
     // Preview executors were published with the read-only core. Open their
-    // mutation lane only after the exact Git transaction authority exists.
+    // mutation lane only after the exact Git transaction owner exists.
     // A later failure in this function retires the whole server, and project
     // open marks the lane failed as it does so, so the lane never stays warming.
     source_edit_mutation.mark_ready();

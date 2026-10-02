@@ -73,7 +73,9 @@ pub fn hook_v2_admission_ledger_root(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
 ) -> std::path::PathBuf {
-    data_root.join("hook-v2-admissions").join(host.hook_key())
+    data_root
+        .join(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR)
+        .join(host.hook_key())
 }
 
 /// Bound on distinct ledgers held open at once. A daemon serves one profile, so
@@ -93,14 +95,15 @@ fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
     LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-/// Where producer work lived before the admission ledger owned it. A daemon
-/// imports that spool into the ledger the first time it opens the host's
-/// ledger, then retires it.
-fn legacy_hook_v2_pending_work_root(
+/// Where producer work lived before the admission ledger owned it. A project
+/// still holding it is refused for reset with its ledgers.
+fn pre_ledger_hook_v2_pending_work_root(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
 ) -> std::path::PathBuf {
-    data_root.join("hook-v2-pending-work").join(host.hook_key())
+    data_root
+        .join(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR)
+        .join(host.hook_key())
 }
 
 fn complete_hook_v2_pending_work(
@@ -149,7 +152,7 @@ pub fn hook_v2_pending_work_envelopes(
     now: UtcMicros,
 ) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
     let ledger_root = hook_v2_admission_ledger_root(data_root, host);
-    if !ledger_root.is_dir() && !legacy_hook_v2_pending_work_root(data_root, host).is_dir() {
+    if !ledger_root.is_dir() && !pre_ledger_hook_v2_pending_work_root(data_root, host).is_dir() {
         return Vec::new();
     }
     match with_hook_v2_admission_ledger(Some(data_root), ledger_root, host, now, |ledger| {
@@ -191,8 +194,9 @@ fn stage_hook_v2_admission(
 
 /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
 /// first use and again after a failed write. A project ledger (`data_root`)
-/// adopts its legacy pending work when it opens. `None` means the ledger is
-/// unavailable (open failure, poisoned owner, or the open-ledger bound).
+/// whose pre-ledger pending work remains is refused for reset. `None` means
+/// the ledger is unavailable (open failure, reset refusal, poisoned owner, or
+/// the open-ledger bound).
 fn with_hook_v2_admission_ledger<T>(
     data_root: Option<&Path>,
     ledger_root: std::path::PathBuf,
@@ -214,69 +218,49 @@ fn with_hook_v2_admission_ledger<T>(
             if open_ledgers >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
                 return None;
             }
-            let (mut ledger, _report) = tracedecay_hooks::HookAdmissionLedgerV1::open(
-                unopened.key().clone(),
-                host,
-                tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
-                now,
-            )
-            .ok()?;
-            if let Some(data_root) = data_root {
-                import_legacy_hook_v2_pending_work(data_root, &mut ledger, now);
+            let opened = match data_root {
+                Some(data_root) => refuse_pre_ledger_pending_work(data_root, host),
+                None => Ok(()),
             }
-            unopened.insert(ledger)
+            .and_then(|()| {
+                tracedecay_hooks::HookAdmissionLedgerV1::open(
+                    unopened.key().clone(),
+                    host,
+                    tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+                    now,
+                )
+            });
+            match opened {
+                Ok((ledger, _report)) => unopened.insert(ledger),
+                Err(error) => {
+                    tracing::warn!(
+                        event = "hook_v2_admission_ledger_unavailable",
+                        host = host.hook_key(),
+                        error = %error,
+                        "hook V2 admission ledger could not be opened"
+                    );
+                    return None;
+                }
+            }
         }
     };
     Some(operation(ledger))
 }
 
-/// Adopt the producer work a pre-ledger daemon left in its pending-work spool,
-/// then retire that spool. A failure leaves the spool for the next open.
-fn import_legacy_hook_v2_pending_work(
+/// Refuses `host`'s project ledger for reset while the pre-ledger
+/// pending-work spool remains beside it.
+fn refuse_pre_ledger_pending_work(
     data_root: &Path,
-    ledger: &mut tracedecay_hooks::HookAdmissionLedgerV1,
-    now: UtcMicros,
-) {
-    let host = ledger.host();
-    let root = legacy_hook_v2_pending_work_root(data_root, host);
-    if !root.is_dir() {
-        return;
+    host: tracedecay_domain::NativeHostIdentityV1,
+) -> std::result::Result<(), tracedecay_hooks::HookAdmissionLedgerError> {
+    let root = pre_ledger_hook_v2_pending_work_root(data_root, host);
+    let present = root
+        .try_exists()
+        .map_err(|_| tracedecay_hooks::HookAdmissionLedgerError::Io)?;
+    tracedecay_hooks::record_hook_admission_reset(&root, present);
+    if present {
+        return Err(tracedecay_hooks::HookAdmissionLedgerError::ResetRequired);
     }
-    if let Err(error) = adopt_legacy_hook_v2_pending_work(&root, ledger, now) {
-        tracing::warn!(
-            event = "hook_v2_legacy_pending_work_import_failed",
-            host = host.hook_key(),
-            error = %error,
-            "legacy hook V2 pending work stays in place for the next ledger open"
-        );
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum LegacyPendingWorkImportError {
-    #[error("legacy pending-work spool: {0}")]
-    Spool(#[from] tracedecay_hooks::HookSpoolError),
-    #[error("admission ledger: {0}")]
-    Ledger(#[from] tracedecay_hooks::HookAdmissionLedgerError),
-}
-
-fn adopt_legacy_hook_v2_pending_work(
-    root: &Path,
-    ledger: &mut tracedecay_hooks::HookAdmissionLedgerV1,
-    now: UtcMicros,
-) -> std::result::Result<(), LegacyPendingWorkImportError> {
-    let config = tracedecay_hooks::HookSpoolConfigV1::stock(ledger.host());
-    let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(root, config, now)?;
-    let records = spool.pending_records()?;
-    drop(spool);
-    for record in records {
-        let canonical = daemon_mint_hook_v2_envelope(&record.envelope);
-        ledger
-            .stage_admission(&canonical, Some(&record.envelope), now)?
-            .commit
-            .wait()?;
-    }
-    tracedecay_hooks::HookSpoolV1::remove(root, config, now)?;
     Ok(())
 }
 
@@ -861,7 +845,7 @@ pub(super) fn hook_v2_profile_admit(
         ))
     })?;
     let ledger_root = profile_root
-        .join("hook-v2-profile-admissions")
+        .join(tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR)
         .join(binding.host.hook_key());
     let now = hook_now();
     let outcome = with_hook_v2_admission_ledger(None, ledger_root, binding.host, now, |ledger| {

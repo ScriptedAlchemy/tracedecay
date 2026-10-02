@@ -151,6 +151,7 @@ import type {
   CredentialReferenceId,
   CrossMergeModeV1,
   CrossMergePolicyV1,
+  DaemonServiceUnitObservationV1,
   DashboardAuthorizationV1,
   DashboardCoverageCompletenessV1,
   DashboardCoverageV1,
@@ -1495,6 +1496,11 @@ export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<["denied", "mal
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("daemon_unreachable"),
+  named_by: z.string().nullable(),
+  service_unit: z.lazy(() => DaemonServiceUnitObservationV1Schema),
+  socket: z.string(),
+}).strict(), z.object({
   generation: z.string().nullable(),
   kind: z.literal("diagnostics_pending"),
   producer: z.string(),
@@ -1528,6 +1534,10 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
   committed: z.number().int().safe().min(0),
   kind: z.literal("stale_refresh_frontier"),
   requested: z.number().int().safe().min(0),
+}).strict(), z.object({
+  expected: z.string(),
+  found: z.string(),
+  kind: z.literal("workflow_placement_digest_stale"),
 }).strict()]);
 
 /** Stable application failure envelope. Partial effects and reset-required
@@ -2715,6 +2725,19 @@ export const CrossMergePolicyV1Schema: z.ZodObject<{
   allowed_modes: z.array(z.lazy(() => CrossMergeModeV1Schema)),
   default_mode: z.lazy(() => CrossMergeModeV1Schema),
 }).strict();
+
+/** The managed daemon service unit as a client observed it, from the unit
+file alone. */
+export const DaemonServiceUnitObservationV1Schema: z.ZodType<DaemonServiceUnitObservationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+  path: z.string(),
+  serves: z.string(),
+  state: z.literal("installed"),
+}).strict(), z.object({
+  state: z.literal("not_installed"),
+}).strict(), z.object({
+  error: z.string(),
+  state: z.literal("unobservable"),
+}).strict()]);
 
 /** Authorization outcome for the read. On the loopback single-user dashboard a
 legal local read is [`Self::Authorized`]; the other variants are retained so
@@ -7268,7 +7291,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   context_scout: z.ZodType<boolean, z.ZodTypeDef, unknown>;
   exclude: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
   extract_docstrings: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  git_ignore: z.ZodType<boolean, z.ZodTypeDef, unknown>;
   include: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
   max_file_size: z.ZodType<number, z.ZodTypeDef, unknown>;
   sync: z.ZodType<SyncSettingsV1, z.ZodTypeDef, unknown>;
@@ -7278,7 +7300,6 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
   context_scout: z.boolean(),
   exclude: z.array(z.string()),
   extract_docstrings: z.boolean(),
-  git_ignore: z.boolean(),
   include: z.array(z.string()),
   max_file_size: z.number().int().safe().min(0),
   sync: z.lazy(() => SyncSettingsV1Schema),
@@ -7383,7 +7404,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   exclude: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
   expected_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
   extract_docstrings: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  git_ignore: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
   idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
   include: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
   max_file_size: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
@@ -7395,7 +7415,6 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   exclude: z.array(z.string()).nullable().optional(),
   expected_revision_id: z.string(),
   extract_docstrings: z.boolean().nullable().optional(),
-  git_ignore: z.boolean().nullable().optional(),
   idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
   max_file_size: z.number().int().safe().min(0).nullable().optional(),
@@ -7676,7 +7695,7 @@ export const ReleaseWorkPlacementCommandSchema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch"]> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch"]);
+export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]);
 
 export const RemoteAuthoritySummaryV1Schema: z.ZodType<RemoteAuthoritySummaryV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
   fence: z.lazy(() => RemoteFenceSummaryV1Schema),

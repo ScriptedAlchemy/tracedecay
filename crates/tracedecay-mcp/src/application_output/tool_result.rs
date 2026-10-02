@@ -4,7 +4,9 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult};
+use tracedecay_contracts::{
+    ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationProblemRecord, ApplicationResult,
+};
 use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
@@ -13,6 +15,7 @@ use super::markdown;
 use super::view::CanonicalHumanView;
 use crate::ToolResult;
 use crate::handlers::support::text_tool_result;
+use crate::tool_errors::problem_structured_content;
 use crate::tools::render::finalize_with_format;
 use crate::tools::response_trailers::ResponseTrailer;
 
@@ -62,8 +65,8 @@ pub fn problem_error(problem: ApplicationProblemEnvelope) -> TraceDecayError {
 }
 
 /// Renders one settled application call. A problem is a semantic failure
-/// whose whole record rides beside the text as `problem`, which MCP carries
-/// as structured content and `--json` prints with the result.
+/// whose whole record rides beside the text as MCP
+/// `structuredContent.problem`, which `--json` prints with the result.
 pub fn render_application_result(
     response_handle_root: Option<&Path>,
     operation: &str,
@@ -71,18 +74,9 @@ pub fn render_application_result(
     result: &ApplicationResult<Value>,
     requested_format: RequestedOutputFormat,
 ) -> Result<ToolResult> {
-    let (value, failure_message) = match result {
-        Ok(application) => (serde_json::to_value(application)?, None),
-        Err(problem) => {
-            let failure_message = match problem.problem.kind() {
-                ApplicationProblemKind::NotFoundOrNotAuthorized => {
-                    "application surface was not found or is not authorized"
-                }
-                ApplicationProblemKind::Unavailable => "application surface unavailable",
-                _ => "application surface request failed",
-            };
-            (serde_json::to_value(problem)?, Some(failure_message))
-        }
+    let value = match result {
+        Ok(application) => serde_json::to_value(application)?,
+        Err(problem) => serde_json::to_value(problem)?,
     };
     let markdown = match requested_format {
         RequestedOutputFormat::Json => None,
@@ -94,30 +88,42 @@ pub fn render_application_result(
     let text = finalize_with_format(response_handle_root, requested_format, &value, || {
         markdown.unwrap_or_default()
     });
-    let mut rendered = text_tool_result(&text, Vec::new());
     match result {
-        Ok(envelope) => ResponseTrailer {
-            touched_files: &envelope.touched_files,
-            code_graph: envelope.code_graph.as_ref(),
-            cost: envelope.cost.as_ref(),
-        }
-        .attach(&mut rendered),
-        // Markdown alone would strand the problem in prose no client can
-        // classify; the legal actions, retry directive, detail, and any
-        // committed receipt are what a caller acts on.
-        Err(problem) => {
-            if let Some(object) = rendered.value.as_object_mut() {
-                object.insert(
-                    "problem".to_string(),
-                    serde_json::to_value(problem.problem.as_ref())?,
-                );
+        Ok(envelope) => {
+            let mut rendered = text_tool_result(&text, Vec::new()).with_structured_result(value);
+            ResponseTrailer {
+                touched_files: &envelope.touched_files,
+                code_graph: envelope.code_graph.as_ref(),
+                cost: envelope.cost.as_ref(),
             }
+            .attach(&mut rendered);
+            Ok(rendered)
         }
+        Err(problem) => problem_tool_result(&text, &problem.problem),
     }
-    Ok(match failure_message {
-        Some(failure_message) => rendered
-            .with_semantic_error(true)
-            .with_failure_message(failure_message),
-        None => rendered,
-    })
+}
+
+/// The one refusing tool result: `text` beside the typed record at
+/// `structuredContent.problem`, marked as a semantic failure. Markdown alone
+/// would strand the problem in prose no client can classify; the legal
+/// actions, retry directive, detail, and any committed receipt are what a
+/// caller acts on.
+pub fn problem_tool_result(text: &str, problem: &ApplicationProblemRecord) -> Result<ToolResult> {
+    let failure_message = match problem.kind {
+        ApplicationProblemKind::NotFoundOrNotAuthorized => {
+            "application surface was not found or is not authorized"
+        }
+        ApplicationProblemKind::Unavailable => "application surface unavailable",
+        _ => "application surface request failed",
+    };
+    let mut rendered = text_tool_result(text, Vec::new());
+    if let Some(object) = rendered.value.as_object_mut() {
+        object.insert(
+            "structuredContent".to_string(),
+            problem_structured_content(problem)?,
+        );
+    }
+    Ok(rendered
+        .with_semantic_error(true)
+        .with_failure_message(failure_message))
 }

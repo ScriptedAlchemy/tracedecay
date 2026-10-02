@@ -20,6 +20,7 @@ pub mod memory;
 pub mod multi_root;
 pub mod observability;
 pub mod observation;
+pub mod process_heap;
 pub mod remote;
 pub mod repository;
 pub mod research;
@@ -45,7 +46,9 @@ pub mod workflow_fan_out_census;
 pub mod workflow_receipt;
 pub mod workflow_run;
 
-pub use application_problem_detail::{ApplicationProblemDetailV1, DiagnosticsSearchedTsconfigV1};
+pub use application_problem_detail::{
+    ApplicationProblemDetailV1, DaemonServiceUnitObservationV1, DiagnosticsSearchedTsconfigV1,
+};
 pub use automation::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
 pub use canonical_text::{encode_lowercase_hex, nonnegative_sha256_prefix, sha256_hex_suffix};
 pub use code_intelligence::{
@@ -99,10 +102,10 @@ pub use configuration::{
     ContextScoutConfigurationStateV1, ContextScoutConfiguredModelPathV1, ContextScoutSettingsV1,
     CredentialReferenceId, CrossMergeModeV1, CrossMergePolicyV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
     DeprecationStateV1, GitHubStackedPullRequestPolicyV1, HistoryRewritePolicyV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1,
     MAX_WORK_EXPERTISE_CONSENT_LIFETIME_MICROS_V1, PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
     ProtectedRefDispositionV1, ProtectedRefRuleV1, ProtectedRefSelectorV1, QueryCollectionId,
@@ -383,13 +386,17 @@ pub use session::{
     ValidCoverageIntervalV1,
 };
 pub use session_derived::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1,
-    DerivedEvidenceMemberV1, DerivedEvidenceOccurrenceRefV1, EvidenceSpanIdV1,
-    SESSION_DERIVED_BURST_ALGORITHM_V1, SESSION_DERIVED_SPAN_ALGORITHM_V1,
-    SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,
-    SessionDerivedEvidenceRecordV1, derive_session_evidence_from_occurrences,
+    DerivedEvidenceDeltaV1, DerivedEvidenceIdV1, DerivedEvidenceKindV1,
+    DerivedEvidenceMemberRoleV1, DerivedEvidenceMemberV1, DerivedEvidenceOccurrenceRefV1,
+    DerivedEvidenceTailV1, EvidenceSpanIdV1, SESSION_DERIVED_BURST_ALGORITHM_V1,
+    SESSION_DERIVED_SPAN_ALGORITHM_V1, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1,
+    SessionDerivedEvidencePolicyV1, SessionDerivedEvidenceRecordV1,
+    derive_session_evidence_from_occurrences, extend_session_evidence,
 };
-pub use source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
+pub use source_path_policy::{
+    GENERATED_DIR_SEGMENTS, IndexPathPatternError, IndexPathPolicyV1, is_generated_dir_segment,
+    validate_index_path_patterns,
+};
 pub use text::{
     blank_json_comments, collapse_whitespace, fold_control_characters, forward_slash_path,
     forward_slash_text, utf8_prefix_at_or_before,

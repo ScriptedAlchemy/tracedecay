@@ -10,7 +10,9 @@ use tracedecay_session_runtime::session_temporal_refresh_scheduler::wake::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
     SessionTemporalRefreshUnavailableReason,
 };
-use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_session_temporal_store::{
+    SessionTemporalAccess, SessionTemporalRefreshDiscoveryCursor,
+};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -428,7 +430,11 @@ async fn missing_active_relation_receipt_rebuilds_through_canonical_refresh() {
     );
     assert!(
         SessionTemporalAccess::new(db)
-            .pending_session_temporal_refresh_page_result(1, 1, None)
+            .pending_session_temporal_refresh_page_result(
+                1,
+                1,
+                &SessionTemporalRefreshDiscoveryCursor::default(),
+            )
             .await
             .unwrap()
             .into_parts()
@@ -446,8 +452,10 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
     let db = authority.database();
     let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let state = SessionTemporalRefreshWakeState::default();
-    let cursor = SessionId::new("session.refresh.cursor-before-retry").unwrap();
-    state.update_projection_discovery_cursor(Some(cursor.clone()));
+    let cursor = SessionTemporalRefreshDiscoveryCursor::after_active_session(
+        SessionId::new("session.refresh.cursor-before-retry").unwrap(),
+    );
+    state.update_projection_discovery_cursor(cursor.clone());
     let session_id = SessionId::new("session.refresh.retained-storage-retry").unwrap();
     state.requeue_request(request(session_id.as_str(), 1));
     let transaction = db.begin_write_transaction().await.unwrap();
@@ -484,8 +492,8 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
             "discovery must not append another page behind a retained begin retry"
         );
         assert_eq!(
-            state.projection_discovery_after(),
-            Some(cursor.clone()),
+            state.projection_discovery_cursor(),
+            cursor.clone(),
             "a retained begin retry must prevent discovery cursor advance"
         );
     }
@@ -553,7 +561,11 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     admit_canonical_effect(db, &session_id, 2, "materialized crash canary").await;
     let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let mut requests = SessionTemporalAccess::new(db)
-        .pending_session_temporal_refresh_page_result(1, 0, None)
+        .pending_session_temporal_refresh_page_result(
+            1,
+            0,
+            &SessionTemporalRefreshDiscoveryCursor::default(),
+        )
         .await
         .unwrap()
         .into_parts()
@@ -643,7 +655,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND occurrence.generation <= generation.generation
                  WHERE generation.state = 'active'"
         )
         .await,
@@ -668,7 +680,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
+                  AND occurrence.generation <= generation.generation
                  WHERE generation.state = 'active'"
         )
         .await,

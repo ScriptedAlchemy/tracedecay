@@ -1,21 +1,12 @@
 /**
- * The parse gate `data.ts` has always claimed to have.
+ * The parse gate for `data.ts`.
  *
- * `data.ts` says its payloads are "gated against each route's single decoding
- * schema by `data.test.ts`". That file did not exist. Under the missing gate
- * the Automations scheduler fixture must stay aligned with the generated
- * daemon-owned task receipt contract, so a healthy HTTP 200 does not decode as
- * an unsupported schema in the visual audit.
- *
- * What this suite pins is the DAEMON side: every fixture is parsed against the
- * generated contract for the route it answers, straight out of
- * `src/contracts/generated.ts`. That is deliberately a different question from
- * `src/workspaces/endpoint-fixtures.test.ts`, which parses the same fixtures
- * against what their *consuming workspace* decodes, including, for the routes
- * Rust still answers with a bare `Value`, hand-written mirrors of page-local
- * schemas. A mirror can be wrong in the same direction as the fixture; the
- * generated contract cannot, because it is derived from the Rust type.
- *
+ * Every fixture is parsed against the generated contract for the route it
+ * answers, straight out of `src/contracts/generated.ts`, so a healthy HTTP 200
+ * never decodes as an unsupported schema in the visual audit. A route whose
+ * generated payload sits inside a wrapper is parsed with the wrapper decoder
+ * the browser itself uses, never a hand-written mirror: a mirror can be wrong
+ * in the same direction as the fixture.
  */
 import { describe, expect, it } from 'vitest';
 import { z, type ZodType } from 'zod';
@@ -53,7 +44,6 @@ import {
   MemoryFactDetailPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   MemorySimilarityPayloadV1Schema,
-  AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
   ProjectContextPayloadV1Schema,
@@ -70,15 +60,16 @@ import {
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
-import { AutomationOutcomesPayloadSchema } from '../../src/data/query/automation.ts';
+import {
+  AutomaticCuratorResponseSchema,
+  AutomationOutcomesPayloadSchema,
+} from '../../src/data/query/automation.ts';
 import {
   ProjectionPayloadSchema,
   TrustHistoryPayloadSchema,
 } from '../../src/data/query/memory.ts';
 
-/** Parse one resolved fixture, surfacing zod's issues on failure. The same
- * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
- * same whichever gate catches it. */
+/** Parse one resolved fixture, surfacing zod's issues on failure. */
 function expectParses(schema: ZodType<unknown>, pathname: string, search = ''): void {
   expectValue(schema, resolveFixture(pathname, search), pathname + search);
 }
@@ -136,15 +127,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/automation/automatic-fact-receipts': AutomaticFactReceiptsPayloadV1Schema,
   '/api/automation/runs': AutomationRunsPayloadV1Schema,
   '/api/automation/outcomes': AutomationOutcomesPayloadSchema,
-  '/api/application/retained/fact_store_curate': z.object({
-    kind: z.literal('success'),
-    value: z.object({
-      outcome: z.object({
-        outcome: z.literal('effect'),
-        value: z.object({ payload: AutomationRunResultV1Schema }),
-      }),
-    }).passthrough(),
-  }).strict(),
+  '/api/application/retained/fact_store_curate': AutomaticCuratorResponseSchema,
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
   '/api/code-index/freshness': DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),

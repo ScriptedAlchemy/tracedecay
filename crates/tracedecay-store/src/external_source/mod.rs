@@ -58,6 +58,8 @@ pub enum SourceStoreErrorV1 {
     LineageConflict,
     #[error("external source observation evidence does not match its authority")]
     EvidenceConflict,
+    #[error("external source state does not hold a native object the operation names")]
+    ObjectNotLoaded,
 }
 
 pub type SourceStoreResult<T> = Result<T, SourceStoreErrorV1>;
@@ -538,6 +540,23 @@ pub struct SourceCommitV1 {
 }
 
 impl SourceCommitV1 {
+    /// The objects applying this commit decides about: every mutated object
+    /// and every object its snapshot completion claims present.
+    pub fn object_coverage(&self) -> SourceObjectCoverageV1 {
+        SourceObjectCoverageV1::Objects(
+            self.mutations
+                .iter()
+                .map(|mutation| mutation.observation().native_object())
+                .chain(
+                    self.snapshot_completion
+                        .iter()
+                        .flat_map(|completion| completion.present_objects()),
+                )
+                .cloned()
+                .collect(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         definition: SourceDefinitionV1,
@@ -1054,6 +1073,45 @@ impl SourceAuthorityPublicationReceiptV1 {
     }
 }
 
+/// Which current objects a [`SourceStoreStateV1`] holds.
+///
+/// A state the reducers assemble from nothing holds every object. A state
+/// restored from durable rows holds the current rows of exactly the objects
+/// its operation names, each found or known absent, so reading it costs the
+/// operation's size rather than the binding's. Reducers decide only about
+/// covered objects and refuse any other.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceObjectCoverageV1 {
+    Complete,
+    Objects(BTreeSet<SourceNativeObjectIdV1>),
+}
+
+impl SourceObjectCoverageV1 {
+    pub fn covers(&self, native_object: &SourceNativeObjectIdV1) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Objects(objects) => objects.contains(native_object),
+        }
+    }
+
+    fn require(&self, native_object: &SourceNativeObjectIdV1) -> SourceStoreResult<()> {
+        if self.covers(native_object) {
+            Ok(())
+        } else {
+            Err(SourceStoreErrorV1::ObjectNotLoaded)
+        }
+    }
+
+    fn require_all(&self, needed: &Self) -> SourceStoreResult<()> {
+        match needed {
+            Self::Complete if self != needed => Err(SourceStoreErrorV1::ObjectNotLoaded),
+            Self::Complete => Ok(()),
+            Self::Objects(objects) => objects.iter().try_for_each(|object| self.require(object)),
+        }
+    }
+}
+
 /// The exact durable state a project Database stores under its existing writer
 /// authority. It is a source-local state record, not a second database or
 /// cross-provider registry.
@@ -1070,6 +1128,7 @@ pub struct SourceStoreStateV1 {
     latest_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
     projected_mutations: BTreeMap<SourceNativeObjectIdV1, SourceObjectMutationV1>,
     receipt: SourceCommitReceiptV1,
+    coverage: SourceObjectCoverageV1,
     #[serde(skip)]
     verified: ValidationMemoV1,
 }
@@ -1095,6 +1154,7 @@ impl SourceStoreStateV1 {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn restore(
         definition: SourceDefinitionV1,
         binding: SourceBindingV1,
@@ -1103,6 +1163,7 @@ impl SourceStoreStateV1 {
         observed_mutations: Vec<SourceObjectMutationV1>,
         projected_mutations: Vec<SourceObjectMutationV1>,
         receipt: SourceCommitReceiptV1,
+        coverage: SourceObjectCoverageV1,
     ) -> SourceStoreResult<Self> {
         let binding_identity = binding.immutable_identity()?;
         let mut observed_objects = BTreeMap::new();
@@ -1151,6 +1212,7 @@ impl SourceStoreStateV1 {
             latest_mutations,
             projected_mutations: current_projected_mutations,
             receipt,
+            coverage,
             verified: ValidationMemoV1::default(),
         }
         .validated()
@@ -1174,10 +1236,6 @@ impl SourceStoreStateV1 {
         &self.projected_objects
     }
 
-    pub fn observed_objects(&self) -> &BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1> {
-        &self.observed_objects
-    }
-
     pub fn projection(&self) -> Option<&SourceProjectionCommitV1> {
         self.projection.as_ref()
     }
@@ -1193,11 +1251,26 @@ impl SourceStoreStateV1 {
         self.object_partitions.get(native_object)
     }
 
+    pub fn coverage(&self) -> &SourceObjectCoverageV1 {
+        &self.coverage
+    }
+
+    /// The current observation of a covered object, or `None` when it has
+    /// none.
+    pub fn observed_object(
+        &self,
+        native_object: &SourceNativeObjectIdV1,
+    ) -> SourceStoreResult<Option<&SourceObjectObservationV1>> {
+        self.coverage.require(native_object)?;
+        Ok(self.observed_objects.get(native_object))
+    }
+
     pub fn latest_mutation(
         &self,
         native_object: &SourceNativeObjectIdV1,
-    ) -> Option<&SourceObjectMutationV1> {
-        self.latest_mutations.get(native_object)
+    ) -> SourceStoreResult<Option<&SourceObjectMutationV1>> {
+        self.coverage.require(native_object)?;
+        Ok(self.latest_mutations.get(native_object))
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
@@ -1222,6 +1295,10 @@ impl SourceStoreStateV1 {
         {
             return Err(SourceStoreErrorV1::RevisionConflict);
         }
+        self.observed_objects
+            .keys()
+            .chain(self.projected_objects.keys())
+            .try_for_each(|native_object| self.coverage.require(native_object))?;
         for (native_object, observation) in &self.observed_objects {
             let partition = self
                 .object_partitions
@@ -1322,6 +1399,12 @@ impl SourcePendingProjectionV1 {
         binding: SourceBindingV1,
         receipt: SourceCommitReceiptV1,
     ) -> SourceStoreResult<Self> {
+        if definition.deletion_semantics == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
+            && receipt.snapshot_completion().is_some()
+            && state.coverage != SourceObjectCoverageV1::Complete
+        {
+            return Err(SourceStoreErrorV1::ObjectNotLoaded);
+        }
         Self::new(
             definition,
             binding,
@@ -1352,6 +1435,23 @@ impl SourcePendingProjectionV1 {
     fn needs_projected_mutations(&self) -> bool {
         self.definition.deletion_semantics == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
             && self.receipt.snapshot_completion().is_some()
+    }
+
+    /// The objects publishing `projection` over this pending receipt decides
+    /// about. Complete-snapshot absence compares the whole projected view, so
+    /// only that semantics needs every object.
+    pub fn object_coverage(&self, projection: &SourceProjectionCommitV1) -> SourceObjectCoverageV1 {
+        if self.needs_projected_mutations() {
+            SourceObjectCoverageV1::Complete
+        } else {
+            SourceObjectCoverageV1::Objects(
+                projection
+                    .mutations()
+                    .iter()
+                    .map(|mutation| mutation.observation().native_object().clone())
+                    .collect(),
+            )
+        }
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
@@ -1526,6 +1626,9 @@ fn reduce_source_projection(
     if pending.receipt().receipt_digest() != projection.source_receipt_digest() {
         return Err(SourceStoreErrorV1::IdempotencyConflict);
     }
+    current
+        .coverage
+        .require_all(&pending.object_coverage(&projection))?;
     let expected = build_source_projection(pending, projection.projector().clone())?;
     if expected != projection {
         return Err(SourceStoreErrorV1::RevisionConflict);

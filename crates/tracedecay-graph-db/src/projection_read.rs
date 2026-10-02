@@ -16,7 +16,7 @@ use crate::{
     GraphWatermark, SourceGeneration,
 };
 
-const MAX_PROJECTION_PAGE_ITEMS: usize = 100_000;
+pub(crate) const MAX_PROJECTION_PAGE_ITEMS: usize = 100_000;
 
 /// The label pair and identity property that name one ordered identity domain:
 /// the projection-scoped owner label, the record label that separates entities
@@ -362,7 +362,7 @@ fn authenticate_relation_cursor(
 /// [`crate::projection_identity_index`]. A projection too large to index falls
 /// back to the bounded streaming scan below.
 #[hotpath::measure(label = "graph_db.projection.identity_index.seek")]
-fn query_identity_page(
+pub(crate) fn query_identity_page(
     handle: &GraphDb,
     database: &GrafeoDB,
     scope: IdentityScope<'_>,

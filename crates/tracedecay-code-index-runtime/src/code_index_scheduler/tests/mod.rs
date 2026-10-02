@@ -45,6 +45,7 @@ mod branch_publication_tests;
 mod cancellation_tests;
 mod deferred_mount_tests;
 mod ignored_dependency_seat_tests;
+mod index_path_policy_tests;
 mod noop_reconcile_tests;
 mod publication_store;
 mod reconcile;
@@ -724,7 +725,7 @@ fn install_verified_graph_store_on_text(
     .expect("install interactive graph serving");
 }
 
-fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
+pub(super) fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -1537,6 +1538,7 @@ fn scheduler_with_policy(
         store_root,
         bytes,
         policy,
+        crate::config::registry_default_index_path_policy(),
     )
     .expect("open worktree scheduler with policy")
 }
@@ -1736,7 +1738,7 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
     wait_for_owner(
         registry,
         path,
-        Duration::from_secs(5),
+        SERVING_SEAT_FAILURE_CEILING,
         "fresh complete dashboard freshness",
         || async {
             (registry
@@ -1830,7 +1832,7 @@ async fn wait_for_event_to_ready(
     registry: &CodeIndexSchedulerRegistryV1,
 ) -> super::CodeIndexEventToReadyReceiptV1 {
     let mut receipts = registry.subscribe_cadence_receipts();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(receipt) = receipts.borrow_and_update().latest().cloned() {
                 return receipt;

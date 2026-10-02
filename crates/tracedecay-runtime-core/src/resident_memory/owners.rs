@@ -13,9 +13,9 @@
 //! [`RESIDENT_OWNER_SHED_ORDER_V1`], and never the generation a worktree is
 //! actively serving.
 //!
-//! Every release, and every return of process RSS to nominal, bumps one
-//! headroom epoch. Work refused for memory subscribes to it and retries then,
-//! instead of waiting for an unrelated wake.
+//! Every release bumps a headroom epoch. Work refused for memory subscribes to
+//! it, beside the pressure cell's epoch for ledger and measured headroom, and
+//! retries then instead of waiting for an unrelated wake.
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
+
+use super::advance_headroom_epoch;
 
 /// How long a worktree keeps its retained state after its last use.
 ///
@@ -36,6 +38,10 @@ pub const RESIDENT_OWNER_IDLE_WINDOW_V1: Duration = Duration::from_mins(10);
 /// What one owner retains. Declaration order is the shed order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResidentOwnerKindV1 {
+    /// Parse trees and extractions an increment kept for the files it
+    /// re-extracted, so the next edit of one reparses only what changed.
+    /// Released, that next edit parses the file from scratch.
+    RetainedParses,
     /// Decoded generations other than the one a worktree serves, kept so
     /// pinned and branch reads do not re-decode. Always re-decodable.
     SupersededGeneration,
@@ -59,7 +65,8 @@ pub enum ResidentOwnerKindV1 {
 }
 
 /// Pressure releases owners in this order.
-pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 5] = [
+pub const RESIDENT_OWNER_SHED_ORDER_V1: [ResidentOwnerKindV1; 6] = [
+    ResidentOwnerKindV1::RetainedParses,
     ResidentOwnerKindV1::SupersededGeneration,
     ResidentOwnerKindV1::GraphCatalog,
     ResidentOwnerKindV1::DecodedGeneration,
@@ -71,6 +78,7 @@ impl ResidentOwnerKindV1 {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::RetainedParses => "retained_parses",
             Self::SupersededGeneration => "superseded_generation",
             Self::GraphCatalog => "graph_catalog",
             Self::DecodedGeneration => "decoded_generation",
@@ -87,6 +95,8 @@ pub enum ResidentHoldingV1 {
     Generation(CodeGenerationId),
     /// An open LSP session, by its session id.
     Session(String),
+    /// State the worktree keeps across its generations.
+    Worktree,
 }
 
 impl ResidentHoldingV1 {
@@ -95,6 +105,7 @@ impl ResidentHoldingV1 {
         match self {
             Self::Generation(generation) => generation.as_str(),
             Self::Session(session) => session,
+            Self::Worktree => "worktree",
         }
     }
 }
@@ -285,8 +296,7 @@ impl ResidentOwnersV1 {
         }
     }
 
-    /// Changes each time memory is given back: an owner released, or the
-    /// process returned below its reclaim line.
+    /// Changes each time an owner's memory is given back.
     #[must_use]
     pub fn subscribe_headroom(&self) -> watch::Receiver<u64> {
         self.headroom.subscribe()
@@ -294,8 +304,7 @@ impl ResidentOwnersV1 {
 
     /// Record that memory was given back outside this inventory.
     pub fn note_headroom(&self) {
-        self.headroom
-            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        advance_headroom_epoch(&self.headroom);
     }
 
     fn note_released(

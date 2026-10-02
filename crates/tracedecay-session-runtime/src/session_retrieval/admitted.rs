@@ -18,12 +18,13 @@ use tracedecay_session_memory::context::{
     CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets, ResolvedSessionIdentity,
 };
 use tracedecay_session_memory::session::{
-    SessionRequestBinding, SessionRetrievalConfiguration, SessionTemporalQuery,
-    TaskSessionRetrievalOutcomeV1,
+    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionTemporalQuery, TaskSessionRetrievalOutcomeV1,
 };
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
 use tracedecay_sessions::serving::{
-    RefreshWorkerMissing, SessionProjectionServingStatus, SessionProjectionServingStatusPort,
+    RefreshWorkerMissing, SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionProjectionServingStatusPort,
 };
 use tracedecay_store::StoreShardScopeV1;
 
@@ -265,6 +266,10 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 Ok(binding) => binding,
                 Err(outcome) => return *outcome,
             };
+            let history_pending = matches!(
+                self.refresh_status.serving_status().state,
+                SessionProjectionServingState::Stale { .. }
+            );
             let outcome = self
                 .execute_temporal_query_with_context(
                     context,
@@ -273,7 +278,28 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     "grant.application.session-retrieval",
                 )
                 .await;
-            self.public_outcome(outcome).await
+            match self.public_outcome(outcome).await {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal,
+                    freshness,
+                } if history_pending
+                    || matches!(
+                        self.refresh_status.serving_status().state,
+                        SessionProjectionServingState::Stale { .. }
+                    ) =>
+                {
+                    SessionRetrievalServiceOutcome::Stale {
+                        temporal,
+                        freshness: match freshness {
+                            SessionDataFreshness::Fresh => {
+                                SessionDataFreshness::Stored { generation_lag: 0 }
+                            }
+                            other => other,
+                        },
+                    }
+                }
+                outcome => outcome,
+            }
         })
     }
 

@@ -247,16 +247,16 @@ async fn drain_pending_payload_deletes_matching(
 /// refs whose chunk query failed and must be reported as `metadata_check_failed`
 /// in loop order rather than silently treated as absent.
 #[derive(Default)]
-struct MetadataProbe {
-    existing: HashSet<String>,
-    failures: HashMap<String, String>,
+pub(super) struct MetadataProbe {
+    pub(super) existing: HashSet<String>,
+    pub(super) failures: HashMap<String, String>,
 }
 
 /// Batched form of the per-tombstone `SELECT 1 FROM lcm_external_payloads`
 /// probe. Chunked at [`util::SQLITE_IN_BATCH_SIZE`] so an unbounded tombstone
 /// backlog cannot exceed SQLite's bind-variable limit; an empty input issues no
 /// query at all.
-async fn probe_metadata_rows(
+pub(super) async fn probe_metadata_rows(
     conn: &(impl Executor + ?Sized),
     payload_refs: &[String],
 ) -> MetadataProbe {

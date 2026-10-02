@@ -1755,8 +1755,8 @@ mod tests {
         let graph_error = transaction
             .execute(
                 "INSERT INTO graph_scopes
-                 (graph_scope_id, project_id, store_id, branch_name, db_relpath)
-                 VALUES ('scope_bad', 'project_two', 'store_one', 'main', 'graph.db')",
+                 (graph_scope_id, project_id, store_id, branch_name)
+                 VALUES ('scope_bad', 'project_two', 'store_one', 'main')",
                 (),
             )
             .await

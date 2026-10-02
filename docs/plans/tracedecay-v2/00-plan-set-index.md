@@ -193,11 +193,17 @@ This register is normative. A historical mention of one of these mechanisms is
 evidence that it was considered, not permission to rebuild it. Each entry
 records the rejected mechanism, the reason, and the retained replacement:
 
-1. **libSQL as the local runtime is superseded.** Its compatibility driver and
-   local runtime were removed after the rusqlite cutover. The
-   `tracedecay-rusqlite-runtime` path and daemon-owned SQLite authority replace
-   it; future remote work composes over that authority rather than reviving a
-   libSQL runtime.
+1. **Turso/libSQL as the local runtime is rejected (decided 2026-09-30).**
+   Storage stays on rusqlite with bundled SQLite behind the
+   `tracedecay-rusqlite-runtime` path and daemon-owned SQLite authority; future
+   remote work composes over that authority. `libsql` 0.9.30/0.10-pre is
+   async-only with a private raw connection (no online backup, progress
+   handler, per-connection limits, worker-thread config, custom functions, or
+   statement cache), bundles SQLite 3.45.1 with CVE-2025-29087 unpatched, and
+   has the open double-close bug tursodatabase/libsql#2251. `turso` 0.8.1 lacks
+   FTS5, cross-process file sharing, and backup/limits. `libsql-rusqlite`
+   0.9.30 inherits the old engine. Revisit only when a libSQL release ships on
+   current SQLite with #2251 fixed.
 2. **Octocrab, `backon`, and `graphql-parser` are rejected here.** They add
    provider-client, retry, and parser abstractions that the one narrow
    read-only GitHub/CI path does not need. Existing `ureq`, shared narrow typed

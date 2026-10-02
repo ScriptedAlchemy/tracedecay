@@ -2538,6 +2538,39 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
 }
 
 #[test]
+fn scope_recovery_deletes_a_retired_binding_cleanup_intent() {
+    let (store, live, stranded) = fixture_scope_store();
+    let intent = store
+        .path()
+        .join(".code-index-scope-binding-cleanup-intent-v1.json");
+    std::fs::write(
+        &intent,
+        format!(
+            r#"{{"schema":"tracedecay.code-index-scope-binding-cleanup-intent.v1","scope_hash":"{stranded}"}}"#
+        ),
+    )
+    .expect("write a binding-cleanup intent from before its authority was retired");
+
+    recover_scope_root_retention(store.path()).expect("recover the scope store");
+
+    let mut entries: Vec<String> = std::fs::read_dir(store.path())
+        .expect("list the scope store")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    let mut expected = vec![
+        ".code-index-scope-retention.lock".to_owned(),
+        live,
+        stranded,
+    ];
+    expected.sort();
+    assert_eq!(
+        entries, expected,
+        "recovery deletes the inert intent and keeps every scope"
+    );
+}
+
+#[test]
 fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     let (store, live, stranded) = fixture_scope_store();
     let proof = fixture_scope_liveness_proof(live.clone());
@@ -3611,5 +3644,39 @@ fn a_pre_key_text_artifact_descriptor_reads_as_retired_and_is_replaced() {
             .iter()
             .any(|entry| entry.text_artifact() == Some(&attached)),
         "attaching a current artifact replaces the retired slot"
+    );
+}
+
+/// A writer refused because readers hold the store must wait out those
+/// readers. A release wait that returned while a reader still held the lock
+/// woke the refused writer only to be refused again.
+#[test]
+fn store_release_wait_outlasts_a_reader() {
+    let store = tempfile::TempDir::new().expect("generation store");
+    let reader = try_acquire_code_generation_store_read_lock(store.path())
+        .expect("try reader lock")
+        .expect("the store is free for a reader");
+    let root = store.path().to_path_buf();
+    let (released_tx, released) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        released_tx
+            .send(wait_for_code_generation_store_release(&root).is_ok())
+            .expect("report the release");
+    });
+    assert_eq!(
+        released.recv_timeout(std::time::Duration::from_millis(300)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "the release wait must not return while a reader holds the store"
+    );
+    drop(reader);
+    assert_eq!(
+        released.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true)
+    );
+    waiter.join().expect("waiter thread");
+    assert!(
+        try_acquire_code_generation_store_lock(store.path())
+            .expect("try writer lock")
+            .is_some()
     );
 }

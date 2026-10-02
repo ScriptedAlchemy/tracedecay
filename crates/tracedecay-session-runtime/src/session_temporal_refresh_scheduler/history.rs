@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+
+use futures_util::future::select_all;
+use tokio::sync::watch;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::ProfileIdentityReadPort;
@@ -55,22 +57,43 @@ impl SessionHistoricalIngestOutcome {
     }
 }
 
-pub trait SessionHistoricalIngestor: Send + Sync {
-    fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
-    fn cancel(&self);
+/// The capacity-release signals a pass that committed nothing waits on before
+/// it runs again, in place of a retry timer.
+pub struct SessionHistoricalCapacityRelease {
+    signals: Vec<watch::Receiver<u64>>,
+}
 
-    fn take_progress(&self) -> SessionHistoricalIngestProgress {
-        SessionHistoricalIngestProgress::default()
+impl SessionHistoricalCapacityRelease {
+    /// Each signal advances when capacity the pass may have been refused is
+    /// released. Values already published are treated as seen.
+    pub fn new(signals: Vec<watch::Receiver<u64>>) -> Self {
+        Self { signals }
+    }
+
+    /// Resolves once any signal advances. A closed signal never releases.
+    pub async fn released(&mut self) {
+        if self.signals.is_empty() {
+            return std::future::pending().await;
+        }
+        let changes = self.signals.iter_mut().map(|signal| {
+            Box::pin(async move {
+                if signal.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            })
+        });
+        select_all(changes).await;
     }
 }
 
-pub type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SessionHistoricalIngestProgress {
-    pub stats: tracedecay_sessions::TranscriptIngestStats,
-    pub committed: bool,
+pub trait SessionHistoricalIngestor: Send + Sync {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
+    /// Subscribed immediately before each pass.
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease;
+    fn cancel(&self);
 }
+
+pub type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
 
 pub struct ProjectSessionHistoricalIngestor {
     database: RegisteredGlobalDbLeaseV1,
@@ -83,7 +106,6 @@ pub struct ProjectSessionHistoricalIngestor {
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
-    progress: Mutex<SessionHistoricalIngestProgress>,
 }
 
 impl ProjectSessionHistoricalIngestor {
@@ -118,7 +140,6 @@ impl ProjectSessionHistoricalIngestor {
             background_cpu,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
-            progress: Mutex::new(SessionHistoricalIngestProgress::default()),
         }
     }
 
@@ -154,23 +175,19 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
                 pass,
             )
             .await;
-            let progress = SessionHistoricalIngestProgress {
-                stats: outcome.stats,
-                committed: outcome.scheduling_state_written || outcome.made_progress(),
-            };
-            let classified = classify_transcript_ingest_outcome(outcome, &self.cancellation);
-            *self.progress.lock().unwrap_or_else(PoisonError::into_inner) = progress;
-            classified
+            classify_transcript_ingest_outcome(outcome, &self.cancellation)
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(
+            tracedecay_sessions::runtime::subscribe_history_capacity_release(&self.codex_discovery),
+        )
     }
 
     fn cancel(&self) {
         self.cancellation.cancel();
         self.deregister_codex_once();
-    }
-
-    fn take_progress(&self) -> SessionHistoricalIngestProgress {
-        std::mem::take(&mut *self.progress.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -191,7 +208,6 @@ pub struct ProfileSessionHistoricalIngestor {
     session_review: SessionReviewPort,
     codex_consumer: String,
     codex_registered: AtomicBool,
-    progress: Mutex<SessionHistoricalIngestProgress>,
 }
 
 impl ProfileSessionHistoricalIngestor {
@@ -226,7 +242,6 @@ impl ProfileSessionHistoricalIngestor {
             session_review,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
-            progress: Mutex::new(SessionHistoricalIngestProgress::default()),
         }
     }
 
@@ -281,23 +296,19 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 pass,
             )
             .await;
-            let progress = SessionHistoricalIngestProgress {
-                stats: outcome.stats,
-                committed: outcome.scheduling_state_written || outcome.made_progress(),
-            };
-            let classified = classify_transcript_ingest_outcome(outcome, &self.cancellation);
-            *self.progress.lock().unwrap_or_else(PoisonError::into_inner) = progress;
-            classified
+            classify_transcript_ingest_outcome(outcome, &self.cancellation)
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(
+            tracedecay_sessions::runtime::subscribe_history_capacity_release(&self.codex_discovery),
+        )
     }
 
     fn cancel(&self) {
         self.cancellation.cancel();
         self.deregister_codex_once();
-    }
-
-    fn take_progress(&self) -> SessionHistoricalIngestProgress {
-        std::mem::take(&mut *self.progress.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -356,6 +367,7 @@ mod tests {
             }],
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
+            coverage_advanced: false,
         }
     }
 
@@ -414,6 +426,7 @@ mod tests {
                 }],
                 coverage: IngestPassCoverage::Complete,
                 scheduling_state_written: false,
+                coverage_advanced: false,
             },
             &ObservationCancellation::default(),
         );

@@ -95,6 +95,8 @@ pub enum RemoteSqliteStorageErrorV1 {
     Corruption,
     #[error("remote Brain storage is unavailable")]
     Unavailable,
+    #[error("no remote Brain writer authority has been published")]
+    WriterAuthorityUnpublished,
     #[error(transparent)]
     Sql(#[from] ExactSqlError),
 }
@@ -107,6 +109,9 @@ impl From<RemoteCapturePersistenceErrorV1> for RemoteSqliteStorageErrorV1 {
             RemoteCapturePersistenceErrorV1::AtRestEncryptionUnavailable
             | RemoteCapturePersistenceErrorV1::Overflow
             | RemoteCapturePersistenceErrorV1::Unavailable => Self::Unavailable,
+            RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished => {
+                Self::WriterAuthorityUnpublished
+            }
         }
     }
 }
@@ -581,14 +586,12 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
-        let rows = query(
+        let row = authority_row(
             self.handle(),
-            "SELECT authority_state_json, runtime_binding_json
-             FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(writer.authority.fence.brain_id.as_str())],
+            "authority_state_json, runtime_binding_json",
+            &writer.authority.fence.brain_id,
         )
-        .map_err(map_persistence_error)?;
-        let row = one_row(rows).map_err(map_persistence_error)?;
+        .map_err(map_authority_persistence_error)?;
         let authority_json = row_text(&row, 0).map_err(map_persistence_error)?;
         let binding_json = row_text(&row, 1).map_err(map_persistence_error)?;
         let stored_binding: StoreRuntimeBindingV1 = serde_json::from_str(binding_json)

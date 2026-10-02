@@ -125,6 +125,79 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
             VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;";
 
+/// A payload is referenced only by its owner raw row, the
+/// `(provider, message_id)` its metadata names. Payload GC therefore never
+/// scans message text for references: a change to the owner row that can drop
+/// a reference records every payload the row owns as an `unreferenced`
+/// candidate, and GC verifies each candidate against its owner row after the
+/// grace window. A candidate whose owner still references it just loses its
+/// mark.
+const PAYLOAD_GC_CANDIDATE_TRIGGER: &str = "lcm_raw_messages_gc_candidate_delete";
+const PAYLOAD_GC_CANDIDATE_DDL: &str = "
+    CREATE INDEX IF NOT EXISTS idx_lcm_gc_marks_state_first_seen
+        ON lcm_gc_marks(state, first_seen_at);
+    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_gc_candidate_delete
+        AFTER DELETE ON lcm_raw_messages BEGIN
+            INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
+            SELECT payload_ref, 'unreferenced', unixepoch(), unixepoch()
+            FROM lcm_external_payloads
+            WHERE provider = OLD.provider AND message_id = OLD.message_id
+            ON CONFLICT(payload_ref) DO UPDATE SET
+                state = 'unreferenced',
+                first_seen_at = excluded.first_seen_at,
+                updated_at = excluded.updated_at
+            WHERE lcm_gc_marks.state <> 'unreferenced';
+        END;
+    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_gc_candidate_update
+        AFTER UPDATE ON lcm_raw_messages
+        WHEN OLD.content IS NOT NEW.content
+          OR OLD.placeholder_text IS NOT NEW.placeholder_text
+          OR OLD.metadata_json IS NOT NEW.metadata_json
+          OR OLD.storage_kind IS NOT NEW.storage_kind
+          OR OLD.payload_ref IS NOT NEW.payload_ref
+          OR OLD.provider IS NOT NEW.provider
+          OR OLD.message_id IS NOT NEW.message_id
+          OR OLD.session_id IS NOT NEW.session_id
+        BEGIN
+            INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
+            SELECT payload_ref, 'unreferenced', unixepoch(), unixepoch()
+            FROM lcm_external_payloads
+            WHERE provider = OLD.provider AND message_id = OLD.message_id
+            ON CONFLICT(payload_ref) DO UPDATE SET
+                state = 'unreferenced',
+                first_seen_at = excluded.first_seen_at,
+                updated_at = excluded.updated_at
+            WHERE lcm_gc_marks.state <> 'unreferenced';
+        END;";
+
+/// Installs the payload GC candidate index and triggers. A store that
+/// predates them holds unreferenced payloads no trigger recorded, so the
+/// install records every existing payload as a candidate once; GC verifies
+/// each against its owner row. The dangling-placeholder scan starts after the
+/// rows that exist at install, which the reference scan it replaces covered.
+async fn ensure_payload_gc_candidates(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
+    let installed = schema_object_exists(conn, PAYLOAD_GC_CANDIDATE_TRIGGER).await?;
+    conn.execute_batch(PAYLOAD_GC_CANDIDATE_DDL).await?;
+    if !installed {
+        conn.execute(
+            "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
+             SELECT payload_ref, 'unreferenced', unixepoch(), unixepoch()
+             FROM lcm_external_payloads WHERE true
+             ON CONFLICT(payload_ref) DO NOTHING",
+            (),
+        )
+        .await?;
+        conn.execute(
+            "INSERT INTO lcm_gc_meta(key, value)
+             SELECT ?1, CAST(COALESCE(MAX(store_id), 0) AS TEXT) FROM lcm_raw_messages WHERE true
+             ON CONFLICT(key) DO NOTHING",
+            params![super::gc::DANGLING_SCAN_CURSOR],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// FTS5 column filter that restricts a MATCH to the message body, e.g.
 /// `format!("{RAW_FTS_CONTENT_COLUMN_FILTER}({query})")`.
 pub const RAW_FTS_CONTENT_COLUMN_FILTER: &str = "index_text : ";
@@ -292,6 +365,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
             ensure_raw_identity_schema(conn).await?;
+            ensure_payload_gc_candidates(conn).await?;
             super::summary_convergence::ensure_schema(conn).await?;
             return Ok(());
         }
@@ -412,6 +486,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     )
     .await?;
     ensure_raw_identity_schema(conn).await?;
+    ensure_payload_gc_candidates(conn).await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
     super::summary_convergence::ensure_schema(conn).await?;
     super::summary_convergence::retire_predecessor_range_rewrite(conn).await?;

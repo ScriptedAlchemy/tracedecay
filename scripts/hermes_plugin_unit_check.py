@@ -33,6 +33,7 @@ import copy
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -174,7 +175,6 @@ def _import_plugin(work: Path, plugin_dir: Path):
     sys.path.insert(0, str(plugin_dir.parent))
     plugin = __import__("tracedecay")
     assert Path(plugin.__file__).resolve() == (plugin_dir / "__init__.py").resolve()
-    assert plugin.STANDARD_HERMES_LCM_PROVIDER == "hermes"
     ok("plugin package imports standalone (no hermes on sys.path)")
     return host_home, plugin
 
@@ -1141,6 +1141,132 @@ def _check_args_file_spill(plugin, work: Path):
         tempfile.tempdir = real_tmp
 
 
+_ISOLATED_PROFILE_ENV = (
+    "HOME",
+    "USERPROFILE",
+    "TRACEDECAY_DATA_DIR",
+    "TRACEDECAY_GLOBAL_DB",
+    "TRACEDECAY_DAEMON_SOCKET",
+)
+
+
+def _tool_result_still_starting(result) -> bool:
+    if not isinstance(result, dict) or "error" not in result:
+        return False
+    text = json.dumps(result)
+    return "is warming in the background" in text or "daemon.sock" in text
+
+
+def _call_until_tool_ready(call):
+    # `tracedecay tool` answers the typed warming state until the isolated
+    # profile's project is open. That retry is the client protocol, same as
+    # the CLI bridge test.
+    deadline = time.monotonic() + 60
+    result = call()
+    while _tool_result_still_starting(result):
+        if time.monotonic() >= deadline:
+            raise AssertionError(result)
+        time.sleep(0.25)
+        result = call()
+    return result
+
+
+def _session_message_count(status, session_id: str) -> int:
+    assert isinstance(status, dict) and "error" not in status, status
+    assert status.get("status") == "ok", status
+    assert status.get("session_id") == session_id, status
+    count = status["lcm"]["raw_message_count"]
+    assert isinstance(count, int) and not isinstance(count, bool), status
+    return count
+
+
+def _stop_daemon(proc: subprocess.Popen):
+    if proc.poll() is not None:
+        return
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=5)
+
+
+def _check_hermes_lcm_session_census(plugin, ctx, work: Path):
+    """One ingested Hermes session shows its message; a session that was not
+    ingested shows none. Status is asked only for the session id."""
+    home = work / "home"
+    profile = home / ".tracedecay"
+    profile.mkdir(parents=True, exist_ok=True)
+    saved_env = {key: os.environ.get(key) for key in _ISOLATED_PROFILE_ENV}
+    os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
+    os.environ["TRACEDECAY_DATA_DIR"] = str(profile)
+    os.environ["TRACEDECAY_GLOBAL_DB"] = str(profile / "global.db")
+    os.environ["TRACEDECAY_DAEMON_SOCKET"] = str(profile / "daemon.sock")
+    daemon_env = os.environ.copy()
+    daemon_env["TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN"] = "1"
+    daemon = subprocess.Popen(
+        [plugin.tools.TRACEDECAY_BIN, "daemon", "run"],
+        env=daemon_env,
+        cwd=str(home),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    engine = ctx.engine
+    saved_root = engine.project_root
+    saved_session = engine.active_session_id
+    try:
+        deadline = time.monotonic() + 10
+        while not (profile / "daemon.sock").exists():
+            if daemon.poll() is not None:
+                raise AssertionError(daemon.stderr.read() if daemon.stderr else "daemon exited")
+            if time.monotonic() >= deadline:
+                raise AssertionError("isolated daemon socket did not appear")
+            time.sleep(0.05)
+        engine.project_root = None
+        engine.active_session_id = "not-the-queried-session"
+        ingested = _call_until_tool_ready(
+            lambda: plugin.call_tracedecay_json(
+                "tracedecay_hook_runtime",
+                {
+                    "action": "ingest_transcript",
+                    "provider": "hermes",
+                    "session_id": "gate-hermes-session",
+                    "user_scope": True,
+                    "format": "json",
+                    "messages": [
+                        {
+                            "id": "gate-hermes-message",
+                            "role": "user",
+                            "content": "orchard note",
+                        }
+                    ],
+                },
+            )
+        )
+        assert ingested.get("status") in ("accepted", "committed"), ingested
+        present = _call_until_tool_ready(
+            lambda: engine.status(session_id="gate-hermes-session")
+        )
+        absent = _call_until_tool_ready(
+            lambda: engine.status(session_id="gate-empty-session")
+        )
+        assert _session_message_count(present, "gate-hermes-session") == 1, present
+        assert _session_message_count(absent, "gate-empty-session") == 0, absent
+        ok("context-engine status counts the ingested session only")
+    finally:
+        engine.project_root = saved_root
+        engine.active_session_id = saved_session
+        _stop_daemon(daemon)
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def run_checks(work: Path):
     plugin_dir = _resolve_plugin_dir(work)
     host_home, plugin = _import_plugin(work, plugin_dir)
@@ -1163,6 +1289,7 @@ def run_checks(work: Path):
     _check_prefetch_cache(plugin, ctx)
     _check_system_prompt_block(ctx)
     _check_args_file_spill(plugin, work)
+    _check_hermes_lcm_session_census(plugin, ctx, work)
 
 
 if __name__ == "__main__":

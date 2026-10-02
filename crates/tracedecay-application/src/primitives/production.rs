@@ -293,6 +293,24 @@ fn graph_read_outcome<T>(
     }
 }
 
+/// A request the port refuses outright, such as a malformed or unknown id:
+/// the caller gets the typed problem instead of a failed read.
+fn refused<T>(
+    kind: PrimitiveFailureKind,
+    code: &'static str,
+    message: &'static str,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let Ok(failure) = PrimitiveFailure::new(kind, code, message) else {
+        return failed(domain, finished_at);
+    };
+    RetrievalPortOutcome::Refused(
+        omitted_evidence(domain, finished_at, OmissionReason::Failed, 0),
+        Box::new(failure.into_problem()),
+    )
+}
+
 /// The outcome of a graph query that failed after its projection opened: the
 /// same typed state an open failure reports when the query surfaced a
 /// code-graph read error, and a failed read otherwise.
@@ -324,6 +342,12 @@ pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFa
             "application.code-graph.unavailable",
             "The project's verified code graph is not serving yet; retry after the code index \
              seals a generation.",
+        ),
+        CodeGraphReadError::Refused { .. } => (
+            PrimitiveFailureKind::Unavailable,
+            "application.code-graph.refused",
+            "The project's code graph is refused for the serving generation; exact and lexical \
+             reads still serve, and graph reads return once another generation seals.",
         ),
         CodeGraphReadError::ResetRequired { .. } => (
             PrimitiveFailureKind::Unavailable,

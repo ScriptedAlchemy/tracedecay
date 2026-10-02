@@ -26,14 +26,11 @@ const NO_JOURNAL: &str = "execution_failed source_edit.execution_failed [contact
 const IDENTITY_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit reconciliation identity does not match the retained effect";
 const COMMITTED_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit committed-state inspection does not match the exact preview";
 const ROLLED_BACK_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit rollback inspection does not match the admitted expected state";
-const CONFIRM_REQUIRED: &str = "config error: source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human";
-const ATTEMPT_KEY_CONFLICT: &str =
-    "config error: reconciliation attempt idempotency key must differ from the original edit key";
-const COMMITTED_STATE_UNEXPECTED: &str =
-    "config error: committed_state is only valid when disposition is confirm_committed";
-const COMMITTED_STATE_REQUIRED: &str = "config error: missing required parameter: committed_state";
-const INVALID_DISPOSITION: &str =
-    "config error: invalid source edit reconciliation disposition: guess";
+const CONFIRM_REQUIRED: &str = "project route error (application_surface_invalid_request): source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human";
+const ATTEMPT_KEY_CONFLICT: &str = "project route error (application_surface_invalid_request): reconciliation attempt idempotency key must differ from the original edit key";
+const COMMITTED_STATE_UNEXPECTED: &str = "project route error (application_surface_invalid_request): committed_state is only valid when disposition is confirm_committed";
+const COMMITTED_STATE_REQUIRED: &str = "project route error (application_surface_invalid_request): missing required parameter: committed_state";
+const INVALID_DISPOSITION: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation disposition: guess";
 
 struct OpenedProject {
     _dir: TestTempDir,
@@ -71,7 +68,7 @@ fn refusal(result: Result<ToolResult, TraceDecayError>) -> String {
 fn problem_refusal(result: Result<ToolResult, TraceDecayError>) -> String {
     let result = result.expect("a daemon refusal renders as a tool result");
     assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
-    let problem = &result.value["problem"];
+    let problem = &result.value["structuredContent"]["problem"];
     let actions = problem["legal_actions"]
         .as_array()
         .expect("legal actions")

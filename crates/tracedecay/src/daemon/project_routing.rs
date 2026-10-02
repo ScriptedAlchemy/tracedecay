@@ -17,8 +17,9 @@ pub(super) fn project_server_capacity_error() -> TraceDecayError {
     )
 }
 
-/// Capacity refusal while the idle owner chosen for retirement still holds a
-/// store the release could not close. The next open retries that release.
+/// Capacity refusal when a store client outside the retired owner still holds
+/// a store its release could not close. The owner's servers are already gone,
+/// so the next open retires another idle owner.
 pub(super) fn project_server_retirement_blocked_error(
     owner: &StoreOwnerKey,
     blocker: &TraceDecayError,
@@ -139,11 +140,9 @@ pub(super) async fn bind_authenticated_profile_identity(
         // A reset-required profile authority keeps its registered location.
         // Binding the connection to it lets every request on it answer the
         // typed refusal instead of closing without a frame.
-        Err(error) if error.store_reset_required("profile authority").is_some() => {
-            authority::canonical_identity_path(
-                &profile_root.join(tracedecay_runtime_core::config::GLOBAL_DB_FILENAME),
-            )?
-        }
+        Err(error) if error.is_store_reset_required() => authority::canonical_identity_path(
+            &profile_root.join(tracedecay_runtime_core::config::GLOBAL_DB_FILENAME),
+        )?,
         Err(error) => return Err(error),
     };
     let supplied_global_db_path =
@@ -169,15 +168,12 @@ pub(super) async fn project_open_gate(
     match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
         Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
         Ok(None) => {}
-        Err(tracedecay_runtime_core::git_repository::GitRepositoryError::DiscoveryBlocked {
-            ..
-        }) => {
+        Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { .. }) => {
             return Err(super::core_proxy::repository_discovery_deferred(
                 &route.project_path,
                 tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
             ));
         }
-        Err(_) => {}
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates
@@ -227,7 +223,10 @@ where
     Value: Send + 'static,
 {
     let probe = tokio::task::spawn_blocking(probe);
-    let budget = repository_probe_budget(project_path);
+    let budget = tracedecay_runtime_core::git_discovery::repository_discovery_budget(
+        project_path,
+        std::time::Instant::now() + REPOSITORY_DISCOVERY_DEADLINE,
+    );
     tokio::pin!(probe);
     tokio::pin!(budget);
     match tokio::select! {
@@ -245,19 +244,6 @@ where
             tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
         )),
     }
-}
-
-/// Wall-clock discovery budget, or the moment a test parks the walk.
-///
-/// The parked walk is already past any useful wait: returning here marks the
-/// project discovery-blocked without sleeping out the production deadline.
-async fn repository_probe_budget(project_path: &Path) {
-    if tracedecay_runtime_core::git_repository::wait_until_repository_discovery_blocks(project_path)
-        .await
-    {
-        return;
-    }
-    tokio::time::sleep(REPOSITORY_DISCOVERY_DEADLINE).await;
 }
 
 /// Finish or refuse repository discovery before any cross-project admission lock.
@@ -312,21 +298,19 @@ pub(super) async fn resolved_project_server_key(
     };
     let probe_path = canonical_project_path.to_path_buf();
     let data_root = layout.data_root.clone();
-    let (graph_db_path, fallback_warning) =
-        bounded_repository_probe(canonical_project_path, move || {
-            let graph_scope =
-                tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
-                    tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
-                });
-            let (graph_db_path, _, fallback_warning) =
-                tracedecay_project::project::TraceDecay::resolve_db_for_branch(
-                    &probe_path,
-                    &data_root,
-                    graph_scope.as_deref(),
-                );
-            (graph_db_path, fallback_warning)
-        })
-        .await?;
+    let fallback_warning = bounded_repository_probe(canonical_project_path, move || {
+        let graph_scope =
+            tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
+                tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
+            });
+        let (_, fallback_warning) = tracedecay_project::project::TraceDecay::resolve_serving_branch(
+            &probe_path,
+            &data_root,
+            graph_scope.as_deref(),
+        );
+        fallback_warning
+    })
+    .await?;
     if fallback_warning.is_some() {
         return Ok(None);
     }
@@ -336,7 +320,7 @@ pub(super) async fn resolved_project_server_key(
             &handshake.client_identity.global_db_path,
             layout.identity.project_id,
             &layout.data_root,
-            &graph_db_path,
+            &layout.graph_db_path,
         )?,
         project_root: authority::canonical_identity_path(&layout.project_root)?,
         scope_prefix: handshake.scope_prefix.clone(),

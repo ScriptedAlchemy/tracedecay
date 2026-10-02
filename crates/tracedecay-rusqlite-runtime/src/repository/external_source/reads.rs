@@ -77,7 +77,12 @@ pub(super) fn load_next_pending_projection(
         == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
         && receipt.snapshot_completion().is_some()
     {
-        load_current_mutations(connection, "external_source_projected_objects_v2", binding)?
+        load_current_mutations(
+            connection,
+            CurrentObjects::Projected,
+            binding,
+            &SourceObjectCoverageV1::Complete,
+        )?
     } else {
         Vec::new()
     };

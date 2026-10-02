@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::io::{BufReader, ErrorKind, Write as IoWrite};
+use std::io::{BufReader, Write as IoWrite};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -26,8 +26,6 @@ use tracedecay_framing::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_lcm::LcmSummaryRequest;
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
-const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);
-const CODEX_APP_SERVER_SPAWN_RETRY_SLEEP: Duration = Duration::from_millis(10);
 
 #[derive(Default)]
 struct ActiveCodexChildren {
@@ -440,44 +438,25 @@ fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Chil
     hotpath::measure_block!("sessions.hosts.codex_app_server.spawn", {
         #[cfg(unix)]
         command.process_group(0);
-        let deadline = Instant::now() + CODEX_APP_SERVER_SPAWN_RETRY_WINDOW;
-        loop {
-            let spawn_result = {
-                let mut active = active_codex_children()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if active.shutdown_guards > 0 {
-                    return Err(TraceDecayError::Config {
-                        message: "codex app-server shutdown is in progress".to_string(),
-                    });
-                }
-                let child = command.spawn();
-                if let Ok(child) = &child {
-                    active.process_groups.insert(child.id());
-                }
-                child
-            };
-            match spawn_result {
-                Ok(child) => {
-                    tracing::debug!(
-                        pid = child.id(),
-                        codex_bin,
-                        "codex app-server process started"
-                    );
-                    return Ok(child);
-                }
-                Err(err)
-                    if err.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(CODEX_APP_SERVER_SPAWN_RETRY_SLEEP);
-                }
-                Err(err) => {
-                    return Err(TraceDecayError::Config {
-                        message: format!("failed to start `{codex_bin}` app-server: {err}"),
-                    });
-                }
-            }
+        let mut active = active_codex_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.shutdown_guards > 0 {
+            return Err(TraceDecayError::Config {
+                message: "codex app-server shutdown is in progress".to_string(),
+            });
         }
+        let child = command.spawn().map_err(|err| TraceDecayError::Config {
+            message: format!("failed to start `{codex_bin}` app-server: {err}"),
+        })?;
+        active.process_groups.insert(child.id());
+        drop(active);
+        tracing::debug!(
+            pid = child.id(),
+            codex_bin,
+            "codex app-server process started"
+        );
+        Ok(child)
     })
 }
 
@@ -1081,40 +1060,91 @@ mod tests {
         );
     }
 
+    /// A read-only, no-egress Work attempt through `codex_bin` with an empty
+    /// admitted environment, run from `cwd`.
+    fn run_read_only_work(
+        codex_bin: &Path,
+        cwd: &Path,
+        timeout: Duration,
+        launch_receipt: &CodexAppServerLaunchReceipt,
+    ) -> Result<CodexAppServerSummary> {
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: codex_bin.to_string_lossy().into_owned(),
+            model: None,
+            timeout,
+        };
+        run_work_with_codex_app_server(
+            "Return a work result.",
+            &config,
+            "tracedecay_work_attempt",
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd,
+                timeout,
+                admitted_environment: &BTreeMap::new(),
+                launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::ReadOnly,
+                egress: WorkEgressPolicy::Deny,
+            },
+        )
+    }
+
     #[test]
     fn work_app_server_spawn_failure_does_not_claim_a_launch() {
         let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temporary = tempfile::tempdir().expect("temporary app-server directory");
-        let config = CodexAppServerSummaryConfig {
-            codex_bin: temporary
-                .path()
-                .join("missing-codex")
-                .to_string_lossy()
-                .into_owned(),
-            model: None,
-            timeout: Duration::from_secs(1),
-        };
         let launch_receipt = CodexAppServerLaunchReceipt::default();
-        let result = run_work_with_codex_app_server(
-            "This process cannot start.",
-            &config,
-            "tracedecay_work_attempt",
-            CodexAppServerWorkExecution {
-                cancellation: &CodexAppServerCancellation::default(),
-                cwd: temporary.path(),
-                timeout: Duration::from_secs(1),
-                admitted_environment: &BTreeMap::new(),
-                launch_receipt: &launch_receipt,
-                approval: WorkApprovalPolicy::Never,
-                filesystem: WorkFilesystemPolicy::ReadOnly,
-                egress: WorkEgressPolicy::Deny,
-            },
+        let result = run_read_only_work(
+            &temporary.path().join("missing-codex"),
+            temporary.path(),
+            Duration::from_secs(1),
+            &launch_receipt,
         );
 
         assert!(result.is_err());
         assert_eq!(launch_receipt.started_at(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn work_app_server_held_open_for_writing_is_refused_on_the_first_attempt() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let executable = temporary.path().join("fake-codex");
+        write_executable_script(&executable, "#!/bin/sh\nexit 0\n").expect("write fake app-server");
+        let _writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .expect("hold the fake app-server open for writing");
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
+
+        let started = Instant::now();
+        let error = run_read_only_work(
+            &executable,
+            temporary.path(),
+            Duration::from_secs(1),
+            &launch_receipt,
+        )
+        .expect_err("Linux refuses to exec a file that is open for writing");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "config error: failed to start `{}` app-server: Text file busy (os error 26)",
+                executable.display()
+            )
+        );
+        assert_eq!(launch_receipt.started_at(), None);
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "the refusal must not wait for the writer to go away: {elapsed:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1138,26 +1168,12 @@ mod tests {
         )
         .expect("write timeout fake app-server");
 
-        let config = CodexAppServerSummaryConfig {
-            codex_bin: executable.to_string_lossy().into_owned(),
-            model: None,
-            timeout: Duration::from_millis(50),
-        };
         let launch_receipt = CodexAppServerLaunchReceipt::default();
-        let error = run_work_with_codex_app_server(
-            "This turn never responds.",
-            &config,
-            "tracedecay_work_attempt",
-            CodexAppServerWorkExecution {
-                cancellation: &CodexAppServerCancellation::default(),
-                cwd: temporary.path(),
-                timeout: Duration::from_millis(50),
-                admitted_environment: &BTreeMap::new(),
-                launch_receipt: &launch_receipt,
-                approval: WorkApprovalPolicy::Never,
-                filesystem: WorkFilesystemPolicy::ReadOnly,
-                egress: WorkEgressPolicy::Deny,
-            },
+        let error = run_read_only_work(
+            &executable,
+            temporary.path(),
+            Duration::from_millis(50),
+            &launch_receipt,
         )
         .expect_err("unresponsive app-server must time out");
 

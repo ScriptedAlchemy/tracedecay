@@ -62,7 +62,7 @@ use tracedecay_store::{
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 
 use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -1085,15 +1085,11 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    // Without this, a foreign test thread can cache `Interest::never()` for the
-    // dispatch callsite and make the `runtime_commands == 0` assertions below
-    // pass vacuously; see the helper's documentation.
-    tracedecay_runtime_core::logging::install_tracing_callsite_keepalive();
     let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let first_dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&first_dispatch_trace),
-    });
-    let first_trace_guard = tracing::dispatcher::set_default(&first_dispatch);
+    let first_trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&first_dispatch_trace),
+        });
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -1128,10 +1124,10 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
     let dispatch_trace = Arc::new(ObservationDispatchTrace::default());
-    let dispatch = Dispatch::new(ObservationDispatchSubscriber {
-        trace: Arc::clone(&dispatch_trace),
-    });
-    let trace_guard = tracing::dispatcher::set_default(&dispatch);
+    let trace_guard =
+        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+            trace: Arc::clone(&dispatch_trace),
+        });
     let second = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -2527,6 +2523,23 @@ impl tracedecay_sessions::admission::HostAdmission for ProductionJsonlAdmission 
         })
     }
 
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(async move {
+            self.store
+                .committed_source_cursors(source, scope)
+                .await
+                .map_err(|_| {
+                    tracedecay_sessions::admission::HostAdmissionOutcome::retained_unavailable(
+                        "authority_read_failed",
+                    )
+                })
+        })
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         _provider: &'a str,
@@ -2622,6 +2635,7 @@ async fn run_vibe_trigger(
         ObservationScopeV1::Profile,
         None,
         &tracedecay_sessions::observation::ObservationCancellation::default(),
+        None,
     )
     .await
 }
@@ -2721,13 +2735,22 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_contracts::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply observation retention");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
     replace_vibe_eof(&transcript, "rewritten eof record");
+    let identical_calls = admission.capture_count();
+    let identical = run_vibe_trigger(&source, &workspace, &admission)
+        .await
+        .expect("a byte-identical replacement resumes its recorded prefix");
+    assert_eq!(identical.bytes_consumed, 0);
+    assert_eq!(admission.capture_count() - identical_calls, 0);
+    assert_eq!(only_source_cursor(&runtime).await, refused_cursor);
+
+    replace_vibe_eof(&transcript, "rewritten eof record again");
     let generation_calls = admission.capture_count();
     let generation_collision = run_vibe_trigger(&source, &workspace, &admission)
         .await
@@ -2764,11 +2787,12 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
             None,
             &ObservationRetentionConfig::default(),
             RetentionMode::Apply,
-            tracedecay_contracts::clock::now_micros().0,
+            tracedecay_contracts::clock::now_micros(),
         )
         .await
         .expect("apply post-generation observation retention");
-    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    // One marker per distinct refused EOF body.
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 2);
     assert!(identity_collision_advance_total(&runtime).await >= 1);
     assert_eq!(
         raw_observation_json(&runtime, &retained_observation_id).await,
@@ -2793,7 +2817,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     assert_eq!(restart.bytes_consumed, 0);
     assert_eq!(reopened_admission.capture_count() - restart_calls, 0);
     assert_eq!(only_source_cursor(&reopened).await, generation_cursor);
-    assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
+    assert_eq!(admission_refusal_rows(&reopened).await.len(), 2);
     assert_eq!(
         raw_observation_json(&reopened, &retained_observation_id).await,
         retained_row

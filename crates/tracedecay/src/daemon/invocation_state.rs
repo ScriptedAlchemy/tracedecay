@@ -353,6 +353,7 @@ impl DaemonInvocationState {
         Arc::clone(&self.work_federated_query_authority)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.invocation_state.code_index_mount", future = true)]
     pub(super) async fn mount_code_index(
         &self,
@@ -360,6 +361,7 @@ impl DaemonInvocationState {
         project_root: &Path,
         store_root: PathBuf,
         native_graph_activation: bool,
+        index_paths: tracedecay_domain::IndexPathPolicyV1,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
@@ -392,6 +394,7 @@ impl DaemonInvocationState {
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
+                index_paths,
             )
             .await
             .map_err(|error| {
@@ -1279,12 +1282,14 @@ mod shutdown_tests {
         assert_eq!(receipt.unfinished(), &["invocation"]);
     }
 
-    #[tokio::test]
+    /// Paused time advances only through timers, so the bound below measures
+    /// grace the shutdown waited out, not host scheduling.
+    #[tokio::test(start_paused = true)]
     async fn cancel_admissions_then_empty_shutdown_is_prompt() {
         let state = DaemonInvocationState::default();
         state.cancel_admissions();
         state.cancel_admissions();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         assert!(
             state.shutdown().await.is_clean(),
             "empty invocation shutdown must expire cleanly"

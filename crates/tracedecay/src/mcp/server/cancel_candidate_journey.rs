@@ -75,7 +75,6 @@ struct PausingAdmission {
     scan_checkpoints: Arc<AtomicUsize>,
     pause_at: Arc<AtomicUsize>,
     scan_paused: Arc<tokio::sync::Notify>,
-    resume: Arc<StdMutex<std::sync::mpsc::Receiver<()>>>,
     server: Arc<StdMutex<Option<Arc<McpServer>>>>,
     observed_signal: Arc<StdMutex<Option<tracedecay_contracts::CancellationSignal>>>,
 }
@@ -111,26 +110,11 @@ impl CodeIndexMcpReadAdmissionV1 for PausingAdmission {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(signal);
             }
             self.scan_paused.notify_one();
-            let resume = self
-                .resume
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                if signal
-                    .as_ref()
-                    .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
-                {
-                    break;
-                }
-                match resume.try_recv() {
-                    Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty)
-                        if std::time::Instant::now() < deadline =>
-                    {
-                        std::thread::yield_now();
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            // The scan holds this checkpoint until the transport cancel lands,
+            // however late the canceller runs.
+            if let Some(signal) = signal {
+                while !signal.is_cancelled() {
+                    std::thread::yield_now();
                 }
             }
         }
@@ -173,7 +157,7 @@ async fn cancelled_large_candidate_search_stops_before_the_next_batch() {
         authorization_revision: AuthorizationRevision::new("authorization.cancel-journey.fixture")
             .expect("authorization revision"),
     };
-    let (resume_tx, admission) = pausing_admission(authority.clone());
+    let admission = pausing_admission(authority.clone());
     let executor = code_index_search_executor(
         corpus.registry.clone(),
         ProjectId::new("project.cancel-candidate-journey").expect("corpus project"),
@@ -190,7 +174,7 @@ async fn cancelled_large_candidate_search_stops_before_the_next_batch() {
         .pause_at
         .store(NEXT_BATCH_CHECKPOINT, Ordering::SeqCst);
     let pause_at = admission.pause_at.load(Ordering::SeqCst);
-    drive_rmcp(&held.server, &admission, &resume_tx, pause_at).await;
+    drive_rmcp(&held.server, &admission, pause_at).await;
 
     held.server.shutdown().await;
     corpus.registry.shutdown().await;
@@ -264,21 +248,16 @@ async fn mount_candidate_corpus() -> MountedCorpus {
     }
 }
 
-fn pausing_admission(
-    authority: CodeIndexSearchAuthorityV1,
-) -> (std::sync::mpsc::Sender<()>, PausingAdmission) {
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-    let admission = PausingAdmission {
+fn pausing_admission(authority: CodeIndexSearchAuthorityV1) -> PausingAdmission {
+    PausingAdmission {
         authority,
         runtime_thread: std::thread::current().id(),
         scan_checkpoints: Arc::new(AtomicUsize::new(0)),
         pause_at: Arc::new(AtomicUsize::new(usize::MAX)),
         scan_paused: Arc::new(tokio::sync::Notify::new()),
-        resume: Arc::new(StdMutex::new(resume_rx)),
         server: Arc::new(StdMutex::new(None)),
         observed_signal: Arc::new(StdMutex::new(None)),
-    };
-    (resume_tx, admission)
+    }
 }
 
 async fn open_search_server(
@@ -326,12 +305,7 @@ async fn open_search_server(
     }
 }
 
-async fn drive_rmcp(
-    server: &Arc<McpServer>,
-    admission: &PausingAdmission,
-    _resume_tx: &std::sync::mpsc::Sender<()>,
-    pause_at: usize,
-) {
+async fn drive_rmcp(server: &Arc<McpServer>, admission: &PausingAdmission, pause_at: usize) {
     let adapter = tracedecay_mcp::server::RmcpConnectionAdapter::new(
         super::connection::ProductionMcpConnectionContext::with_activity(Arc::clone(server), None),
         false,
@@ -487,22 +461,13 @@ fn tools_call_request_id(messages: &StdMutex<Vec<Value>>) -> rmcp::model::Reques
 }
 
 async fn wait_until_observed_signal_cancels(admission: &PausingAdmission, label: &str) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let cancelled = admission
-                .observed_signal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled);
-            if cancelled {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{label}: the transport cancel did not reach the in-flight scan"));
+    let signal = admission
+        .observed_signal
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| panic!("{label}: the paused scan held no cancellation signal"));
+    signal.cancelled().await;
 }
 
 async fn wait_for_batch_pause(admission: &PausingAdmission, label: &str) {

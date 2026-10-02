@@ -55,13 +55,6 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
 }
 
 #[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
-    )
-)]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -69,7 +62,6 @@ async fn release_one_idle_project_server_before_open(
     capacity_admission: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
     let runtime_registry = store_administration.session_runtime_registry().await?;
-    let blocked_retirement = retry_failed_capacity_releases(store_administration).await;
     // The route cache and invocation schedulers have independent bounds. Retire
     // the whole idle owner before either fills: evicting only its MCP server
     // leaves the code-index worker holding its scheduler slot.
@@ -83,9 +75,6 @@ async fn release_one_idle_project_server_before_open(
     let graph_admission_available = runtime_registry.has_project_graph_admission_capacity()?;
     if graph_admission_available && !project_server_cache_saturated {
         return Ok(capacity_admission);
-    }
-    if let Some(error) = blocked_retirement {
-        return Err(error);
     }
     let profile_identity = store_administration.profile_identity()?.clone();
     let mut retirement_admission = store_administration
@@ -127,27 +116,27 @@ async fn release_one_idle_project_server_before_open(
         .map(|(_, server)| server)
         .collect::<Vec<_>>();
     let retired_server_count = retired_servers.len();
-    let release = capacity_retirement_release(CapacityRetirementStores {
+    let stores = CapacityRetirementStores {
         administration: store_administration.clone(),
         invocation: invocation.clone(),
         runtime_registry,
         owner: retired_owner.clone(),
         project_roots,
         profile_identity,
-    });
-    let teardown_administration = store_administration.clone();
-    let teardown_owner = retired_owner.clone();
-    let completion = retirement_admission.spawn_and_track_fallible(
-        retired_owner.clone(),
-        async move {
-            teardown_administration
+    };
+    let completion =
+        retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
+            // Teardown joins every owner-scoped store client, so the release
+            // below finds the owner's stores unleased on its only attempt.
+            stores
+                .administration
                 .session_temporal_refresh_schedulers()
-                .retire_project(&teardown_owner)
+                .retire_project(&stores.owner)
                 .await;
             #[cfg(unix)]
             super::scheduler::retire_owner_automation_schedulers(
-                &teardown_administration,
-                &teardown_owner,
+                &stores.administration,
+                &stores.owner,
             )
             .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
@@ -157,10 +146,10 @@ async fn release_one_idle_project_server_before_open(
             for prior in prior_owner_retirements {
                 prior.wait().await?;
             }
-            Ok(capacity_admission)
-        },
-        release,
-    );
+            let released = release_capacity_retired_stores(stores).await;
+            drop(capacity_admission);
+            released
+        });
     hotpath::gauge!("project_servers").inc(-(retired_server_count as f64));
     drop(retirement_admission);
     completion
@@ -178,38 +167,7 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-/// Retry the store release of every failed capacity retirement. The first
-/// release that is still refused is the typed capacity blocker an open that
-/// needs capacity reports; the next open retries it again.
-async fn retry_failed_capacity_releases(
-    store_administration: &StoreAdministration,
-) -> Option<TraceDecayError> {
-    let mut retirement_admission = store_administration
-        .acquire_project_server_retirement_admission()
-        .await;
-    let serving = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .servers
-        .keys()
-        .map(|key| key.owner.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let retries =
-        retirement_admission.retry_failed_capacity_releases(|owner| serving.contains(owner));
-    drop(retirement_admission);
-    let mut blocked = None;
-    for (owner, completion) in retries {
-        if let Err(error) = completion.wait().await {
-            blocked.get_or_insert_with(|| project_server_retirement_blocked_error(&owner, &error));
-        }
-    }
-    blocked
-}
-
-/// Everything the store release of one capacity-retired owner reads. It is
-/// cloned into each attempt so a refused release can run again.
-#[derive(Clone)]
+/// Everything the store release of one capacity-retired owner reads.
 struct CapacityRetirementStores {
     administration: StoreAdministration,
     invocation: DaemonInvocationState,
@@ -217,12 +175,6 @@ struct CapacityRetirementStores {
     owner: StoreOwnerKey,
     project_roots: std::collections::BTreeSet<PathBuf>,
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
-}
-
-fn capacity_retirement_release(
-    stores: CapacityRetirementStores,
-) -> super::branch_admin::CapacityRetirementRelease {
-    Arc::new(move || Box::pin(release_capacity_retired_stores(stores.clone())))
 }
 
 #[hotpath::measure(label = "daemon.project.compose.release_retired_stores", future = true)]
@@ -395,14 +347,14 @@ pub(super) async fn production_project_server(
                 Box::pin(inputs.activate_core_route(&opened, &core, &resolved)).await?;
             let upgrade =
                 match Box::pin(inputs.construct_full_server(&opened, &core, &resolved)).await {
-                    Ok(PublishedFullServer { server, session_db }) => {
+                    Ok(PublishedFullServer { server, pending }) => {
                         match Box::pin(inputs.finish_full_server(
                             &opened,
                             &core,
                             &activation,
                             &resolved,
                             &server,
-                            session_db,
+                            pending,
                         ))
                         .await
                         {
@@ -654,11 +606,16 @@ struct AdmittedSessionDatabases {
     user_session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
 }
 
-/// The full server after it replaced the core in the owner registry, with the
-/// project session database its dependent owners still have to mount.
+/// The full server after it replaced the core in the owner registry.
 struct PublishedFullServer {
     server: Arc<crate::mcp::McpServer>,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    pending: PendingFullServerOwners,
+}
+
+/// What the published full server still has to mount before it serves: the
+/// Doctor report reader published once its dependent owners have.
+struct PendingFullServerOwners {
+    doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
 }
 
 impl ProjectOpenInputs<'_> {
@@ -919,6 +876,7 @@ impl ProjectOpenInputs<'_> {
             project_root: self.canonical_project_path.to_path_buf(),
             store_root: code_index_store_root.clone(),
             native_graph_activation: runtime_configuration.config().native_graph_activation,
+            index_paths: runtime_configuration.config().index_paths.clone(),
             scope: code_index.scope.clone(),
             route_registered: Arc::clone(&route_registered),
             cancellation: route_cancellation.clone(),
@@ -1408,46 +1366,14 @@ impl ProjectOpenInputs<'_> {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
-        let remote_operational_read = {
-            let remote_operational_status = Arc::clone(&remote_operational_status);
-            Arc::new(move || remote_operational_status().doctor_read())
-        };
-        // Historical convergence runs in the background after admission, so a
-        // large store can be mid-migration while the daemon serves. Doctor
-        // re-reads that state on every report instead of a snapshot taken
-        // before the migrations were scheduled.
-        let schema_convergence = {
-            let registry = self.store_administration.session_runtime_registry().await?;
-            Arc::new(move || {
-                let unconverged = registry.unconverged_registered_schemas();
-                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage:
-                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
-                            &unconverged,
-                        ),
-                    findings: registry.registered_schema_convergence_observations(),
-                }
-            })
-        };
-        let doctor_report_reader =
-            tracedecay_daemon_service::doctor_kernel::production_doctor_report_reader(
-                self.canonical_project_path.to_path_buf(),
-                code_index.project_id.clone(),
-                cg.store_layout().clone(),
-                cg.db().clone(),
-                core.registered_profile_db.clone(),
-                user_session_db.clone(),
-                session_db.clone(),
-                core.profile_identity.profile_root().to_path_buf(),
-                core.transcript_source_profile.clone(),
-                remote_operational_read,
-                schema_convergence,
-                cg.get_config().sync.retention.clone(),
-                self.invocation.code_index_schedulers.clone(),
-                Arc::clone(&core.ports.diagnostic_broker),
-                self.invocation.feedback_runtime_registrar(),
-                store_telemetry_sampling,
-            );
+        let doctor_report_reader = self
+            .doctor_report_reader(
+                cg,
+                core,
+                Some(user_session_db.clone()),
+                Some(session_db.clone()),
+            )
+            .await?;
         let (delivery_settlement_authority, delivery_settlement_recorder) =
             project_delivery_settlement_ports(self.invocation, self.canonical_project_path).await?;
         let full_context = core
@@ -1487,7 +1413,6 @@ impl ProjectOpenInputs<'_> {
                 self.invocation,
             )
             .with_remote_operational_status(remote_operational_status)
-            .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_startup_catch_up_enabled(self.runtime.startup_catch_up());
         project_open_cancellation_checkpoint(self.cancellation)?;
         let full_construction_started = Instant::now();
@@ -1520,7 +1445,9 @@ impl ProjectOpenInputs<'_> {
         }
         Ok(PublishedFullServer {
             server: full_candidate,
-            session_db,
+            pending: PendingFullServerOwners {
+                doctor_report_reader,
+            },
         })
     }
 
@@ -1538,7 +1465,6 @@ impl ProjectOpenInputs<'_> {
         opened: &OpenedProjectGraph,
         core: &ComposedCoreServer,
         full_server: &crate::mcp::McpServer,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         core_source_edit_mutation: Option<
             Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>,
         >,
@@ -1566,14 +1492,6 @@ impl ProjectOpenInputs<'_> {
             )
         };
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
-        ensure_git_index_transactions_for_mutation_owners(
-            self.store_administration,
-            session_db,
-            self.canonical_project_path,
-            opened.key.owner.project_id.as_deref(),
-        )
-        .await?;
-        self.log_phase("git_transactions_ready", None, full_setup_started);
         let dependent_owners = if opened.project_database_is_read_only {
             None
         } else {
@@ -1628,14 +1546,16 @@ impl ProjectOpenInputs<'_> {
         activation: &CoreRouteActivation,
         resolved: &Arc<crate::mcp::McpServer>,
         full_server: &Arc<crate::mcp::McpServer>,
-        session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        pending: PendingFullServerOwners,
     ) -> Result<()> {
+        let PendingFullServerOwners {
+            doctor_report_reader,
+        } = pending;
         self.log_phase("session_capabilities_published", None, self.started);
         Box::pin(self.mount_full_server_owners(
             opened,
             core,
             full_server.as_ref(),
-            session_db,
             activation.core_source_edit_mutation.clone(),
         ))
         .await?;
@@ -1666,7 +1586,7 @@ impl ProjectOpenInputs<'_> {
             None,
         )
         .await;
-        full_server.publish_doctor_report();
+        full_server.publish_doctor_report(doctor_report_reader);
         let code_index_status = self.activate_code_index(core);
         self.log_phase(
             "full_published",
@@ -1696,6 +1616,134 @@ impl ProjectOpenInputs<'_> {
                 );
                 "linked_worktree_disabled"
             }
+        }
+    }
+
+    /// The route's Doctor report reader over whichever session stores it
+    /// serves; a store held reset-required is `None`.
+    async fn doctor_report_reader(
+        &self,
+        cg: &Arc<tracedecay_project::project::TraceDecay>,
+        core: &ComposedCoreServer,
+        user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+        session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    ) -> Result<tracedecay_dashboard_api::DoctorReportReader> {
+        let remote_credentials = core.graph_runtime.remote_credential_authority();
+        let remote_operational_read =
+            Arc::new(move || remote_credentials.operational_status().doctor_read());
+        // Historical convergence runs in the background after admission, so a
+        // large store can be mid-migration while the daemon serves. Doctor
+        // re-reads that state on every report instead of a snapshot taken
+        // before the migrations were scheduled.
+        let schema_convergence = {
+            let registry = self.store_administration.session_runtime_registry().await?;
+            Arc::new(move || {
+                let unconverged = registry.unconverged_registered_schemas();
+                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
+                    storage:
+                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
+                            &unconverged,
+                        ),
+                    findings: registry.registered_schema_convergence_observations(),
+                }
+            })
+        };
+        Ok(
+            tracedecay_daemon_service::doctor_kernel::production_doctor_report_reader(
+                self.canonical_project_path.to_path_buf(),
+                core.ports.code_index.project_id.clone(),
+                cg.store_layout().clone(),
+                cg.db().clone(),
+                core.registered_profile_db.clone(),
+                user_session_db,
+                session_db,
+                core.profile_identity.profile_root().to_path_buf(),
+                core.transcript_source_profile.clone(),
+                remote_operational_read,
+                schema_convergence,
+                cg.get_config().sync.retention.clone(),
+                self.invocation.code_index_schedulers.clone(),
+                Arc::clone(&core.ports.diagnostic_broker),
+                self.invocation.feedback_runtime_registrar(),
+                self.store_administration.store_telemetry_sampling(),
+            ),
+        )
+    }
+
+    /// Code reads (primitives and callable code) on a route whose full
+    /// upgrade a reset-required session store refused. A refusal to mount
+    /// them leaves those reads answering the store's reset refusal.
+    async fn register_reset_required_code_reads(
+        &self,
+        core: &ComposedCoreServer,
+        resolved: &Arc<crate::mcp::McpServer>,
+    ) {
+        let registered = match tracedecay_domain::ProjectId::new(core.project_id.clone()) {
+            Ok(project_id) => match core
+                .graph_runtime
+                .mounted_project_session_store(&project_id)
+                .await
+            {
+                Some(session_store) => {
+                    Box::pin(
+                        project_open_owners::register_reset_required_route_code_read_owners(
+                            self.invocation,
+                            self.canonical_project_path,
+                            &core.project_id,
+                            resolved,
+                            session_store,
+                        ),
+                    )
+                    .await
+                }
+                None => Err(TraceDecayError::Config {
+                    message: "the project session store is not mounted".to_owned(),
+                }),
+            },
+            Err(error) => Err(TraceDecayError::Config {
+                message: format!("invalid project identity: {error}"),
+            }),
+        };
+        if let Err(error) = registered {
+            self.log_phase(
+                "reset_required_code_reads_unavailable",
+                Some(("error", error.to_string())),
+                self.started,
+            );
+        }
+    }
+
+    /// The retained core answers Doctor over every store it still serves:
+    /// a session store refused as reset-required only disables session
+    /// features, never the report that names its reset.
+    async fn publish_reset_required_doctor_report(
+        &self,
+        opened: &OpenedProjectGraph,
+        core: &ComposedCoreServer,
+        resolved: &Arc<crate::mcp::McpServer>,
+    ) {
+        let cg = &opened.cg;
+        let reader = async {
+            let session_db = reset_required_as_absent(
+                self.store_administration
+                    .registered_project_session_database(cg.project_root(), cg.store_layout())
+                    .await,
+            )?;
+            let user_session_db = reset_required_as_absent(
+                self.store_administration
+                    .registered_profile_session_database()
+                    .await,
+            )?;
+            self.doctor_report_reader(cg, core, user_session_db, session_db)
+                .await
+        };
+        match reader.await {
+            Ok(reader) => resolved.publish_doctor_report(reader),
+            Err(error) => self.log_phase(
+                "reset_required_doctor_report_unavailable",
+                Some(("error", error.to_string())),
+                self.started,
+            ),
         }
     }
 
@@ -1734,11 +1782,15 @@ impl ProjectOpenInputs<'_> {
             mutation.mark_failed();
         }
         if core_retained {
+            let reset_refusal = tracedecay_mcp::reset_required_detail(&error);
             if let Some(attempt) = &activation.publication_attempt {
-                self.invocation
-                    .service
-                    .project_runtimes
-                    .mark_publication_failed(attempt);
+                let project_runtimes = &self.invocation.service.project_runtimes;
+                match &reset_refusal {
+                    Some(refusal) => {
+                        project_runtimes.mark_publication_reset_required(attempt, refusal.clone())
+                    }
+                    None => project_runtimes.mark_publication_failed(attempt),
+                };
             }
             if let Some(failed_full_server) = failed_full_server {
                 failed_full_server.revoke_project_server_responses();
@@ -1753,8 +1805,10 @@ impl ProjectOpenInputs<'_> {
             // A session store in its typed reset-required state keeps the
             // full upgrade refused until the operator resets it, so the
             // retained core serves the code index meanwhile.
-            if tracedecay_mcp::reset_required_context(&error).is_some() {
+            if reset_refusal.is_some() {
                 let code_index_status = self.activate_code_index(core);
+                Box::pin(self.register_reset_required_code_reads(core, resolved)).await;
+                Box::pin(self.publish_reset_required_doctor_report(opened, core, resolved)).await;
                 self.log_phase(
                     "full_upgrade_reset_required",
                     Some(("code_index", code_index_status.to_owned())),
@@ -1777,6 +1831,18 @@ impl ProjectOpenInputs<'_> {
         )
         .await;
         Err(error)
+    }
+}
+
+/// A session store held in its typed reset-required state is absent from
+/// Doctor's report; any other open failure stays an error.
+fn reset_required_as_absent(
+    opened: Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+) -> Result<Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>> {
+    match opened {
+        Ok(database) => Ok(Some(database)),
+        Err(error) if tracedecay_mcp::reset_required_context(&error).is_some() => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

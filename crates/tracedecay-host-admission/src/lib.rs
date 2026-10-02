@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, RetrievalAnchorId, SanitizationReceiptV1,
+    FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -32,10 +32,11 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, GetObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation,
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, GitEvidenceBatch, GitEvidenceWriter,
     canonical_observation_git_evidence,
@@ -62,9 +63,18 @@ pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
 
 pub struct HostAdmissionBroker {
     runtime: Arc<Mutex<HostAdmissionRuntime>>,
+    /// Admissions awaiting the next group commit: whichever admission holds
+    /// the runtime next appends every queued item as one durable batch.
+    appends: Arc<Mutex<Vec<QueuedAppend>>>,
     replay: tokio::sync::Mutex<()>,
     /// Coalesced wake for daemon-owned profile/project replay workers.
     replay_wake: tokio::sync::Notify,
+}
+
+struct QueuedAppend {
+    source: String,
+    payload: Vec<u8>,
+    admitted: tokio::sync::oneshot::Sender<Result<DurableHostAdmission, HostAdmissionOutcome>>,
 }
 
 pub struct HostAdmissionReplay<'a> {
@@ -72,10 +82,32 @@ pub struct HostAdmissionReplay<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
+fn spool_runtime_unavailable() -> HostAdmissionOutcome {
+    HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
+}
+
+/// Append every queued admission as one batch and answer each admitter.
+fn commit_queued_appends(runtime: &mut HostAdmissionRuntime, queued: Vec<QueuedAppend>) {
+    if queued.is_empty() {
+        return;
+    }
+    let items = queued
+        .iter()
+        .map(|append| (append.source.as_str(), append.payload.as_slice()))
+        .collect::<Vec<_>>();
+    let admitted = runtime.admit_batch(&items);
+    for (append, admitted) in queued.into_iter().zip(admitted) {
+        // A dropped receiver is a cancelled admitter; its durable record
+        // still replays through the worker.
+        let _ = append.admitted.send(admitted);
+    }
+}
+
 impl HostAdmissionBroker {
     pub fn new(runtime: HostAdmissionRuntime) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            appends: Arc::new(Mutex::new(Vec::new())),
             replay: tokio::sync::Mutex::new(()),
             replay_wake: tokio::sync::Notify::new(),
         }
@@ -89,30 +121,41 @@ impl HostAdmissionBroker {
     {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || {
-            let mut runtime = runtime.lock().map_err(|_| {
-                HostAdmissionOutcome::retained_unavailable("spool_runtime_unavailable")
-            })?;
+            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
             operation(&mut runtime)
         })
         .await
-        .unwrap_or_else(|_| {
-            Err(HostAdmissionOutcome::retained_unavailable(
-                "spool_runtime_unavailable",
-            ))
-        })
+        .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
     }
 
+    /// Durably admit one record, group-committed with every concurrent
+    /// admission queued while an earlier batch holds the spool.
     #[hotpath::measure(label = "usecases.admission.admit", future = true)]
     pub async fn admit(
         &self,
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let source = source.to_owned();
-        let payload = payload.to_vec();
-        let admitted = self
-            .with_runtime(move |runtime| runtime.admit(&source, &payload))
-            .await?;
+        let (admitted, durable) = tokio::sync::oneshot::channel();
+        self.appends
+            .lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .push(QueuedAppend {
+                source: source.to_owned(),
+                payload: payload.to_vec(),
+                admitted,
+            });
+        let appends = Arc::clone(&self.appends);
+        self.with_runtime(move |runtime| {
+            let queued =
+                std::mem::take(&mut *appends.lock().map_err(|_| spool_runtime_unavailable())?);
+            commit_queued_appends(runtime, queued);
+            Ok(())
+        })
+        .await?;
+        // This admission was queued before its own runtime turn, so that turn
+        // or an earlier one already answered it.
+        let admitted = durable.await.map_err(|_| spool_runtime_unavailable())??;
         self.request_replay();
         Ok(admitted)
     }
@@ -269,27 +312,14 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         Box::pin(HostAdmissionFacade::get_source_cursor(self, source, scope))
     }
 
-    fn observation_receipt<'a>(
+    fn committed_source_cursors<'a>(
         &'a self,
-        provider: &'a str,
+        source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
-        observation_id: &'a CanonicalObservationIdV1,
-        cancellation: &'a ObservationCancellation,
-    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
-        Box::pin(async move {
-            let application = self.application(provider, scope)?;
-            application
-                .get_observation(GetObservationRequest::new(
-                    observation_id.clone(),
-                    cancellation.clone(),
-                ))
-                .await
-                .map(|read| {
-                    read.observation()
-                        .map(|stored| stored.observation().receipt().clone())
-                })
-                .map_err(|error| classify_error(&error))
-        })
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        Box::pin(HostAdmissionFacade::committed_source_cursors(
+            self, source, scope,
+        ))
     }
 
     fn drain_projection_queue<'a>(
@@ -495,8 +525,18 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
+    /// Direct host-call admission, the gate every host route consults before
+    /// it captures through this façade.
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
-        if !supported_provider(provider) {
+        self.authority_probe(admits_direct_host_call(provider), scope)
+    }
+
+    fn authority_probe(
+        &self,
+        provider_admitted: bool,
+        scope: HostAdmissionScope,
+    ) -> HostAdmissionOutcome {
+        if !provider_admitted {
             return admission_outcome(
                 HostAdmissionStatus::Unknown,
                 false,
@@ -531,6 +571,19 @@ impl<'a> HostAdmissionFacade<'a> {
         let store = self.store(source.provider().as_str(), scope)?;
         store
             .get_source_cursor(source, scope)
+            .await
+            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
+    }
+
+    #[hotpath::measure(label = "usecases.admission.committed_source_cursors", future = true)]
+    pub async fn committed_source_cursors(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> Result<Vec<ObservationSourceCursorV1>, HostAdmissionOutcome> {
+        let store = self.store(source.provider().as_str(), scope)?;
+        store
+            .committed_source_cursors(source, scope)
             .await
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
@@ -727,7 +780,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<GlobalDbObservationStore, HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let scope = host_scope(scope);
-        let probe = self.probe(provider, scope);
+        let probe = self.authority_probe(admits_provider_capture(provider), scope);
         if probe.status != HostAdmissionStatus::Supported {
             return Err(probe);
         }
@@ -928,10 +981,14 @@ fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {
     }
 }
 
-fn supported_provider(provider: &str) -> bool {
-    matches!(provider, "kimi" | "opencode")
-        || tracedecay_sessions::runtime::SessionProvider::parse(provider)
-            .is_some_and(tracedecay_sessions::runtime::SessionProvider::supports_host_admission)
+fn admits_direct_host_call(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some_and(SessionProvider::supports_host_admission)
+}
+
+/// Observation-store access admits every session provider: canonical capture
+/// from provider ingestion includes providers with no direct host surface.
+fn admits_provider_capture(provider: &str) -> bool {
+    SessionProvider::parse(provider).is_some()
 }
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
@@ -996,9 +1053,15 @@ async fn project_captured_outcomes(
     let mut receipts = Vec::new();
     let mut persisted_slots = Vec::new();
     for (slot, outcome) in outcomes.iter().enumerate() {
+        // A covered duplicate writes no row: its retained observation was
+        // projected under its original receipt, and only the cursor moved.
         if let CaptureObservationOutcome::Persisted {
             outcome: persisted, ..
         } = outcome
+            && !matches!(
+                persisted.as_ref(),
+                ObservationPersistOutcome::CoveredDuplicate(_)
+            )
         {
             persisted_slots.push(slot);
             receipts.push(persisted.receipt().clone());

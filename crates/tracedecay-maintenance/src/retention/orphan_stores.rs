@@ -19,6 +19,7 @@
 //! at all are eligible for collection, and only once older than the retention
 //! window.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
@@ -81,10 +82,6 @@ pub struct StoreCensusEntry {
     /// on the opened store directory immediately before deleting it.
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
-    /// Registered graph-scope database paths, relative to the profile root as
-    /// store registration records them. Scopes may sit at custom paths, so the
-    /// durable-data check cannot infer them from the main graph alone.
-    pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
 /// Why a store's identity could not be resolved either way.
@@ -132,10 +129,6 @@ pub struct OrphanStoreFinding {
     pub expected_data_root_fence: StoreDirectoryFence,
     pub expected_content_fence: StoreContentFence,
     pub expected_manifest_bytes: Option<Vec<u8>>,
-    /// Registered graph-scope database paths, relative to the profile root;
-    /// carried through so the durable-data check covers every registered
-    /// graph-scope database.
-    pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
 /// Every root that can keep this store's identity alive: the registry roots,
@@ -149,6 +142,21 @@ fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
         .chain(entry.alias_roots.iter().map(PathBuf::as_path))
 }
 
+/// A project root with a live owner is live even once it is gone from disk:
+/// the owner can still write into the store until it is retired and joined.
+/// Only the exact registered root counts.
+fn classify_owned(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
+    if std::iter::once(&entry.canonical_root)
+        .chain(entry.display_root.as_ref())
+        .chain(&entry.alias_roots)
+        .any(|root| owner_roots.contains(root))
+    {
+        return StoreDisposition::Live;
+    }
+    classify_one(entry)
+}
+
+/// The disposition the store's roots and manifest prove on disk.
 fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     if entry.expected_data_root_fence == StoreDirectoryFence::Unverifiable {
         return StoreDisposition::Unverifiable {
@@ -200,15 +208,20 @@ fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     StoreDisposition::Orphaned
 }
 
-/// Classify every census entry. Pure: no filesystem writes, no deletion.
-pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStoreFinding> {
+/// Classify every census entry against the project roots that still have a
+/// live owner. Pure: no filesystem writes, no deletion.
+pub fn classify_stores(
+    census: &[StoreCensusEntry],
+    now: i64,
+    owner_roots: &BTreeSet<PathBuf>,
+) -> Vec<OrphanStoreFinding> {
     census
         .iter()
         .map(|entry| OrphanStoreFinding {
             project_id: entry.project_id.clone(),
             store_id: entry.store_id.clone(),
             data_root: entry.data_root.clone(),
-            disposition: classify_one(entry),
+            disposition: classify_owned(entry, owner_roots),
             age_secs: now.saturating_sub(entry.last_write_secs).max(0),
             size_bytes: entry.size_bytes,
             expected_store_relpath: entry.expected_store_relpath.clone(),
@@ -218,7 +231,6 @@ pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStore
             expected_data_root_fence: entry.expected_data_root_fence.clone(),
             expected_content_fence: entry.expected_content_fence.clone(),
             expected_manifest_bytes: entry.expected_manifest_bytes.clone(),
-            graph_scope_relpaths: entry.graph_scope_relpaths.clone(),
         })
         .collect()
 }
@@ -344,20 +356,16 @@ pub enum CollectionCompletionV1 {
 pub use collection::execute_registered_collection;
 pub(crate) use collection::{CollectionControl, execute_unregistered_collection_controlled};
 #[cfg(test)]
-pub(crate) use collection::{
-    execute_registered_collection_controlled, execute_unregistered_collection,
-    unbounded_collection_control,
-};
+pub(crate) use collection::{execute_unregistered_collection, unbounded_collection_control};
 pub use pages::{
     OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
-    build_store_census, build_store_census_page, plan_unregistered_collection,
+    build_store_census, build_store_census_page, dir_size_bytes, plan_unregistered_collection,
     sweep_unregistered_stores,
 };
 #[cfg(test)]
 pub(crate) use pages::{census_unregistered_project_dirs, sweep_orphan_stores};
 pub(crate) use pages::{
-    dir_size_bytes, dir_size_bytes_controlled, manifest_names_abandoned_root,
-    newest_mtime_secs_controlled,
+    dir_size_bytes_controlled, manifest_names_abandoned_root, newest_mtime_secs_controlled,
 };
 
 #[cfg(test)]

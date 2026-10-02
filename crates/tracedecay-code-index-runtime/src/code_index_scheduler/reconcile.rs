@@ -30,10 +30,10 @@ use tracedecay_contracts::{
     now_micros,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, TreeId, WorktreeId, canonical_sha256,
+    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, IndexPathPolicyV1,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, TreeId, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
@@ -405,11 +405,10 @@ impl CodeIndexSchedulerErrorV1 {
     /// because a bounded shared resource was already fully held, and it is
     /// released by whoever holds it rather than by anything about this input.
     ///
-    /// The background worker schedules its own delayed retry for exactly these,
-    /// because releasing shared capacity emits no wake: a sibling worktree or
-    /// artifact build finishing does not notify this worktree, so without a
-    /// self-scheduled retry it stayed stale until an unrelated query or edit
-    /// happened to wake it.
+    /// The background worker retries these on its own, because a sibling
+    /// worktree or artifact build finishing does not notify this worktree: a
+    /// held store lock is retried when the kernel reports its release, and
+    /// memory after a delay, since RSS can fall with no owner releasing it.
     ///
     /// The distinction the admission failure carries is the whole point. A
     /// request that exceeds the *entire* process limit is shaped like a
@@ -426,21 +425,34 @@ impl CodeIndexSchedulerErrorV1 {
     /// real RSS falls back to the low watermark. Retrying is the only way the
     /// pass ever runs, because falling pressure emits no wake either.
     pub fn is_transient_capacity_failure(&self) -> bool {
+        self.is_resident_memory_refusal()
+            || self.is_store_lock_contended()
+            || matches!(
+                self,
+                Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. })
+            )
+    }
+
+    /// Another owner, in this or another process, holds this scope's
+    /// code-generation store lock.
+    pub fn is_store_lock_contended(&self) -> bool {
+        matches!(
+            self,
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::StoreLockContended,
+            ))
+        )
+    }
+
+    /// The transient refusals that resident memory given back lifts, as
+    /// opposed to a held store lock or a graph operation budget.
+    pub(crate) fn is_resident_memory_refusal(&self) -> bool {
         match self {
             Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
                 failure.is_observed_over_budget()
                     || failure.requested_bytes() <= failure.limit_bytes()
             }
             Self::SnapshotMemoryCapacityUnavailable => true,
-            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { .. }) => true,
-            // The code-generation store lock is bounded shared capacity: a
-            // concurrent publication in the same store root already holds it,
-            // and it releases on its own without waking this worktree. Every
-            // other `Unavailable` detail names a fault in this store, so only
-            // this one refusal is retried.
-            Self::Production(CodeIndexProductionErrorV1::Publication(
-                CodeIndexPublicationStoreErrorV1::Unavailable(detail),
-            )) => detail == super::publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
             // A whole-generation decode that does not fit yet: other holders
             // give the memory back, not anything about this input.
             Self::Production(CodeIndexProductionErrorV1::Publication(
@@ -540,7 +552,7 @@ pub(super) struct SourceFreshnessFenceStateV1 {
 }
 
 impl SourceFreshnessFenceV1 {
-    fn unverified(source_epoch: Arc<AtomicU64>) -> Self {
+    fn unverified(source_epoch: Arc<AtomicU64>, path_policy: IndexPathPolicyV1) -> Self {
         Self {
             state: Arc::new(Mutex::new(SourceFreshnessFenceStateV1 {
                 git_metadata: identity::GitMetadataFingerprintV1::default(),
@@ -554,7 +566,7 @@ impl SourceFreshnessFenceV1 {
             })),
             last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
             source_epoch,
-            sweep_cache: Arc::default(),
+            sweep_cache: Arc::new(Mutex::new(SourceSweepCacheV1::new(path_policy))),
         }
     }
 
@@ -894,16 +906,14 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     pub(super) repository_id: RepositoryId,
     pub(super) worktree_id: WorktreeId,
     pub(super) policy: CodeIndexHintPolicyV1,
+    /// The project's `index.exclude.v1` / `index.include.v1` policy this owner
+    /// captures under. Fixed for the mount: both settings require a daemon
+    /// restart, and the next mount re-proves every sealed roster against it.
+    pub(super) path_policy: IndexPathPolicyV1,
     /// Independent source-freshness authority. Ready/status probes clone this
     /// handle from the mounted map and never wait for scheduler build state.
     freshness_fence: SourceFreshnessFenceV1,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    /// Keeps the current snapshot's interned bytes alive in the shared pool.
-    pub(super) retained_snapshot_bytes: Vec<Arc<[u8]>>,
-    /// Holds the measured source-byte charges for
-    /// `retained_snapshot_bytes`; worker scratch is admitted separately only
-    /// after capture has completed.
-    pub(super) _retained_snapshot_memory: Vec<ResidentMemoryReservationV1>,
     /// Deterministic reconcile fault used only by the worker-loop isolation
     /// tests; production never installs one.
     #[cfg(test)]
@@ -1200,6 +1210,8 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    /// A standalone owner under the path policy a fresh profile resolves.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn open(
         project_id: ProjectId,
         project_root: &Path,
@@ -1212,6 +1224,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             store_root,
             byte_pool,
             CodeIndexHintPolicyV1::default(),
+            crate::config::registry_default_index_path_policy(),
         )
     }
 
@@ -1221,6 +1234,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
@@ -1265,7 +1279,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        let freshness_fence = SourceFreshnessFenceV1::unverified(Arc::clone(&epoch));
+        let freshness_fence =
+            SourceFreshnessFenceV1::unverified(Arc::clone(&epoch), path_policy.clone());
         // Nothing is decoded or served until the retained owner proves the
         // durable generation belongs to this exact identity and its freshness
         // frontier still matches the worktree.
@@ -1277,10 +1292,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             repository_id,
             worktree_id,
             policy,
+            path_policy,
             freshness_fence,
             byte_pool,
-            retained_snapshot_bytes: Vec::new(),
-            _retained_snapshot_memory: Vec::new(),
             #[cfg(test)]
             reconcile_fault: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
@@ -1403,24 +1417,27 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Reserve the installed worker plan on the canonical process authority.
     /// The returned RAII guard spans source capture and the complete production
     /// build, releasing on success, typed failure, cancellation, or unwind.
+    ///
+    /// Every build decodes its active parent generation under this slab, and
+    /// that decode is admitted against the ledger the slab is part of. The
+    /// parent is decoded first, so the slab is planned against the headroom
+    /// the resident parent leaves instead of refusing the parent for the slab
+    /// this same build just took.
     pub(super) fn reserve_worker_memory(
         &self,
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         let _workers = self.ensure_worker_plan()?;
+        self.publication
+            .load_active_shared()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-        let snapshot = self.resident_memory.snapshot();
-        // Admission refuses a request larger than the measured headroom, so
-        // the slab is planned against that too: the ledger alone does not see
-        // live state no owner charges, and a width planned from it asks for
-        // more than the process has left and is refused on every retry.
-        let pressure = self.resident_memory.pressure();
-        let measured_remaining = pressure
-            .limit_bytes()
-            .saturating_sub(pressure.state().observed_bytes().unwrap_or(0));
-        let remaining = snapshot
-            .limit_bytes
-            .saturating_sub(snapshot.used_bytes)
-            .min(measured_remaining);
+        // Planned from the view admission refuses against, taken after the
+        // parent decoded: a width the process cannot hold is refused on every
+        // retry.
+        let remaining = self
+            .resident_memory
+            .headroom_below(u64::MAX)
+            .available_bytes;
         // The process-global worker plan may have been installed against a
         // larger authority (standalone seed using detected host RAM). This
         // scheduler's remaining bytes are a different authority: the 6 GiB
@@ -1524,12 +1541,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             )
             .map(Some)
             .map_err(CodeIndexSchedulerErrorV1::SnapshotMemoryAdmission)
-    }
-
-    pub(super) fn finish_snapshot_build_memory(
-        _reservations: &mut [ResidentMemoryReservationV1],
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        Ok(())
     }
 
     /// One reconcile attempt's fence, bound to the process RSS cell.
@@ -1767,6 +1778,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self
             .observe_generation_compatibility(&generation)
             .is_reusable()
+            || !self.roster_follows_path_policy(&generation)
         {
             return Ok(None);
         }
@@ -1992,7 +2004,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         let RetainedReconcileCaptureV1 {
-            mut captured,
+            captured,
             drained_hints,
             control,
             git_metadata,
@@ -2012,9 +2024,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         publication
             .publish_atomically(&scope, None, Arc::clone(&pending))
             .map_err(CodeIndexProductionErrorV1::Publication)?;
-        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let snapshot_content_identity = pending.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         self.mark_reconciled_state(
@@ -2388,9 +2397,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .to_owned(),
                 ));
             }
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled_retained_generation_state(
                 git_metadata.clone(),
@@ -2454,9 +2460,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(Some(outcome));
         }
         drop(std::mem::take(&mut captured.captured_files));
-        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let source_witness = stat_signature
             .clone()
             .map(|signature| ReconciledSourceWitnessV1::new(signature, &captured.snapshot));
@@ -2804,8 +2807,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             .reset_corrupt_store()
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         self.latest_content_identity = None;
-        self.retained_snapshot_bytes.clear();
-        self._retained_snapshot_memory.clear();
         *self
             .active_snapshot_changed_paths
             .lock()
@@ -2968,10 +2969,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                     return Err(cancelled_code_index_reconcile());
                 }
                 drop(std::mem::take(&mut captured.captured_files));
-                Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                self._retained_snapshot_memory =
-                    std::mem::take(&mut captured.retained_reservations);
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(SourceContentManifestV1::for_snapshot(&captured.snapshot));
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3046,10 +3043,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
-                    Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-                    self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-                    self._retained_snapshot_memory =
-                        std::mem::take(&mut captured.retained_reservations);
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(source_manifest);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3066,9 +3059,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .to_owned(),
                 ));
             }
-            Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(source_manifest);
 
@@ -4091,6 +4081,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .filter(|file| {
                         remembered_dirty_paths
                             .is_none_or(|paths| !paths.contains(&file.logical_path))
+                            && self.row_follows_path_policy(file)
                     })
                     .map(|file| (file.logical_path.as_str(), file))
                     .collect::<BTreeMap<_, _>>()
@@ -4116,6 +4107,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let progress = git_tree_capture::CaptureProgressV1::new();
+        let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates

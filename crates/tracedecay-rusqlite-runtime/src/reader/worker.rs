@@ -10,6 +10,9 @@ use std::{
 };
 
 use rusqlite::{Connection, InterruptHandle, Transaction, TransactionBehavior};
+use tracedecay_domain::process_heap::{
+    IDLE_THREAD_COLLECTION_WAIT_V1, collect_idle_thread_heap_v1,
+};
 use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     StorageRuntimeErrorV1, UnavailableReasonV1,
@@ -475,7 +478,7 @@ fn run<E: ReaderQueryExecutor>(
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    while let Some(command) = next_command(&receiver) {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::ReleaseMemory { reply } => {
@@ -514,6 +517,19 @@ fn run<E: ReaderQueryExecutor>(
     }
 }
 
+/// Wait for the next command, returning this thread's heap whenever the
+/// sampler asked for it while the worker idles.
+fn next_command(receiver: &Receiver<WorkerCommand>) -> Option<WorkerCommand> {
+    loop {
+        collect_idle_thread_heap_v1();
+        match receiver.recv_timeout(IDLE_THREAD_COLLECTION_WAIT_V1) {
+            Ok(command) => return Some(command),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
 fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: Transaction<'_>,
     commands: Receiver<SnapshotCommand>,
@@ -523,8 +539,10 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     while let Ok(command) = commands.recv() {
         match command {
             SnapshotCommand::Pin { reply } => {
+                // Any read starts the snapshot; counting the schema would
+                // read every schema page on each pinned snapshot.
                 let result = transaction
-                    .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                    .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
                         row.get::<_, i64>(0)
                     })
                     .map(|_| ())

@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::framed_log::checksum;
 
 use super::bounds::SpoolBounds;
 use super::frames::{
@@ -28,9 +29,13 @@ pub(crate) struct SpoolMetaV1 {
     pub(crate) append_intent: Option<AppendIntentV1>,
 }
 
+/// One group-commit batch whose frames may be on disk before the metadata
+/// that names them. `header` is the first frame's header and `checksum`
+/// covers the whole batch's bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AppendIntentV1 {
     pub(crate) seq: u64,
+    pub(crate) records: u64,
     pub(crate) file_offset: u64,
     pub(crate) framed_len: u64,
     pub(crate) header: [u8; FRAME_HEADER_BYTES],
@@ -50,27 +55,60 @@ impl SpoolMetaV1 {
 }
 
 impl AppendIntentV1 {
-    pub(crate) fn new(seq: u64, file_offset: u64, frame: &[u8]) -> Self {
+    /// `batch` is `records` consecutive frames starting at `seq`.
+    pub(crate) fn new(seq: u64, file_offset: u64, records: u64, batch: &[u8]) -> Self {
         let mut header = [0u8; FRAME_HEADER_BYTES];
-        header.copy_from_slice(&frame[..FRAME_HEADER_BYTES]);
-        let mut checksum = [0u8; CHECKSUM_BYTES];
-        checksum.copy_from_slice(&frame[frame.len() - CHECKSUM_BYTES..]);
+        header.copy_from_slice(&batch[..FRAME_HEADER_BYTES]);
         Self {
             seq,
+            records,
             file_offset,
-            framed_len: frame.len() as u64,
+            framed_len: batch.len() as u64,
             header,
-            checksum,
+            checksum: checksum(batch),
         }
     }
 
-    pub(crate) fn matches_record(&self, record: &SpoolRecord) -> Result<bool, SpoolError> {
-        let frame = encode_frame(record.seq, record.source.as_bytes(), &record.payload)?;
-        Ok(self.seq == record.seq
-            && self.file_offset == record.file_offset
-            && self.framed_len == record.framed_len as u64
-            && self.header.as_slice() == &frame[..FRAME_HEADER_BYTES]
-            && self.checksum.as_slice() == &frame[frame.len() - CHECKSUM_BYTES..])
+    /// One past the last sequence the batch names.
+    pub(crate) fn end_seq(&self) -> u64 {
+        self.seq.saturating_add(self.records)
+    }
+
+    /// One past the last byte the batch names.
+    pub(crate) fn end_offset(&self) -> u64 {
+        self.file_offset.saturating_add(self.framed_len)
+    }
+
+    /// The scanned records that belong to this batch, which must be the
+    /// consecutive tail of the scan starting at the batch's first frame.
+    pub(crate) fn written_prefix<'a>(
+        &self,
+        records: &'a [SpoolRecord],
+    ) -> Option<&'a [SpoolRecord]> {
+        let written = &records[records.partition_point(|record| record.seq < self.seq)..];
+        let consecutive = written.len() as u64 <= self.records
+            && written
+                .iter()
+                .zip(self.seq..)
+                .all(|(record, seq)| record.seq == seq);
+        let anchored = written.first().is_none_or(|first| {
+            first.file_offset == self.file_offset
+                && encode_frame(first.seq, first.source.as_bytes(), &first.payload)
+                    .is_ok_and(|frame| frame[..FRAME_HEADER_BYTES] == self.header)
+        });
+        (consecutive && anchored).then_some(written)
+    }
+
+    fn matches_batch(&self, written: &[SpoolRecord]) -> Result<bool, SpoolError> {
+        let mut batch = Vec::new();
+        for record in written {
+            batch.extend_from_slice(&encode_frame(
+                record.seq,
+                record.source.as_bytes(),
+                &record.payload,
+            )?);
+        }
+        Ok(batch.len() as u64 == self.framed_len && checksum(&batch) == self.checksum)
     }
 }
 
@@ -92,9 +130,17 @@ pub(crate) fn validate_append_intent(
         return Ok(());
     };
     let parsed = parse_header(&intent.header, bounds).map_err(|_| SpoolError::MetadataCorrupted)?;
+    let first_len = parsed.framed_len as u64;
     if intent.seq != meta.next_seq
         || parsed.seq != intent.seq
-        || parsed.framed_len as u64 != intent.framed_len
+        || intent.records == 0
+        || intent.records > bounds.max_records as u64
+        || intent
+            .seq
+            .checked_add(intent.records)
+            .is_none_or(|end| end == u64::MAX)
+        || first_len > intent.framed_len
+        || (intent.records == 1 && first_len != intent.framed_len)
         || intent
             .file_offset
             .checked_add(intent.framed_len)
@@ -117,18 +163,28 @@ pub(crate) fn append_intent_is_reconciled(
         return Ok(false);
     }
     if truncated_partial_tail_bytes > 0 {
-        return Ok(intent.file_offset == scan.truncate_to);
+        // Open already proved the torn tail lies inside this batch.
+        return Ok(intent.file_offset <= scan.truncate_to && scan.truncate_to < intent.end_offset());
     }
-    if scan.file_len == intent.file_offset {
-        return Ok(true);
-    }
-    let Some(record) = scan.records.iter().find(|record| record.seq == intent.seq) else {
+    let Some(written) = intent.written_prefix(&scan.records) else {
         return Err(SpoolError::MetadataCorrupted);
     };
-    if scan.records.last().map(|record| record.seq) != Some(intent.seq)
-        || intent.file_offset.checked_add(intent.framed_len) != Some(scan.file_len)
-        || !intent.matches_record(record)?
-    {
+    let Some(last) = written.last() else {
+        return if scan.file_len == intent.file_offset {
+            Ok(true)
+        } else {
+            Err(SpoolError::MetadataCorrupted)
+        };
+    };
+    let written_end = last.file_offset + last.framed_len as u64;
+    // A crash may persist a frame-aligned prefix of the batch; its complete
+    // frames were never acknowledged and stay pending for replay.
+    let consistent = if written.len() as u64 == intent.records {
+        written_end == intent.end_offset() && intent.matches_batch(written)?
+    } else {
+        written_end < intent.end_offset()
+    };
+    if !consistent || written_end != scan.file_len {
         return Err(SpoolError::MetadataCorrupted);
     }
     Ok(true)

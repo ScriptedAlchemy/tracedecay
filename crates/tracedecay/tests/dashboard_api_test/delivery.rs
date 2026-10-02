@@ -41,7 +41,6 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
-use tracedecay_global_db::ParseOffset;
 use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -50,7 +49,6 @@ use serde_json::json;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
-use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 const DELIVERY_HTTP_ADMISSION_MATCHED_PR: &str = "42";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_PR: &str = "99";
@@ -678,6 +676,26 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
         assert_eq!(usage["required_authority"], "session-Git correlation index");
 
         let project_key = fixture.host_runtime.project_id().as_str().to_string();
+        // A subagent rollout admitted through the production Codex pass: its
+        // tool invocations exist only as canonical observations, and the
+        // paired outputs are results, not invocations. It is admitted before
+        // the seeded sessions exist so the pass's Git evidence convergence
+        // places only this session on the checked-out branch.
+        let home = fixture
+            .host_runtime
+            .profile()
+            .home()
+            .expect("fixture profile names its home")
+            .to_path_buf();
+        write_codex_subagent_rollout(&home, &project_root, "feature/agents");
+        fixture
+            .host_runtime
+            .ingest_project_provider_for_test(
+                &project_root,
+                tracedecay_sessions::runtime::SessionProvider::Codex,
+            )
+            .await
+            .expect("ingest Codex rollout");
         let sessions = [
             agent_usage_session(&project_key, &project_root, "planner-1", Some("planner")),
             agent_usage_session(&project_key, &project_root, "planner-2", Some("planner")),
@@ -764,30 +782,10 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
                 .collect();
             fixture
                 .host_runtime
-                .upsert_transcript_batch_for_test(
-                    HostAdmissionScope::Project,
-                    session,
-                    &messages,
-                    &format!("agent-usage-fixture:{}", session.session_id),
-                    ParseOffset::default(),
-                )
+                .seed_session_messages_for_test(HostAdmissionScope::Project, session, &messages)
                 .await
                 .expect("seed agent usage transcript");
         }
-        // A subagent rollout admitted through the production Codex source:
-        // its tool invocations exist only as canonical observations, and the
-        // paired outputs are results, not invocations.
-        let codex_home = tempfile::tempdir().expect("codex home");
-        write_codex_subagent_rollout(codex_home.path(), &project_root, "feature/agents");
-        let stats = fixture
-            .host_runtime
-            .ingest_project_transcript_source_for_test(
-                &CodexSource::with_home(codex_home.path()),
-                &project_root,
-            )
-            .await
-            .expect("ingest Codex rollout");
-        assert!(stats.messages_upserted > 0, "{stats:?}");
 
         for (session_id, branch) in [
             ("planner-1", "feature/agents"),
@@ -853,15 +851,16 @@ fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
             unlabeled["tool_calls"], 3,
             "two tool calls plus one Codex patch invocation: {body}"
         );
-        // No provider usage was observed for these sessions; the rows say so
-        // instead of reporting zero tokens.
+        // The accounting authority covers these sessions and observed no
+        // provider usage for them; the rows say so instead of reporting zero
+        // tokens.
         for row in agents {
             assert_eq!(row["sessions_with_usage"], 0, "{body}");
             assert_eq!(row["usage_complete"], false);
             assert!(row["counters"]["total_tokens"].is_null(), "{body}");
         }
-        assert_ne!(value["usage_coverage"], "complete", "{body}");
-        assert_eq!(usage["state"], "partial", "{body}");
+        assert_eq!(value["usage_coverage"], "complete", "{body}");
+        assert_eq!(usage["state"], "ready", "{body}");
     });
 }
 

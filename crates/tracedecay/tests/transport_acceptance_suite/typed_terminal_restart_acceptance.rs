@@ -38,9 +38,14 @@
 use crate::common;
 /// A reset-required registered store served as a typed state.
 mod reset_required_serving;
+/// A pre-log hook admission ledger is refused until its scoped reset.
+mod stale_hook_admission_reset;
+/// Stale session stores refuse only sessions until their scoped reset.
+mod stale_sessions_store_reset;
 /// The HTTP, MCP-host, and Rust SDK legs of this same journey.
 mod transport_boundaries;
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -60,6 +65,8 @@ const MAX_MARKER_TOKEN_BYTES: usize = 36;
 /// live; the barrier, not this number, decides when settlement happens.
 const PARTIAL_EFFECT_DEADLINE: Duration = Duration::from_secs(8);
 const BARRIER_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound on the scoped reset reaching its wait for the profile lease.
+const SCOPED_RESET_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Fails loudly if a marker could be refused by memory hygiene instead of
 /// committing, so a future marker edit cannot silently invalidate the
@@ -327,6 +334,72 @@ fn assert_reset_required(payload: &Value, context: &str) {
     );
 }
 
+/// Runs the scoped reset the way an operator does while the daemon that
+/// reported the stale stores is still serving: the reset reads the daemon's
+/// reset census, then waits for the operator to stop the unmanaged test
+/// daemon (a managed service is stopped by the reset itself). `between` runs
+/// after the daemon exited and before the reset can take the profile, so it
+/// observes exactly the bytes the reset starts from.
+fn run_scoped_reset(
+    home: &Path,
+    project: &Path,
+    daemon: &mut common::DaemonProcess,
+    between: impl FnOnce(),
+) -> (std::process::ExitStatus, String) {
+    let profile_root = home.join(".tracedecay");
+    let hold = tracedecay_runtime_core::lifecycle_lease::acquire_shared_for_profile(
+        &profile_root,
+        "stale-sessions-store-reset",
+    )
+    .expect("hold the profile while the daemon stops");
+    let mut child = tracedecay_command_with_home(home)
+        .args(["wipe", "--stale", "--yes"])
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the scoped reset");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        for line in BufReader::new(stdout).lines() {
+            text.push_str(&line.expect("reset stdout line"));
+            text.push('\n');
+        }
+        text
+    });
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let mut transcript = String::new();
+    let started = Instant::now();
+    loop {
+        let mut line = String::new();
+        let read = stderr.read_line(&mut line).expect("read reset stderr");
+        transcript.push_str(&line);
+        if read == 0 {
+            panic!("the scoped reset exited before waiting for the profile:\n{transcript}");
+        }
+        if line.contains("stop it and wipe --stale continues") {
+            break;
+        }
+        assert!(
+            started.elapsed() < SCOPED_RESET_TIMEOUT,
+            "the scoped reset never waited for the profile:\n{transcript}"
+        );
+    }
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon for the scoped reset");
+    between();
+    drop(hold);
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stderr, &mut rest).expect("read reset stderr");
+    transcript.push_str(&rest);
+    let status = child.wait().expect("wait for the scoped reset");
+    transcript.push_str(&stdout_reader.join().expect("join reset stdout"));
+    (status, transcript)
+}
+
 fn spawn_daemon_with_commit_barrier(home: &Path, barrier_dir: &Path) -> common::DaemonProcess {
     let barrier_dir = barrier_dir.to_path_buf();
     spawn_tracedecay_daemon_with(home, move |command| {
@@ -452,7 +525,7 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload, "first observation");
+    assert_reset_required(&reset_payload["structuredContent"], "first observation");
 
     // Replace the serving process again. The reset-only legal action must be
     // reported identically: the tampered store is never repaired implicitly,
@@ -475,7 +548,10 @@ fn reset_required_survives_physical_daemon_restart_via_cli() {
         "tracedecay_storage_status",
         &json!({ "include_details": false }),
     );
-    assert_reset_required(&reset_payload_after_restart, "after a physical restart");
+    assert_reset_required(
+        &reset_payload_after_restart["structuredContent"],
+        "after a physical restart",
+    );
 
     let _ = daemon.kill_and_wait();
 }

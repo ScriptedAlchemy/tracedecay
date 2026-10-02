@@ -12,8 +12,8 @@ use tracedecay_store::{
 };
 
 use super::support::{
-    ExecutorControl, LifecycleBarrier, TestBinding, TestDatabase, TestProbe, marker_count, release,
-    request, runtime, table_count, unwrap_arc, writer,
+    ExecutorControl, LifecycleBarrier, ReleaseOnDrop, TestBinding, TestDatabase, TestProbe,
+    marker_count, release, request, runtime, table_count, unwrap_arc, writer,
 };
 
 #[test]
@@ -134,6 +134,7 @@ fn drain_rejects_new_work_but_joins_after_accepted_work_replies() {
             ..ExecutorControl::default()
         },
     ));
+    let _open_gate_on_failure = ReleaseOnDrop(Arc::clone(&gate));
     runtime().block_on(async {
         let task_writer = Arc::clone(&writer);
         let probe = TestProbe::fixed(&accepted);

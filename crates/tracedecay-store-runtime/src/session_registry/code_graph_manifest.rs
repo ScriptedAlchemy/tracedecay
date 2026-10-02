@@ -6,20 +6,19 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionError, SealedCodeGraphRowsError, build_sealed_code_graph_rows,
+    CodeGraphLayeredReportV1, CodeGraphProjectionError, SealedCodeGraphRowsError,
+    build_layered_code_graph_rows, build_sealed_code_graph_rows,
 };
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
 };
-use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationStoreLockV1, GRAPH_REPLAY_POOL_ACQUIRE_POLL, code_generation_segments_root,
-    try_acquire_code_generation_store_lock,
-};
+use tracedecay_code_index_retention::code_index_generations::code_generation_segments_root;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, sha256_hex_suffix};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphGenerationRows, GraphLayeredRowSpill, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphSealedBaseAbsenceV1,
     SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
 };
 use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
@@ -69,6 +68,9 @@ fn validate_sealed_generation_metadata(metadata: &std::fs::Metadata) -> Result<u
     Ok(metadata.len())
 }
 
+/// Readers hold no store lock, so retention may hard-link or rename a seal
+/// while it is read. Both advance ctime without touching the bytes, so ctime
+/// is not part of a seal's identity.
 fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -79,8 +81,6 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
             && left.len() == right.len()
             && left.mtime() == right.mtime()
             && left.mtime_nsec() == right.mtime_nsec()
-            && left.ctime() == right.ctime()
-            && left.ctime_nsec() == right.ctime_nsec()
     }
     #[cfg(windows)]
     {
@@ -130,13 +130,15 @@ impl CheckedSealReader<'_> {
         std::io::Error::other("sealed code generation checked read failed")
     }
 
+    /// Returns the verified handle, whose bytes a caller may re-read without
+    /// trusting the path again.
     fn finish(
         self,
         path: &std::path::Path,
         opened_metadata: &std::fs::Metadata,
         admitted_len: u64,
         expected_digest: &str,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<File, GraphDbError> {
         (self.check)()?;
         let final_file_metadata =
             self.reader
@@ -147,19 +149,16 @@ impl CheckedSealReader<'_> {
                         "sealed code generation metadata cannot be revalidated: {error}"
                     ),
                 })?;
-        let final_path_metadata =
-            path.symlink_metadata()
-                .map_err(|error| GraphDbError::Corrupt {
-                    message: format!("sealed code generation path cannot be revalidated: {error}"),
-                })?;
         if !same_file_identity(opened_metadata, &final_file_metadata)
-            || !same_file_identity(opened_metadata, &final_path_metadata)
             || self.bytes_read != admitted_len
         {
             return Err(GraphDbError::Corrupt {
                 message: "sealed code generation identity or length changed while it was read"
                     .to_owned(),
             });
+        }
+        if seal_left_path(path, opened_metadata)? {
+            return Err(GraphDbError::SealSuperseded);
         }
         #[cfg(windows)]
         if !same_windows_handle_identity(self.reader.get_ref(), path)? {
@@ -174,8 +173,35 @@ impl CheckedSealReader<'_> {
                     .to_owned(),
             });
         }
-        Ok(())
+        Ok(self.reader.into_inner())
     }
+}
+
+/// Retention retires seals without waiting for readers. A read that outlives
+/// its path reports the seal superseded; the bytes it read are not evidence
+/// of corruption.
+fn seal_left_path(
+    path: &std::path::Path,
+    opened_metadata: &std::fs::Metadata,
+) -> Result<bool, GraphDbError> {
+    match path.symlink_metadata() {
+        Ok(path_metadata) => Ok(!same_file_identity(opened_metadata, &path_metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(GraphDbError::Corrupt {
+            message: format!("sealed code generation path cannot be revalidated: {error}"),
+        }),
+    }
+}
+
+/// Whether any of `seal_paths` still names the seal. The segment sweep
+/// collects a seal's segments only once no root names the seal.
+fn seal_still_named(seal_paths: &[PathBuf]) -> Result<bool, GraphDbError> {
+    for path in seal_paths {
+        if seal_is_present(path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl Read for CheckedSealReader<'_> {
@@ -268,9 +294,12 @@ fn open_checked_seal_reader<'a>(
 /// first, then from the graph replay pool. Retirement moves a sealed file
 /// strictly canonical->pool by atomic rename, so probing in that order
 /// observes a live seal in at least one root; every read is digest-verified,
-/// which makes recovery from either root equally trustworthy. Typed
-/// interruptions from the caller's probe are transport states and must
-/// surface immediately instead of triggering a second full read.
+/// which makes recovery from either root equally trustworthy. Readers take no
+/// store or pool lock: a seal is immutable and content-addressed, so the
+/// digest-verified bytes of the opened handle are the seal, and a seal that
+/// retires mid-read is unavailable. Typed interruptions from the caller's
+/// probe are transport states and must surface immediately instead of
+/// triggering a second full read.
 fn with_verified_seal_from_roots<T>(
     canonical: &std::path::Path,
     pool: &std::path::Path,
@@ -280,20 +309,14 @@ fn with_verified_seal_from_roots<T>(
         &std::path::Path,
         &str,
         &dyn Fn() -> Result<(), GraphDbError>,
-        CodeGenerationStoreLockV1,
     ) -> Result<T, GraphDbError>,
 ) -> Result<T, GraphDbError> {
-    let canonical_store_root = canonical
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| GraphDbError::invalid("canonical generation root has no store parent"))?;
-    let canonical_lock = acquire_generation_bundle_lock(canonical_store_root, check)?;
     let canonical_absent = matches!(
         std::fs::symlink_metadata(canonical),
         Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
     );
     if !canonical_absent {
-        match read(canonical, expected_digest, check, canonical_lock) {
+        match read(canonical, expected_digest, check) {
             Ok(value) => return Ok(value),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
                 return Err(error);
@@ -303,23 +326,14 @@ fn with_verified_seal_from_roots<T>(
                 // the pool copy is digest-verified, so recovering there is
                 // sound. A pool failure reports the canonical error, which
                 // names the authoritative copy.
-                let pool_root = pool.parent().ok_or_else(|| {
-                    GraphDbError::invalid("graph replay generation has no pool parent")
-                })?;
-                let pool_lock = acquire_generation_bundle_lock(pool_root, check)?;
-                return match read(pool, expected_digest, check, pool_lock) {
+                return match read(pool, expected_digest, check) {
                     Ok(value) => Ok(value),
                     Err(_) => Err(canonical_error),
                 };
             }
         }
     }
-    drop(canonical_lock);
-    let pool_root = pool
-        .parent()
-        .ok_or_else(|| GraphDbError::invalid("graph replay generation has no pool parent"))?;
-    let pool_lock = acquire_generation_bundle_lock(pool_root, check)?;
-    read(pool, expected_digest, check, pool_lock)
+    read(pool, expected_digest, check)
 }
 
 /// Only NotFound abstains; malformed or inaccessible seal authority fails closed.
@@ -333,33 +347,15 @@ fn seal_is_present(path: &std::path::Path) -> Result<bool, GraphDbError> {
     }
 }
 
-#[hotpath::measure(label = "daemon.session_registry.seal.acquire_bundle_lock")]
-fn acquire_generation_bundle_lock(
-    root: &std::path::Path,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<CodeGenerationStoreLockV1, GraphDbError> {
-    loop {
-        check()?;
-        match try_acquire_code_generation_store_lock(root)
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?
-        {
-            Some(lock) => return Ok(lock),
-            None => std::thread::sleep(GRAPH_REPLAY_POOL_ACQUIRE_POLL),
-        }
-    }
-}
-
 /// Reads the partitioned manifest at `path` and proves it is the seal named
-/// by `expected_digest`. The lock proves the pathname is live while the
-/// bytes are read; it drops with the returned manifest in hand, because the
-/// segments it names are content-addressed and every segment read verifies
-/// its own address.
+/// by `expected_digest`. The digest is checked over the bytes read from the
+/// opened handle, so a retirement that unlinks the path after the open
+/// cannot change them.
 #[hotpath::measure(label = "daemon.session_registry.seal.read_manifest")]
 fn read_verified_seal_manifest(
     path: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-    lifetime_lock: CodeGenerationStoreLockV1,
 ) -> Result<Vec<u8>, GraphDbError> {
     (check)()?;
     let path_metadata = path.symlink_metadata().map_err(|error| {
@@ -404,23 +400,29 @@ fn read_verified_seal_manifest(
                 .to_owned(),
         });
     }
-    drop(lifetime_lock);
     (check)()?;
     Ok(manifest)
 }
 
-/// Builds the code graph of the authenticated seal `manifest` into `spill`,
-/// streaming its file segments from `segment_roots` one window at a time.
-#[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
-fn spill_verified_seal_graph(
-    source: &SealedGenerationFileWindowsV1,
+/// The paths that can name one seal and the roots holding its segments.
+struct SealRoutes {
+    seal_paths: Vec<PathBuf>,
+    segment_roots: Vec<PathBuf>,
+}
+
+/// Runs a graph build over `source`'s file segments, read from the segment
+/// roots of `routes`, and classifies its failure. A cancellation or deadline
+/// the segment reader observed is the build's outcome, whatever error the
+/// build reported after it. A build whose seal no route names any more read
+/// a retired seal: it is superseded, not corrupt.
+fn with_verified_segments<T>(
     sealed_state_digest: &ManifestDigest,
-    segment_roots: &[PathBuf],
-    projection: GraphProjectionIdentity,
-    projector_revision: &GraphProjectorRevision,
-    spill: GraphGenerationRowSpill,
+    routes: &SealRoutes,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<SpilledGraphGeneration, GraphDbError> {
+    build: impl FnOnce(
+        &mut tracedecay_code_index::production::SealedGenerationSegmentReaderV1<'_>,
+    ) -> Result<T, SealedCodeGraphRowsError>,
+) -> Result<T, GraphDbError> {
     let mut interruption = None;
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
@@ -435,29 +437,51 @@ fn spill_verified_seal_graph(
             return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
         }
         read_partitioned_segment(
-            select_partitioned_segment_root(segment_roots, request)?,
+            select_partitioned_segment_root(&routes.segment_roots, request)?,
             request,
             buffer,
         )
     };
-    let built = build_sealed_code_graph_rows(
-        projection,
-        source,
-        &mut read_segment,
-        projector_revision,
-        spill,
-        check,
-    );
+    let built = build(&mut read_segment);
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
-    built.map_err(|error| match error {
-        SealedCodeGraphRowsError::Source(error) => {
+    let error = match built {
+        Ok(built) => return Ok(built),
+        Err(SealedCodeGraphRowsError::Source(error)) => {
             classify_sealed_generation_decode_error(error, sealed_state_digest)
         }
-        SealedCodeGraphRowsError::Projection(error) => {
+        Err(SealedCodeGraphRowsError::Projection(error)) => {
             classify_sealed_projection_build_error(error)
         }
+    };
+    if matches!(error, GraphDbError::Corrupt { .. }) && !seal_still_named(&routes.seal_paths)? {
+        return Err(GraphDbError::SealSuperseded);
+    }
+    Err(error)
+}
+
+/// Builds the code graph of the authenticated seal `manifest` into `spill`,
+/// streaming its file segments from `routes` one window at a time.
+#[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
+fn spill_verified_seal_graph(
+    source: &SealedGenerationFileWindowsV1,
+    sealed_state_digest: &ManifestDigest,
+    routes: &SealRoutes,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    spill: GraphGenerationRowSpill,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<SpilledGraphGeneration, GraphDbError> {
+    with_verified_segments(sealed_state_digest, routes, check, |read_segment| {
+        build_sealed_code_graph_rows(
+            projection,
+            source,
+            read_segment,
+            projector_revision,
+            spill,
+            check,
+        )
     })
 }
 
@@ -482,6 +506,7 @@ fn open_verified_seal(
 /// Builds the code graph of the seal `sealed_state_digest` names, read from
 /// the canonical generations root or, once retention moved it, the replay
 /// pool, into `spill`. The seal must hold `generation`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spill_sealed_generation_graph_from_roots(
     generations_root: &std::path::Path,
@@ -493,6 +518,37 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
     spill: GraphGenerationRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SpilledGraphGeneration, GraphDbError> {
+    let (source, sealed_state_digest, routes) = open_seal_from_roots(
+        generations_root,
+        replay_root,
+        sealed_state_digest,
+        generation,
+        check,
+        "code_graph_manifest.spill_sealed_generation_graph",
+    )?;
+    spill_verified_seal_graph(
+        &source,
+        &sealed_state_digest,
+        &routes,
+        projection,
+        projector_revision,
+        spill,
+        check,
+    )
+}
+
+/// Authenticates the seal `sealed_state_digest` names, read from the
+/// canonical generations root or, once retention moved it, the replay pool,
+/// and requires it to hold `generation`; a different generation is a
+/// conflict at `site`.
+fn open_seal_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    site: &'static str,
+) -> Result<(SealedGenerationFileWindowsV1, ManifestDigest, SealRoutes), GraphDbError> {
     let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
@@ -501,9 +557,11 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
             .parent()
             .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?,
     );
+    let canonical = generations_root.join(&seal_file);
+    let pool = replay_root.join(&seal_file);
     let manifest = with_verified_seal_from_roots(
-        &generations_root.join(&seal_file),
-        &replay_root.join(&seal_file),
+        &canonical,
+        &pool,
         digest,
         check,
         read_verified_seal_manifest,
@@ -511,19 +569,99 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
     let (source, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
     drop(manifest);
     if source.generation_id() != generation {
-        return Err(GraphDbError::conflict(
-            "code_graph_manifest.spill_sealed_generation_graph",
-        ));
+        return Err(GraphDbError::conflict(site));
     }
-    spill_verified_seal_graph(
+    let routes = SealRoutes {
+        seal_paths: vec![canonical, pool],
+        segment_roots: vec![segments_root],
+    };
+    Ok((source, sealed_state_digest, routes))
+}
+
+/// A layered row spill over a parent's sealed graph, or why it has none.
+pub(super) type LayeredRowSpillV1 =
+    Result<Result<GraphLayeredRowSpill, GraphSealedBaseAbsenceV1>, GraphDbError>;
+
+/// A seal's graph rows as its publication seals them: a delta over the
+/// sealed graph of the seal's parent code generation when `layered_spill`
+/// resolves one and the base's inputs admit it, the cold rows otherwise.
+///
+/// A layered attempt that fails for any reason but an interruption is
+/// reported and replaced by the cold build, which is the authority a
+/// layered generation must equal.
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.session_registry.seal.graph_rows")]
+pub(super) fn graph_rows_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    generation: &tracedecay_domain::CodeGenerationId,
+    projection: GraphProjectionIdentity,
+    projector_revision: &GraphProjectorRevision,
+    layered_spill: &dyn Fn(&tracedecay_domain::CodeGenerationId) -> LayeredRowSpillV1,
+    cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
+    let (source, sealed_state_digest, routes) = open_seal_from_roots(
+        generations_root,
+        replay_root,
+        sealed_state_digest,
+        generation,
+        check,
+        "code_graph_manifest.graph_rows",
+    )?;
+    if let Some(parent) = source.manifest().parent_generation.clone() {
+        let layered = layered_spill(&parent).and_then(|spill| match spill {
+            Ok(spill) => {
+                with_verified_segments(&sealed_state_digest, &routes, check, |read_segment| {
+                    build_layered_code_graph_rows(
+                        projection.clone(),
+                        &source,
+                        read_segment,
+                        projector_revision,
+                        spill,
+                        check,
+                    )
+                })
+                .map(|built| built.map_err(|decline| format!("{decline:?}")))
+            }
+            Err(absence) => Ok(Err(format!("{absence:?}"))),
+        });
+        match layered {
+            Ok(Ok(built)) => return Ok((built.generation.into(), Some(built.report))),
+            Ok(Err(reason)) => tracing::info!(
+                event = "code_graph_layered_refresh_declined",
+                generation = %generation,
+                parent = %parent,
+                reason = %reason,
+                "the refresh seals cold rather than as a delta over its parent's graph"
+            ),
+            Err(
+                error @ (GraphDbError::Cancelled
+                | GraphDbError::DeadlineExceeded
+                | GraphDbError::SealSuperseded),
+            ) => {
+                return Err(error);
+            }
+            Err(error) => tracing::warn!(
+                event = "code_graph_layered_refresh_unavailable",
+                generation = %generation,
+                parent = %parent,
+                error = %error,
+                "a layered graph refresh could not be built; sealing the generation cold"
+            ),
+        }
+    }
+    let spilled = spill_verified_seal_graph(
         &source,
         &sealed_state_digest,
-        &[segments_root],
+        &routes,
         projection,
         projector_revision,
-        spill,
+        cold_spill()?,
         check,
-    )
+    )?;
+    Ok((spilled.into(), None))
 }
 
 struct PinnedPartitionedSegmentV1 {
@@ -715,7 +853,7 @@ fn verify_checked_seal(
     path: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
+) -> Result<File, GraphDbError> {
     let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
     let copied = std::io::copy(&mut reader, &mut std::io::sink());
     #[cfg(feature = "hotpath")]
@@ -735,14 +873,12 @@ fn verify_checked_seal_bundle(
     segments_root: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-    lifetime_lock: CodeGenerationStoreLockV1,
 ) -> Result<(), GraphDbError> {
     verify_checked_seal_bundle_with_evidence_barrier(
         path,
         segments_root,
         expected_digest,
         check,
-        lifetime_lock,
         || {},
     )
 }
@@ -752,16 +888,13 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     segments_root: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-    lifetime_lock: CodeGenerationStoreLockV1,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
-    verify_checked_seal(path, expected_digest, check)?;
+    let mut file = verify_checked_seal(path, expected_digest, check)?;
     let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
-    let mut file = File::open(path).map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation manifest cannot be reopened: {error}"),
-    })?;
     let read = file
-        .read(&mut prefix)
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.read(&mut prefix))
         .map_err(|error| GraphDbError::Corrupt {
             message: format!("sealed generation manifest prefix read failed: {error}"),
         })?;
@@ -784,10 +917,12 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
         return (check)();
     }
-    let manifest = std::fs::read(path).map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation manifest read failed: {error}"),
-    })?;
-    let mut lifetime_lock = Some(lifetime_lock);
+    let mut manifest = Vec::new();
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_to_end(&mut manifest))
+        .map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed generation manifest read failed: {error}"),
+        })?;
     let mut pinned_evidence = None;
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
@@ -814,9 +949,6 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                 } => {
                     if pinned_evidence.is_none() {
                         pinned_evidence = Some(open_partitioned_segment(segments_root, request)?);
-                        // Verification uses the same lifetime handoff as decode:
-                        // pathname authority under the lock, then one pinned pack.
-                        drop(lifetime_lock.take());
                         if let Some(barrier) = evidence_barrier.take() {
                             barrier();
                         }
@@ -837,9 +969,20 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
-    verified.map_err(|error| GraphDbError::Corrupt {
-        message: format!("sealed generation component verification failed: {error}"),
-    })?;
+    if let Err(error) = verified {
+        // The segment sweep collects a seal's segments only once no root
+        // names the seal, so a missing segment of a retired seal is its
+        // retirement, and of a live seal is corruption.
+        let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+            message: format!("sealed code generation metadata cannot be revalidated: {error}"),
+        })?;
+        if seal_left_path(path, &opened_metadata)? {
+            return Err(GraphDbError::SealSuperseded);
+        }
+        return Err(GraphDbError::Corrupt {
+            message: format!("sealed generation component verification failed: {error}"),
+        });
+    }
     (check)()
 }
 
@@ -865,8 +1008,8 @@ pub(super) fn verify_sealed_generation_source_from_roots(
         &replay_root.join(&seal_file),
         digest,
         check,
-        |path, expected_digest, check, lifetime_lock| {
-            verify_checked_seal_bundle(path, &segments_root, expected_digest, check, lifetime_lock)
+        |path, expected_digest, check| {
+            verify_checked_seal_bundle(path, &segments_root, expected_digest, check)
         },
     )
 }
@@ -1060,23 +1203,14 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         let mut canonical_error = None;
         for route in &routes {
             check()?;
-            let store_root = route.generations_root.parent().ok_or_else(|| {
-                GraphDbError::invalid("canonical generation root has no store parent")
-            })?;
             let canonical = route.generations_root.join(&seal_file);
-            // Absence abstains before lock acquisition. Presence is only a
-            // prefilter: the reader revalidates identity under the lock.
+            // Presence is only a prefilter: retention may move the seal before
+            // the read opens it, and the single replay-pool probe below
+            // resolves that move.
             if !seal_is_present(&canonical)? {
                 continue;
             }
-            let lock = acquire_generation_bundle_lock(store_root, check)?;
-            if !seal_is_present(&canonical)? {
-                // Retention may move the seal while this reader waits.
-                // The single replay-pool probe below resolves that move.
-                drop(lock);
-                continue;
-            }
-            match read_verified_seal_manifest(&canonical, digest, check, lock) {
+            match read_verified_seal_manifest(&canonical, digest, check) {
                 Ok(bytes) => manifest = Some(bytes),
                 Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
                     return Err(error);
@@ -1096,8 +1230,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                         )
                     }));
                 }
-                let lock = acquire_generation_bundle_lock(&binding.replay_root, check)?;
-                read_verified_seal_manifest(&pool, digest, check, lock).map_err(|error| {
+                read_verified_seal_manifest(&pool, digest, check).map_err(|error| {
                     if matches!(
                         error,
                         GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
@@ -1111,6 +1244,14 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         };
         let (sealed, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
         drop(manifest);
+        let seal_routes = SealRoutes {
+            seal_paths: routes
+                .iter()
+                .map(|route| route.generations_root.join(&seal_file))
+                .chain(std::iter::once(binding.replay_root.join(&seal_file)))
+                .collect(),
+            segment_roots,
+        };
         if sealed.manifest().project_id != binding.project_id
             || sealed.snapshot().repository != source.repository
             || sealed.generation_id() != &source.generation
@@ -1131,7 +1272,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         spill_verified_seal_graph(
             &sealed,
             &sealed_state_digest,
-            &segment_roots,
+            &seal_routes,
             projection,
             &source.projector_revision,
             spill,
@@ -1188,7 +1329,7 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, read_verified_seal_manifest,
         spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
         verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
         verify_sealed_generation_source_from_roots,
@@ -1468,8 +1609,9 @@ mod tests {
                 } else {
                     Ok(())
                 }
-            }),
-            Err(GraphDbError::DeadlineExceeded)
+            })
+            .unwrap_err(),
+            GraphDbError::DeadlineExceeded
         );
     }
 
@@ -1523,6 +1665,205 @@ mod tests {
         std::fs::remove_file(replay_root.join(&seal_file)).unwrap();
         std::fs::write(generations_root.join(&seal_file), &bytes).unwrap();
         verify(&|| Ok(())).unwrap();
+    }
+
+    fn two_second_check() -> impl Fn() -> Result<(), GraphDbError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        move || {
+            if std::time::Instant::now() >= deadline {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A graph publisher holds the project's replay-pool lock while it reads
+    /// seals. Seal reads take neither that lock nor the canonical store lock,
+    /// so they answer instead of polling a lock their own thread holds until
+    /// the deadline.
+    #[test]
+    fn sealed_source_verification_answers_while_the_store_and_pool_locks_are_held() {
+        let temp = TempDir::new().unwrap();
+        let store_root = temp.path().join("store");
+        let generations_root = store_root.join("code-generations-v1");
+        let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        tracedecay_private_fs::create_private_directory(&replay_root).unwrap();
+        let digest = "772b0ae89b16929b615e26a584f5f492ba6a29d94903f45490df8de3a7d06d36";
+        let sealed_state_digest =
+            SealedGraphStateDigest::try_from(format!("sha256:{digest}")).unwrap();
+        let pool_seal = replay_root.join(format!("generation-{digest}.json"));
+        let _store_lock = acquire_code_generation_store_lock(&store_root).unwrap();
+        let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
+        let verify = || {
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                &replay_root,
+                &sealed_state_digest,
+                &two_second_check(),
+            )
+        };
+
+        std::fs::write(
+            &pool_seal,
+            b"pool-only seal read under a held replay-pool lock\n",
+        )
+        .unwrap();
+        assert_eq!(verify(), Ok(()));
+        std::fs::write(
+            &pool_seal,
+            b"pool-only seal read under a held replay-pool lock!",
+        )
+        .unwrap();
+        assert!(matches!(verify(), Err(GraphDbError::Corrupt { .. })));
+        std::fs::remove_file(&pool_seal).unwrap();
+        assert!(matches!(verify(), Err(GraphDbError::Unavailable { .. })));
+    }
+
+    #[test]
+    fn hydration_answers_while_the_store_and_pool_locks_are_held() {
+        let fixture = partitioned_seal_fixture("held-locks");
+        let replay_root = fixture.pool_manifest.parent().unwrap().to_path_buf();
+        let generations_root = fixture.scope_root.join("code-generations-v1");
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.held-locks").unwrap(),
+            UserProfileId::new("profile.held-locks").unwrap(),
+            fixture.project.clone(),
+        );
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let _route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                generations_root.clone(),
+                replay_root.clone(),
+            )
+            .unwrap();
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: shard,
+            namespace: GraphNamespaceV1::new("namespace.held-locks").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        let source = SealedCodeGenerationReplay {
+            repository: fixture.repository.clone(),
+            generation: fixture.generation.clone(),
+            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                "sha256:{}",
+                fixture.digest
+            ))
+            .unwrap(),
+            projector_revision: GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+        };
+        let _store_lock = acquire_code_generation_store_lock(&fixture.scope_root).unwrap();
+        let _pool_lock = acquire_code_generation_store_lock(&replay_root).unwrap();
+
+        let pooled = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
+        assert_eq!(pooled.row_counts(), (1602, 1600));
+        let canonical = generations_root.join(fixture.pool_manifest.file_name().unwrap());
+        std::fs::rename(&fixture.pool_manifest, &canonical).unwrap();
+        let canonical_only = hydrate(&provider, &owner, &source, &two_second_check()).unwrap();
+        assert_eq!(canonical_only.row_counts(), (1602, 1600));
+        std::fs::remove_file(&canonical).unwrap();
+        assert!(matches!(
+            hydrate(&provider, &owner, &source, &two_second_check()),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+    }
+
+    /// The graph reconciler stages a pool seal for unlink by renaming it out
+    /// of the content-addressed namespace. A verification that was reading it
+    /// then reports the seal unavailable, not corrupt.
+    #[test]
+    fn a_pool_seal_staged_for_unlink_mid_read_is_superseded() {
+        let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("store/code-generations-v1");
+        let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        std::fs::create_dir_all(&replay_root).unwrap();
+        let bytes = vec![b'a'; SEAL_READ_CHECK_BYTES * 4];
+        let digest = hex::encode(Sha256::digest(&bytes));
+        let sealed_state_digest =
+            SealedGraphStateDigest::try_from(format!("sha256:{digest}")).unwrap();
+        let pool_seal = replay_root.join(format!("generation-{digest}.json"));
+        let staged = replay_root.join(format!(".generation-{digest}.unlink-test"));
+        std::fs::write(&pool_seal, &bytes).unwrap();
+        let checks = AtomicUsize::new(0);
+        let verify = |retire_mid_read: bool| {
+            checks.store(0, Ordering::SeqCst);
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                &replay_root,
+                &sealed_state_digest,
+                &|| {
+                    if retire_mid_read && checks.fetch_add(1, Ordering::SeqCst) == 5 {
+                        std::fs::rename(&pool_seal, &staged).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        };
+
+        assert_eq!(verify(false), Ok(()));
+        assert_eq!(verify(true), Err(GraphDbError::SealSuperseded));
+    }
+
+    /// The segment sweep collects a seal's segments only once no root names
+    /// the seal. Missing segments of a live seal are corruption; missing
+    /// segments of a seal that retired during verification are its
+    /// retirement.
+    #[test]
+    fn swept_segments_are_corruption_for_a_live_seal_and_retirement_for_a_retired_one() {
+        let fixture = partitioned_seal_fixture("swept-segments");
+        let manifest_checks = AtomicUsize::new(0);
+        verify_checked_seal(&fixture.pool_manifest, &fixture.digest, &|| {
+            manifest_checks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        let manifest_checks = manifest_checks.load(Ordering::SeqCst);
+        let staged = fixture
+            .pool_manifest
+            .with_file_name(format!(".generation-{}.unlink-test", fixture.digest));
+        let sweep = || {
+            for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("segment-"))
+                {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        };
+        let verify_sweeping_segments = |retire_seal: bool| {
+            let checks = AtomicUsize::new(0);
+            verify_checked_seal_bundle_with_evidence_barrier(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &|| {
+                    if checks.fetch_add(1, Ordering::SeqCst) == manifest_checks {
+                        if retire_seal {
+                            std::fs::rename(&fixture.pool_manifest, &staged).unwrap();
+                        }
+                        sweep();
+                    }
+                    Ok(())
+                },
+                || {},
+            )
+            .unwrap_err()
+        };
+
+        let live = verify_sweeping_segments(false);
+        assert!(matches!(live, GraphDbError::Corrupt { .. }), "{live:?}");
+        assert_eq!(verify_sweeping_segments(true), GraphDbError::SealSuperseded);
     }
 
     fn git(root: &Path, args: &[&str]) {
@@ -1808,12 +2149,12 @@ mod tests {
 
     /// Builds the fixture's graph from its pool seal and interrupts the build
     /// once `reads` segment reads have passed their check.
-    fn spill_partitioned_with_interruption(
-        label: &str,
-        reads: usize,
-        interruption: GraphDbError,
-    ) -> GraphDbError {
-        let fixture = partitioned_seal_fixture(label);
+    /// Builds the fixture's graph from its pool seal, probing `check` before
+    /// every read.
+    fn spill_partitioned(
+        fixture: &PartitionedSealFixture,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<SpilledGraphGeneration, GraphDbError> {
         let generations_root = fixture.scope_root.join("code-generations-v1");
         let replay_root = fixture.pool_manifest.parent().unwrap();
         let owner = GraphProjectionIdentityV1 {
@@ -1825,8 +2166,7 @@ mod tests {
             namespace: GraphNamespaceV1::new("namespace.spill-interruption").unwrap(),
             projection: GraphProjectionIdV1::new("code-generation").unwrap(),
         };
-        let checks = AtomicUsize::new(0);
-        let error = spill_sealed_generation_graph_from_roots(
+        spill_sealed_generation_graph_from_roots(
             &generations_root,
             replay_root,
             &SealedGraphStateDigest::try_from(format!("sha256:{}", fixture.digest)).unwrap(),
@@ -1840,17 +2180,76 @@ mod tests {
             )
             .unwrap(),
             spill_for(&owner),
-            &|| {
-                if checks.fetch_add(1, Ordering::SeqCst) >= reads {
-                    Err(interruption.clone())
-                } else {
-                    Ok(())
-                }
-            },
+            check,
         )
+    }
+
+    fn spill_partitioned_with_interruption(
+        label: &str,
+        reads: usize,
+        interruption: GraphDbError,
+    ) -> GraphDbError {
+        let fixture = partitioned_seal_fixture(label);
+        let checks = AtomicUsize::new(0);
+        let error = spill_partitioned(&fixture, &|| {
+            if checks.fetch_add(1, Ordering::SeqCst) >= reads {
+                Err(interruption.clone())
+            } else {
+                Ok(())
+            }
+        })
         .unwrap_err();
         assert_eq!(checks.load(Ordering::SeqCst), reads + 1);
         error
+    }
+
+    /// Retention retires a seal without waiting for a graph build reading it,
+    /// and the segment sweep then collects its segments. The build read a
+    /// superseded generation, not a corrupt one; the same swept segments
+    /// under a seal a root still names are corruption.
+    #[test]
+    fn a_seal_retired_during_a_build_segment_read_is_superseded_not_corrupt() {
+        let build_sweeping_segments = |label: &str, retire_seal: bool| {
+            let fixture = partitioned_seal_fixture(label);
+            let manifest_checks = AtomicUsize::new(0);
+            read_verified_seal_manifest(&fixture.pool_manifest, &fixture.digest, &|| {
+                manifest_checks.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+            let manifest_checks = manifest_checks.load(Ordering::SeqCst);
+            let staged = fixture
+                .pool_manifest
+                .with_file_name(format!(".generation-{}.unlink-test", fixture.digest));
+            let checks = AtomicUsize::new(0);
+            spill_partitioned(&fixture, &|| {
+                if checks.fetch_add(1, Ordering::SeqCst) == manifest_checks {
+                    if retire_seal {
+                        std::fs::rename(&fixture.pool_manifest, &staged).unwrap();
+                    }
+                    for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                        let path = entry.unwrap().path();
+                        if path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("segment-"))
+                        {
+                            std::fs::remove_file(path).unwrap();
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err()
+        };
+
+        let live = build_sweeping_segments("build-swept-live", false);
+        assert!(matches!(live, GraphDbError::Corrupt { .. }), "{live:?}");
+        let retired = build_sweeping_segments("build-swept-retired", true);
+        assert_eq!(
+            retired.to_string(),
+            "sealed code generation was superseded while it was read; retry against the current seal"
+        );
     }
 
     fn verify_partitioned_with_interruption(
@@ -1860,7 +2259,6 @@ mod tests {
         let fixture = partitioned_seal_fixture(label);
         let evidence_ranges_started = AtomicBool::new(false);
         let interrupted_range_checks = AtomicUsize::new(0);
-        let replay_root = fixture.pool_manifest.parent().unwrap();
         let error = verify_checked_seal_bundle_with_evidence_barrier(
             &fixture.pool_manifest,
             &fixture.segments_root,
@@ -1873,7 +2271,6 @@ mod tests {
                     Ok(())
                 }
             },
-            acquire_code_generation_store_lock(replay_root).unwrap(),
             || evidence_ranges_started.store(true, Ordering::SeqCst),
         )
         .unwrap_err();

@@ -162,7 +162,6 @@ struct ProjectEditableSettingsV1 {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    git_ignore: bool,
     telemetry: TelemetrySettingsV1,
     sync: SyncSettingsV1,
     /// Rendered from the effective `context_scout.settings.v1` value;
@@ -175,12 +174,11 @@ fn project_editable_settings(
 ) -> ProjectEditableSettingsV1 {
     let config = configuration.config();
     ProjectEditableSettingsV1 {
-        include: config.include.clone(),
-        exclude: config.exclude.clone(),
+        include: config.index_paths.include_patterns().to_vec(),
+        exclude: config.index_paths.exclude_patterns().to_vec(),
         max_file_size: config.max_file_size,
         extract_docstrings: config.extract_docstrings,
         track_call_sites: config.track_call_sites,
-        git_ignore: config.git_ignore,
         telemetry: TelemetrySettingsV1 {
             timings: config.telemetry.timings,
         },
@@ -355,7 +353,6 @@ pub async fn patch_project_settings(
             max_file_size: patch.max_file_size,
             extract_docstrings: patch.extract_docstrings,
             track_call_sites: patch.track_call_sites,
-            git_ignore: patch.git_ignore,
             telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
                 timings: telemetry.timings,
             }),
@@ -774,10 +771,6 @@ fn environment_payload() -> EnvironmentSettingsPayloadV1 {
         global_accounting_enabled: accounting_mode.enabled(),
         pricing_offline: true,
         variables: vec![
-            env_variable(
-                "TRACEDECAY_ENABLE_GLOBAL_DB",
-                "Force-enables (truthy) or disables (falsy) global savings-ledger recording. Wins over TRACEDECAY_DISABLE_GLOBAL_DB.",
-            ),
             env_variable(
                 "TRACEDECAY_DISABLE_GLOBAL_DB",
                 "A truthy value disables global savings/accounting recording.",

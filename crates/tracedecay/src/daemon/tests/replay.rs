@@ -42,9 +42,12 @@ async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal(
         panic!("profile setup failure must be a typed tool result: {response:?}")
     });
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
     assert_eq!(
-        result["problem"]["code"], "registered_authority_unavailable",
+        result["structuredContent"]["problem"]["kind"], "unavailable",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "registered_authority_unavailable",
         "{result}"
     );
 }
@@ -107,12 +110,18 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         panic!("blocked canonical apply must be the owner's typed refusal: {response:?}")
     });
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
     assert_eq!(
-        result["problem"]["code"], "canonical_admission_failed",
+        result["structuredContent"]["problem"]["kind"], "unavailable",
         "{result}"
     );
-    assert_eq!(result["problem"]["retryable"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["problem"]["code"], "canonical_admission_failed",
+        "{result}"
+    );
+    assert_eq!(
+        result["structuredContent"]["problem"]["retryable"], true,
+        "{result}"
+    );
     assert_eq!(broker.pending_count().await, 1);
     assert!(!profile_root.join("host_receipts.json").exists());
     first_admin.shutdown_host_admission_replay().await;
@@ -120,6 +129,19 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     // stopped, so restart replay remains the acceptance path under test.
     drop(broker);
     drop(user_db);
+    // A restart follows the first daemon's store shutdown: its detached
+    // session-runtime workers still write the profile database until joined.
+    first_admin
+        .prepare_memory_graph_reconciliation_shutdown()
+        .await
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+    first_admin
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .unwrap();
     drop(first_admin);
     std::fs::remove_file(&automation_root).unwrap();
 

@@ -224,6 +224,23 @@ pub(crate) async fn daemon_tool_json_until(
     .await
 }
 
+/// A reply that is an [`ApplicationProblemEnvelope`] is the owner's typed
+/// refusal: it returns as that problem's error, typed detail included, so a
+/// caller never reads the refusal as its success shape.
+pub(crate) fn reject_problem_envelope(
+    reply: &Value,
+    tool_name: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    if reply.get("problem").is_none() {
+        return Ok(());
+    }
+    let envelope: ApplicationProblemEnvelope =
+        serde_json::from_value(reply.clone()).map_err(|error| {
+            retained_decode_error(tool_name, "an undecodable problem envelope", error)
+        })?;
+    Err(tracedecay_mcp::application_output::tool_result::problem_error(envelope))
+}
+
 pub(crate) fn reject_truncation_envelope(
     value: &Value,
     tool_name: &str,
@@ -400,32 +417,35 @@ mod tests {
 
         let error = retained_tool_payload::<serde_json::Value>("tracedecay_message_search", reply)
             .expect_err("a problem envelope is a refusal");
-        let message = error.to_string();
-        assert!(
-            message.contains("tracedecay_message_search refused"),
-            "refusal must name the tool: {message}"
-        );
-        assert!(
-            message.contains("not_found"),
-            "refusal must carry the typed problem code: {message}"
-        );
+        match error {
+            tracedecay_domain::errors::TraceDecayError::Config { message } => assert_eq!(
+                message,
+                "daemon tool tracedecay_message_search refused: not_found_or_not_authorized: The requested resource was not found or is not authorized"
+            ),
+            other => panic!("expected a config refusal, got {other}"),
+        }
     }
 
     /// Envelope drift fails with an error naming the tool instead of a bare
     /// serde message.
     #[test]
     fn non_envelope_reply_is_a_named_decode_error() {
-        let error = retained_tool_payload::<serde_json::Value>(
-            "tracedecay_memory_status",
-            json!({ "memory": {} }),
-        )
-        .expect_err("a bare payload is envelope drift");
-        assert!(
-            error
-                .to_string()
-                .contains("tracedecay_memory_status returned an undecodable application envelope"),
-            "decode error must name the tool: {error}"
-        );
+        let reply = json!({ "memory": {} });
+        let decode = serde_json::from_value::<
+            tracedecay_contracts::ApplicationEnvelope<serde_json::Value>,
+        >(reply.clone())
+        .expect_err("the fixture is not an application envelope");
+        let error = retained_tool_payload::<serde_json::Value>("tracedecay_memory_status", reply)
+            .expect_err("a bare payload is envelope drift");
+        match error {
+            tracedecay_domain::errors::TraceDecayError::Config { message } => assert_eq!(
+                message,
+                format!(
+                    "daemon tool tracedecay_memory_status returned an undecodable application envelope: {decode}"
+                )
+            ),
+            other => panic!("expected a config refusal, got {other}"),
+        }
     }
 
     #[test]

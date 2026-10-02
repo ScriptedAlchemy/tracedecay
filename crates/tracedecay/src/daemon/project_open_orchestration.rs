@@ -423,7 +423,7 @@ pub(super) async fn schedule_portable_project_server_warmup(
     invocation: DaemonInvocationState,
     http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: DaemonHandshake,
-    initialize_request: JsonRpcRequest,
+    initialize_request: Option<JsonRpcRequest>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let (canonical_project_path, route) =
@@ -448,7 +448,7 @@ pub(super) async fn schedule_portable_project_server_warmup(
         handshake,
         canonical_project_path,
         route,
-        Some(initialize_request),
+        initialize_request,
         #[cfg(test)]
         project_open_attempts,
     ))

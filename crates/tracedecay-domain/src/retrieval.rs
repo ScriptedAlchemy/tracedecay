@@ -502,6 +502,10 @@ pub enum RetrievalFailure {
     AuthorityUnavailable {
         detail: String,
     },
+    /// The generation's code graph has not seated yet (a restart recovering
+    /// its verified head, or a publication still building it); exact and
+    /// lexical serve meanwhile.
+    GraphWarming,
     IncompatibleProjection {
         detail: String,
     },

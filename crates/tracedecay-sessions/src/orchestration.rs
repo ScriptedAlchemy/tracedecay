@@ -12,6 +12,9 @@ pub struct ProviderRunOutcome<F> {
     pub bytes_consumed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
+    /// The run durably advanced source coverage (a cursor, a skipped range,
+    /// or a projection), whether or not it upserted any message.
+    pub coverage_advanced: bool,
     admitted: bool,
 }
 
@@ -27,6 +30,7 @@ impl<F> ProviderRunOutcome<F> {
             bytes_consumed,
             deferred_units: u64::from(deferred_by_byte_cap),
             byte_bounds_enforced: true,
+            coverage_advanced: bytes_consumed > 0,
             admitted: true,
         }
     }
@@ -38,6 +42,7 @@ impl<F> ProviderRunOutcome<F> {
             bytes_consumed: 0,
             deferred_units: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
             admitted: false,
         }
     }
@@ -45,6 +50,7 @@ impl<F> ProviderRunOutcome<F> {
     pub fn failed(failure: F, bytes_consumed: u64) -> Self {
         let mut outcome = Self::bounded(TranscriptIngestStats::default(), bytes_consumed, false);
         outcome.failures.push(failure);
+        outcome.coverage_advanced = false;
         outcome
     }
 
@@ -78,6 +84,8 @@ pub struct ProviderRunFold<F> {
     pub units_failed: u64,
     pub deferred_units: u64,
     pub byte_bounds_enforced: bool,
+    /// Some run without a failure durably advanced source coverage.
+    pub coverage_advanced: bool,
 }
 
 impl<F> Default for ProviderRunFold<F> {
@@ -90,6 +98,7 @@ impl<F> Default for ProviderRunFold<F> {
             units_failed: 0,
             deferred_units: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
         }
     }
 }
@@ -106,6 +115,7 @@ impl<F> ProviderRunFold<F> {
         }
         self.units_admitted = self.units_admitted.saturating_add(1);
         if outcome.failures.is_empty() {
+            self.coverage_advanced |= outcome.coverage_advanced;
             if outcome.deferred_units == 0 {
                 self.units_completed = self.units_completed.saturating_add(1);
             }

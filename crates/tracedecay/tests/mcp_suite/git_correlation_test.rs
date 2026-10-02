@@ -277,15 +277,13 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
             .await
             .unwrap_or_else(|e| panic!("seed session: {e}"))
     );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &message("s1", "s1-m1", 1_050, "work on main"),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("seed session message: {e}"))
-    );
+    runtime
+        .upsert_session_message_for_test(
+            HostAdmissionScope::Project,
+            &message("s1", "s1-m1", 1_050, "work on main"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("seed session message: {e}"));
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
         cg,
         None,
@@ -836,16 +834,7 @@ async fn assert_schema_rejection(server: &McpServer, args: Value, detail: &str) 
     let host = host_call(server, args).await;
     assert_eq!(
         host.response["error"],
-        json!({
-            "code": -32603,
-            "message": format!(
-                "tool execution failed: config error: invalid retained application request for tracedecay_sessions_for: {detail}"
-            ),
-            "data": {
-                "tool": "tracedecay_sessions_for",
-                "cli_fallback": "This tool is also available from the shell: `tracedecay tool sessions_for ...` (`tracedecay tool sessions_for --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-            }
-        }),
+        crate::support::application_invalid_request_error("tracedecay_sessions_for", detail),
         "{}",
         host.response
     );

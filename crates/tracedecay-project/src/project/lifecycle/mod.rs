@@ -3,8 +3,8 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::LazyLock;
-use std::sync::{Arc, OnceLock};
 
 use crate::config::{
     install_usecase_runtime_configuration_authority,
@@ -308,7 +308,7 @@ impl TraceDecay {
             project_id.as_str(),
         )?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, vec![project_root.to_path_buf()])
+            .project_session_store(project_id, vec![project_root.to_path_buf()])
             .await?;
         Self::init_with_registered_configuration(
             project_root,
@@ -413,7 +413,6 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: false,
-            db_path_cache: OnceLock::new(),
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -569,7 +568,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_with_registered_configuration(
             project_root,
@@ -640,7 +639,6 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: false,
-            db_path_cache: OnceLock::new(),
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -689,7 +687,7 @@ impl TraceDecay {
         let graph_scope = active_branch.clone().or_else(|| {
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
         });
-        let (_, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+        let (serving_branch, fallback_warning) = Self::resolve_serving_branch(
             project_root,
             &store_layout.data_root,
             graph_scope.as_deref(),
@@ -764,7 +762,7 @@ impl TraceDecay {
         )
         .await?;
         let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
+            .project_session_store(project_id, enrollment_roots)
             .await?;
         Self::open_read_only_with_registered_configuration(
             project_root,
@@ -834,7 +832,6 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: true,
-            db_path_cache: OnceLock::new(),
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,

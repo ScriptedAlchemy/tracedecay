@@ -293,7 +293,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         serde_json::json!(true),
         "a linked worktree without the watch opt-in must not serve a file listing: {routed_result}"
     );
-    let problem = &routed_result["problem"];
+    let problem = &routed_result["structuredContent"]["problem"];
     assert_eq!(
         (&problem["kind"], &problem["code"], &problem["message"]),
         (
@@ -689,7 +689,9 @@ fn active_text_artifact_file(scope: &Path) -> Option<String> {
 /// Removing an indexed linked worktree through Git reclaims its whole
 /// code-index scope and the text artifact only it named on the ordinary
 /// maintenance journey, while the primary's scope and artifact stay served.
-/// The linked route stays mounted throughout, as it does in a running daemon.
+/// The linked route stays mounted throughout, as it does in a running daemon;
+/// its code-index scheduler, which could still write into the scope, is
+/// retired before the scope is collected.
 #[tokio::test]
 async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_only_it_named() {
     let home = TempDir::new().expect("isolated home");
@@ -757,6 +759,9 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
     assert!(shared.join(&primary_artifact).is_file());
     assert!(shared.join(&linked_artifact).is_file());
 
+    // Put a refresh in flight so the linked scheduler is writing when its
+    // root disappears.
+    std::fs::write(linked.join("late.rs"), "pub fn late() {}\n").expect("edit linked worktree");
     run_git(
         &primary,
         &[
@@ -769,7 +774,8 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
     let observations = engine.store_administration.store_telemetry_sampling();
     let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let lease = crate::daemon::maintenance::project_store_maintenance_lease(primary_graph.as_ref());
-    tokio::time::timeout(std::time::Duration::from_mins(1), async {
+    let mut ticks = Vec::new();
+    let converged = tokio::time::timeout(std::time::Duration::from_mins(1), async {
         let mut continuation = None;
         loop {
             let outcome = tracedecay_maintenance::generation::run_project_generation_maintenance(
@@ -781,6 +787,7 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
                 continuation,
             )
             .await;
+            ticks.push((outcome.label(), linked_scope.exists()));
             if outcome.is_complete() && !linked_scope.exists() {
                 return;
             }
@@ -791,12 +798,31 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("generation maintenance converges after the worktree is removed");
+    .await;
+    assert!(
+        converged.is_ok(),
+        "generation maintenance did not converge after the worktree was removed; \
+         (outcome, linked scope present) per tick, last 20: {:?} of {} ticks",
+        &ticks[ticks.len().saturating_sub(20)..],
+        ticks.len()
+    );
 
     assert!(
         !linked_scope.exists(),
         "the removed worktree's scope is collected"
+    );
+    let schedulers = &engine.invocation.code_index_schedulers;
+    let mounted = schedulers.mounted_roots().await;
+    assert!(
+        !mounted.contains(&linked) && !schedulers.retiring.lock().await.contains_key(&linked),
+        "collection retires and joins the removed worktree's scheduler first: {mounted:?}"
+    );
+    assert!(mounted.contains(&primary), "the primary's scheduler stays");
+    assert!(
+        !code_index_root
+            .join(".code-index-scope-retention-transaction-v1.json")
+            .exists(),
+        "no scope collection is left pending rollback"
     );
     assert!(
         !shared.join(&linked_artifact).exists(),

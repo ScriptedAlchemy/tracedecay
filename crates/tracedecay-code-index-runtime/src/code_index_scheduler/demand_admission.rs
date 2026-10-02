@@ -70,8 +70,9 @@ pub enum CodeIndexDemandAdmissionV1 {
     /// The watcher policy for this route refuses the daemon's own demand. An
     /// operator-named demand for the same route is still admitted.
     RefusedByPolicy,
-    /// The route is valid but has no repository identity, so code indexing
-    /// does not apply and no work was queued.
+    /// Code indexing does not apply, so no work was queued: the route has no
+    /// repository identity, or every hinted path is excluded by the
+    /// project's index path policy.
     NotApplicable,
     /// The worktree is parked on a corrupt publication authority. Terminal:
     /// only an explicit index reset admits work again.

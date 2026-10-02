@@ -724,6 +724,75 @@ fn query_authority_snapshot_is_exactly_scope_and_registry_bound() {
 }
 
 #[test]
+fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let writer = writer();
+    let fence = &writer.authority.fence;
+    let expected = tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1 {
+        brain_id: fence.brain_id.as_str().to_owned(),
+        shard_id: fence.shard_id.as_str().to_owned(),
+        generation_id: fence.generation_id.as_str().to_owned(),
+        authority_node_id: fence.authority_node_id.as_str().to_owned(),
+        placement_revision: fence.placement_revision.get(),
+        authority_epoch: fence.authority_epoch.0,
+    };
+    let frame = tracedecay_contracts::remote::replay::RemoteReplayFrameV1 {
+        event_id: "remote.event.unpublished".to_owned(),
+        capture: admitted(),
+    };
+    let read_all =
+        |storage: &RemoteSqliteStorageV1| {
+            (
+            <RemoteSqliteStorageV1 as RemoteCapturePortV1>::current_writer_authority(
+                storage, &writer,
+            )
+            .map(|_| ()),
+            tracedecay_contracts::remote::replay::RemoteReplayCurrentWriterPortV1::current_writer(
+                storage, &frame,
+            )
+            .map(|current| current.writer),
+            storage
+                .query_authority_snapshot(&writer.scope, UtcMicros(11))
+                .map(|snapshot| snapshot.writer),
+            storage.recovery_writer(&expected).map_err(|error| error.to_string()),
+            storage
+                .recovery_writer_for_lineage(&expected)
+                .map_err(|error| error.to_string()),
+        )
+        };
+    let unpublished = "no remote Brain writer authority has been published".to_owned();
+
+    assert_eq!(
+        read_all(&storage),
+        (
+            Err(RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished),
+            Err(RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished),
+            Err(RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished),
+            Err(unpublished.clone()),
+            Err(unpublished),
+        )
+    );
+    storage
+        .publish_authority(
+            &tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone()),
+            &writer,
+            UtcMicros(10),
+        )
+        .unwrap();
+    assert_eq!(
+        read_all(&storage),
+        (
+            Ok(()),
+            Ok(Some(writer.clone())),
+            Ok(writer.clone()),
+            Ok(writer.clone()),
+            Ok(writer.clone()),
+        )
+    );
+}
+
+#[test]
 fn capture_and_promotion_gate_share_one_write_transaction() {
     let fixture = fixture();
     let storage = storage(&fixture);
@@ -793,7 +862,8 @@ fn operational_status_reads_report_typed_absence_gaps_and_recovery_truth() {
     assert_eq!(
         snapshot.authority,
         tracedecay_domain::CurrentRemoteAuthorityStateV1::Unavailable {
-            reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+            reason:
+                tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
             observed_at: UtcMicros(42),
         }
     );

@@ -116,6 +116,7 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
             },
             retry: RetryDirective::Never,
             legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+            detail: None,
         },
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EventAuthorityUnavailable

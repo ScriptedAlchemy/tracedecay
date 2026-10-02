@@ -271,18 +271,19 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
     let profile = ProfileRoot::new(&profile_root);
     let session = Some("session-without-project-root".to_string());
 
-    assert!(
+    let hint = test_hint();
+    assert_eq!(
         deduped_project_hint_with_id(
             &profile,
             None,
             HostIntegrationIdV1::Codex,
             session.clone(),
             &mint_hint_id(),
-            test_hint(),
-        )
-        .is_some()
+            hint.clone(),
+        ),
+        Some(hint)
     );
-    assert!(
+    assert_eq!(
         deduped_project_hint_with_id(
             &profile,
             None,
@@ -290,9 +291,8 @@ fn hints_without_project_root_dedupe_in_the_user_profile() {
             session,
             &mint_hint_id(),
             test_hint(),
-        )
-        .is_none(),
-        "a missing project root must not turn every prompt into a fresh hint"
+        ),
+        None
     );
 }
 

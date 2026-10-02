@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+use tokio::sync::watch;
+use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
@@ -572,6 +574,11 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 /// publishes the `daemon.process.resident_bytes` gauge, and feeds this cell
 /// the unreclaimable bytes. Admission re-measures through the same sampler;
 /// there is no second parser or publisher.
+///
+/// Every request refused for memory, by any authority on this cell, waits on
+/// one headroom epoch. It advances when the latch clears or when a refused
+/// request would fit beside the ledger and the measured process, whichever
+/// release made the room: a reservation dropping, or a sample falling.
 pub struct ResidentMemoryPressureV1 {
     limit_bytes: NonZeroU64,
     high_watermark_bytes: u64,
@@ -579,6 +586,10 @@ pub struct ResidentMemoryPressureV1 {
     observed_bytes: AtomicU64,
     observed: AtomicBool,
     over_budget: AtomicBool,
+    headroom: watch::Sender<u64>,
+    /// Authorities holding a refused request, settled on every observation.
+    waiting: ProfiledMutex<Vec<Weak<ProcessResidentMemoryV1>>>,
+    any_waiting: AtomicBool,
     state: ProfiledMutex<ResidentMemoryPressureReclaimerStateV1>,
     sampler: Arc<ProcessResidentSamplerV1>,
     checkpoint_epoch: Instant,
@@ -649,6 +660,12 @@ impl ResidentMemoryPressureV1 {
             observed_bytes: AtomicU64::new(0),
             observed: AtomicBool::new(false),
             over_budget: AtomicBool::new(false),
+            headroom: watch::Sender::new(0),
+            waiting: hotpath::mutex!(
+                Mutex::new(Vec::new()),
+                label = "runtime_core.resident.pressure_waiting"
+            ),
+            any_waiting: AtomicBool::new(false),
             state: hotpath::mutex!(
                 Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
                 label = "runtime_core.resident.pressure"
@@ -767,8 +784,57 @@ impl ResidentMemoryPressureV1 {
         hotpath::gauge!("daemon.memory.observed_resident_bytes").set(observed_bytes as f64);
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
-        } else if observed_bytes <= self.low_watermark_bytes {
-            self.over_budget.store(false, Ordering::Release);
+        } else if observed_bytes <= self.low_watermark_bytes
+            && self.over_budget.swap(false, Ordering::AcqRel)
+        {
+            self.note_headroom();
+        }
+        self.settle_waiting();
+    }
+
+    /// Changes each time work refused for memory could be admitted again.
+    #[must_use]
+    pub fn subscribe_headroom(&self) -> watch::Receiver<u64> {
+        self.headroom.subscribe()
+    }
+
+    fn note_headroom(&self) {
+        advance_headroom_epoch(&self.headroom);
+    }
+
+    fn register_waiting(&self, authority: &Arc<ProcessResidentMemoryV1>) {
+        let mut waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let authority = Arc::downgrade(authority);
+        if !waiting.iter().any(|held| held.ptr_eq(&authority)) {
+            waiting.push(authority);
+        }
+        self.any_waiting.store(true, Ordering::Release);
+    }
+
+    fn settle_waiting(&self) {
+        if !self.any_waiting.load(Ordering::Acquire) {
+            return;
+        }
+        let mut settled = false;
+        let mut waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waiting.retain(|authority| {
+            authority.upgrade().is_some_and(|authority| {
+                let mut state = authority.lock_state();
+                settled |= authority.settle_waiter(&mut state);
+                state.waiting_level.is_some()
+            })
+        });
+        self.any_waiting
+            .store(!waiting.is_empty(), Ordering::Release);
+        drop(waiting);
+        if settled {
+            self.note_headroom();
         }
     }
 
@@ -877,6 +943,10 @@ impl Drop for ResidentMemoryPressureRegistrationV1 {
     }
 }
 
+fn advance_headroom_epoch(epoch: &watch::Sender<u64>) {
+    epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+}
+
 static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV1>> =
     OnceLock::new();
 
@@ -929,19 +999,6 @@ impl ProcessAllocatorTrimV1 {
     }
 }
 
-/// The Rust global allocator's release call, installed once by the composition
-/// root that chose the allocator. glibc's arenas are trimmed either way.
-static PROCESS_ALLOCATOR_RELEASE_V1: OnceLock<fn()> = OnceLock::new();
-
-/// Install `release` as the call that returns the process allocator's freed
-/// pages to the kernel. The binary that selects a global allocator installs
-/// its release at startup; a second installation is refused.
-pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String> {
-    PROCESS_ALLOCATOR_RELEASE_V1
-        .set(release)
-        .map_err(|_| "the process allocator release is already installed".to_owned())
-}
-
 /// Return freed-but-retained allocator pages to the kernel.
 ///
 /// Allocators keep freed pages for reuse: glibc inside its per-thread arenas
@@ -951,34 +1008,19 @@ pub fn install_process_allocator_release_v1(release: fn()) -> Result<(), String>
 /// RSS is what admission trusts, so those pages refuse real work until the
 /// allocator is asked for them.
 ///
-/// A mimalloc global allocator serves only Rust allocations. `SQLite`,
-/// tree-sitter, and libgit2 call `malloc` directly, so glibc's arenas are
-/// trimmed after the installed release as well.
+/// The composition root that installs an allocator routes `SQLite` and
+/// tree-sitter through it, so its release returns their pages too. Without
+/// one, glibc serves everything and is trimmed.
 #[must_use]
 pub fn release_process_allocator_memory_v1() -> ProcessAllocatorTrimV1 {
-    measured_trim(|| {
-        let released = PROCESS_ALLOCATOR_RELEASE_V1
-            .get()
-            .map(|release| release())
-            .is_some();
-        glibc_trim() || released
-    })
-}
-
-/// Return freed glibc arena pages to the kernel without the installed release.
-///
-/// C-library churn (`SQLite` statements and caches on the store writers,
-/// tree-sitter parses on the index workers) accumulates between the events
-/// that run the full release, so the daemon runs this on its resident-memory
-/// sampling cadence. It never waits on a busy worker pool.
-#[must_use]
-pub fn release_c_library_heap_v1() -> ProcessAllocatorTrimV1 {
-    measured_trim(glibc_trim)
-}
-
-fn measured_trim(trim: impl FnOnce() -> bool) -> ProcessAllocatorTrimV1 {
     let before_bytes = sampled_process_resident_bytes_v1();
-    let trimmed = trim();
+    let trimmed = match installed_process_allocator_release_v1() {
+        Some(release) => {
+            (release.release)();
+            true
+        }
+        None => glibc_trim(),
+    };
     let after_bytes = sampled_process_resident_bytes_v1();
     let trim = ProcessAllocatorTrimV1 {
         trimmed,
@@ -1250,6 +1292,23 @@ pub struct ResidentMemorySnapshotV1 {
     pub process_shared_charges: Vec<ProcessSharedMemoryChargeV1>,
 }
 
+/// One reading of the process's room for new work.
+///
+/// The ledger charges the retained owners and the work in flight; it does not
+/// see the runtime's own allocations or the allocator's retained pages, which
+/// are not yet small and fixed enough to charge as a constant. The measured
+/// process covers them, so new work has to fit beside both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentMemoryHeadroomV1 {
+    /// Bytes the ledger charges.
+    pub used_bytes: u64,
+    /// Bytes measured for the process; zero when it cannot be read.
+    pub observed_bytes: u64,
+    /// What fits below the ceiling beside both; zero while the pressure
+    /// latch holds.
+    pub available_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessSharedMemoryChargeV1 {
     pub component: ResidentMemoryComponentIdV1,
@@ -1294,6 +1353,9 @@ struct ResidentMemoryStateV1 {
     process_shared_charges: BTreeMap<ResidentMemoryComponentIdV1, u64>,
     reclaimers: BTreeMap<(u32, u64), Arc<ResidentMemoryReclaimerV1>>,
     next_reclaimer_sequence: u64,
+    /// The highest occupancy (ledger or measured, whichever is larger) at
+    /// which some refused request fits; `None` while nothing waits.
+    waiting_level: Option<u64>,
 }
 
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
@@ -1346,6 +1408,52 @@ impl ProcessResidentMemoryV1 {
         &self.pressure
     }
 
+    /// Wait for `bytes` to fit below `ceiling` beside both the ledger and the
+    /// measured process. The pressure cell's headroom epoch advances once it
+    /// would, and every refusal this authority makes registers the same way.
+    pub fn wait_for_headroom(self: &Arc<Self>, bytes: u64, ceiling: u64) {
+        let Some(level) = ceiling.checked_sub(bytes) else {
+            return;
+        };
+        {
+            let mut state = self.lock_state();
+            state.waiting_level = Some(state.waiting_level.map_or(level, |held| held.max(level)));
+        }
+        self.pressure.register_waiting(self);
+    }
+
+    /// Clear the waiters once the most satisfiable one fits; each still
+    /// refused registers again on its retry.
+    fn settle_waiter(&self, state: &mut ResidentMemoryStateV1) -> bool {
+        let Some(level) = state.waiting_level else {
+            return false;
+        };
+        let pressure = self.pressure.state();
+        let occupied = state.used_bytes.max(pressure.observed_bytes().unwrap_or(0));
+        if pressure.is_over_budget() || occupied > level {
+            return false;
+        }
+        state.waiting_level = None;
+        true
+    }
+
+    fn refused(
+        self: &Arc<Self>,
+        failure: ResidentMemoryAdmissionFailureV1,
+    ) -> ResidentMemoryAdmissionFailureV1 {
+        self.wait_for_headroom(failure.requested_bytes(), failure.limit_bytes());
+        failure
+    }
+
+    /// Settle waiters after the ledger gave bytes back.
+    fn ledger_released(&self, mut state: ProfiledMutexGuard<'_, ResidentMemoryStateV1>) {
+        let settled = self.settle_waiter(&mut state);
+        drop(state);
+        if settled {
+            self.pressure.note_headroom();
+        }
+    }
+
     #[hotpath::measure(label = "runtime_core.resident.reserve")]
     pub fn reserve(
         self: &Arc<Self>,
@@ -1353,7 +1461,7 @@ impl ProcessResidentMemoryV1 {
         requested_bytes: NonZeroU64,
     ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
         if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
-            return Err(failure);
+            return Err(self.refused(failure));
         }
         if let Some(reservation) = self.try_reserve(&key, requested_bytes) {
             return Ok(reservation);
@@ -1369,7 +1477,7 @@ impl ProcessResidentMemoryV1 {
             }
         }
 
-        Err(self.admission_failure(requested_bytes))
+        Err(self.refused(self.admission_failure(requested_bytes)))
     }
 
     /// Reserves one process-shared component without fabricating a project,
@@ -1382,17 +1490,19 @@ impl ProcessResidentMemoryV1 {
         requested_bytes: NonZeroU64,
     ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
         if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
-            return Err(failure);
+            return Err(self.refused(failure));
         }
         let mut state = self.lock_state();
-        let Some(next_used) = state.used_bytes.checked_add(requested_bytes.get()) else {
+        let next_used = state
+            .used_bytes
+            .checked_add(requested_bytes.get())
+            .filter(|next_used| *next_used <= self.limit_bytes.get());
+        let Some(next_used) = next_used else {
             hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
-            return Err(self.admission_failure_from_used(state.used_bytes, requested_bytes));
+            let failure = self.admission_failure_from_used(state.used_bytes, requested_bytes);
+            drop(state);
+            return Err(self.refused(failure));
         };
-        if next_used > self.limit_bytes.get() {
-            hotpath::gauge!("runtime_core.resident.refusals").inc(1.0);
-            return Err(self.admission_failure_from_used(state.used_bytes, requested_bytes));
-        }
         state.used_bytes = next_used;
         *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
         hotpath::gauge!("runtime_core.resident.reservations").inc(1.0);
@@ -1445,6 +1555,40 @@ impl ProcessResidentMemoryV1 {
                 })
                 .collect(),
         }
+    }
+
+    /// The process's room for new work below `ceiling`, from a fresh
+    /// measurement: what every admission sizes from. The ledger is held to
+    /// this authority's limit and the measurement to the pressure cell's, as
+    /// [`Self::reserve`] holds them.
+    pub fn headroom_below(&self, ceiling: u64) -> ResidentMemoryHeadroomV1 {
+        let observed_bytes = self.pressure.measure_admission_bytes();
+        let used_bytes = self.lock_state().used_bytes;
+        let available_bytes = if self.pressure.state().is_over_budget() {
+            0
+        } else {
+            let ledger_room = ceiling
+                .min(self.limit_bytes.get())
+                .saturating_sub(used_bytes);
+            let measured_room = ceiling
+                .min(self.pressure.limit_bytes())
+                .saturating_sub(observed_bytes);
+            ledger_room.min(measured_room)
+        };
+        ResidentMemoryHeadroomV1 {
+            used_bytes,
+            observed_bytes,
+            available_bytes,
+        }
+    }
+
+    /// The ceiling decode and artifact builds size below: the pressure high
+    /// watermark, leaving the band above it for work already admitted.
+    #[must_use]
+    pub fn admission_watermark_bytes(&self) -> u64 {
+        self.pressure
+            .high_watermark_bytes()
+            .min(self.limit_bytes.get())
     }
 
     fn lock_state(&self) -> ProfiledMutexGuard<'_, ResidentMemoryStateV1> {
@@ -1576,6 +1720,7 @@ impl ProcessResidentMemoryV1 {
                 state.charges.remove(key);
             }
         }
+        self.ledger_released(state);
         Ok(())
     }
 
@@ -1627,6 +1772,7 @@ impl ProcessResidentMemoryV1 {
             to.component = to_component;
             *state.charges.entry(to).or_default() += measured_bytes;
         }
+        self.ledger_released(state);
         Ok(())
     }
 
@@ -1644,6 +1790,7 @@ impl ProcessResidentMemoryV1 {
                 state.charges.remove(key);
             }
         }
+        self.ledger_released(state);
     }
 
     fn shrink_process_shared(
@@ -1671,6 +1818,7 @@ impl ProcessResidentMemoryV1 {
             }
         }
         hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+        self.ledger_released(state);
         Ok(())
     }
 
@@ -1688,6 +1836,7 @@ impl ProcessResidentMemoryV1 {
         }
         hotpath::gauge!("runtime_core.resident.reservations").dec(1.0);
         hotpath::gauge!("runtime_core.resident.used_bytes").set(state.used_bytes as f64);
+        self.ledger_released(state);
     }
 }
 

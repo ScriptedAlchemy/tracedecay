@@ -19,7 +19,7 @@ mod retention;
 mod schema;
 mod types;
 
-pub use schema::ensure_observability_rollup_schema;
+pub(crate) use schema::OBSERVABILITY_ROLLUP_SCHEMA_V1;
 pub use types::*;
 
 use dirty::{dirty_claim_is_current, range_has_dirty_day, validate_dirty_claim};

@@ -12,6 +12,7 @@ use crate::config::registry::ConfigurationRegistry;
 use crate::config::scope_control::{
     ProtectedChangePlanDraftV1, plan_protected_change, validate_apply_binding,
 };
+use crate::config::setting_findings;
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
     ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
@@ -163,6 +164,7 @@ where
                 .cloned()
                 .unwrap_or_else(|| definition.default_value.clone());
             Ok(ResolvedSetting {
+                findings: setting_findings(&key, &effective_value),
                 key: key.clone(),
                 effective_value,
                 revision_id: current.revision_id,
@@ -524,7 +526,7 @@ fn validate_direct_mutation(
                 .validate_layer(key, layer)
                 .map_err(ConfigurationError::validation)?;
             registry
-                .validate_value(key, value)
+                .validate_written_value(key, value)
                 .map_err(ConfigurationError::validation)
         }
         DirectConfigurationMutation::Unset { layer, key } => {

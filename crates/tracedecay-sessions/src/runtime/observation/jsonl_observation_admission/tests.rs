@@ -24,7 +24,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass, SessionId,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
+    SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::ParseOffset;
@@ -35,7 +36,8 @@ use tracedecay_store::observation::{
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::admission::{
-    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostProjectionDrainOutcome,
+    AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostAdmissionStatus,
+    HostProjectionDrainOutcome,
 };
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -44,8 +46,11 @@ use crate::runtime::hosts::codex::{
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission,
 };
+use crate::runtime::ingest::classify_transcript_ingest_failure;
 use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::{JsonlResumeState, TranscriptIngestError};
+use crate::runtime::source::{
+    JsonlChangeKind, JsonlResumeState, TranscriptIngestError, spin_until_jsonl_change_settled,
+};
 
 /// Wraps [`MemoryHostAdmission`] so a test can script the capture verdict and
 /// observe every cover-past cursor write the seam attempts.
@@ -55,6 +60,7 @@ struct SeamSpyAdmission {
     scripted_capture_error: Mutex<Option<HostAdmissionOutcome>>,
     scripted_capture_error_once: Mutex<Option<HostAdmissionOutcome>>,
     scripted_batch_error: Mutex<Option<HostAdmissionOutcome>>,
+    scripted_cursor_refusal: Mutex<Option<HostAdmissionOutcome>>,
     report_no_cursor: AtomicBool,
     capture_calls: AtomicU64,
     capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
@@ -167,6 +173,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         max_new_bytes: Some(1024),
         max_frames: None,
         resume: None,
+        prefix_recovery: super::JsonlPrefixRecovery::Report,
         preparation: false.into(),
     };
     let cache = super::SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
@@ -772,10 +779,21 @@ impl HostAdmission for SeamSpyAdmission {
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
+        if let Some(outcome) = self.scripted_cursor_refusal.lock().unwrap().clone() {
+            return Box::pin(async move { Err(outcome) });
+        }
         if self.report_no_cursor.load(Ordering::SeqCst) {
             return Box::pin(async { Ok(None) });
         }
         self.inner.get_source_cursor(source, scope)
+    }
+
+    fn committed_source_cursors<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
+        self.inner.committed_source_cursors(source, scope)
     }
 
     fn drain_projection_queue<'a>(
@@ -906,6 +924,44 @@ async fn commit_failures_block_typed_and_never_cover_past() {
             "{reason}: the source frontier must not advance"
         );
     }
+}
+
+/// A refused source cursor names the admission authority's reason instead of
+/// blaming the transcript's frames.
+#[tokio::test]
+async fn refused_source_cursor_reports_its_typed_reason() {
+    let (_temp, path, _len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    *spy.scripted_cursor_refusal.lock().unwrap() = Some(HostAdmissionOutcome {
+        status: HostAdmissionStatus::Unknown,
+        retryable: false,
+        reason_code: Some("unknown_provider"),
+        recovery: None,
+        cause: None,
+    });
+
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("a refused source cursor must fail the source");
+
+    assert!(
+        matches!(
+            error,
+            TranscriptIngestError::HostAdmission {
+                provider: "codex",
+                reason: "unknown_provider",
+                retryable: false,
+                ..
+            }
+        ),
+        "the cursor refusal must keep its admission reason: {error:?}"
+    );
+    let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+    assert_eq!(failure.reason_code, "unknown_provider");
+    assert!(!failure.retryable);
+    assert_eq!(spy.capture_count(), 0);
+    assert!(spy.inner.observations().is_empty());
 }
 
 #[tokio::test]
@@ -1323,6 +1379,61 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
 }
 
 #[tokio::test]
+async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("first pass");
+    assert_eq!(first.bytes_consumed, len);
+
+    crate::runtime::hosts::codex::evict_prior_context_for_test(&path);
+    let replay =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("unchanged pass");
+    assert_eq!(replay.bytes_consumed, 0);
+    assert_eq!(replay.frames_persisted, 0);
+    assert_eq!(
+        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
+        0,
+        "an unchanged rollout admits no frame, so it must not be re-read for its context"
+    );
+
+    let appended = json!({
+        "timestamp": "2026-01-01T00:00:02.000Z",
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "appended message"}
+    })
+    .to_string()
+        + "\n";
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let resumed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("appended pass");
+    assert!(
+        resumed.resumed,
+        "the appended pass resumes at the committed cursor"
+    );
+    assert_eq!(
+        resumed.bytes_consumed,
+        u64::try_from(appended.len()).unwrap()
+    );
+    assert_eq!(
+        crate::runtime::hosts::codex::prior_context_scan_count_for_test(&path),
+        1
+    );
+    assert_eq!(resumed.frames_persisted, 1);
+}
+
+#[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     // The shared metadata cache retains entries up to
     // `shared_jsonl_preparation_capacity()`, so this test only observes the
@@ -1598,8 +1709,8 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
         contents.push('\n');
     }
     std::fs::write(&path, contents).unwrap();
-    super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.store(0, Ordering::Release);
-    let prepared_before = super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.load(Ordering::Acquire);
+    let file_identity = crate::runtime::source::jsonl_file_identity(&path).unwrap();
+    let rendezvous = super::SharedJsonlPreparationRendezvous::register(file_identity);
 
     let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
         &path,
@@ -1611,18 +1722,222 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
     .await
     .expect("bounded exact-hook admission");
 
-    assert!(progress.frames_persisted >= u64::try_from(event_count).unwrap());
-    assert!(
-        super::SHARED_JSONL_TOTAL_FRAME_PREPARATIONS
-            .load(Ordering::Acquire)
-            .saturating_sub(prepared_before)
-            >= event_count,
-        "every in-scope event is prepared once through the shared window"
+    assert_eq!(progress.frames_persisted, 33);
+    assert_eq!(
+        super::shared_jsonl_frame_preparations_for_test(file_identity),
+        33,
+        "every in-scope frame is prepared once through the shared window"
     );
-    if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1) {
-        assert!(
-            super::SHARED_JSONL_PEAK_FRAME_PREPARATIONS.load(Ordering::Acquire) > 1,
-            "the exact-hook path must overlap independent frame preparation"
-        );
-    }
+    assert_eq!(
+        rendezvous.state(),
+        super::SharedJsonlPreparationRendezvousState {
+            inside: 2,
+            overlapped: true,
+            serialized: false,
+        },
+        "the exact-hook path must overlap independent frame preparation"
+    );
+}
+
+const EDITED_RECORD_BYTES: usize = 128;
+
+fn identified_record_line(id: &str) -> String {
+    let framing = json!({"id": id, "content": ""}).to_string().len() + 1;
+    let mut line =
+        json!({"id": id, "content": "x".repeat(EDITED_RECORD_BYTES - framing)}).to_string();
+    line.push('\n');
+    assert_eq!(line.len(), EDITED_RECORD_BYTES);
+    line
+}
+
+async fn admit_identified_records(
+    admission: &MemoryHostAdmission,
+    path: &Path,
+) -> super::JsonlObservationAdmissionProgress {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("kimi").unwrap(),
+        SessionId::new("session.edited-middle").unwrap(),
+    )
+    .unwrap();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "kimi",
+        path,
+        admission,
+        source,
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+    super::admit_jsonl_observations(
+        request,
+        |_| (),
+        |_, bytes, range, _, _, _| {
+            let native: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let native_record_id = ObservationId::new(native["id"].as_str().unwrap()).unwrap();
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    CanonicalObservationEnvelopeV1::new(
+                        ProviderId::new("kimi").unwrap(),
+                        "message",
+                        native_record_id.clone(),
+                        CanonicalObservationRelationsV1::new(
+                            SessionId::new("session.edited-middle").unwrap(),
+                        )
+                        .with_message_id(native_record_id.clone()),
+                        vec![CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content: native,
+                            model: None,
+                            timestamp: None,
+                        }],
+                        CanonicalObservationEvidenceV1::new(
+                            ObservationOrderingDomainV1::FileBytes,
+                            range,
+                        ),
+                    )
+                    .map_err(|_| {
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                    })
+                },
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "kimi" })?;
+            Ok(super::JsonlFrameAdmission::durable(
+                parsed,
+                native_record_id,
+            ))
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// Editing one record in the middle of a transcript keeps every record before
+/// it: only the bytes from the edited record on are framed and admitted again.
+#[tokio::test]
+async fn edited_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("edited-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+
+    let cold = admit_identified_records(&admission, &path).await;
+    assert_eq!(cold.frames_persisted, 400);
+    assert_eq!(cold.io.content_bytes, 51_200);
+    let original_generation = admission.observations()[0]
+        .observation()
+        .identity()
+        .generation();
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    std::fs::write(&path, &edited).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.change, JsonlChangeKind::Rewritten);
+    assert_eq!(
+        rescan.io.content_bytes, 25_600,
+        "only bytes after the edit are framed"
+    );
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    assert_eq!(
+        rescan.io.prefix_validation_bytes,
+        51_200 + 25_728,
+        "divergence check walks the recorded prefix, recovery stops one record past the edit"
+    );
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    // The 199 unchanged records after the edit resolve to their retained
+    // identities; only the edited record is new, in the rewritten generation.
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 401);
+    let rewritten = observations
+        .iter()
+        .filter(|stored| stored.observation().identity().generation() != original_generation)
+        .map(|stored| stored.observation().identity().position())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rewritten,
+        [ObservationSourceRangeV1::new(25_600, 25_728).unwrap()]
+    );
+    let edited_payloads = observations
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("edited-0200")
+        })
+        .count();
+    assert_eq!(edited_payloads, 1);
+
+    let settled = admit_identified_records(&admission, &path).await;
+    assert_eq!(settled.io.content_bytes, 0);
+    assert_eq!(settled.bytes_consumed, 0);
+    assert_eq!(settled.frames_persisted, 0);
+}
+
+/// A host that rewrites its transcript by atomic rename gets the same
+/// proportional resume: the committed checkpoints prove the retained prefix,
+/// not the replaced file's identity.
+#[tokio::test]
+async fn renamed_rewrite_of_a_middle_record_reingests_only_the_bytes_after_the_edit() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("renamed-middle.jsonl");
+    let original = (0..400)
+        .map(|index| identified_record_line(&format!("record-{index:04}")))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    assert_eq!(
+        admit_identified_records(&admission, &path)
+            .await
+            .frames_persisted,
+        400
+    );
+
+    let mut edited = original.into_bytes();
+    edited[25_600..25_728].copy_from_slice(identified_record_line("edited-0200").as_bytes());
+    let replacement = temp.path().join("renamed-middle.jsonl.next");
+    std::fs::write(&replacement, &edited).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let rescan = admit_identified_records(&admission, &path).await;
+
+    assert_eq!(rescan.io.content_bytes, 25_600);
+    assert_eq!(rescan.io.snapshot_hash_bytes, 0);
+    assert_eq!(rescan.bytes_consumed, 25_600);
+    assert_eq!(rescan.frames_persisted, 200);
+    let retained = admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
+    );
+    assert_eq!(admission.observations().len(), 401);
 }

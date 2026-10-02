@@ -10,7 +10,7 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_domain::{ProjectId, RemoteWriterFenceV1, canonical_sha256};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
-    RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageV1,
+    RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
 use tracedecay_store::RemoteWriterFenceInstallV1;
 
@@ -21,9 +21,11 @@ const INTERRUPTION_NONE: u8 = 0;
 const INTERRUPTION_CANCELLED: u8 = 1;
 const INTERRUPTION_DEADLINE: u8 = 2;
 
+#[cfg(test)]
+mod interruption_tests;
 mod support;
 
-use support::{RecoveryRuntimeProbeV1, authority_key, classify_runtime_error};
+use support::{RecoveryRuntimeProbeV1, authority_key};
 
 #[derive(Clone)]
 pub(super) struct DaemonRemoteRecoveryPhysicalEffectsV1 {
@@ -79,7 +81,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let writer = self
             .storage
             .recovery_writer(expected)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            .map_err(map_writer_lookup_error)?;
         if writer.scope != caller.scope {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
@@ -94,8 +96,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let authority_key = authority_key(expected)?;
         match self
             .replay
-            .current_writer_fence(project_id, authority_key)
-            .map_err(classify_runtime_error)?
+            .current_writer_fence(project_id, authority_key)?
         {
             Some((fence, frontier)) if fence == writer.authority.fence => {
                 Ok((writer.authority, frontier))
@@ -133,7 +134,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let writer = self
             .storage
             .recovery_writer_for_lineage(expected)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            .map_err(map_writer_lookup_error)?;
         if writer.scope != caller.scope {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
@@ -159,7 +160,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let (binding, _) = self
             .replay
             .target_descriptor(&project_id)
-            .map_err(classify_runtime_error)?;
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let install = RemoteWriterFenceInstallV1 {
             project_id: project_id.clone(),
             target_binding: binding,
@@ -177,12 +178,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let project_for_install = project_id.clone();
         let receipt = run_controlled(control, request_id, &interruption, move || {
             replay.install_writer_fence(project_for_install, install, probe)
-        })?
-        .map_err(classify_runtime_error)?;
+        })??;
         let (_, published_frontier_sequence) = self
             .replay
-            .current_writer_fence(project_id, authority_key)
-            .map_err(classify_runtime_error)?
+            .current_writer_fence(project_id, authority_key)?
             .filter(|(fence, _)| fence == replacement)
             .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let receipt_id = format!("remote.promotion.{}", safe_suffix(operation_id)?);
@@ -213,6 +212,17 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             bytes_consumed,
             interruption_observed_after_commit: interruption_value(&interruption),
         })
+    }
+}
+
+fn map_writer_lookup_error(
+    error: RemoteSqliteStorageErrorV1,
+) -> RemoteRecoveryPhysicalEffectErrorV1 {
+    match error {
+        RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished
+        }
+        _ => RemoteRecoveryPhysicalEffectErrorV1::Unavailable,
     }
 }
 

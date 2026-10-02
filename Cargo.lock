@@ -1359,7 +1359,7 @@ checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1459,7 +1459,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2162,7 +2162,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -2675,7 +2675,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa#9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2690,7 +2690,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa#9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2710,7 +2710,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa#9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2733,7 +2733,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa#9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2755,7 +2755,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2#2027d1093c19d9d631618b9b4d1e575120c12fb2"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa#9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 dependencies = [
  "bincode",
  "byteorder",
@@ -3286,7 +3286,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4149,7 +4149,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4583,7 +4583,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5276,7 +5276,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5708,7 +5708,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.61"
+version = "1.0.0-beta.65"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5981,7 +5981,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.61"
+version = "1.0.0-beta.65"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6018,6 +6018,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-configuration",
  "tracedecay-contracts",
@@ -6046,8 +6047,11 @@ dependencies = [
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
  "ureq",
  "url",
+ "windows-sys 0.61.2",
  "xattr",
  "zip",
 ]
@@ -6164,7 +6168,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
- "tracing-subscriber",
  "url",
  "walkdir",
 ]
@@ -6187,6 +6190,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracing",
 ]
 
 [[package]]
@@ -6224,7 +6228,6 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-runtime-core",
  "tracing",
- "tracing-subscriber",
  "windows 0.62.2",
 ]
 
@@ -6373,6 +6376,7 @@ dependencies = [
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "hotpath",
  "schemars",
  "serde",
@@ -6706,7 +6710,7 @@ dependencies = [
  "hex",
  "hotpath",
  "percent-encoding",
- "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -6741,7 +6745,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.61"
+version = "1.0.0-beta.65"
 dependencies = [
  "hotpath",
  "rusqlite",
@@ -6840,6 +6844,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 
@@ -6964,6 +6969,8 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-host-admission",
  "tracedecay-lcm",
+ "tracedecay-maintenance",
+ "tracedecay-privacy",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -7103,6 +7110,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-hooks",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -7983,7 +7991,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

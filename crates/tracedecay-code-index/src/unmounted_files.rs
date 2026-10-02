@@ -50,6 +50,7 @@ mod typescript;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// One orphaned file and, where the ecosystem admits one, the smallest repair
@@ -141,8 +142,8 @@ pub struct ProjectAudit {
 /// Every file in the working tree, walked once and shared by every ecosystem.
 ///
 /// The walk is the same one the indexer and `tracedecay_grep` use (`.gitignore`
-/// honoured, `target/`, `vendor/`, `node_modules/` and the other generated
-/// directories skipped, links not followed). Reusing it rather than restating
+/// honoured, the project's `index.exclude.v1` / `index.include.v1` policy
+/// applied, links not followed). Reusing it rather than restating
 /// its policy is the point: a scan that disagreed with the indexer's file set
 /// would report findings nothing else in the product can see.
 pub(super) struct ProjectFiles {
@@ -151,12 +152,13 @@ pub(super) struct ProjectFiles {
 }
 
 impl ProjectFiles {
-    fn collect(project_root: &Path) -> Result<Self> {
-        let walk = crate::source_walk::source_walk(project_root, None).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("source walk rejected its own scope: {}", error.message),
-            }
-        })?;
+    fn collect(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<Self> {
+        let walk =
+            crate::source_walk::source_walk(project_root, None, path_policy).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("source walk rejected its own scope: {}", error.message),
+                }
+            })?;
         let mut files = Vec::new();
         for entry in walk {
             let Ok(entry) = entry else { continue };
@@ -238,10 +240,10 @@ pub(super) fn normalized(path: &Path) -> PathBuf {
 }
 
 /// Walks the working tree once and asks each ecosystem its own question.
-pub fn audit_project(project_root: &Path) -> Result<ProjectAudit> {
+pub fn audit_project(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<ProjectAudit> {
     let files = hotpath::measure_block!(
         "code_index.unmounted_files.walk",
-        ProjectFiles::collect(project_root)?
+        ProjectFiles::collect(project_root, path_policy)?
     );
     let rust = hotpath::measure_block!("code_index.unmounted_files.rust", rust::audit(&files)?);
     let typescript = hotpath::measure_block!(
@@ -329,6 +331,8 @@ fn unmodelled_ecosystems(files: &ProjectFiles) -> Vec<EcosystemAudit> {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use tracedecay_domain::IndexPathPolicyV1;
+
     use super::{EcosystemAudit, ProjectAudit, ProjectFiles, audit_project, normalized};
 
     /// Writes `contents` to `root/relative`, creating parents.
@@ -338,8 +342,12 @@ mod tests {
         std::fs::write(path, contents).expect("write fixture file");
     }
 
+    pub(super) fn no_exclusions() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy")
+    }
+
     pub(super) fn project(root: &Path) -> ProjectFiles {
-        ProjectFiles::collect(root).expect("walk")
+        ProjectFiles::collect(root, &no_exclusions()).expect("walk")
     }
 
     fn ecosystem<'a>(audit: &'a ProjectAudit, name: &str) -> &'a EcosystemAudit {
@@ -367,7 +375,7 @@ mod tests {
         write(root, "service/main.go", "package main\n");
         write(root, "tools/build.py", "print('x')\n");
 
-        let audit = audit_project(root).expect("audit");
+        let audit = audit_project(root, &no_exclusions()).expect("audit");
         let go = ecosystem(&audit, "go");
         assert_eq!(go.status.as_str(), "unsupported");
         assert_eq!(go.scanned_file_count, 1);
@@ -401,7 +409,7 @@ mod tests {
         write(root, "web/src/index.js", "export const ok = 1;\n");
         write(root, "web/src/ts_orphan.js", "export const nope = 1;\n");
 
-        let audit = audit_project(root).expect("audit");
+        let audit = audit_project(root, &no_exclusions()).expect("audit");
         let rust = ecosystem(&audit, "rust");
         assert_eq!(rust.status.as_str(), "audited");
         assert_eq!(rust.unmounted.len(), 1);

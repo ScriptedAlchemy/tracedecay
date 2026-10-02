@@ -1,10 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::collection::{
-    DurableDatabaseInventoryV1, DurableMemoryCheck, check_store_durable_memory,
-    durable_check_scratch_root, durable_database_inventory, open_verified_store,
+    DurableDatabaseInventoryV1, DurableMemoryCheck, FindingStep, check_store_durable_memory,
+    collect_registered_finding, collect_unregistered_finding, durable_check_scratch_root,
+    durable_database_inventory, open_verified_store, unbounded_deadline,
 };
 use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
@@ -23,6 +25,18 @@ const DAY: i64 = 24 * 60 * 60;
 /// functional sweep assertions do not race a one-second wall clock.
 fn functional_sweep_deadline() -> MonotonicDeadline {
     MonotonicDeadline::at(Instant::now() + Duration::from_hours(24))
+}
+
+fn cancelled_collection_control() -> CollectionControl<'static> {
+    static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
+    CollectionControl::new(
+        CANCELLATION.get_or_init(|| {
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            cancellation
+        }),
+        functional_sweep_deadline(),
+    )
 }
 
 async fn open_registered_db(
@@ -76,7 +90,6 @@ fn entry(
         expected_data_root_fence: StoreDirectoryFence::Missing,
         expected_content_fence: StoreContentFence::Missing,
         expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
     }
 }
 
@@ -184,7 +197,7 @@ fn live_root_is_never_collected() {
         0,
         4096,
     )];
-    let findings = classify_stores(&census, 1_000 * DAY);
+    let findings = classify_stores(&census, 1_000 * DAY, &BTreeSet::new());
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
 
     let plan = plan_collection(findings, 0);
@@ -211,7 +224,7 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
     );
     census_entry.alias_roots = vec![live_alias];
 
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
     assert_eq!(
         findings[0].disposition,
         StoreDisposition::Live,
@@ -241,7 +254,7 @@ fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
     );
     census_entry.git_common_dir = Some(shared_common_dir);
 
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
     assert!(plan_collection(findings, 0).collect.is_empty());
 }
@@ -278,27 +291,16 @@ fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
             },
         )
     });
-    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-    let second = std::thread::spawn(move || {
-        let result = super::unregistered_page::read_project_directory_page(
-            &second_profile,
-            None,
-            1,
-            &|| false,
-        );
-        finished_tx.send(result).unwrap();
-    });
-    let independent = finished_rx.recv_timeout(Duration::from_secs(1));
-    // Always release and join the stalled writer before asserting so the
-    // regression cannot strand a process-global lock on its failure path.
+    entered_rx.recv().unwrap();
+    // The first writer stays paused until this read returns, so a regression
+    // that serializes profiles deadlocks here instead of racing a wall clock.
+    let independent =
+        super::unregistered_page::read_project_directory_page(&second_profile, None, 1, &|| false);
+    // Release and join the stalled writer before asserting so a failure cannot
+    // strand a process-global lock.
     release_tx.send(()).unwrap();
     assert_eq!(first.join().unwrap().unwrap(), Some(false));
-    second.join().unwrap();
-    let page = independent
-        .expect("another profile must progress before the paused writer is released")
-        .unwrap()
-        .unwrap();
+    let page = independent.unwrap().unwrap();
     assert_eq!(page.entries, ["proj_independent"]);
 }
 
@@ -446,11 +448,8 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     let page =
-        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
             .unwrap()
             .expect("first bounded page creates a resumable inventory");
     let cursor = page
@@ -467,7 +466,7 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         &profile_root,
         Some(&cursor),
         1,
-        &interrupted,
+        &|| false,
     )
     .unwrap()
     .expect("a torn header is replaced before restart resume");
@@ -710,21 +709,14 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     );
 }
 
-/// Build enough no-follow entries that a bounded apply can be interrupted in
-/// the payload-mtime fence itself, after the apply loop has admitted the
-/// finding. The production path must stop with a typed completion rather than
-/// recording `Cancelled` as an ordinary per-store error and claiming success.
 fn seed_payload_fence_work(data_root: &Path) {
-    std::fs::create_dir_all(data_root).unwrap();
-    for bucket_index in 0..32 {
-        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
-    }
-    for index in 0..30_000usize {
-        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
-        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
-    }
+    std::fs::create_dir_all(data_root.join("bucket")).unwrap();
+    std::fs::write(data_root.join("bucket/payload.bin"), b"x").unwrap();
 }
 
+/// A finding whose payload-mtime fence would refuse the store as changed if
+/// the fence walk ran to completion. An interrupted gate can therefore only
+/// report `Interrupted` if the fence itself observed the interruption.
 fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
     let profile_root = data_root
         .parent()
@@ -741,12 +733,11 @@ fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> Or
         expected_store_relpath: expected_store_relpath.to_owned(),
         expected_created_at: 1,
         expected_last_write_at: None,
-        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
+        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs - 1,
         expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
         // The mtime fence is the boundary under test; no later phase should be
         // reached when this control is interrupted.
         expected_content_fence: StoreContentFence::Missing,
         expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
     }
 }

@@ -15,9 +15,8 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
 use tracedecay_hooks::{
     HookDeliveryReceiptSpoolV1, HookReplayAdmissionOutcomeV1, HookReplayPassReportV1,
-    HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
-    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
-    published_hook_scope_binding,
+    HookSpoolConfigV1, HookSpoolV1, admit_replayed_envelope_with_authoritative_session,
+    drain_host_spool_once, hook_v2_spool_root, published_hook_scope_binding,
 };
 
 use tracedecay_mcp::handlers::hook_runtime::{
@@ -32,8 +31,11 @@ mod spool_watch;
 #[cfg(unix)]
 pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
 
-/// The longest a retained record waits for its next delivery attempt; a
-/// spool append wakes the drain sooner.
+/// The longest a retained record or receipt waits for its next delivery
+/// attempt. Every append and receipt publication wakes the drain, and startup
+/// opens every project holding either, so this sweep only retries work a pass
+/// retained (for example a settlement the authority refused) or a wake the
+/// spool watch could not deliver.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
@@ -105,13 +107,15 @@ async fn drain_hook_delivery_receipts(
 }
 
 /// The drain shares each delivery spool with hook callbacks, which legitimately
-/// write it while the daemon is down. A held writer lease is skipped and
-/// retried by the next sweep; any other failure is reported, not swallowed.
+/// write it while the daemon is down. A drain woken by a publication waits
+/// out the publishing writer; a lock held past the hook budget is skipped and
+/// retried by the next wake or sweep; any other failure is reported, not
+/// swallowed.
 fn open_delivery_receipt_spool_for_drain(
     root: &Path,
     host: NativeHostIdentityV1,
 ) -> Option<HookDeliveryReceiptSpoolV1> {
-    match HookDeliveryReceiptSpoolV1::open(root) {
+    match HookDeliveryReceiptSpoolV1::open(root, tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET) {
         Ok(spool) => Some(spool),
         Err(HookDeliverySpoolError::Busy) => None,
         Err(error) => {
@@ -246,20 +250,10 @@ async fn drain_admitted_host_spool(
     if !HookSpoolV1::has_records(&root).ok()? {
         return None;
     }
-    // A hook callback holding the writer lease is retried by the next sweep;
-    // any other failure is reported, not swallowed.
-    let spool = match HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) {
-        Ok((spool, _report)) => spool,
-        Err(HookSpoolError::WriterLeaseHeld) => return None,
-        Err(error) => {
-            tracing::warn!(host = host.hook_key(), %error, "hook spool replay could not open the spool");
-            return None;
-        }
-    };
     let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
-    Some(
-        Box::pin(drain_host_spool_once(
-            spool,
+    let pass = Box::pin(drain_host_spool_once(
+            &root,
+            HookSpoolConfigV1::stock(host),
             project_id,
             binding.as_ref(),
             now,
@@ -294,8 +288,16 @@ async fn drain_admitted_host_spool(
                 )
             },
         ))
-        .await,
-    )
+        .await;
+    // A writer still holding the lease past its own lease is stale, so its
+    // spool waits for the next sweep; every failure is reported, not swallowed.
+    match pass {
+        Ok(pass) => Some(pass),
+        Err(error) => {
+            tracing::warn!(host = host.hook_key(), %error, "hook spool replay could not open the spool");
+            None
+        }
+    }
 }
 
 fn hook_replay_now() -> UtcMicros {

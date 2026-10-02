@@ -30,5 +30,9 @@ pub(crate) async fn run(
             invocation.json,
         )?
     );
-    crate::application_cli::outcome_status(&outcome)
+    crate::application_cli::refused(
+        crate::application_cli::WORKFLOW,
+        operation.route_segment(),
+        &outcome,
+    )
 }

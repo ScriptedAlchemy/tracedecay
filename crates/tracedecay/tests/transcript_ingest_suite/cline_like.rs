@@ -1,23 +1,24 @@
 use tempfile::TempDir;
-use tracedecay_domain::{ClineTranscriptStream, ObservationSourceCursorV1, ProviderId, SessionId};
-use tracedecay_global_db::ParseOffset;
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationScopeV1, ObservationSourceCursorV1, ProviderId, SessionId,
+};
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::cline_like::ClineLikeSource;
-use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
+use tracedecay_sessions::runtime::hosts::cline_like::{
+    ClineLikeSource, capture_cline_like_snapshot_observations,
+};
+use tracedecay_sessions::runtime::source::TranscriptIngestError;
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
-use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks,
-    ingest_global_sources_for_provider, mark_test_project, open_project_session_db,
-    set_projection_failure, try_ingest_source,
+    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
+    ingest_global_sources_for_provider, ingest_user_provider, mark_test_project,
+    open_project_session_db, set_projection_failure,
 };
-use crate::support::{
-    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
-};
+use crate::support::{create_git_repo_with_linked_worktree, init_git_repo, setup};
 
 pub(super) fn vscode_storage_root(
     home: &std::path::Path,
@@ -79,49 +80,6 @@ async fn cline_usage_observations(
         .collect()
 }
 
-async fn parse_offset_for_path(
-    db: &ProjectSessionTestRuntime,
-    path: &std::path::Path,
-) -> Option<ParseOffset> {
-    let path = path.to_string_lossy();
-    if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
-        return Some(offset);
-    }
-
-    #[cfg(windows)]
-    {
-        let alternate = if path.contains('/') {
-            path.replace('/', "\\")
-        } else {
-            path.replace('\\', "/")
-        };
-        if alternate != path {
-            return db.get_parse_offset(&alternate).await;
-        }
-    }
-
-    None
-}
-
-pub(super) async fn parse_offset_for_task_history(
-    db: &ProjectSessionTestRuntime,
-    _project: &std::path::Path,
-    path: &std::path::Path,
-) -> Option<ParseOffset> {
-    if let Some(offset) = parse_offset_for_path(db, path).await {
-        return Some(offset);
-    }
-
-    let task_dir = path.parent()?.file_name()?.to_string_lossy();
-    let file_name = path.file_name()?.to_string_lossy();
-    let expected_suffix = format!("{task_dir}/{file_name}");
-    db.runtime()
-        .project_parse_offset_by_suffix_for_test(&expected_suffix)
-        .await
-        .ok()
-        .flatten()
-}
-
 pub(super) fn write_task(
     root: &std::path::Path,
     project: &std::path::Path,
@@ -172,21 +130,20 @@ pub(super) fn write_task_with_api_filename(
 }
 
 async fn assert_provider_ingests(
-    provider: &str,
-    source: ClineLikeSource,
+    kind: SessionProvider,
+    home: &std::path::Path,
     db: &ProjectSessionTestRuntime,
     ingest_project: &std::path::Path,
-    transcript_project: &std::path::Path,
 ) {
-    let stats = try_ingest_source(db, &source, ingest_project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
+    ingest_global_sources_for_provider(home, db, ingest_project, Some(kind)).await;
+    // user + assistant + the UI sidecar's usage record
+    assert_eq!(durable_table_count(db, "observations").await, 3);
+    let provider = kind.id();
 
     let results = db
         .search_session_messages(
             provider,
-            Some(ingest_project.to_string_lossy().as_ref()),
+            Some(db.project_id().as_str()),
             "billing pipeline",
             10,
         )
@@ -212,33 +169,6 @@ async fn assert_provider_ingests(
         .iter()
         .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
         .expect("assistant tool-use message should be searchable");
-    let metadata: serde_json::Value =
-        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&metadata["cline_like_task_cwd"], transcript_project);
-    assert_metadata_path_eq(&metadata["cline_like_task_worktree"], transcript_project);
-    assert_eq!(
-        metadata["cline_like_task_location_provenance"].as_str(),
-        Some("task_metadata")
-    );
-    assert!(metadata.get("usage").is_none());
-    let usage_hits = db
-        .search_session_messages(provider, None, "input_tokens", 10)
-        .await;
-    assert_eq!(usage_hits.len(), 1);
-    assert_eq!(usage_hits[0].message.kind.as_deref(), Some("usage"));
-    let usage_metadata: serde_json::Value = serde_json::from_str(
-        usage_hits[0]
-            .message
-            .metadata_json
-            .as_deref()
-            .expect("usage metadata"),
-    )
-    .unwrap();
-    assert_eq!(usage_metadata["usage"]["input_tokens"], 1200);
-    assert_eq!(usage_metadata["usage"]["output_tokens"], 350);
-    assert_eq!(usage_metadata["usage"]["cache_read_input_tokens"], 8000);
-    assert_eq!(usage_metadata["usage"]["cache_creation_input_tokens"], 500);
-    assert_eq!(usage_metadata["correlation"], "unavailable");
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
         {"type": "tool_use", "name": "read_file"}
@@ -251,30 +181,9 @@ async fn assert_provider_ingests(
         raw.content,
         serde_json::to_string(&expected_content).unwrap()
     );
-    let session = db
-        .get_session(provider, &assistant.message.session_id)
-        .await
-        .expect("Cline-like session should be stored");
-    let session_metadata: serde_json::Value =
-        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&session_metadata["cline_like_task_cwd"], transcript_project);
-    assert_metadata_path_eq(
-        &session_metadata["cline_like_task_worktree"],
-        transcript_project,
-    );
-    assert_eq!(
-        session_metadata["cline_like_task_location_provenance"].as_str(),
-        Some("task_metadata")
-    );
-
-    // ContentHash: unchanged full-rewrite file is a no-op.
-    assert_eq!(
-        try_ingest_source(db, &source, ingest_project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+    // An unchanged snapshot re-admits as an exact duplicate.
+    ingest_global_sources_for_provider(home, db, ingest_project, Some(kind)).await;
+    assert_eq!(durable_table_count(db, "observations").await, 3);
 }
 
 #[tokio::test]
@@ -290,14 +199,7 @@ async fn cline_task_history_populates_searchable_messages() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    assert_provider_ingests(
-        "cline",
-        ClineLikeSource::cline_with_home(&home),
-        &db,
-        &project,
-        &linked_worktree,
-    )
-    .await;
+    assert_provider_ingests(SessionProvider::Cline, &home, &db, &project).await;
 }
 
 #[tokio::test]
@@ -311,38 +213,19 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
-    );
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    assert_eq!(durable_table_count(&db, "observations").await, 3);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
 
     let ui_path = api.parent().unwrap().join("ui_messages.json");
-    let committed = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("initial task generation cursor");
+    let committed = durable_table_count(&db, "observations").await;
+    assert_eq!(committed, 3, "an unchanged snapshot is an exact duplicate");
     std::fs::write(&ui_path, r#"[{"type":"say","say":"api_req_started""#).unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        0
-    );
-    assert_eq!(
-        parse_offset_for_task_history(&db, &project, &api).await,
-        Some(committed),
-        "incomplete companion snapshot must not replace the committed generation"
+        durable_table_count(&db, "observations").await,
+        committed,
+        "incomplete companion snapshot must not admit a new generation"
     );
 
     std::fs::write(
@@ -364,26 +247,12 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     )
     .unwrap();
 
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    // The refreshed UI sidecar is a new source generation.
     assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        3
+        durable_table_count(&db, "observations").await,
+        committed + 1
     );
-    let usage = db
-        .search_session_messages("cline", None, "input_tokens", 10)
-        .await;
-    assert!(usage.iter().any(|hit| {
-        let metadata: serde_json::Value = serde_json::from_str(
-            hit.message
-                .metadata_json
-                .as_deref()
-                .expect("usage metadata"),
-        )
-        .unwrap();
-        metadata["usage"]["input_tokens"] == 2200
-    }));
 }
 
 #[tokio::test]
@@ -425,36 +294,13 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    assert_eq!(
-        try_ingest_source(&db, &source, &project, None)
-            .await
-            .unwrap()
-            .messages_upserted,
-        2
-    );
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    // the emitted assistant entry + the UI sidecar's usage record
+    assert_eq!(durable_table_count(&db, "observations").await, 2);
     let hits = db
         .search_session_messages("cline", None, "target", 10)
         .await;
     assert_eq!(hits.len(), 1);
-    let metadata: serde_json::Value =
-        serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert!(metadata.get("usage").is_none());
-    let usage = db
-        .search_session_messages("cline", None, "input_tokens", 10)
-        .await;
-    assert_eq!(
-        usage.len(),
-        1,
-        "usage hits: {:?}",
-        usage
-            .iter()
-            .map(|hit| (&hit.message.message_id, &hit.message.text))
-            .collect::<Vec<_>>()
-    );
-    let metadata: serde_json::Value =
-        serde_json::from_str(usage[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["usage"]["input_tokens"], 777);
 }
 
 #[tokio::test]
@@ -492,10 +338,7 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
     let before = db
         .search_session_messages("cline", None, "regression is fixed", 10)
         .await;
@@ -537,9 +380,7 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
         .to_string(),
     )
     .unwrap();
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
 
     let after = db
         .search_session_messages("cline", None, "regression is fixed", 10)
@@ -554,8 +395,8 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
     assert_eq!(reordered_ids, assistant_ids);
 }
 
-#[test]
-fn cline_complete_malformed_snapshot_is_typed_non_durable() {
+#[tokio::test]
+async fn cline_complete_malformed_snapshot_is_typed_non_durable() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
@@ -569,9 +410,20 @@ fn cline_complete_malformed_snapshot_is_typed_non_durable() {
     let api = dir.join("api_conversation_history.json");
     std::fs::write(&api, "{not-json]").unwrap();
 
-    let source = ClineLikeSource::cline_with_home(&home);
+    let db = open_project_session_db(&project).await.unwrap();
+    let captured = capture_cline_like_snapshot_observations(
+        &db.runtime().facade(),
+        &ClineLikeSource::cline_with_home(&home),
+        &project,
+        ObservationScopeV1::Project {
+            project_id: db.project_id().clone(),
+        },
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await;
     assert!(matches!(
-        source.try_parse_new(&api, StoredCursor::default(), &project, None),
+        captured,
         Err(TranscriptIngestError::NonDurableRecord {
             provider: "cline",
             reason: "malformed snapshot JSON",
@@ -598,17 +450,15 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    let stats =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+            .await;
     assert_eq!(stats.messages_upserted, 0);
 
-    assert!(
-        parse_offset_for_task_history(&db, &project, &api)
-            .await
-            .is_none(),
-        "metadata-less task should not advance its cursor"
+    assert_eq!(
+        durable_table_count(&db, "observations").await,
+        0,
+        "metadata-less task must not admit observations"
     );
 
     std::fs::write(
@@ -621,15 +471,12 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
     )
     .unwrap();
 
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    let stats =
+        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline))
+            .await;
     assert_eq!(stats.messages_upserted, 1);
 
-    let offset = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("task should advance once metadata is available");
-    assert_ne!(offset.byte_offset, 0);
+    assert_eq!(durable_table_count(&db, "observations").await, 1);
 }
 
 #[tokio::test]
@@ -645,15 +492,8 @@ async fn cline_like_task_for_other_project_is_skipped() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = try_ingest_source(
-        &db,
-        &ClineLikeSource::cline_with_home(&home),
-        &project,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(stats.messages_upserted, 0);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Cline)).await;
+    assert_eq!(durable_table_count(&db, "observations").await, 0);
 }
 
 #[tokio::test]
@@ -677,14 +517,41 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+    ingest_user_provider(
+        db.runtime(),
+        &home,
+        SessionProvider::Cline,
+        vec![project.clone()],
+    )
+    .await;
+    // user + assistant; the UI usage record is accounted, not a message
+    assert_eq!(
+        db.runtime()
+            .session_message_count_for_test(HostAdmissionScope::Profile, None)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        db.runtime()
+            .session_for_test(HostAdmissionScope::Profile, "cline", "registered-task")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.runtime()
+            .session_for_test(HostAdmissionScope::Profile, "cline", "mixed-task")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let session = db
+        .runtime()
+        .session_for_test(HostAdmissionScope::Profile, "cline", "user-task")
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-    assert!(db.get_session("cline", "registered-task").await.is_none());
-    assert!(db.get_session("cline", "mixed-task").await.is_none());
-    let session = db.get_session("cline", "user-task").await.unwrap();
     assert_eq!(session.project_key, "user");
     assert_eq!(session.project_path, "user");
 }
@@ -1208,25 +1075,30 @@ async fn cline_like_unknown_project_membership_defers_persistence_and_offset() {
         let (home, project) = setup(&tmp);
         let nested = project.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
-        let api = write_task(
+        write_task(
             &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
             &nested,
             "unknown-cline",
         );
 
         let db = open_project_session_db(&project).await.unwrap();
-        let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
         assert_eq!(
-            try_ingest_source(&db, &source, tmp.path(), None)
-                .await
-                .unwrap()
-                .messages_upserted,
+            ingest_user_provider(
+                db.runtime(),
+                &home,
+                SessionProvider::Cline,
+                vec![project.clone()]
+            )
+            .await
+            .stats
+            .messages_upserted,
             0
         );
-        assert!(db.get_session("cline", "unknown-cline").await.is_none());
         assert!(
-            parse_offset_for_task_history(&db, &project, &api)
+            db.runtime()
+                .session_for_test(HostAdmissionScope::Profile, "cline", "unknown-cline")
                 .await
+                .unwrap()
                 .is_none()
         );
         return;

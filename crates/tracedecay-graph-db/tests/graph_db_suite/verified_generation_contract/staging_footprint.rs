@@ -590,10 +590,10 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
         );
         stage_rows_before_publish(&registered, temp.path(), &manifest);
         let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
-        sealed.push((identity, marker, manifest, commit));
+        sealed.push((record.publication.key.projection, manifest, commit));
     }
 
-    for (_, _, manifest, _) in &sealed {
+    for (_, manifest, _) in &sealed {
         assert_ne!(
             database
                 .staging_generation_row_counts(&manifest.identity())
@@ -605,27 +605,25 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
 
     // Drop every snapshot and every resident lease: exactly what a daemon
     // that opened the project and activated nothing else looks like.
-    let recovered_digests = sealed
+    let sealed_projections = sealed
         .iter()
-        .map(|(_, _, _, commit)| commit.head.recovered_digest.as_str().to_owned())
+        .map(|(projection, _, _)| projection.clone())
         .collect::<Vec<_>>();
     let sealed_identities = sealed
         .iter()
-        .map(|(_, _, manifest, _)| manifest.identity())
+        .map(|(_, manifest, _)| manifest.identity())
         .collect::<Vec<_>>();
-    let inline_head_digest = inline_commit.head.recovered_digest.as_str().to_owned();
+    let inline_projection = inline_record.publication.key.projection.clone();
     let inline_manifest_identity = inline_manifest.identity();
     drop(inline_commit);
-    for (_, _, _, commit) in sealed.drain(..) {
+    for (_, _, commit) in sealed.drain(..) {
         drop(commit);
     }
     database.forget_resident_verified_leases().unwrap();
 
-    for (identity, digest) in sealed_identities.iter().zip(&recovered_digests) {
+    for (identity, projection) in sealed_identities.iter().zip(&sealed_projections) {
         // Fails if a sealed generation with no resident lease is retained.
-        let outcome = database
-            .release_staging_rows_for_relational_head(identity, digest)
-            .unwrap();
+        let outcome = release_sealed_head(&registered, temp.path(), &mut authority, projection);
         assert_eq!(
             outcome,
             SealedStagingRelease::Released {
@@ -655,20 +653,15 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
     );
 
     // The memory graph with no sealed artifact installed: staging holds the
-    // only copy of its rows, so no authority, lease or artifact, may
-    // release them. Fails if the lease-independent arm ever releases rows
-    // that nothing else can reconstruct.
+    // only copy of its rows. Publication still left a matching receipt on
+    // disk, so the sealed-code-generation replay check is what refuses here.
+    // Fails if the release ever trusts that receipt for an inline replay.
     database
         .discard_sealed_generation_reader(&inline_manifest_identity)
         .unwrap();
     assert_eq!(
-        database
-            .release_staging_rows_for_relational_head(
-                &inline_manifest_identity,
-                &inline_head_digest,
-            )
-            .unwrap(),
-        SealedStagingRelease::Retained(SealedStagingRetentionReason::NoSealedStore)
+        release_sealed_head(&registered, temp.path(), &mut authority, &inline_projection),
+        SealedStagingRelease::Retained(SealedStagingRetentionReason::NoSealedCodeGenerationReplay)
     );
     assert_ne!(
         database

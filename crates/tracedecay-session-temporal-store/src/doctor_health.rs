@@ -11,7 +11,6 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
@@ -137,20 +136,33 @@ fn required_table_names() -> impl Iterator<Item = &'static str> {
 }
 
 const REQUIRED_INDEXES: &[&str] = &[
+    "idx_session_agents_introduced",
+    "idx_session_assertion_supersession_introduced",
     "idx_session_assertion_supersession_successor",
+    "idx_session_assertions_introduced",
     "idx_session_assertions_generation_order",
     "idx_session_assertions_kind_order",
     "idx_session_assertions_object_order",
     "idx_session_assertions_subject",
     "idx_session_current_entities_assertion",
+    "idx_session_current_entities_introduced",
     "idx_session_current_entities_occurrence",
+    "idx_session_derived_evidence_anchor",
+    "idx_session_derived_evidence_identity",
+    "idx_session_derived_evidence_introduced",
+    "idx_session_derived_evidence_members_introduced",
+    "idx_session_derived_evidence_members_occurrence",
+    "idx_session_derived_evidence_tail",
+    "idx_session_derived_evidence_thread_order",
     "idx_session_external_payload_manifests_session",
     "idx_session_occurrences_agent",
     "idx_session_occurrences_anchor_order",
     "idx_session_occurrences_generation_order",
+    "idx_session_occurrences_introduced",
     "idx_session_occurrences_message",
     "idx_session_occurrences_root_generation_order",
     "idx_session_occurrences_session_time",
+    "idx_session_occurrences_source_order",
     "idx_session_occurrences_thread",
     "idx_session_occurrences_turn",
     "idx_session_query_cursor_keys_active",
@@ -167,7 +179,10 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_temporal_generations_one_active",
     "idx_session_temporal_generations_session_state",
     "idx_session_temporal_observation_effects_session",
+    "idx_session_threads_introduced",
+    "idx_session_turn_members_introduced",
     "idx_session_turn_members_occurrence",
+    "idx_session_turns_introduced",
 ];
 
 const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
@@ -796,7 +811,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return unavailable_report_with_detail(
-                    classify_database_error(&error),
+                    classify_engine_error(&error),
                     "read_snapshot",
                     &error,
                 );
@@ -864,7 +879,7 @@ async fn diagnose_snapshot(
             Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
             Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
             Err(error) => {
-                if is_engine_locked(&error) {
+                if error.is_busy_or_locked() {
                     return unavailable_report_with_detail(
                         SessionTemporalHealthStatus::Locked,
                         "schema_version",
@@ -980,7 +995,7 @@ async fn diagnose_health_check(
             merge_finding(findings, check.kind, 1);
             false
         }
-        Err(error) if is_engine_locked(&error) => true,
+        Err(error) if error.is_busy_or_locked() => true,
         Err(error) => {
             *status = SessionTemporalHealthStatus::Partial;
             merge_finding(findings, check.kind, 0);
@@ -1167,25 +1182,11 @@ fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
 }
 
 fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
-    if is_engine_locked(error) {
+    if error.is_busy_or_locked() {
         SessionTemporalHealthStatus::Locked
     } else {
         SessionTemporalHealthStatus::Unavailable
     }
-}
-
-fn classify_database_error(error: &TraceDecayError) -> SessionTemporalHealthStatus {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("locked") || message.contains("busy") {
-        SessionTemporalHealthStatus::Locked
-    } else {
-        SessionTemporalHealthStatus::Unavailable
-    }
-}
-
-fn is_engine_locked(error: &EngineError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("locked") || message.contains("busy")
 }
 
 /// The probe a failed check names in its `reason`, so an unavailable report
@@ -1347,6 +1348,50 @@ mod probe_tests {
         assert_eq!(
             partial_reasons,
             BTreeSet::from(["missing_anchor: bounded_row_probe_incomplete".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_naming_a_locked_table_is_partial_not_locked() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let connection = TestConnection::open(&tmp.path().join("doctor-locked-name.db"));
+        SessionTemporalExec::execute_batch(
+            &connection,
+            "CREATE TABLE retrieval_anchors (anchor_id TEXT PRIMARY KEY);
+             CREATE VIEW session_summary_nodes AS
+                 SELECT summary_anchor_id FROM locked_summary_rows;",
+        )
+        .await
+        .expect("seed a probe whose source table is gone");
+        let check = CHECKS
+            .iter()
+            .find(|check| check.kind == SessionTemporalHealthFindingKind::MissingAnchor)
+            .expect("missing-anchor check");
+
+        let mut status = SessionTemporalHealthStatus::Complete;
+        let mut findings = Vec::new();
+        let mut partial_reasons = BTreeSet::new();
+        let locked = diagnose_health_check(
+            &connection,
+            check,
+            &mut status,
+            &mut findings,
+            &mut partial_reasons,
+        )
+        .await;
+
+        assert!(!locked, "a missing table is not a held database lock");
+        assert_eq!(status, SessionTemporalHealthStatus::Partial);
+        assert_eq!(
+            findings,
+            vec![finding(SessionTemporalHealthFindingKind::MissingAnchor, 0)]
+        );
+        assert_eq!(
+            partial_reasons,
+            BTreeSet::from([
+                "missing_anchor: SQLite prepare query failed: no such table: main.locked_summary_rows"
+                    .to_owned()
+            ])
         );
     }
 }

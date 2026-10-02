@@ -513,7 +513,12 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let advisory_cycle = match advisory_cycle {
-                    Some(owner) if owner.service.mount().await == DaemonAdvisoryCycleMountV1::Answers => {
+                    Some(owner)
+                        if matches!(
+                            owner.service.mount().await,
+                            DaemonAdvisoryCycleMountV1::Answers
+                        ) =>
+                    {
                         Some(owner)
                     }
                     _ => {

@@ -104,73 +104,6 @@ pub(super) struct DaemonEngine {
         Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
 }
 
-/// Retain one daemon-owned Git index transaction service for the project store
-/// and reconcile any durable records before mutation owners become available.
-/// Read-only core tools and edit previews do not depend on this service. The
-/// service owns the store actor; constructing a second service for the same
-/// database is rejected by the registry.
-#[hotpath::measure(label = "daemon.engine.git_index_transactions", future = true)]
-pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
-    store_administration: &StoreAdministration,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_root: &Path,
-    project_id: Option<&str>,
-) -> Result<()> {
-    ensure_git_index_transactions_for_mutation_owners_inner(
-        store_administration,
-        session_db,
-        project_root,
-        project_id,
-    )
-    .await
-}
-
-fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
-    store_administration: &'a StoreAdministration,
-    session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_root: &'a Path,
-    project_id: Option<&'a str>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    // Erase the deeply nested future before it reaches the measured wrapper
-    // so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let Some(project_id) = project_id else {
-            // Linked/anonymous project opens without a durable project id cannot
-            // own index-mutation authority; skip rather than invent an identity.
-            return Ok(());
-        };
-        let project_id =
-            tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("git index transaction project identity is invalid: {error}"),
-                }
-            })?;
-        let Some(repository_root) =
-            tracedecay_runtime_core::worktree::git_worktree_root(project_root)
-        else {
-            // Non-Git projects remain valid TraceDecay projects. They advertise no
-            // Git mutation authority and must not fail project-open admission.
-            return Ok(());
-        };
-        let observed_at = tracedecay_domain::UtcMicros(
-            i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |duration| duration.as_micros()),
-            )
-            .unwrap_or(i64::MAX),
-        );
-        store_administration
-            .git_index_transaction_services()
-            .ensure(session_db, repository_root, project_id, observed_at)
-            .await
-            .map(|_| ())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("git index transaction startup did not complete: {error}"),
-            })
-    })
-}
-
 #[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
 pub(super) fn ensure_context_scout_owner_before_advertising(
     project: &tracedecay_project::project::TraceDecay,
@@ -640,7 +573,7 @@ impl DaemonEngine {
     pub(super) async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> Result<()> {
         self.schedule_project_server_warmup_inner(handshake, initialize_request)
             .await
@@ -649,7 +582,7 @@ impl DaemonEngine {
     fn schedule_project_server_warmup_inner(
         &self,
         handshake: DaemonHandshake,
-        initialize_request: JsonRpcRequest,
+        initialize_request: Option<JsonRpcRequest>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         // Erase the deeply nested future before it reaches the measured
         // wrapper so every profiling feature can compute its layout.
@@ -657,7 +590,7 @@ impl DaemonEngine {
             if self.cached_project_server(&handshake).await?.is_some() {
                 return Ok(());
             }
-            match Box::pin(self.begin_project_open(handshake, Some(initialize_request))).await? {
+            match Box::pin(self.begin_project_open(handshake, initialize_request)).await? {
                 ProjectOpenTaskClaim::InFlight(_) => Ok(()),
                 ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
                 ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),

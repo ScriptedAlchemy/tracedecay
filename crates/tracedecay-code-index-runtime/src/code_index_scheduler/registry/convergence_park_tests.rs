@@ -27,7 +27,13 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1, CodeIndexReadinessTargetV1,
+    CodeIndexReadinessWaitReadV1,
+};
+use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_domain::UtcMicros;
+use tracedecay_graph_query::{
+    CodeGraphReadError, CodeGraphReadRequest, map_code_graph_read_runtime_error,
 };
 
 use super::super::graph_activation::{
@@ -35,8 +41,9 @@ use super::super::graph_activation::{
     install_injected_activation_gate, set_injected_activation_failures,
     set_injected_publication_deadline,
 };
-use super::super::tests::OwnerSignals;
-use super::CodeIndexSchedulerRegistryV1;
+use super::super::tests::{OwnerSignals, application_context, query_authority};
+use super::{CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1};
+use crate::project_reads::project_code_graph_projection_read_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Ceiling on how long a test waits for the worker to reach the asserted
@@ -183,6 +190,18 @@ impl Fixture {
             tokio::time::sleep(POLL_SPACING).await;
         }
     }
+}
+
+fn assert_seated_fixture_generation(seated: &super::super::CodeIndexPublishedGenerationV1) {
+    assert_eq!(seated.snapshot().files.len(), 1);
+    assert_eq!(seated.snapshot().files[0].logical_path, "src/main.rs");
+    let symbols: Vec<(&str, &str)> = seated
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.simple_name.as_str(), symbol.kind.as_str()))
+        .collect();
+    assert_eq!(symbols, [("main", "function")]);
 }
 
 /// A permissive artifacts root violates the owner-privacy contract; the
@@ -480,17 +499,13 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
     set_injected_activation_failures(&scope.worktree_id, UNDRAINABLE_ACTIVATION_FAILURES);
     drop(admission);
 
-    let seated = fixture.wait_for_seated_generation().await;
-    let attempts = injected_activation_attempt_count(&scope.worktree_id);
-    assert!(
-        attempts > 0,
-        "the fixture must observe a real graph activation attempt, otherwise the seat proves nothing"
-    );
-    assert!(
-        seated.is_some(),
-        "the sealed generation must take the serving seat while graph activation retries \
-         (activation attempts: {attempts})"
-    );
+    let seated = fixture
+        .wait_for_seated_generation()
+        .await
+        .expect("the sealed generation must take the serving seat while graph activation retries");
+    // Retries stay armed, so the attempt counter is already past 1 on some
+    // observations. The seated file and symbol are the stable outcome.
+    assert_seated_fixture_generation(&seated);
     fixture.registry.shutdown().await;
 }
 
@@ -502,8 +517,7 @@ async fn text_seats_while_graph_activation_keeps_failing_retryably() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
     let (fixture, admission) =
-        Fixture::mount_with_poisoned_artifacts_root_held("project.publication-budget", |_| {})
-            .await;
+        Fixture::mount_with_poisoned_artifacts_root_held("project.code-index-tests", |_| {}).await;
     let scope = fixture
         .registry
         .serving_code_scope(&fixture.project)
@@ -523,10 +537,11 @@ async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
         .expect("freshness is observable");
     assert_eq!(settled.code_graph_serving.as_ref(), Some(&refused));
     assert!(!settled.rebuild_in_flight, "{settled:?}");
-    assert!(
-        fixture.wait_for_seated_generation().await.is_some(),
-        "exact and lexical keep serving the generation whose graph was refused"
-    );
+    let seated = fixture
+        .wait_for_seated_generation()
+        .await
+        .expect("exact and lexical keep serving the generation whose graph was refused");
+    assert_seated_fixture_generation(&seated);
 
     // Past the whole retry backoff ladder, with the worker woken throughout.
     let observe_until = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -545,6 +560,38 @@ async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
         .await
         .expect("freshness after the retry window");
     assert_eq!(after.code_graph_serving.as_ref(), Some(&refused));
+
+    // A graph read of that generation answers the refusal typed and
+    // terminal: retrying reads the same until another generation seals.
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let port = project_code_graph_projection_read_port(
+        fixture.registry.clone(),
+        fixture.project.clone(),
+        context.scope().clone(),
+    );
+    let refusal = port
+        .open(CodeGraphReadRequest::from_context(&context, UtcMicros(1)))
+        .await
+        .expect_err("a refused generation serves no graph read");
+    assert_eq!(
+        refusal,
+        CodeGraphReadError::Refused {
+            detail: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
+        }
+    );
+    let routed = map_code_graph_read_runtime_error(refusal);
+    assert_eq!(
+        routed
+            .project_route_context()
+            .map(|(code, retryable, _)| (code, retryable)),
+        Some(("code-graph-refused", false))
+    );
     set_injected_publication_deadline(&scope.worktree_id, false);
     fixture.registry.shutdown().await;
 }
@@ -605,6 +652,162 @@ async fn progress_names_graph_publication_until_the_graph_seats() {
         seated.progress.as_ref().map(|progress| progress.phase),
         Some(CodeIndexBuildPhaseV1::Ready)
     );
+    fixture.registry.shutdown().await;
+}
+
+/// A search waiting for a retained generation's text serving answers from the
+/// text owners while that generation's graph is still being published: the
+/// publication is corpus-sized work the wait neither covers nor needs. It
+/// answers warming only while the query authority it also needs is missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_serving_wait_answers_while_the_graph_publishes() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.code-index-tests", |_| {}).await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    drop(admission);
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation starts");
+
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(
+        &operation,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    let without_authority = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_text_serving(
+            &fixture.project,
+            context.scope(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("the wait answers at its own budget");
+    assert_eq!(without_authority, CodeIndexSeatWaitV1::Deadline);
+
+    let text = fixture
+        .registry
+        .retained_text_owner_for_root(&fixture.project)
+        .await
+        .expect("published text owner");
+    fixture
+        .registry
+        .mount_query_authority(
+            &fixture.project,
+            context.scope(),
+            query_authority(text.metadata().manifest().privacy_domain.clone()),
+        )
+        .await
+        .expect("mount query authority");
+    let serving = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_text_serving(
+            &fixture.project,
+            context.scope(),
+            Duration::from_mins(10),
+        ),
+    )
+    .await
+    .expect("the wait answers while the graph publication is held");
+    assert_eq!(serving, CodeIndexSeatWaitV1::Seated(()));
+    assert_eq!(
+        fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("freshness")
+            .code_graph_serving,
+        Some(CodeGraphServingReadinessV1::Pending),
+        "the graph is still unseated when text serving answers"
+    );
+
+    gate.release();
+    fixture.registry.shutdown().await;
+}
+
+/// A seat wait answers a parked worker with its park instead of waiting out
+/// its budget for a seat the worker will not install. The squatted artifacts
+/// root parks the published generation's text owner on every pass, so the
+/// search's wait for retained text serving can never be satisfied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seat_wait_answers_a_parked_worker_with_its_park() {
+    let fixture =
+        Fixture::mount_with_poisoned_artifacts_root("project.seat-wait-parked", |artifacts_root| {
+            fs::write(artifacts_root, b"squatter").expect("occupy artifacts root path");
+        })
+        .await;
+    fixture
+        .wait_for_freshness(|freshness| freshness.parked.is_some())
+        .await
+        .expect("the worker parks on the squatted artifacts root");
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+
+    let waited = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_text_serving(
+            &fixture.project,
+            context.scope(),
+            CONVERGENCE_DEADLINE * 2,
+        ),
+    )
+    .await
+    .expect("a parked worker ends the wait before its budget");
+    let CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(park)) = waited else {
+        panic!("the wait must answer with the worker's park: {waited:?}");
+    };
+    assert!(
+        park.reason.contains("code text artifacts root"),
+        "{}",
+        park.reason
+    );
+    assert!(park.retries_on_wake);
+    fixture.registry.shutdown().await;
+}
+
+/// A readiness wait (`status` `wait_for`) ends as soon as the registry is
+/// cancelled: a worktree shutting down installs nothing more, so the wait
+/// reports the closed registry instead of spending its budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readiness_wait_ends_when_the_registry_is_cancelled() {
+    let (fixture, _held) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.seat-wait-cancelled", |_| {})
+            .await;
+    let registry = fixture.registry.clone();
+    let project = fixture.project.clone();
+    let wait = tokio::spawn(async move {
+        registry
+            .wait_for_readiness(
+                &project,
+                CodeIndexReadinessTargetV1::Fresh,
+                CONVERGENCE_DEADLINE * 2,
+            )
+            .await
+    });
+    fixture.registry.cancel();
+    let waited = tokio::time::timeout(CONVERGENCE_DEADLINE, wait)
+        .await
+        .expect("cancellation ends the wait before its budget")
+        .expect("wait task")
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Unreachable { reason } = waited else {
+        panic!("a cancelled registry must end the wait: {waited:?}");
+    };
+    assert_eq!(reason, "code_index_scheduler_registry_closed");
     fixture.registry.shutdown().await;
 }
 

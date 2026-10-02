@@ -34,14 +34,15 @@ use tracedecay_store::runtime::{
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
+use crate::row_index::{ROW_INDEX_FILE, RowIndexBuilder};
 use crate::{GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey};
 
 use super::{
     CheckedDigestWriter, CheckedVecWriter, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationRelation, GraphGenerationReplaySource,
-    GraphProjectionIdentity, SealedCodeGenerationReplay, checked_canonical_bytes,
-    relational_dependency_generations, validate_sealed_replay, write_frame,
-    write_generation_identity_frames,
+    GraphProjectionIdentity, GraphRowDigestSum, SealedCodeGenerationReplay,
+    checked_canonical_bytes, relational_dependency_generations, validate_sealed_replay,
+    write_generation_identity_frames, write_row_frame,
 };
 
 /// Canonical bytes a spill buffers before it sorts and writes one run.
@@ -53,6 +54,9 @@ pub const GRAPH_ROW_SPILL_RUN_BYTES: usize = 32 * 1024 * 1024;
 const SPILL_IO_BUFFER_BYTES: usize = 256 * 1024;
 const ENTITIES_FILE: &str = "entities.rows";
 const RELATIONS_FILE: &str = "relations.rows";
+/// A producer-owned file that travels with the sealed generation, see
+/// [`GraphGenerationRowSpill::attachment_path`].
+const ATTACHMENT_FILE: &str = "attachment";
 
 /// Scratch directory owned by one spill; removed with its owner.
 struct SpillDirectory(PathBuf);
@@ -221,6 +225,9 @@ pub struct GraphGenerationRowSpill {
     entities: RowRuns,
     relations: RowRuns,
     entity_identities: Vec<GraphEntityId>,
+    /// Relation endpoints, tracked only for a layered delta whose relations
+    /// may reach rows its base serves.
+    endpoints: Option<std::collections::HashSet<GraphEntityId>>,
 }
 
 /// Bytes one row adds to a spill buffer: `buffered` counts toward
@@ -271,7 +278,54 @@ impl GraphGenerationRowSpill {
             entities: RowRuns::new("entities"),
             relations: RowRuns::new("relations"),
             entity_identities: Vec::new(),
+            endpoints: None,
         })
+    }
+
+    /// A spill for a layered delta: relations may name endpoints the delta
+    /// does not carry, reported by [`Self::missing_endpoints`] so the layered
+    /// builder copies them from the base before [`Self::finish`].
+    pub(crate) fn create_layered(
+        directory: PathBuf,
+        projection: GraphProjectionIdentity,
+    ) -> Result<Self, GraphDbError> {
+        let mut spill = Self::create(directory, projection)?;
+        spill.endpoints = Some(std::collections::HashSet::new());
+        Ok(spill)
+    }
+
+    /// Scratch directory the spill owns; removed with the spill.
+    pub(crate) fn directory(&self) -> &Path {
+        self.directory.path()
+    }
+
+    /// Where the producer may write one file that is sealed beside the
+    /// generation's container and reaches every layered generation built on
+    /// it. Absent unless the producer writes it.
+    #[must_use]
+    pub fn attachment_path(&self) -> PathBuf {
+        self.directory.path().join(ATTACHMENT_FILE)
+    }
+
+    /// The distinct entity identities pushed so far, ascending.
+    pub(crate) fn sorted_entity_identities(&mut self) -> &[GraphEntityId] {
+        self.distinct_entities();
+        &self.entity_identities
+    }
+
+    /// Relation endpoints pushed so far that no pushed entity carries.
+    pub(crate) fn missing_endpoints(&mut self) -> Vec<GraphEntityId> {
+        self.distinct_entities();
+        let Some(endpoints) = self.endpoints.as_ref() else {
+            return Vec::new();
+        };
+        let mut missing = endpoints
+            .iter()
+            .filter(|endpoint| self.entity_identities.binary_search(endpoint).is_err())
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort_unstable();
+        missing
     }
 
     /// Distinct entity identities pushed so far: the entity count of the
@@ -315,6 +369,9 @@ impl GraphGenerationRowSpill {
                         "relation endpoint projection `{}` is not the candidate or an exact dependency",
                         endpoint.projection
                     )));
+                }
+                if let Some(endpoints) = self.endpoints.as_mut() {
+                    endpoints.insert(endpoint.identity.clone());
                 }
             }
             let canonical = canonical_row(&relation, "recovered generation relation", check)?;
@@ -378,12 +435,21 @@ impl GraphGenerationRowSpill {
         drop(canonical);
         let directory = self.directory.path().to_path_buf();
         let entity_identities = self.entity_identities;
+        // A generation a later refresh may layer over records every row's
+        // digest beside its container; see `row_index`.
+        let mut row_index = directory
+            .join(ATTACHMENT_FILE)
+            .is_file()
+            .then(RowIndexBuilder::new);
         let entity_count = merge_runs(
             &self.entities.runs,
             &directory.join(ENTITIES_FILE),
             check,
             |row| {
-                write_frame(&mut writer, "entity", &row.canonical)?;
+                let lanes = write_row_frame(&mut writer, "entity", &row.canonical)?;
+                if let Some(index) = row_index.as_mut() {
+                    index.entity(&row.identity, lanes)?;
+                }
                 Ok(())
             },
         )?;
@@ -398,17 +464,21 @@ impl GraphGenerationRowSpill {
             &directory.join(RELATIONS_FILE),
             check,
             |row| {
-                for endpoint in &row.endpoints {
-                    if entity_identities
+                let mut positions = [0_usize; 2];
+                for (position, endpoint) in positions.iter_mut().zip(&row.endpoints) {
+                    *position = entity_identities
                         .binary_search_by(|entity| entity.as_str().cmp(endpoint))
-                        .is_err()
-                    {
-                        return Err(GraphDbError::invalid(format!(
-                            "local relation endpoint `{endpoint}` is absent from the candidate generation"
-                        )));
-                    }
+                        .map_err(|_| {
+                            GraphDbError::invalid(format!(
+                                "local relation endpoint `{endpoint}` is absent from the candidate generation"
+                            ))
+                        })?;
                 }
-                write_frame(&mut writer, "relation", &row.canonical)
+                let lanes = write_row_frame(&mut writer, "relation", &row.canonical)?;
+                if let Some(index) = row_index.as_mut() {
+                    index.relation(&row.identity, lanes, positions[0], positions[1])?;
+                }
+                Ok(())
             },
         )?;
         if relation_count > MAX_VERIFIED_GENERATION_RELATIONS {
@@ -417,7 +487,11 @@ impl GraphGenerationRowSpill {
                 MAX_VERIFIED_GENERATION_RELATIONS,
             ));
         }
+        let row_sum = writer.row_sum();
         writer.finish()?;
+        if let Some(index) = row_index {
+            index.write(&directory.join(ROW_INDEX_FILE))?;
+        }
         let expected_recovered_digest = GraphRecoveredGenerationDigestV1::new(format!(
             "sha256:{}",
             encode_lowercase_hex(&digest.finalize())
@@ -433,6 +507,7 @@ impl GraphGenerationRowSpill {
             entity_identities,
             relation_count,
             expected_recovered_digest,
+            row_sum,
         })
     }
 }
@@ -542,6 +617,7 @@ pub struct SpilledGraphGeneration {
     entity_identities: Vec<GraphEntityId>,
     relation_count: usize,
     expected_recovered_digest: GraphRecoveredGenerationDigestV1,
+    row_sum: GraphRowDigestSum,
 }
 
 impl std::fmt::Debug for SpilledGraphGeneration {
@@ -571,6 +647,39 @@ impl SpilledGraphGeneration {
     #[must_use]
     pub fn expected_recovered_digest(&self) -> &GraphRecoveredGenerationDigestV1 {
         &self.expected_recovered_digest
+    }
+
+    /// The order-independent row half of [`Self::expected_recovered_digest`].
+    #[must_use]
+    pub fn row_sum(&self) -> GraphRowDigestSum {
+        self.row_sum
+    }
+
+    /// The producer's attachment, when it wrote one before the spill finished.
+    pub(crate) fn attachment(&self) -> Option<PathBuf> {
+        let path = self.directory.path().join(ATTACHMENT_FILE);
+        path.is_file().then_some(path)
+    }
+
+    /// The row index sealed beside an attachment; see `row_index`.
+    pub(crate) fn row_index(&self) -> Option<PathBuf> {
+        let path = self.directory.path().join(ROW_INDEX_FILE);
+        path.is_file().then_some(path)
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        self.directory.path()
+    }
+
+    /// The canonical relation rows' identities, in canonical order.
+    pub(crate) fn relation_identities(&self) -> Result<Vec<crate::GraphRelationId>, GraphDbError> {
+        self.relations()?
+            .map(|row| row.map(|(relation, _)| relation.identity))
+            .collect()
+    }
+
+    pub(crate) fn entity_identities(&self) -> &[GraphEntityId] {
+        &self.entity_identities
     }
 
     /// The position of `identity` in the canonical entity order.
@@ -651,11 +760,13 @@ impl<T: DeserializeOwned> Iterator for SpilledRows<T> {
 }
 
 /// A generation's rows as a publisher hands them to the registry: an
-/// in-memory manifest, or rows spilled to disk by a batch producer.
+/// in-memory manifest, rows spilled to disk by a batch producer, or a delta
+/// over a sealed base.
 #[derive(Clone, Debug)]
 pub enum GraphGenerationRows {
     Manifest(Arc<GraphGenerationManifest>),
     Spilled(Arc<SpilledGraphGeneration>),
+    Layered(Arc<crate::LayeredGraphGeneration>),
 }
 
 impl From<Arc<GraphGenerationManifest>> for GraphGenerationRows {
@@ -676,12 +787,19 @@ impl From<SpilledGraphGeneration> for GraphGenerationRows {
     }
 }
 
+impl From<crate::LayeredGraphGeneration> for GraphGenerationRows {
+    fn from(layered: crate::LayeredGraphGeneration) -> Self {
+        Self::Layered(Arc::new(layered))
+    }
+}
+
 impl GraphGenerationRows {
     #[must_use]
     pub fn identity(&self) -> GraphGenerationManifestIdentity {
         match self {
             Self::Manifest(manifest) => manifest.identity(),
             Self::Spilled(spilled) => spilled.identity(),
+            Self::Layered(layered) => layered.identity(),
         }
     }
 
@@ -690,6 +808,7 @@ impl GraphGenerationRows {
         match self {
             Self::Manifest(manifest) => manifest.row_counts(),
             Self::Spilled(spilled) => spilled.row_counts(),
+            Self::Layered(layered) => layered.row_counts(),
         }
     }
 
@@ -700,6 +819,7 @@ impl GraphGenerationRows {
         match self {
             Self::Manifest(manifest) => manifest.expected_recovered_digest(check),
             Self::Spilled(spilled) => Ok(spilled.expected_recovered_digest.clone()),
+            Self::Layered(layered) => Ok(layered.expected_recovered_digest().clone()),
         }
     }
 
@@ -711,6 +831,7 @@ impl GraphGenerationRows {
         match self {
             Self::Manifest(manifest) => manifest.dependency_closure_digest(check),
             Self::Spilled(spilled) => spilled.identity.dependency_closure_digest(check),
+            Self::Layered(layered) => layered.identity().dependency_closure_digest(check),
         }
     }
 
@@ -723,6 +844,9 @@ impl GraphGenerationRows {
         match self {
             Self::Manifest(manifest) => Ok(manifest),
             Self::Spilled(spilled) => spilled.materialize(check).map(Arc::new),
+            Self::Layered(_) => Err(GraphDbError::invalid(
+                "a layered generation seals only over its sealed base",
+            )),
         }
     }
 
@@ -745,7 +869,7 @@ impl GraphGenerationRows {
                 source,
                 check,
             ),
-            Self::Spilled(spilled) => {
+            Self::Spilled(_) | Self::Layered(_) => {
                 validate_sealed_replay(&source)?;
                 let payload = checked_canonical_bytes(
                     &GraphGenerationReplaySource::SealedCodeGeneration(source),
@@ -753,12 +877,12 @@ impl GraphGenerationRows {
                     "canonical graph generation replay",
                     MAX_GRAPH_REPLAY_SOURCE_BYTES_V1,
                 )?;
-                spilled.identity.relational_replay_with_payload(
+                self.identity().relational_replay_with_payload(
                     shard_id,
                     idempotency_key,
                     input_digest,
                     expected_prior_head,
-                    spilled.expected_recovered_digest.clone(),
+                    self.expected_recovered_digest(check)?,
                     payload,
                     check,
                 )

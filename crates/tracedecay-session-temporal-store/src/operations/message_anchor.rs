@@ -131,7 +131,7 @@ async fn resolve_materialized_occurrences(
              JOIN observations observation
                ON observation.observation_id = occurrence.source_observation_id
              WHERE occurrence.session_id = ?1
-               AND occurrence.generation = ?2
+               AND +occurrence.generation <= ?2
                AND occurrence.message_id IN (SELECT value FROM json_each(?3))
              ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id",
             params![session_id, generation, encoded_ids],
@@ -669,12 +669,16 @@ mod tests {
         .expect("active generation");
         conn.execute(
             "INSERT INTO session_occurrences (
-                session_id, generation, occurrence_id, source_observation_id, source_provider,
-                projection_output_ordinal, retrieval_anchor_id, message_id, role, knowledge_at,
-                valid_time_json, evidence_json, sanitized_content_digest,
-                sanitized_content_bytes, index_text
+                session_id, generation, occurrence_id, source_observation_id, source_sequence,
+                source_provider, projection_output_ordinal, retrieval_anchor_id, message_id,
+                copied_from_anchor_ids_json, role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes, index_text
              ) VALUES (
-                'session.message-anchor', 1, ?1, ?2, 'codex', 0, ?3, ?1, 'assistant',
+                'session.message-anchor', 1, ?1, ?2,
+                (SELECT observation_sequence
+                   FROM session_temporal_observation_effects
+                  WHERE observation_id = ?2),
+                'codex', 0, ?3, ?1, '[]', 'assistant',
                 1715000002, '{\"kind\":\"unknown\"}', '{}',
                 '0000000000000000000000000000000000000000000000000000000000000000', 0, ''
              )",

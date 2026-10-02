@@ -30,10 +30,11 @@ async fn first_session_rebuild_bootstraps_active_generation_under_writer_authori
     );
 }
 
-#[tokio::test]
-async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
+/// Projects the parity fixture into candidate generation 2 of a fresh profile,
+/// either as one batch or as two checkpointed batches, and returns the
+/// canonical rows that generation reads.
+async fn project_parity_fixture(tmp: &TempDir, incremental: bool) -> Vec<Vec<String>> {
+    let runtime = profile_runtime(tmp).await;
     let path = runtime
         .database_path(HostAdmissionScope::Profile)
         .unwrap()
@@ -65,44 +66,46 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
         .session_temporal_store(HostAdmissionScope::Profile)
         .unwrap();
     begin_candidate(&store, &session_id, 2, 2).await;
-    begin_candidate(&store, &session_id, 3, 2).await;
+    if incremental {
+        store
+            .persist_session_temporal_projection_batch(batch(
+                &session_id,
+                2,
+                2,
+                vec![first],
+                vec![],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        store
+            .persist_session_temporal_projection_batch(
+                batch(&session_id, 2, 2, vec![second], vec![edge], vec![assertion])
+                    .with_checkpoint(1, 2, 2)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    } else {
+        store
+            .persist_session_temporal_projection_batch(batch(
+                &session_id,
+                2,
+                2,
+                vec![first, second],
+                vec![edge],
+                vec![assertion],
+            ))
+            .await
+            .unwrap();
+    }
 
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
-            vec![first.clone(), second.clone()],
-            vec![edge.clone()],
-            vec![assertion.clone()],
-        ))
-        .await
-        .unwrap();
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            3,
-            2,
-            vec![first],
-            vec![],
-            vec![],
-        ))
-        .await
-        .unwrap();
-    store
-        .persist_session_temporal_projection_batch(
-            batch(&session_id, 3, 2, vec![second], vec![edge], vec![assertion])
-                .with_checkpoint(1, 2, 2)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let canonical_rows = |generation: u64| {
-        format!(
-            "SELECT json_object(
+    let mut projected = Vec::new();
+    for projection in [
+        "SELECT json_object(
                 'occurrence_id', occurrence_id,
                 'source_observation_id', source_observation_id,
+                'source_sequence', source_sequence,
                 'projection_output_ordinal', projection_output_ordinal,
                 'retrieval_anchor_id', retrieval_anchor_id,
                 'thread_id', thread_id,
@@ -111,6 +114,10 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
                 'turn_grouping_json', json(turn_grouping_json),
                 'message_id', message_id,
                 'agent_id', agent_id,
+                'parent_message_id', parent_message_id,
+                'parent_agent_id', parent_agent_id,
+                'parent_session_id', parent_session_id,
+                'copied_from_anchor_ids_json', json(copied_from_anchor_ids_json),
                 'role', role,
                 'knowledge_at', knowledge_at,
                 'valid_time_json', json(valid_time_json),
@@ -119,58 +126,65 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
                 'index_text', index_text
              )
              FROM session_occurrences
-             WHERE generation = {generation}
-             ORDER BY knowledge_at, occurrence_id"
-        )
-    };
-    assert_eq!(
-        rows(&path, &canonical_rows(2)).await,
-        rows(&path, &canonical_rows(3)).await
-    );
-    for projection in [
+             WHERE generation <= 2
+             ORDER BY knowledge_at, occurrence_id",
         "SELECT assertion_id || ':' || assertion_kind || ':' ||
                 subject_anchor_id || ':' || object_anchor_id || ':' ||
                 valid_time_json || ':' || evidence_json
          FROM session_assertions
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY assertion_id",
         "SELECT entity_kind || ':' || entity_id || ':' ||
                 COALESCE(current_assertion_id, '') || ':' ||
                 COALESCE(current_occurrence_id, '') || ':' || coverage_json
          FROM session_current_entities
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY entity_kind, entity_id",
         "SELECT turn_id || ':' || occurrence_id || ':' || ordinal
          FROM session_turn_members
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY turn_id, ordinal, occurrence_id",
         "SELECT thread_id || ':' || grouping_provenance || ':' || created_at
          FROM session_threads
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY thread_id",
         "SELECT turn_id || ':' || ordinal || ':' || grouping_provenance || ':' || created_at
          FROM session_turns
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY turn_id",
         "SELECT agent_id || ':' || agent_json || ':' || created_at
          FROM session_agents
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY agent_id",
         "SELECT superseded_assertion_id || ':' || superseding_assertion_id || ':' || created_at
          FROM session_assertion_supersession
-         WHERE generation = {generation}
+         WHERE generation <= 2
          ORDER BY superseded_assertion_id, superseding_assertion_id",
         "SELECT occurrence.occurrence_id || ':' || fts.index_text || ':' || occurrence.snippet_text
          FROM session_occurrences AS occurrence
          JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
-         WHERE occurrence.generation = {generation}
+         WHERE occurrence.generation <= 2
          ORDER BY occurrence.occurrence_id",
     ] {
-        assert_eq!(
-            rows(&path, &projection.replace("{generation}", "2")).await,
-            rows(&path, &projection.replace("{generation}", "3")).await
-        );
+        projected.push(rows(&path, projection).await);
     }
+    projected
+}
+
+#[tokio::test]
+async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
+    let one_shot_profile = TempDir::new().unwrap();
+    let incremental_profile = TempDir::new().unwrap();
+    let one_shot = project_parity_fixture(&one_shot_profile, false).await;
+    let incremental = project_parity_fixture(&incremental_profile, true).await;
+
+    assert_eq!(one_shot[0].len(), 2, "both occurrences are projected");
+    assert_eq!(
+        one_shot[1].len(),
+        1,
+        "the supersession assertion is projected"
+    );
+    assert_eq!(one_shot, incremental);
 }
 
 #[tokio::test]

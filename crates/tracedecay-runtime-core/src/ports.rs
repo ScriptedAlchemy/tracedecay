@@ -23,6 +23,7 @@ pub mod registered_schema {
     use std::pin::Pin;
     use std::sync::OnceLock;
 
+    use crate::cancellation::CancellationToken;
     use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
     use tracedecay_domain::errors::{Result, TraceDecayError};
     use tracedecay_store::StoreRuntimeBindingV1;
@@ -36,6 +37,7 @@ pub mod registered_schema {
     /// been validated for a final-schema installation.
     pub struct RegisteredSchemaInstallationV1 {
         connection: Connection,
+        cancellation: CancellationToken,
     }
 
     /// An atomic schema-installation transaction tied to its initializing
@@ -48,8 +50,20 @@ pub mod registered_schema {
     }
 
     impl RegisteredSchemaInstallationV1 {
-        fn from_authorized_connection(connection: Connection) -> Self {
-            Self { connection }
+        fn from_authorized_connection(
+            connection: Connection,
+            cancellation: CancellationToken,
+        ) -> Self {
+            Self {
+                connection,
+                cancellation,
+            }
+        }
+
+        /// Cancelled when shutdown stops the Store open this installation
+        /// belongs to; the installer rolls back at its next statement.
+        pub fn cancellation(&self) -> &CancellationToken {
+            &self.cancellation
         }
 
         /// The exact Store scope being initialized.
@@ -290,8 +304,12 @@ pub mod registered_schema {
     /// This is crate-private so no dependent crate can fabricate an
     /// installation capability before Store publication.
     #[hotpath::skip]
-    pub(crate) async fn install_from_authorized_connection(connection: Connection) -> Result<()> {
-        let installation = RegisteredSchemaInstallationV1::from_authorized_connection(connection);
+    pub(crate) async fn install_from_authorized_connection(
+        connection: Connection,
+        cancellation: CancellationToken,
+    ) -> Result<()> {
+        let installation =
+            RegisteredSchemaInstallationV1::from_authorized_connection(connection, cancellation);
         ensure_registered_schema(&installation).await
     }
 
@@ -368,8 +386,10 @@ pub mod registered_schema {
                 &directory.path().join("registered-schema.sqlite3"),
                 authority.clone(),
             );
-            let installation =
-                RegisteredSchemaInstallationV1::from_authorized_connection((*connection).clone());
+            let installation = RegisteredSchemaInstallationV1::from_authorized_connection(
+                (*connection).clone(),
+                CancellationToken::new(),
+            );
             let transaction = installation
                 .begin_atomic_schema_transaction()
                 .await

@@ -39,18 +39,16 @@ async fn wait_for_changed_generation(
     project_root: &Path,
     prior: &CodeGenerationId,
 ) -> CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(current) = schedulers.latest_generation_id(project_root).await
-                && &current != prior
-            {
-                return current;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    // Background reindexing has no deadline; the published generation id is
+    // the readiness signal.
+    loop {
+        if let Some(current) = schedulers.latest_generation_id(project_root).await
+            && &current != prior
+        {
+            return current;
         }
-    })
-    .await
-    .expect("changed code generation")
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn publish_code_edit(

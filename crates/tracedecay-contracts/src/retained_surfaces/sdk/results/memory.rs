@@ -320,11 +320,22 @@ mod tests {
 
         let mut synthetic = receipt.clone();
         synthetic["expected_last_event_id"] = json!("event.previous");
-        assert!(serde_json::from_value::<FactCommitReceiptV1>(synthetic).is_err());
+        let error = serde_json::from_value::<FactCommitReceiptV1>(synthetic)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unknown field `expected_last_event_id`, expected one of"),
+            "{error}"
+        );
 
         let mut numeric = receipt;
         numeric["fact_id"] = json!(41);
-        assert!(serde_json::from_value::<FactCommitReceiptV1>(numeric).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactCommitReceiptV1>(numeric)
+                .unwrap_err()
+                .to_string(),
+            "invalid type: integer `41`, expected a string"
+        );
     }
 
     #[test]
@@ -333,7 +344,7 @@ mod tests {
             "outcome": "secret_rejected"
         }))
         .expect("secret rejection is a truthful no-write outcome");
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreAddResultV1>(json!({
                 "count": 0,
                 "fact": null,
@@ -343,7 +354,9 @@ mod tests {
                 "reason": "secret-like",
                 "mutation": null
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "missing field `outcome`"
         );
     }
 
@@ -359,15 +372,22 @@ mod tests {
 
         let mut invalid_added = added;
         invalid_added["closest_fact_id"] = json!("fact.closest");
-        assert!(serde_json::from_value::<FactStoreAddCommitV1>(invalid_added).is_err());
+        assert_eq!(
+            serde_json::from_value::<FactStoreAddCommitV1>(invalid_added)
+                .unwrap_err()
+                .to_string(),
+            "unknown field `closest_fact_id`, expected `fact` or `commit`"
+        );
 
-        assert!(
+        assert_eq!(
             serde_json::from_value::<FactStoreAddCommitV1>(json!({
                 "disposition": "near_duplicate",
                 "fact": canonical_projection(),
                 "commit": canonical_receipt()
             }))
-            .is_err()
+            .unwrap_err()
+            .to_string(),
+            "missing field `closest_fact_id`"
         );
         serde_json::from_value::<FactStoreAddCommitV1>(json!({
             "disposition": "near_duplicate",
@@ -397,8 +417,11 @@ mod tests {
                 .as_object_mut()
                 .expect("page is an object")
                 .remove(lane);
-            assert!(
-                serde_json::from_value::<FactStoreSearchResultV1>(missing_lane).is_err(),
+            assert_eq!(
+                serde_json::from_value::<FactStoreSearchResultV1>(missing_lane)
+                    .unwrap_err()
+                    .to_string(),
+                format!("missing field `{lane}`"),
                 "search page must require the typed `{lane}` lane state"
             );
         }
@@ -438,7 +461,12 @@ mod tests {
         for field in ["next_after", "next_cursor", "cursor"] {
             let mut paginated = result.clone();
             paginated[field] = json!("cursor.test");
-            assert!(serde_json::from_value::<FactStoreContradictResultV1>(paginated).is_err());
+            assert_eq!(
+                serde_json::from_value::<FactStoreContradictResultV1>(paginated)
+                    .unwrap_err()
+                    .to_string(),
+                format!("unknown field `{field}`, expected `owner` or `contradictions`")
+            );
         }
     }
 
@@ -476,6 +504,12 @@ mod tests {
 
         let mut unknown = status;
         unknown["memory"]["unknown"] = json!(true);
-        assert!(serde_json::from_value::<MemoryStatusResultV1>(unknown).is_err());
+        let error = serde_json::from_value::<MemoryStatusResultV1>(unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unknown field `unknown`, expected one of"),
+            "{error}"
+        );
     }
 }

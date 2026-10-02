@@ -109,6 +109,11 @@ pub enum CheckpointBlocker {
 
 pub(crate) trait CheckpointBlockerSource: Send + Sync {
     fn checkpoint_blockers(&self) -> CheckpointBlockers;
+
+    /// Blocks until snapshots whose owners had already released them when
+    /// this call began have rolled back, so a requested checkpoint never
+    /// reports a reader that no caller still holds as pinning the WAL.
+    fn await_released_snapshots(&self);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

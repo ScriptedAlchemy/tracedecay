@@ -8,7 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::shared::{ProjectMembership, TranscriptIngestStats};
 use crate::runtime::source::{
     HostCoverageReason, HostProviderCoverage, TranscriptDiscoveryBounds,
     persist_codex_history_frontier, persist_host_provider_coverage, read_codex_history_frontier,
@@ -23,7 +23,7 @@ use crate::runtime::{
 use super::failure::{
     ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
-    warn_transcript_catch_up_failure,
+    failed_observation_run, warn_transcript_catch_up_failure,
 };
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
@@ -93,6 +93,7 @@ fn claude_provider_run_outcome(
 ) -> ProviderRunOutcome {
     let mut outcome =
         ProviderRunOutcome::bounded(stats.transcript, stats.source_bytes_scanned, false);
+    outcome.coverage_advanced = stats.advanced_coverage();
     outcome.add_deferred_units(
         stats
             .deferred_sources
@@ -262,6 +263,17 @@ impl<'a> ProjectProviderRun<'a> {
         let mut remaining = self.max_new_bytes;
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
+        // Out-of-scope rollouts consume no byte budget, so a newest-first page
+        // would otherwise write a cursor for every older out-of-scope day
+        // before the admitted window is projected into search. Once in-scope
+        // frames persisted from a rollout opened this pass, a day directory
+        // that opens out of scope belongs to the next pass. In-scope days and
+        // mixed days keep the pass going, so a project whose history is all in
+        // scope still commits its frontier. A rollout resumed from its cursor
+        // is a live tail whose earlier window is already searchable; letting
+        // its appends end the pass would replay the same page while the
+        // session stays active and never reach an older in-scope day.
+        let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in &discovery.paths {
             if remaining == 0 {
@@ -274,17 +286,49 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            match codex::try_admit_codex_jsonl_observations_for_project_window(
-                path,
-                self.project_root,
-                self.project_id.clone(),
-                self.facade,
-                remaining,
-                self.cancellation,
-            )
-            .await
+            let Some(pending) =
+                codex::PendingTranscript::observe(self.codex_discovery, path).transpose()
+            else {
+                continue;
+            };
+            if persisted_day.is_some_and(|day| path.parent() != Some(day))
+                && run_blocking_transcript_section(|| {
+                    codex::codex_rollout_project_membership(path, self.project_root)
+                        == Some(ProjectMembership::NoMatch)
+                })
             {
-                Ok(progress) => {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
+            let admitted = match pending {
+                Ok(pending) => codex::try_admit_codex_jsonl_observations_for_project_window(
+                    path,
+                    self.project_root,
+                    self.project_id.clone(),
+                    self.facade,
+                    remaining,
+                    self.cancellation,
+                )
+                .await
+                .map(|progress| (progress, pending)),
+                Err(error) => Err(error),
+            };
+            match admitted {
+                Ok((progress, pending)) => {
+                    if let Err(error) =
+                        pending.admitted(path, progress.source_deferred, progress.covered_through)
+                    {
+                        outcome.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "convergence",
+                            &error,
+                            "project Codex rollout convergence record failed",
+                        ));
+                    }
+                    if progress.frames_persisted > 0 && !progress.resumed {
+                        persisted_day = path.parent();
+                    }
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
@@ -398,20 +442,12 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "kiro",
-                        "observation",
-                        &error,
-                        "project Kiro observation catch-up failed",
-                    ),
-                    0,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "kiro",
+                &error,
+                "project Kiro observation catch-up failed",
+                0,
+            ),
         }
     }
 
@@ -427,6 +463,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -488,6 +525,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -657,6 +695,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -665,20 +704,12 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "vibe",
-                        "observation",
-                        &error,
-                        "project Vibe observation catch-up failed",
-                    ),
-                    0,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "vibe",
+                &error,
+                "project Vibe observation catch-up failed",
+                0,
+            ),
         }
     }
 

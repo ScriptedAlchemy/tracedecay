@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_contracts::retrieval::{
-    AdminProjectBenchV1, AdminProjectCounterResetV1, AdminProjectCounterV1,
-    AdminProjectGitignoreStatusV1, AdminProjectResultV1, AdminProjectStatusAccountingV1,
-    AdminProjectSurfaceRequestV1, AutomaticFactAddRequestV1, AutomaticFactEvidenceV1,
-    AutomaticFactReceiptAvailabilityV1, AutomaticFactReceiptListV1, AutomaticFactReceiptStateV1,
-    AutomaticFactReceiptV1, AutomaticFactReceiptViewV1, AutomationReconcileScope,
-    AutomationSchedulerReconcileOutcome, ProjectAutomationReconcileReport,
+    AdminProjectCounterResetV1, AdminProjectCounterV1, AdminProjectResultV1,
+    AdminProjectStatusAccountingV1, AdminProjectSurfaceRequestV1, AutomaticFactAddRequestV1,
+    AutomaticFactEvidenceV1, AutomaticFactReceiptAvailabilityV1, AutomaticFactReceiptListV1,
+    AutomaticFactReceiptStateV1, AutomaticFactReceiptV1, AutomaticFactReceiptViewV1,
+    AutomationReconcileScope, AutomationSchedulerReconcileOutcome,
+    ProjectAutomationReconcileReport,
 };
 use tracedecay_contracts::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
@@ -152,43 +152,6 @@ pub async fn compute_admin_project(
             AdminProjectResultV1::StatusAccounting(AdminProjectStatusAccountingV1 {
                 tokens_saved,
                 global_tokens_saved,
-            })
-        }
-        AdminProjectSurfaceRequestV1::GitignoreStatus {} => {
-            let configuration = cg
-                .configuration_runtime()
-                .client()
-                .current()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("configuration authority unavailable: {error}"),
-                })?;
-            AdminProjectResultV1::GitignoreStatus(AdminProjectGitignoreStatusV1 {
-                git_ignore: configuration.config().git_ignore,
-                revision_id: configuration.revision_id().as_str().to_owned(),
-            })
-        }
-        AdminProjectSurfaceRequestV1::Bench {
-            queries_toml,
-            json,
-            max_nodes,
-        } => {
-            let report = crate::bench::run_bench_with_toml(
-                cg,
-                queries_toml
-                    .as_deref()
-                    .unwrap_or(crate::bench::DEFAULT_QUERIES_TOML),
-                crate::bench::BenchOptions {
-                    format: crate::bench::OutputFormat::Json,
-                    max_nodes,
-                },
-            )?;
-            AdminProjectResultV1::Bench(AdminProjectBenchV1 {
-                output: if json {
-                    crate::bench::format_report_json(&report)
-                } else {
-                    crate::bench::format_report_console(&report)
-                },
             })
         }
         AdminProjectSurfaceRequestV1::AutomaticFactReceiptList { state, limit } => {

@@ -1004,24 +1004,53 @@ fn successful_tool_result_exits_zero() {
         tool_result_process_outcome(&json_success, "tracedecay_str_replace").is_ok(),
         "an explicit isError:false JSON result must keep exit 0"
     );
+    let typed = json!({"success": true, "files": []});
     assert_eq!(
-        rendered_tool_output(&markdown, false),
+        rendered_tool_output(
+            &ToolResult::new(markdown, Vec::new()).with_structured_result(typed.clone()),
+            CliToolOutput::Text
+        )
+        .unwrap(),
         "**success:** true\n**files:** []"
     );
-    let json_stdout = rendered_tool_output(&json_success, true);
+    let json_stdout = rendered_tool_output(
+        &ToolResult::new(json_success.clone(), Vec::new()).with_structured_result(typed.clone()),
+        CliToolOutput::Document,
+    )
+    .unwrap();
     // Pretty serialization escapes the nested `content[0].text` JSON string.
-    // Parse the complete envelope back and compare it structurally instead of
+    // Parse the complete document back and compare it structurally instead of
     // searching for an unescaped substring that valid output cannot contain.
     let reparsed: Value = serde_json::from_str(&json_stdout)
         .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
     assert_eq!(
-        reparsed, json_success,
-        "JSON stdout must keep the exact daemon payload: {json_stdout}"
+        reparsed,
+        json!({
+            "content": json_success["content"],
+            "isError": false,
+            "structuredContent": typed,
+        }),
+        "JSON stdout is the tool result with the typed answer: {json_stdout}"
+    );
+}
+
+/// An answer rendered without its typed result cannot print the `--json`
+/// document, rather than printing one with no `structuredContent`.
+#[test]
+fn json_answer_without_its_typed_result_is_refused() {
+    let answer = ToolResult::new(
+        json!({"content": [{"type": "text", "text": "ok"}]}),
+        Vec::new(),
     );
     assert_eq!(
-        reparsed["isError"],
-        json!(false),
-        "JSON stdout must keep the daemon isError flag: {json_stdout}"
+        rendered_tool_output(&answer, CliToolOutput::Document)
+            .unwrap_err()
+            .to_string(),
+        "config error: the tool rendered its answer without its typed result"
+    );
+    assert_eq!(
+        rendered_tool_output(&answer, CliToolOutput::Text).unwrap(),
+        "ok"
     );
 }
 
@@ -1037,8 +1066,9 @@ fn application_error_tool_result_exits_nonzero() {
         }],
         "isError": true
     });
-    let stdout_json = rendered_tool_output(&failed, true);
-    let stdout_text = rendered_tool_output(&failed, false);
+    let failed = ToolResult::new(failed, Vec::new());
+    let stdout_json = rendered_tool_output(&failed, CliToolOutput::Document).unwrap();
+    let stdout_text = rendered_tool_output(&failed, CliToolOutput::Text).unwrap();
     assert!(
         stdout_json.contains("old_str not found in README.md"),
         "{stdout_json}"
@@ -1049,14 +1079,12 @@ fn application_error_tool_result_exits_nonzero() {
         "{\"success\":false,\"message\":\"old_str not found in README.md\"}"
     );
 
-    let error = tool_result_process_outcome(&failed, "tracedecay_str_replace")
+    let error = tool_result_process_outcome(&failed.value, "tracedecay_str_replace")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(message.contains("tracedecay_str_replace"), "{message}");
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("old_str not found in README.md"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    // stderr names the refusal without scraping the payload already on stdout.
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_str_replace refused the request"
     );
 }
 
@@ -1098,12 +1126,21 @@ fn typed_unavailable_coverage_inside_a_successful_result_stays_exit_zero() {
         tool_result_process_outcome(&nested_is_error, "tracedecay_context").is_ok(),
         "only the daemon's top-level isError flag may change the process status"
     );
+    let typed =
+        json!({"coverage": "partial", "exact": "unavailable", "reason": "generation_rebuilding"});
     assert!(
-        rendered_tool_output(&markdown, false).contains("unavailable (generation_rebuilding)"),
+        rendered_tool_output(&ToolResult::new(markdown, Vec::new()), CliToolOutput::Text)
+            .unwrap()
+            .contains("unavailable (generation_rebuilding)"),
         "markdown stdout must keep the typed degraded payload"
     );
     assert!(
-        rendered_tool_output(&warming_json, true).contains("generation_rebuilding"),
+        rendered_tool_output(
+            &ToolResult::new(warming_json, Vec::new()).with_structured_result(typed),
+            CliToolOutput::Document
+        )
+        .unwrap()
+        .contains("generation_rebuilding"),
         "JSON stdout must keep the typed warming payload"
     );
 }
@@ -1117,26 +1154,23 @@ fn application_error_without_a_json_message_still_exits_nonzero() {
         "content": [{ "type": "text", "text": "**success:** false\n**outcome:** failed" }],
         "isError": true
     });
+    let rendered = ToolResult::new(failed.clone(), Vec::new());
     assert_eq!(
-        rendered_tool_output(&failed, false),
+        rendered_tool_output(&rendered, CliToolOutput::Text).unwrap(),
         "**success:** false\n**outcome:** failed"
     );
     assert!(
-        rendered_tool_output(&failed, true).contains("**success:** false"),
+        rendered_tool_output(&rendered, CliToolOutput::Document)
+            .unwrap()
+            .contains("**success:** false"),
         "JSON stdout must keep the exact markdown daemon payload"
     );
 
     let error = tool_result_process_outcome(&failed, "tracedecay_run_affected_tests")
         .expect_err("an application failure must fail the CLI process");
-    let message = error.to_string();
-    assert!(
-        message.contains("tracedecay_run_affected_tests"),
-        "{message}"
-    );
-    assert!(message.contains("application failure"), "{message}");
-    assert!(
-        !message.contains("**success:** false"),
-        "stderr must not scrape a payload that is already on stdout: {message}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_run_affected_tests refused the request"
     );
 }
 
@@ -1163,13 +1197,12 @@ fn application_problem_makes_the_tool_command_fail() {
         requested_format: RequestedOutputFormat::Json,
     };
 
-    let error = print_cli_application_surface(profile, None, result, true)
+    let error = print_cli_application_surface(profile, None, result, CliToolOutput::Document)
         .expect_err("a canonical application problem must fail the CLI process");
-    assert!(
-        error
-            .to_string()
-            .contains("configuration_revision_conflict"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "tracedecay_configuration_set refused the request (configuration_revision_conflict): \
+         The expected configuration revision is stale"
     );
 }
 
@@ -1204,7 +1237,7 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
 
-        let (request, format) =
+        let (request, format, _) =
             cli_surface_invocation(tool_name, with_format(args.clone(), "json"), false)
                 .unwrap_or_else(|error| {
                     panic!("{tool_name} rejected a documented argument: {error}")
@@ -1368,7 +1401,7 @@ fn assert_retained_transports_decode_one_canonical_request(
     operation: tracedecay_contracts::RetainedSurfaceOperation,
 ) {
     let tool_name = equivalent.tool_name;
-    let (cli_body, cli_format) = cli_surface_invocation(
+    let (cli_body, cli_format, _) = cli_surface_invocation(
         tool_name,
         with_format(equivalent.arguments.clone(), "json"),
         false,
@@ -1448,7 +1481,7 @@ fn cli_mcp_and_http_decode_one_canonical_request() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
 
-        let (cli_body, cli_format) = cli_surface_invocation(
+        let (cli_body, cli_format, _) = cli_surface_invocation(
             tool_name,
             with_format(equivalent.arguments.clone(), "json"),
             false,
@@ -1541,9 +1574,9 @@ fn cli_mcp_and_http_decode_one_canonical_request() {
 
 #[test]
 fn json_flag_and_json_format_select_the_same_output() {
-    let (flag_request, flag_format) =
+    let (flag_request, flag_format, _) =
         cli_surface_invocation("tracedecay_storage_status", json!({}), true).expect("flag");
-    let (format_request, format_format) = cli_surface_invocation(
+    let (format_request, format_format, _) = cli_surface_invocation(
         "tracedecay_storage_status",
         json!({"format": "json"}),
         false,
@@ -1584,31 +1617,23 @@ fn tool_status_exit_follows_the_wait_outcome() {
         })
     };
     let refusal = |wait: Value| {
-        let error = tool_result_process_outcome(&status(wait), "tracedecay_status")
-            .expect_err("an unreached wait exits non-zero");
-        error
-            .project_route_context()
-            .map(|(code, retryable, detail)| (code.to_owned(), retryable, detail.to_owned()))
-            .unwrap_or_else(|| panic!("the wait refusal is a typed route error: {error}"))
+        tool_result_process_outcome(&status(wait), "tracedecay_status")
+            .expect_err("an unreached wait exits non-zero")
+            .to_string()
     };
 
     assert_eq!(
         refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
-        (
-            CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned(),
-            true,
-            "tracedecay_status wait_for timed out before the index reached the requested \
-             state; last state: warming"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_TIMED_OUT}): \
+             wait_for timed out before the index reached the requested state; last state: warming"
         )
     );
     assert_eq!(
         refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
-        (
-            CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned(),
-            false,
-            "tracedecay_status wait_for cannot reach the requested state: scheduler_not_mounted"
-                .to_owned(),
+        format!(
+            "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_UNAVAILABLE}): \
+             wait_for cannot reach the requested state: scheduler_not_mounted"
         )
     );
     tool_result_process_outcome(&status(json!({"outcome": "reached"})), "tracedecay_status")

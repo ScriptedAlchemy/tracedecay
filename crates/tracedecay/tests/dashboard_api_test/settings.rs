@@ -27,7 +27,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(settings_envelope["coverage"]["completeness"], "complete");
         let settings = settings_envelope["payload"].clone();
 
-        assert_eq!(settings["project"]["config"]["git_ignore"], true);
+        assert!(
+            settings["project"]["config"].get("git_ignore").is_none(),
+            "the retired gitignore toggle must not be offered: {settings}"
+        );
         assert_eq!(settings["project"]["config"]["extract_docstrings"], true);
         assert_eq!(settings["project"]["config"]["track_call_sites"], true);
         assert_eq!(settings["project"]["config"]["max_file_size"], 1_048_576);
@@ -136,7 +139,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_array()
             .unwrap_or_else(|| panic!("expected environment variables array: {settings}"));
         for name in [
-            "TRACEDECAY_ENABLE_GLOBAL_DB",
             "TRACEDECAY_DISABLE_GLOBAL_DB",
             "TRACEDECAY_GLOBAL_DB",
             "TRACEDECAY_DATA_DIR",
@@ -153,6 +155,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "env variable {name} needs a description"
             );
         }
+        assert!(
+            variables
+                .iter()
+                .all(|variable| variable["name"] != "TRACEDECAY_ENABLE_GLOBAL_DB"),
+            "the retired enable override must not be advertised: {settings}"
+        );
         let global_db_var = variables
             .iter()
             .find(|variable| variable["name"] == "TRACEDECAY_GLOBAL_DB")

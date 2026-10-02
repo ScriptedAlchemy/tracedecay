@@ -48,25 +48,27 @@ use tracedecay_query::retrieval::{
     },
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
-    sampled_process_resident_bytes_v1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryPressureV1,
+    resident_memory_watermark_bytes_v1,
 };
 
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use super::{
     ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, OwnerSignals, ReadyRetrievalControlV1,
-    active_text_artifact_path, application_context, build_progress_snapshot, callee_fanout_sources,
-    caller_star_sources, callers_page_meta, core_search_request, decode_hex, git,
-    install_verified_graph_store, install_verified_graph_store_on_text, mount_core_query_authority,
-    mount_query_authority, mounted_core_query_worktree,
-    mounted_core_query_worktree_with_one_permit, moved_reference_scope,
-    progress_snapshot_for_generation, published, query_authority, query_meta,
-    quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
+    SERVING_SEAT_FAILURE_CEILING, active_text_artifact_path, application_context,
+    build_progress_snapshot, callee_fanout_sources, caller_star_sources, callers_page_meta,
+    core_search_request, decode_hex, git, install_verified_graph_store,
+    install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
+    moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
+    query_meta, quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
     settle_text_projection, settled_owner_with_idle_admission, test_project_id,
-    wait_for_live_complete_generation, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_settled_owner,
+    wait_for_dashboard_ready, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_settled_owner, write,
 };
 use crate::{
     code_index::production::{
@@ -2052,35 +2054,30 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 fn overlapping_text_builds_share_one_admission_watermark_headroom() {
     let limit_bytes = 1_000_u64;
     let watermark_headroom = 100_u64;
-    let requested = NonZeroU64::new(200).expect("nonzero build request");
+    let requested = NonZeroU64::new(300).expect("nonzero build request");
     let mut used_bytes = 0_u64;
 
-    for observed_bytes in [300_u64, 500, 700] {
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
-        let (accounted, retained) = super::super::text_artifact_resident_memory_charges(
-            requested,
-            unmodeled_live_bytes,
-            watermark_headroom,
-        )
-        .expect("bounded admission accounting");
+    for _ in 0..3 {
+        let accounted =
+            super::super::text_artifact_resident_memory_charge(requested, watermark_headroom)
+                .expect("bounded admission accounting");
         assert!(
             used_bytes + accounted.get() <= limit_bytes,
             "each overlapping build fits beneath the same 900-byte high watermark"
         );
-        used_bytes += retained.get();
+        used_bytes += requested.get();
     }
 
     assert_eq!(
         used_bytes, 900,
-        "the retained ledger owns one observed baseline plus three build ceilings"
+        "the retained ledger owns the three build ceilings, not three margins"
     );
     for overflow in [
-        super::super::text_artifact_resident_memory_charges(
+        super::super::text_artifact_resident_memory_charge(
             NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
             1,
-            0,
         ),
-        super::super::text_artifact_resident_memory_charges(requested, 0, u64::MAX),
+        super::super::text_artifact_resident_memory_charge(requested, u64::MAX),
     ] {
         assert!(
             matches!(
@@ -2096,38 +2093,23 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
 fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_floor() {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
-    let limit = 26 * GIB;
-    let preferred = limit / 8;
+    let preferred = 26 * GIB / 8;
     let minimum = 1536 * MIB;
-    let watermark_headroom = limit - (limit * 900 / 1000);
-    let observed = 21 * GIB;
-    let available = limit - observed - watermark_headroom;
 
     assert_eq!(
-        super::super::text_artifact_admitted_build_budget(
-            preferred,
-            minimum,
-            limit,
-            0,
-            observed,
-            watermark_headroom,
-        ),
-        Ok(available),
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, 2 * GIB),
+        Ok(2 * GIB),
         "a replacement build must use the supported smaller budget instead of deadlocking behind the stale graph"
     );
     assert_eq!(
-        super::super::text_artifact_admitted_build_budget(
-            preferred,
-            minimum,
-            limit,
-            0,
-            22 * GIB,
-            watermark_headroom,
-        ),
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, 8 * GIB),
+        Ok(preferred),
+    );
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(preferred, minimum, GIB),
         Err(
             tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(format!(
-                "text-artifact build needs at least {minimum} bytes; {} bytes are available below the resident-memory watermark",
-                limit - 22 * GIB - watermark_headroom
+                "text-artifact build needs at least {minimum} bytes; {GIB} bytes are available below the resident-memory watermark"
             ))
         ),
         "less than the builder's supported floor must remain a typed capacity refusal"
@@ -2171,16 +2153,32 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         );
     }
 
-    // A request that fits the empty modeled ledger must still account the
-    // process's freshly measured, unmodeled live set before allocating.
-    if let Some(observed_bytes) = sampled_process_resident_bytes_v1() {
-        let build_bytes = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
-            .expect("build ceiling fits u64");
-        let measured_limit = NonZeroU64::new(build_bytes.saturating_add(observed_bytes / 2))
-            .expect("measured test limit");
+    // The empty ledger leaves the measured live set to decide: a build fits
+    // when the live set leaves its floor below the admission watermark, and
+    // is refused once the live set grows past that.
+    let build_floor = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .expect("build floor fits u64");
+    let measured_limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("measured test limit");
+    let watermark = resident_memory_watermark_bytes_v1(
+        measured_limit,
+        RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
+    );
+    let fitting_live = watermark - build_floor;
+    for (live_bytes, admitted) in [(fitting_live, true), (fitting_live + 1, false)] {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            measured_limit,
+            Arc::new(move || {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: live_bytes,
+                    unreclaimable_bytes: live_bytes,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        ));
         let measured = Arc::new(ProcessResidentMemoryV1::with_pressure(
             measured_limit,
-            Arc::new(ResidentMemoryPressureV1::new(measured_limit)),
+            pressure,
         ));
         let mut scheduler = scheduler(
             &fixture,
@@ -2191,18 +2189,26 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         let latest = scheduler
             .latest_complete()
             .expect("measured latest generation");
-        assert!(
-            matches!(
-                latest.advance_text_serving(1),
-                Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
-            ),
-            "fresh RSS plus the minimum build ceiling exceeds the process authority"
-        );
-        assert_eq!(
-            measured.snapshot().used_bytes,
-            0,
-            "a measured-baseline refusal must not leak a charge"
-        );
+        let advanced = latest.advance_text_serving(1);
+        if admitted {
+            assert!(
+                advanced.is_ok(),
+                "{live_bytes} B live leaves the build floor below the watermark: {advanced:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    advanced,
+                    Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
+                ),
+                "{live_bytes} B live leaves less than the build floor: {advanced:?}"
+            );
+            assert_eq!(
+                measured.snapshot().used_bytes,
+                0,
+                "a measured-baseline refusal must not leak a charge"
+            );
+        }
     }
 
     // An adequate authority admits the build and holds the reader charge
@@ -6776,4 +6782,68 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "artifact-backed lexical hydration returns the canonical source path"
     );
     registry.shutdown().await;
+}
+
+/// A graph-off worktree never seats a decoded generation, so its text owner is
+/// the only thing status reads the committed generation from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_keeps_the_committed_generation_through_a_refresh() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            super::super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off scheduler");
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let committed = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted dashboard freshness")
+        .latest_generation_id
+        .expect("a ready worktree advertises its generation");
+
+    write(
+        fixture.path(),
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 2 }\n",
+    );
+    assert!(matches!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let mut advertised = Vec::new();
+    loop {
+        let freshness = registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted dashboard freshness");
+        let latest = freshness.latest_generation_id.clone();
+        if advertised.last() != Some(&latest) {
+            advertised.push(latest.clone());
+        }
+        if latest.as_ref().is_some_and(|latest| *latest != committed)
+            && freshness.staleness_state
+                == Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                )
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the refresh never settled: {advertised:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(advertised.len(), 2, "status advertised {advertised:?}");
+    assert_eq!(advertised[0].as_deref(), Some(committed.as_str()));
 }

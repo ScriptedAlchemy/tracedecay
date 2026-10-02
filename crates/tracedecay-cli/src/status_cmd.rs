@@ -21,7 +21,7 @@ use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
 
-use crate::commands::reject_truncation_envelope;
+use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
@@ -406,7 +406,9 @@ async fn handle_status_command_within(
         .await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
         } else {
+            reject_problem_envelope(&result, "tracedecay_runtime")?;
             let snapshot: tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot =
                 serde_json::from_value(result)?;
             print!(
@@ -428,8 +430,9 @@ async fn handle_status_command_within(
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
-        return Ok(());
+        return reject_problem_envelope(&daemon_status, "tracedecay_status");
     }
+    reject_problem_envelope(&daemon_status, "tracedecay_status")?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()
@@ -489,7 +492,14 @@ async fn handle_status_command_within(
             "timed out waiting for canonical worldwide-counter upload setting before status deadline"
                 .to_string(),
     })??;
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir());
+    let mut config =
+        match tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir()) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                eprintln!("warning: {error}");
+                None
+            }
+        };
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
@@ -511,18 +521,17 @@ async fn handle_status_command_within(
     // has expired, one refresh for the next invocation starts here so its
     // round-trip overlaps the render, and is joined after it within the
     // command deadline.
-    let refresh = show_online
-        .then(|| OnlineRefreshPlan::for_cache(&config, now))
+    let online_config = config.as_ref().filter(|_| show_online);
+    let refresh = online_config
+        .map(|config| OnlineRefreshPlan::for_cache(config, now))
         .filter(OnlineRefreshPlan::is_needed)
         .map(|plan| tokio::task::spawn_blocking(move || plan.fetch()));
-    let worldwide = show_online
-        .then_some(config.last_worldwide_total)
+    let worldwide = online_config
+        .map(|config| config.last_worldwide_total)
         .filter(|total| *total > 0);
-    let country_flags = if show_online {
-        config.cached_country_flags.clone()
-    } else {
-        Vec::new()
-    };
+    let country_flags = online_config
+        .map(|config| config.cached_country_flags.clone())
+        .unwrap_or_default();
     hotpath::measure_block!("cli.status.render", {
         if should_print_status_logo(short, stdout_is_terminal) {
             // Tracked render of resources/logo.png; regenerate with
@@ -591,13 +600,14 @@ async fn handle_status_command_within(
 
     if let Some(refresh) = refresh
         && let Some(fresh) = await_online_refresh(deadline, refresh).await
-        && fresh.apply(&mut config, now)
+        && let Some(config) = config.as_mut()
+        && fresh.apply(config, now)
         && let Err(err) = config.save_if_exists(profile.data_dir())
     {
         eprintln!("warning: could not save tracedecay config: {err}");
     }
-    if stdout_is_terminal {
-        global::check_for_update(profile, &mut config, false, true);
+    if stdout_is_terminal && let Some(config) = config.as_mut() {
+        global::check_for_update(profile, config, false, true);
     }
     Ok(())
 }
@@ -794,21 +804,24 @@ mod tests {
             "preview": "{}",
             "handle": "rh_test",
         });
-        let err = reject_truncation_envelope(&envelope, "tracedecay_status").unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("truncated JSON"));
-        assert!(message.contains("20000"));
-        assert!(message.contains("rh_test"));
-        assert!(
-            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status").is_ok()
-        );
-        assert!(
+        match reject_truncation_envelope(&envelope, "tracedecay_status") {
+            Err(tracedecay_domain::errors::TraceDecayError::Config { message }) => assert_eq!(
+                message,
+                "daemon tool tracedecay_status returned truncated JSON (20000 chars); recover with tracedecay_retrieve handle=rh_test"
+            ),
+            other => panic!("expected a truncation refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            reject_truncation_envelope(&json!({ "node_count": 1 }), "tracedecay_status"),
+            Ok(())
+        ));
+        assert!(matches!(
             reject_truncation_envelope(
                 &json!({ "truncated": true, "matches": [] }),
                 "tracedecay_status",
-            )
-            .is_ok()
-        );
+            ),
+            Ok(())
+        ));
     }
 
     #[test]

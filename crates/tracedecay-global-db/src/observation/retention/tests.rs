@@ -5,17 +5,15 @@ use super::*;
 // tests want the standard two-argument `Result` for their `Result<_, String>`
 // signatures, so shadow it back.
 use std::result::Result;
-use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, SessionId,
+use tracedecay_domain::FactOwnerV1;
+use tracedecay_store::{
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, RetrievalAnchorDispositionRecordV1,
+    RetrievalAnchorDispositionStore,
 };
-use tracedecay_store::observation::ObservationCoverageV1;
 
-use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
-
-const DAY: i64 = 24 * 60 * 60;
-const NOW: i64 = 1_900_000_000;
+/// Disposition `effective_at` and the retention clock are [`UtcMicros`].
+const DAY: i64 = 24 * 60 * 60 * 1_000_000;
+const NOW: i64 = 1_900_000_000 * 1_000_000;
 const OWNER: &str = "{\"owner\":\"o1\"}";
 const GEN: &str = "projection.gen.v1";
 const OTHER_GEN: &str = "projection.gen.v2";
@@ -214,73 +212,148 @@ async fn fetch_str(conn: &RetentionTestStore, sql: &str) -> Result<String, Strin
         .map_err(|e| e.to_string())
 }
 
-async fn seed_cursor_advance_history(conn: &RetentionTestStore) -> Result<(), String> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("retention-test").unwrap(),
-        SessionId::new("retention-session").unwrap(),
-    )
-    .unwrap();
-    let scope = ObservationScopeV1::Profile;
-    let source_json = serde_json::to_string(&source).unwrap();
-    let scope_json = serde_json::to_string(&scope).unwrap();
-    conn.execute_batch(&format!(
-        "CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_update_v1
-         BEFORE UPDATE ON source_cursor_advances BEGIN
-             SELECT RAISE(ABORT, 'source cursor advances are immutable');
-         END;
-         DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1;
-         {SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL};"
-    ))
-    .await
-    .map_err(|error| format!("install cursor immutability: {error}"))?;
-    let current_generation = 1_u64;
-    let current_cursor = ObservationSourceCursorV1::for_ordering(
-        source.clone(),
-        scope.clone(),
-        ObservationSourceGenerationV1::new(current_generation).unwrap(),
-        ObservationOrderingDomainV1::FileBytes,
-        30,
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-         VALUES (?1, ?2, ?3)",
-        params![
-            source_json.as_str(),
-            scope_json.as_str(),
-            serde_json::to_string(&current_cursor).unwrap()
-        ],
-    )
-    .await
-    .map_err(|error| format!("insert current cursor: {error}"))?;
-    // A different generation is superseded because it is not the current
-    // opaque identity, even though its `u64` representation is numerically
-    // larger than the current generation and cannot fit in SQLite's signed
-    // integer range. The lower current-generation receipt is also superseded;
-    // the exact current receipt must remain.
-    for (generation, start, end) in [
-        (u64::MAX, 0, 10),
-        (current_generation, 10, 20),
-        (current_generation, 20, 30),
-    ] {
-        let coverage = ObservationCoverageV1::new(
-            ObservationSourceGenerationV1::new(generation).unwrap(),
-            ObservationOrderingDomainV1::FileBytes,
-            ObservationSourceRangeV1::new(start, end).unwrap(),
-        );
-        conn.execute(
-            "INSERT INTO source_cursor_advances(
-                source_json, scope_json, coverage_json, reason, receipt_id
-             ) VALUES (?1, ?2, ?3, 'blank_frame', NULL)",
-            params![
-                source_json.as_str(),
-                scope_json.as_str(),
-                serde_json::to_string(&coverage).unwrap()
-            ],
+/// A run resumes from its ledger cursor: a later run releases evidence whose
+/// disposition was appended after the previous run, or aged past the window
+/// since, and leaves what earlier runs already released alone.
+#[tokio::test]
+async fn later_runs_release_dispositions_appended_or_aged_since_the_last_run() -> Result<(), String>
+{
+    let conn = test_store().await;
+    seed_evidence(&conn, "anchor-first", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-first", "deleted", NOW - 90 * DAY, None).await?;
+    seed_evidence(&conn, "anchor-aging", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-aging", "deleted", NOW - 10 * DAY, None).await?;
+    let first = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(
+        (
+            first.anchors_released.acted,
+            first.observations_released.acted,
+            first.provenance_released.acted
+        ),
+        (1, 1, 1)
+    );
+
+    seed_evidence(&conn, "anchor-later", GEN, 4096).await?;
+    set_disposition(&conn, "anchor-later", "deleted", NOW - 60 * DAY, None).await?;
+    let second = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(
+        (
+            second.anchors_released.acted,
+            second.observations_released.acted,
+            second.provenance_released.acted
+        ),
+        (1, 1, 1)
+    );
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-later'"
+        )
+        .await?
+    ));
+    let aged = conn
+        .database()
+        .run_observation_retention(
+            None,
+            &released_config(),
+            RetentionMode::Apply,
+            UtcMicros(NOW + 25 * DAY),
         )
         .await
-        .map_err(|error| format!("insert cursor advance: {error}"))?;
+        .map_err(|error| error.to_string())?;
+    assert_eq!(aged.anchors_released.acted, 1);
+    assert!(is_released(
+        &fetch_str(
+            &conn,
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = 'anchor-aging'"
+        )
+        .await?
+    ));
+    let settled = run_apply(&conn, None, &released_config()).await?;
+    assert_eq!(settled.anchors_released.eligible, 0);
+    Ok(())
+}
+
+/// Dispositions written through the production anchor authority record
+/// `effective_at` in microseconds. A tick at the real clock with the default
+/// 30-day windows releases the evidence whose deletion took effect 40 days ago
+/// and keeps the one deleted 5 days ago.
+#[tokio::test]
+async fn production_dispositions_past_the_window_are_released_and_newer_ones_kept()
+-> Result<(), String> {
+    let directory = tempfile::TempDir::new().map_err(|error| error.to_string())?;
+    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .map_err(|error| error.to_string())?;
+    let seeded = crate::tests::harness::seed_projected_messages(&runtime, 0..2).await;
+    let database = runtime
+        .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+        .ok_or("registered profile database")?;
+    let now = tracedecay_contracts::clock::now_micros();
+    for ((_, anchor), age_days) in seeded.iter().zip([40, 5]) {
+        let record = RetrievalAnchorDispositionRecordV1::new(
+            format!("retention-test:{}", anchor.anchor_id().as_str()),
+            anchor.anchor_id().clone(),
+            FactOwnerV1::from(anchor.owner().clone()),
+            AnchorDispositionStateV1::Deleted,
+            None,
+            AnchorDispositionReasonClassV1::Retention,
+            UtcMicros(now.0 - age_days * DAY),
+        )
+        .map_err(|error| error.to_string())?;
+        database
+            .runtime_database()
+            .append_disposition(record)
+            .await
+            .map_err(|error| error.to_string())?;
     }
+
+    let report = database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::Apply,
+            now,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        (
+            report.anchors_released.acted,
+            report.observations_released.acted
+        ),
+        (1, 1)
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut released = Vec::new();
+    for (observation, anchor) in &seeded {
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                    (SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1),
+                    (SELECT observation_json FROM observations WHERE observation_id = ?2)",
+                params![
+                    anchor.anchor_id().as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("evidence row")?;
+        released.push((
+            is_released(&row.get::<String>(0).map_err(|error| error.to_string())?),
+            is_released(&row.get::<String>(1).map_err(|error| error.to_string())?),
+        ));
+    }
+    assert_eq!(released, [(true, true), (false, false)]);
     Ok(())
 }
 
@@ -304,7 +377,7 @@ async fn run_apply(
     config: &ObservationRetentionConfig,
 ) -> Result<ObservationRetentionReport, String> {
     conn.database()
-        .run_observation_retention(generation, config, RetentionMode::Apply, NOW)
+        .run_observation_retention(generation, config, RetentionMode::Apply, UtcMicros(NOW))
         .await
         .map_err(|error| error.to_string())
 }
@@ -494,7 +567,12 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
 
     let report = conn
         .database()
-        .run_observation_retention(None, &released_config(), RetentionMode::DryRun, NOW)
+        .run_observation_retention(
+            None,
+            &released_config(),
+            RetentionMode::DryRun,
+            UtcMicros(NOW),
+        )
         .await
         .map_err(|error| error.to_string())?;
 
@@ -502,7 +580,7 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
     assert_eq!(report.anchors_released.acted, 0, "dry run acts on nothing");
     assert_eq!(
         report.anchors_released.oldest_eligible_at,
-        Some(NOW - 90 * DAY),
+        Some(UtcMicros(NOW - 90 * DAY)),
         "backlog age comes from the governing disposition"
     );
     assert!(report.bytes_reclaimed() > 4096, "dry run still measures");
@@ -544,7 +622,7 @@ async fn released_observations_are_counted_once_each() -> Result<(), String> {
     assert_eq!(report.observations_released.acted, 2);
     assert_eq!(
         report.observations_released.oldest_eligible_at,
-        Some(NOW - 90 * DAY)
+        Some(UtcMicros(NOW - 90 * DAY))
     );
     assert!(is_released(
         &fetch_str(
@@ -601,7 +679,7 @@ async fn active_observation_in_other_generation_remains_live() -> Result<(), Str
     Ok(())
 }
 
-// Reclaim is measurable via payload-count and page/free-list metrics.
+// Reclaim is measurable via released-row and page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
     let conn = test_store().await;
@@ -613,13 +691,8 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
 
     let report = run_apply(&conn, None, &released_config()).await?;
 
-    assert_eq!(report.anchor_payloads_before, 8);
-    assert_eq!(
-        report.anchor_payloads_after, 0,
-        "payload-count delta measurable"
-    );
-    assert_eq!(report.observation_payloads_before, 8);
-    assert_eq!(report.observation_payloads_after, 0);
+    assert_eq!(report.anchors_released.acted, 8);
+    assert_eq!(report.observations_released.acted, 8);
     assert!(report.page_count_before > 0, "page_count observed");
     assert!(
         report.freelist_after >= report.freelist_before,
@@ -755,67 +828,6 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
         .await
         .is_err(),
         "ledger remains append-only"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn superseded_cursor_advances_are_reclaimed_but_current_receipt_survives()
--> Result<(), String> {
-    let conn = test_store().await;
-    seed_cursor_advance_history(&conn).await?;
-
-    let dry_run = conn
-        .database()
-        .run_observation_retention(
-            None,
-            &ObservationRetentionConfig::default(),
-            RetentionMode::DryRun,
-            NOW,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    assert_eq!(dry_run.cursor_advances_reclaimed.eligible, 2);
-    assert_eq!(dry_run.cursor_advances_reclaimed.acted, 0);
-    assert_eq!(dry_run.cursor_advances_before, 3);
-    assert_eq!(dry_run.cursor_advances_after, 3);
-
-    let applied = run_apply(&conn, None, &ObservationRetentionConfig::default()).await?;
-    assert_eq!(applied.cursor_advances_reclaimed.eligible, 2);
-    assert_eq!(applied.cursor_advances_reclaimed.acted, 2);
-    assert_eq!(applied.cursor_advances_before, 3);
-    assert_eq!(applied.cursor_advances_after, 1);
-    assert_eq!(
-        fetch_i64(
-            &conn,
-            "SELECT CAST(json_extract(coverage_json, '$.range.end') AS INTEGER)
-             FROM source_cursor_advances"
-        )
-        .await?,
-        30,
-        "the exact receipt supporting the current frontier remains"
-    );
-    assert!(
-        conn.execute("DELETE FROM source_cursor_advances", ())
-            .await
-            .is_err(),
-        "ordinary callers still cannot delete cursor-advance evidence"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn revoked_daemon_scope_retains_cursor_advance_evidence() -> Result<(), String> {
-    let mut conn = test_store().await;
-    seed_cursor_advance_history(&conn).await?;
-    conn.revoke();
-    let error = run_apply(&conn, None, &ObservationRetentionConfig::default())
-        .await
-        .expect_err("revoked daemon scope must reject cursor retention");
-    assert!(!error.is_empty());
-    assert_eq!(
-        fetch_i64(&conn, "SELECT COUNT(*) FROM source_cursor_advances").await?,
-        3
     );
     Ok(())
 }

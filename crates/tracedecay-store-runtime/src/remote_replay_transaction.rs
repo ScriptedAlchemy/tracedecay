@@ -12,6 +12,7 @@ use tracedecay_domain::{
     ManifestDigest, ObservationSourceCursorV1, ProjectionGenerationId, UtcMicros, canonical_sha256,
 };
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
+use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
     ObservationWrite, OperationPriorityV1, ProjectId, RemoteObservationReplayWriteV1,
@@ -47,15 +48,19 @@ enum ReplayCommandV1 {
         project_id: ProjectId,
         install: Box<RemoteWriterFenceInstallV1>,
         probe: Arc<dyn RuntimeRequestProbeV1>,
-        reply: mpsc::SyncSender<Result<StoreCommitReceiptV1, String>>,
+        reply: mpsc::SyncSender<Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1>>,
     },
     ReadFence {
         project_id: ProjectId,
         authority_key: ManifestDigest,
-        reply:
-            mpsc::SyncSender<Result<Option<(tracedecay_domain::RemoteWriterFenceV1, u64)>, String>>,
+        reply: mpsc::SyncSender<WriterFenceReadV1>,
     },
 }
+
+type WriterFenceReadV1 = Result<
+    Option<(tracedecay_domain::RemoteWriterFenceV1, u64)>,
+    RemoteRecoveryPhysicalEffectErrorV1,
+>;
 
 pub struct DaemonRemoteReplayTransactionAuthorityV1 {
     targets: Arc<RwLock<BTreeMap<ProjectId, ReplayTargetV1>>>,
@@ -216,7 +221,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         project_id: ProjectId,
         install: RemoteWriterFenceInstallV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
-    ) -> Result<StoreCommitReceiptV1, String> {
+    ) -> Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .try_send(ReplayCommandV1::InstallFence {
@@ -225,17 +230,20 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                 probe,
                 reply,
             })
-            .map_err(|_| "remote promotion worker is saturated".to_owned())?;
-        response
-            .recv()
-            .map_err(|_| "remote promotion worker ended before replying".to_owned())?
+            .map_err(|_| unavailable("install remote writer fence", "worker is saturated"))?;
+        response.recv().map_err(|_| {
+            unavailable(
+                "install remote writer fence",
+                "worker ended before replying",
+            )
+        })?
     }
 
     pub fn current_writer_fence(
         &self,
         project_id: ProjectId,
         authority_key: ManifestDigest,
-    ) -> Result<Option<(tracedecay_domain::RemoteWriterFenceV1, u64)>, String> {
+    ) -> WriterFenceReadV1 {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .try_send(ReplayCommandV1::ReadFence {
@@ -243,10 +251,10 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                 authority_key,
                 reply,
             })
-            .map_err(|_| "remote recovery fence reader is saturated".to_owned())?;
+            .map_err(|_| unavailable("read remote writer fence", "worker is saturated"))?;
         response
             .recv()
-            .map_err(|_| "remote recovery fence reader ended before replying".to_owned())?
+            .map_err(|_| unavailable("read remote writer fence", "worker ended before replying"))?
     }
 
     /// Returns the already-published canonical project runtime used by replay
@@ -324,13 +332,50 @@ fn issue_target_lease(
     Ok(lease)
 }
 
+fn unavailable(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> RemoteRecoveryPhysicalEffectErrorV1 {
+    tracing::warn!(operation, %error, "remote recovery fence effect is unavailable");
+    RemoteRecoveryPhysicalEffectErrorV1::Unavailable
+}
+
 fn execute_fence_install(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     install: RemoteWriterFenceInstallV1,
     interruption: Arc<dyn RuntimeRequestProbeV1>,
-) -> Result<StoreCommitReceiptV1, String> {
+) -> Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1> {
+    let operation = "install remote writer fence";
+    let outcome = submit_fence_install(tokio_runtime, targets, project_id, install, interruption)
+        .map_err(|error| unavailable(operation, error))?;
+    match outcome {
+        RuntimeSubmitOutcomeV1::Committed { receipt }
+        | RuntimeSubmitOutcomeV1::ExactReplay { receipt }
+        | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { receipt, .. } => Ok(receipt),
+        RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. } => {
+            Err(RemoteRecoveryPhysicalEffectErrorV1::Cancelled)
+        }
+        RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. } => {
+            Err(RemoteRecoveryPhysicalEffectErrorV1::TimedOut)
+        }
+        outcome @ (RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
+        | RuntimeSubmitOutcomeV1::Fenced { .. }
+        | RuntimeSubmitOutcomeV1::Saturated { .. }
+        | RuntimeSubmitOutcomeV1::Unavailable { .. }) => {
+            Err(unavailable(operation, format_args!("{outcome:?}")))
+        }
+    }
+}
+
+fn submit_fence_install(
+    tokio_runtime: &tokio::runtime::Handle,
+    targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
+    project_id: &ProjectId,
+    install: RemoteWriterFenceInstallV1,
+    interruption: Arc<dyn RuntimeRequestProbeV1>,
+) -> Result<RuntimeSubmitOutcomeV1, String> {
     let target = targets
         .read()
         .map_err(|_| "remote replay target registry lock is poisoned".to_owned())?
@@ -348,32 +393,9 @@ fn execute_fence_install(
         commit_started: AtomicBool::new(false),
     });
     let lease = issue_target_lease(&target)?;
-    let outcome = tokio_runtime
+    tokio_runtime
         .block_on(lease.runtime_client().dispatch_submit(request, probe))
-        .map_err(|error| format!("registered remote fence dispatch failed: {error:?}"))?;
-    match outcome {
-        RuntimeSubmitOutcomeV1::Committed { receipt }
-        | RuntimeSubmitOutcomeV1::ExactReplay { receipt }
-        | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { receipt, .. } => Ok(receipt),
-        RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-            Err("remote fence installation idempotency conflict".to_owned())
-        }
-        RuntimeSubmitOutcomeV1::Fenced { .. } => {
-            Err("remote fence installation target was fenced".to_owned())
-        }
-        RuntimeSubmitOutcomeV1::Saturated { .. } => {
-            Err("remote fence installation target is saturated".to_owned())
-        }
-        RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. } => {
-            Err("remote fence installation timed out before commit".to_owned())
-        }
-        RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. } => {
-            Err("remote fence installation was cancelled before commit".to_owned())
-        }
-        RuntimeSubmitOutcomeV1::Unavailable { .. } => {
-            Err("remote fence installation target is unavailable".to_owned())
-        }
-    }
+        .map_err(|error| format!("registered remote fence dispatch failed: {error:?}"))
 }
 
 fn read_writer_fence(
@@ -381,14 +403,15 @@ fn read_writer_fence(
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     authority_key: &ManifestDigest,
-) -> Result<Option<(tracedecay_domain::RemoteWriterFenceV1, u64)>, String> {
+) -> WriterFenceReadV1 {
+    let operation = "read remote writer fence";
     let target = targets
         .read()
-        .map_err(|_| "remote replay target registry lock is poisoned".to_owned())?
+        .map_err(|_| unavailable(operation, "target registry lock is poisoned"))?
         .get(project_id)
         .cloned()
-        .ok_or_else(|| "remote recovery target is not registered".to_owned())?;
-    let lease = issue_target_lease(&target)?;
+        .ok_or_else(|| unavailable(operation, "target is not registered"))?;
+    let lease = issue_target_lease(&target).map_err(|error| unavailable(operation, error))?;
     tokio_runtime.block_on(async move {
         let mut rows = lease
             .read_connection()
@@ -398,32 +421,32 @@ fn read_writer_fence(
                 (authority_key.as_str(),),
             )
             .await
-            .map_err(|error| format!("read remote recovery fence: {error}"))?;
+            .map_err(|error| unavailable(operation, error))?;
         let Some(row) = rows
             .next()
             .await
-            .map_err(|error| format!("read remote recovery fence row: {error}"))?
+            .map_err(|error| unavailable(operation, error))?
         else {
             return Ok(None);
         };
         if rows
             .next()
             .await
-            .map_err(|error| format!("read remote recovery fence row: {error}"))?
+            .map_err(|error| unavailable(operation, error))?
             .is_some()
         {
-            return Err("remote recovery fence authority is not unique".to_owned());
+            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
         let encoded = row
             .get::<String>(0)
-            .map_err(|error| format!("decode remote recovery fence JSON: {error}"))?;
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let frontier = row
             .get::<i64>(1)
-            .map_err(|error| format!("decode remote recovery fence frontier: {error}"))?;
-        let frontier = u64::try_from(frontier)
-            .map_err(|_| "remote recovery fence frontier is invalid".to_owned())?;
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let frontier =
+            u64::try_from(frontier).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let fence = serde_json::from_str(&encoded)
-            .map_err(|error| format!("decode remote recovery fence: {error}"))?;
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         Ok(Some((fence, frontier)))
     })
 }

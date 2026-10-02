@@ -1,18 +1,15 @@
 //! Codex ingest mechanics: incremental cursors, archived rollouts, turn
 //! cwd/git attribution, subagent parent links, and path relocation.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::codex::CodexSource;
-use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
 
 use crate::codex::{write_codex_rollout, write_jsonl};
 use crate::restart_atomicity::{
     durable_table_count, ingest_global_sources_for_provider, mark_test_project,
-    open_project_session_db, try_ingest_source,
+    open_project_session_db,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -125,60 +122,18 @@ async fn codex_archived_rollout_is_ingested() {
     std::fs::write(&path, contents).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
 
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.sessions_upserted, 1);
-    assert_eq!(stats.messages_upserted, 1);
-    let session = db
-        .get_session("codex", "archived-sess")
-        .await
-        .expect("archived rollout session should be stored");
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+    assert!(db.get_session("codex", "archived-sess").await.is_some());
     assert_eq!(
-        session.transcript_path.as_deref(),
-        Some(path.to_string_lossy().as_ref())
+        db.search_session_messages("codex", None, "Archived rollout probe", 10)
+            .await
+            .len(),
+        1
     );
-    let checkpoint = db
-        .get_parse_offset(&source.cursor_key(&path).durable_text())
-        .await
-        .expect("archive checkpoint retains its provider-specific identity");
-    assert_eq!(
-        checkpoint.byte_offset,
-        std::fs::metadata(&path).unwrap().len()
-    );
-    let health = db
-        .runtime()
-        .session_ingest_health_for_test(
-            tracedecay_sessions::admission::HostAdmissionScope::Project,
-            Some("codex"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(health.tracked_transcripts, 1);
-    assert_eq!(health.pending_transcripts, 0);
-    assert_eq!(health.pending_bytes, 0);
-    let tail = b"\n";
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(tail)
-        .unwrap();
-    let health = db
-        .runtime()
-        .session_ingest_health_for_test(
-            tracedecay_sessions::admission::HostAdmissionScope::Project,
-            Some("codex"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(health.pending_transcripts, 1);
-    assert_eq!(health.pending_bytes, tail.len() as u64);
 }
 #[tokio::test]
-async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
+async fn codex_session_records_the_rollout_location() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let linked_worktree = tmp.path().join("linked-worktree");
@@ -246,10 +201,7 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     let hits = db
         .search_session_messages("codex", None, "attribution", 10)
@@ -261,68 +213,24 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
     assert_metadata_path_eq(&session_metadata["codex_session_worktree"], &project);
     assert_eq!(
         session_metadata["codex_session_location_provenance"].as_str(),
-        Some("session_meta")
-    );
-    assert_eq!(session_metadata["codex_git_branch"], "main");
-    let metadata_of = |needle: &str| -> serde_json::Value {
-        let hit = hits
-            .iter()
-            .find(|hit| hit.message.text.contains(needle))
-            .unwrap_or_else(|| panic!("message containing {needle:?} should exist"));
-        serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap()
-    };
-
-    let first = metadata_of("First branch");
-    assert_metadata_path_eq(&first["codex_turn_cwd"], &project);
-    assert_metadata_path_eq(&first["codex_turn_worktree"], &project);
-    assert_eq!(
-        first["codex_turn_location_provenance"].as_str(),
-        Some("codex_context")
-    );
-    assert_eq!(first["codex_git_branch"], "main");
-    assert_eq!(
-        first["codex_git_commit_hash"],
-        "1111111111111111111111111111111111111111"
-    );
-
-    let second = metadata_of("Second branch");
-    assert_metadata_path_eq(&second["codex_turn_cwd"], &linked_worktree);
-    assert_metadata_path_eq(&second["codex_turn_worktree"], &linked_worktree);
-    assert_eq!(
-        second["codex_turn_location_provenance"].as_str(),
-        Some("codex_context")
-    );
-    assert_eq!(second["codex_git_branch"], "feature/worktree");
-    assert_eq!(
-        second["codex_git_commit_hash"],
-        "2222222222222222222222222222222222222222"
+        Some("rollout_context")
     );
 }
 
 #[tokio::test]
-async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
+async fn codex_resumed_pass_scopes_appended_turns_by_the_prior_turn_context() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let linked_worktree = tmp.path().join("linked-worktree");
-    create_git_repo_with_linked_worktree(&project, &linked_worktree);
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-00-branch-incremental.jsonl");
-    let main_cwd = project.to_string_lossy();
-    let linked_cwd = linked_worktree.to_string_lossy();
-    let prior_lines = [
+    let prior = [
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:00.000Z",
             "type": "session_meta",
-            "payload": {
-                "id": "branch-incremental",
-                "cwd": main_cwd,
-                "model_provider": "openai",
-                "git": {
-                    "branch": "main",
-                    "commit_hash": "1111111111111111111111111111111111111111"
-                }
-            }
+            "payload": {"id": "branch-incremental", "cwd": project.to_string_lossy()}
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
@@ -330,69 +238,47 @@ async fn codex_incremental_ingest_reconstructs_prior_turn_cwd_and_git() {
             "payload": {"type": "user_message", "message": "First incremental branch marker"}
         }),
         serde_json::json!({
-            "timestamp": "2026-01-01T00:00:02.000Z",
-            "type": "session_meta",
-            "payload": {
-                "id": "branch-incremental",
-                "cwd": main_cwd,
-                "model_provider": "openai",
-                "git": {
-                    "branch": "feature/worktree",
-                    "commit_hash": "2222222222222222222222222222222222222222"
-                }
-            }
-        }),
-        serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.500Z",
             "type": "turn_context",
-            "payload": {"turn_id": "t2", "cwd": linked_cwd, "model": "gpt-5.5"}
+            "payload": {"turn_id": "t2", "cwd": elsewhere.to_string_lossy()}
         }),
-    ];
-    let prior = prior_lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join("\n")
         + "\n";
+    std::fs::write(&path, &prior).unwrap();
+    mark_test_project(&project);
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+
+    // The resumed pass starts after the turn context that left the project,
+    // so the appended turn belongs to `elsewhere`, not to this project.
     let resumed_line = serde_json::json!({
         "timestamp": "2026-01-01T00:00:03.000Z",
         "type": "event_msg",
-        "payload": {
-            "type": "agent_message",
-            "message": "Second incremental branch marker"
-        }
-    })
-    .to_string()
-        + "\n";
-    std::fs::write(&path, format!("{prior}{resumed_line}")).unwrap();
+        "payload": {"type": "agent_message", "message": "Second incremental branch marker"}
+    });
+    std::fs::write(&path, format!("{prior}{resumed_line}\n")).unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
-    let source = CodexSource::with_home(&home);
-    let parsed = source
-        .parse_new(
-            &path,
-            StoredCursor {
-                position: prior.len() as u64,
-                mtime: 0,
-                file_id: 0,
-            },
-            &project,
-            None,
-        )
-        .expect("resumed parse should produce the appended message");
-    assert_eq!(parsed.messages.len(), 1);
-    let metadata: serde_json::Value =
-        serde_json::from_str(parsed.messages[0].metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&metadata["codex_turn_cwd"], &linked_worktree);
+    let texts = |query: &'static str| {
+        let db = &db;
+        async move {
+            db.search_session_messages("codex", None, query, 10)
+                .await
+                .into_iter()
+                .map(|hit| hit.message.text)
+                .filter(|text| text.contains(query))
+                .collect::<Vec<_>>()
+        }
+    };
     assert_eq!(
-        metadata["codex_turn_location_provenance"].as_str(),
-        Some("codex_context")
+        texts("First incremental branch marker").await,
+        vec!["First incremental branch marker".to_owned()]
     );
-    assert_eq!(metadata["codex_git_branch"], "feature/worktree");
-    assert_metadata_path_eq(&metadata["codex_turn_worktree"], &linked_worktree);
-    assert_eq!(
-        metadata["codex_git_commit_hash"],
-        "2222222222222222222222222222222222222222"
-    );
+    assert!(texts("Second incremental branch marker").await.is_empty());
 }
 
 #[tokio::test]
@@ -403,13 +289,8 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
     write_codex_subagent_rollout(&home, &project, "codex-parent", "codex-child");
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
 
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.sessions_upserted, 2);
-    assert_eq!(stats.messages_upserted, 3);
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
 
     let child = db
         .get_session("codex", "codex-child")
@@ -417,7 +298,9 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
         .expect("subagent session should be stored");
     assert_eq!(child.parent_session_id.as_deref(), Some("codex-parent"));
     assert!(child.is_subagent);
-    assert_eq!(child.agent_id.as_deref(), Some("Euler"));
+    // The canonical agent identity is the native thread id, never the
+    // mutable nickname.
+    assert_eq!(child.agent_id.as_deref(), Some("codex-child"));
 
     let results = db
         .search_session_messages("codex", None, "layout evidence", 10)

@@ -58,7 +58,7 @@ impl AdmittedProjectRuntimeV1 {
     fn capture(runtime: &ProjectRuntime) -> Self {
         let feedback = runtime.feedback.as_ref();
         Self {
-            publication: runtime.publication,
+            publication: runtime.publication.clone(),
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
             advisory_cycle: runtime.advisory_cycle.clone(),
@@ -219,7 +219,7 @@ impl ProjectRequestRuntimesV1 {
         Self {
             admitted: true,
             resolved_root: Some(request_lease.inner.registered_root.clone()),
-            publication: Some(admitted.publication),
+            publication: Some(admitted.publication.clone()),
             feedback: admitted.feedback.clone(),
             feedback_owner: admitted.feedback_owner.clone(),
             advisory_cycle: admitted.advisory_cycle.clone(),

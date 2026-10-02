@@ -6,6 +6,8 @@ use std::path::Path;
 use std::process::Output;
 
 use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
+#[cfg(unix)]
+use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
 use super::install_kimi_cli;
@@ -125,11 +127,7 @@ const DROID_NOT_INSTALLED: &str = "  droid: skipped, not installed (host CLI `dr
 /// A host CLI `program` on the isolated `PATH` running the shell `body`.
 #[cfg(unix)]
 fn install_host_cli(cli: &IsolatedCli, program: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = cli.bin_dir.join(program);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable_script(&cli.bin_dir.join(program), format!("#!/bin/sh\n{body}\n")).unwrap();
 }
 
 /// Kiro's CLI while signed out, as #2374 found it: it refuses every command
@@ -507,6 +505,62 @@ fn doctor_skips_an_absent_host_but_fails_a_reachable_hosts_malformed_registratio
         !malformed_stderr.contains("kiro: skipped")
             && malformed_stderr.contains(&format!("  - {}", &DROID_NOT_INSTALLED[2..])),
         "{malformed_stderr}"
+    );
+}
+
+/// A torn profile `config.toml` is an issue naming the file, the parse error
+/// and its repair, not a warning while every stored entry reads as default.
+#[cfg(unix)]
+#[test]
+fn doctor_fails_a_corrupt_profile_config_with_its_repair() {
+    let cli = IsolatedCli::new();
+    install_cline(&cli);
+    let _daemon = ProfileDaemon::start(&cli);
+    let config = cli.profile.join("config.toml");
+    let installed = fs::read_to_string(&config).unwrap();
+    fs::write(&config, "pending_upload = 0\n true").unwrap();
+
+    let doctor = cli.run(&["doctor"]);
+    let doctor_stderr = stderr(&doctor);
+    assert_eq!(doctor.status.code(), Some(1), "{doctor_stderr}");
+    assert!(
+        doctor_stderr.contains(&format!(
+            "Profile config is unusable: config file {} is corrupt at line 2: TOML parse error \
+             at line 2, column 6\n  |\n2 |  true\n  |      ^\nkey with no value, expected `=`\n. \
+             Fix it, or delete it to regenerate defaults",
+            config.display()
+        )),
+        "{doctor_stderr}"
+    );
+
+    fs::write(&config, &installed).unwrap();
+    let repaired = cli.run(&["doctor"]);
+    let repaired_stderr = stderr(&repaired);
+    assert_eq!(repaired.status.code(), Some(0), "{repaired_stderr}");
+    assert!(
+        !repaired_stderr.contains("Profile config is unusable"),
+        "{repaired_stderr}"
+    );
+
+    fs::write(
+        &config,
+        format!(
+            "{installed}\n[[github_review_sources]]\nowner = \"ScriptedAlchemy\"\n\
+             repository = \"keyring-unnamed\"\naccess = \"os_keyring\"\n"
+        ),
+    )
+    .unwrap();
+    let unregistered = cli.run(&["doctor"]);
+    let unregistered_stderr = stderr(&unregistered);
+    assert_eq!(unregistered.status.code(), Some(1), "{unregistered_stderr}");
+    assert!(
+        unregistered_stderr.contains(&format!(
+            "GitHub review source ScriptedAlchemy/keyring-unnamed uses os_keyring access without \
+             keyring_service and keyring_account, so it is not registered; fix or remove its \
+             github_review_sources entry in {}",
+            config.display()
+        )),
+        "{unregistered_stderr}"
     );
 }
 

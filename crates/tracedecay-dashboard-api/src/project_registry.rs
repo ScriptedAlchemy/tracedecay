@@ -523,7 +523,6 @@ mod tests {
                     project_id: "project.checkout".to_owned(),
                     store_id: "store.checkout".to_owned(),
                     branch_name: "indexed-master".to_owned(),
-                    db_relpath: "graph.db".to_owned(),
                     parent_scope_id: None,
                     last_synced_at: None,
                     writable: true,

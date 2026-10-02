@@ -6,6 +6,7 @@ use crate::remote_credentials::{
 };
 use std::sync::Arc;
 use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
+use tracedecay_contracts::remote::capture::RemoteCapturePersistenceErrorV1;
 use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1, RemoteCredentialClassV1,
     RemoteSessionBoundProtocolBodyV1,
@@ -154,6 +155,15 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         let storage = registered.storage.with_keyring(keyring);
         let authority = match storage.current_writer_authority(&request.body.writer) {
             Ok(authority) => authority,
+            Err(RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished) => {
+                let failure = RemoteProtocolFailureV1::WriterAuthorityUnpublished;
+                let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: failure.unavailable_reason(),
+                    observed_at,
+                };
+                let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
+                return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+            }
             Err(_) => {
                 return remote_authority_unavailable_response(request_id, observed_at, contract);
             }

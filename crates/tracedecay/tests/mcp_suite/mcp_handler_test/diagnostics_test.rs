@@ -26,25 +26,25 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert_protocol_refusal(
         &server,
         json!({"scope": "package"}),
-        "tool execution failed: config error: application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"scope": "file"}),
-        "tool execution failed: config error: application surface request does not match its reviewed schema: `path` is required when `scope` is file",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `path` is required when `scope` is file",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"scope": "nope"}),
-        "tool execution failed: config error: application surface request does not match its reviewed schema: `scope` `nope` is not one of workspace or file",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `scope` `nope` is not one of workspace or file",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"format": "yaml"}),
-        "tool execution failed: config error: application surface request does not match its reviewed schema: `format` must be markdown or json",
+        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `format` must be markdown or json",
     )
     .await;
 
@@ -243,9 +243,10 @@ async fn assert_protocol_refusal(server: &McpServer, arguments: Value, message: 
         "a refused diagnostics argument must not return a tool result: {response}"
     );
     assert_eq!(response["id"], json!(1));
-    assert_eq!(response["error"]["code"], json!(-32603));
+    assert_eq!(response["error"]["code"], json!(-32602));
     assert_eq!(response["error"]["message"], message, "{response}");
     assert_eq!(response["error"]["data"]["tool"], "tracedecay_diagnostics");
+    assert_eq!(response["error"]["data"]["kind"], "invalid_request");
 }
 
 fn assert_unpublished_json(label: &str, result: &Value, message: &str) {

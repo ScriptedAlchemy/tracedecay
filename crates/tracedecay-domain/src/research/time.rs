@@ -10,6 +10,13 @@ use super::error::DomainError;
 #[serde(transparent)]
 pub struct UtcMicros(pub i64);
 
+impl UtcMicros {
+    #[must_use]
+    pub const fn from_unix_seconds(seconds: i64) -> Self {
+        Self(seconds.saturating_mul(1_000_000))
+    }
+}
+
 /// Closed half-open occurrence interval.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]

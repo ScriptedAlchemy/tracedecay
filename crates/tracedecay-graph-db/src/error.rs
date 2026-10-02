@@ -123,6 +123,13 @@ pub enum GraphDbError {
     FormatSuperseded { found: u32, expected: u32 },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
+    /// The seal a read opened was retired while it was read: a newer code
+    /// generation superseded it. The read is not corrupt; its caller retries
+    /// against the current seal.
+    #[error(
+        "sealed code generation was superseded while it was read; retry against the current seal"
+    )]
+    SealSuperseded,
     #[error(
         "sealed code generation `{sealed_state_digest}` predates authenticated source commitments"
     )]
@@ -195,9 +202,8 @@ pub fn classify_graph_store_error(
             GraphStoreFailureClass::Unavailable(message)
         }
         error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
-        | GraphDbError::SealedRevisionIncompatible { .. }) => {
-            GraphStoreFailureClass::Unavailable(error.to_string())
-        }
+        | GraphDbError::SealedRevisionIncompatible { .. }
+        | GraphDbError::SealSuperseded) => GraphStoreFailureClass::Unavailable(error.to_string()),
         GraphDbError::Closed => {
             GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
         }

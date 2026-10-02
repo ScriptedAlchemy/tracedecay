@@ -18,6 +18,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
+use tracedecay_application::advisory::github_runtime;
 use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
@@ -94,7 +95,7 @@ pub struct AdmittedDoctorNetworkProbes {
         fn() -> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 }
 
-/// What a doctor run that found no issue concluded.
+/// What a completed doctor run concluded; each variant has its own exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorCompletion {
     Healthy,
@@ -102,6 +103,8 @@ pub enum DoctorCompletion {
     /// serves in its typed reset-required state, or a host's interactive
     /// activation.
     PendingOperatorAction,
+    /// Doctor found this many issues; each issue line names its own remedy.
+    Issues(u32),
 }
 
 /// Runs a comprehensive health check of the tracedecay installation.
@@ -146,17 +149,13 @@ pub async fn run_doctor(
     } else {
         None
     };
-    let (storage_health, observed_findings) = render_current_project_daemon_status(
+    let daemon_findings = render_current_project_daemon_status(
         &mut dc,
         profile.data_dir(),
         &project_path,
         daemon_status.as_ref(),
         &mut pending_reset,
     )?;
-    let daemon_status = daemon_status
-        .as_ref()
-        .and_then(|status| status.as_ref().ok())
-        .and_then(Option::as_ref);
     check_watcher(&mut dc, profile);
     let upload_enabled = if daemon_listening {
         configured_upload_enabled(profile)
@@ -168,22 +167,16 @@ pub async fn run_doctor(
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
     check_external_tools(&mut dc);
 
-    check_host_integrations(&mut dc, profile, &project_path, daemon_status);
+    check_host_integrations(&mut dc, profile, &project_path);
 
     check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
 
-    let result = doctor_result(&dc, &storage_health, pending_reset);
+    let completion = doctor_result(&dc, pending_reset);
     if emit_json {
-        print_doctor_json(
-            build_version,
-            &result,
-            &dc,
-            observed_findings,
-            &storage_health,
-        )?;
+        print_doctor_json(build_version, completion, &dc, daemon_findings)?;
     }
-    result
+    Ok(completion)
 }
 
 /// The current project's section as the daemon answered it; `None` is the
@@ -194,40 +187,31 @@ fn render_current_project_daemon_status(
     project_path: &Path,
     daemon_status: Option<&tracedecay_domain::errors::Result<Option<serde_json::Value>>>,
     pending_reset: &mut bool,
-) -> tracedecay_domain::errors::Result<(
-    DatabaseHealth,
-    Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
-)> {
+) -> tracedecay_domain::errors::Result<DoctorDaemonFindingsV1> {
     Ok(match daemon_status {
         None => {
             dc.pending(DAEMON_UNAVAILABLE_STATEMENT);
-            (DatabaseHealth::unknown(DAEMON_UNAVAILABLE), None)
+            DoctorDaemonFindingsV1::DaemonUnavailable
         }
         Some(Ok(None)) => {
             // The daemon answered, so the sole owner is reachable; it simply
             // has not admitted this project far enough to publish storage
             // telemetry. That is a warming state, not a lost authority.
             dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
-            (
-                DatabaseHealth::unknown("daemon_storage_telemetry_pending"),
-                None,
-            )
+            DoctorDaemonFindingsV1::unread("daemon_storage_telemetry_pending")
         }
         Some(Ok(Some(status))) => render_daemon_status(dc, status)?,
         Some(Err(error)) => {
             if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
                 *pending_reset = true;
-                dc.warn(&format!(
+                dc.pending(&format!(
                     "Current project is not served: {authority} requires reset ({reason}). \
                      Pending operator action: run `{}`",
                     tracedecay_mcp::reset_required_command(&authority, Some(project_path))
                 ));
-                (DatabaseHealth::unknown("reset_required"), None)
+                DoctorDaemonFindingsV1::unread("reset_required")
             } else {
-                (
-                    classify_daemon_status_error(dc, profile_root, project_path, error),
-                    None,
-                )
+                classify_daemon_status_error(dc, profile_root, project_path, error)
             }
         }
     })
@@ -239,78 +223,46 @@ fn render_current_project_daemon_status(
 fn render_daemon_status(
     dc: &mut DoctorCounters,
     status: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<(
-    DatabaseHealth,
-    Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
-)> {
+) -> tracedecay_domain::errors::Result<DoctorDaemonFindingsV1> {
     render_project_open_status(dc, status)?;
     let schema_convergences = render_schema_convergences(dc, status)?;
     Ok(match canonical_daemon_doctor_report(status)? {
         CanonicalDoctorReport::Observed(report) => {
-            let findings =
+            let read =
                 tracedecay_dashboard_api::doctor_findings(&report, schema_convergences, None);
-            render_doctor_findings(dc, &findings.payload);
-            (
-                database_health_from_canonical_report(&report),
-                Some(findings),
-            )
+            render_doctor_findings(dc, &read.payload);
+            DoctorDaemonFindingsV1::Observed(Box::new(ObservedDoctorFindingsV1 {
+                domain_state: read.presentation.domain_state,
+                coverage: read.presentation.coverage,
+                freshness: read.presentation.freshness,
+                payload: read.payload,
+            }))
         }
         CanonicalDoctorReport::Mounting => {
             dc.warn(&format!(
                 "Canonical Doctor report is pending: {PROJECT_RUNTIME_MOUNTING}"
             ));
-            (
-                DatabaseHealth::unknown(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON),
-                None,
-            )
+            DoctorDaemonFindingsV1::Mounting
         }
         CanonicalDoctorReport::Unavailable => {
             dc.warn("Canonical Doctor report is unavailable; health remains unknown");
-            (
-                DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
-                None,
-            )
+            DoctorDaemonFindingsV1::unread(CANONICAL_DOCTOR_REPORT_UNAVAILABLE)
         }
     })
 }
 
 fn print_doctor_json(
     build_version: &str,
-    result: &tracedecay_domain::errors::Result<DoctorCompletion>,
+    completion: DoctorCompletion,
     dc: &DoctorCounters,
-    observed_findings: Option<tracedecay_dashboard_api::DoctorFindingsReadV1>,
-    storage_health: &DatabaseHealth,
+    daemon_findings: DoctorDaemonFindingsV1,
 ) -> tracedecay_domain::errors::Result<()> {
-    let daemon_findings = match (observed_findings, storage_health) {
-        (Some(read), _) => DoctorDaemonFindingsV1::Observed(Box::new(ObservedDoctorFindingsV1 {
-            domain_state: read.presentation.domain_state,
-            coverage: read.presentation.coverage,
-            freshness: read.presentation.freshness,
-            payload: read.payload,
-        })),
-        (None, DatabaseHealth::Unknown { reason }) if reason == DAEMON_UNAVAILABLE => {
-            DoctorDaemonFindingsV1::DaemonUnavailable
-        }
-        (None, DatabaseHealth::Unknown { reason })
-            if reason == crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON =>
-        {
-            DoctorDaemonFindingsV1::Mounting
-        }
-        (None, DatabaseHealth::Unknown { reason } | DatabaseHealth::Failed { reason }) => {
-            DoctorDaemonFindingsV1::Unread {
-                reason: reason.clone(),
-            }
-        }
-        (None, DatabaseHealth::Healthy) => DoctorDaemonFindingsV1::Unread {
-            reason: "canonical_doctor_report_unavailable".to_owned(),
-        },
-    };
     let document = DoctorJsonReportV1 {
         version: build_version,
-        outcome: match result {
-            Ok(DoctorCompletion::Healthy) => DoctorOutcomeV1::Healthy,
-            Ok(DoctorCompletion::PendingOperatorAction) => DoctorOutcomeV1::PendingOperatorAction,
-            Err(_) => DoctorOutcomeV1::Issue,
+        outcome: match completion {
+            DoctorCompletion::Healthy => DoctorOutcomeV1::Healthy,
+            DoctorCompletion::PendingOperatorAction => DoctorOutcomeV1::PendingOperatorAction,
+            DoctorCompletion::Issues(_) => DoctorOutcomeV1::Issue,
         },
         issues: dc.issues,
         warnings: dc.warnings,
@@ -344,8 +296,10 @@ enum DoctorOutcomeV1 {
     PendingOperatorAction,
 }
 
-/// What Doctor read from the daemon's canonical Doctor authority.
-#[derive(serde::Serialize)]
+/// What Doctor read from the daemon's canonical Doctor authority. Only the
+/// rendered findings grade the exit code; this state is reported, never
+/// counted again.
+#[derive(Debug, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum DoctorDaemonFindingsV1 {
     /// The daemon's canonical report, projected exactly as
@@ -357,10 +311,18 @@ enum DoctorDaemonFindingsV1 {
     /// (`application.runtime.mounting`); wait, then re-run.
     Mounting,
     /// A daemon answered, but not with an observed report.
-    Unread { reason: String },
+    Unread { reason: &'static str },
 }
 
-#[derive(serde::Serialize)]
+impl DoctorDaemonFindingsV1 {
+    fn unread(reason: &'static str) -> Self {
+        Self::Unread { reason }
+    }
+}
+
+const CANONICAL_DOCTOR_REPORT_UNAVAILABLE: &str = "canonical_doctor_report_unavailable";
+
+#[derive(Debug, serde::Serialize)]
 struct ObservedDoctorFindingsV1 {
     domain_state: tracedecay_api::read_model::DashboardDomainStateV1,
     coverage: tracedecay_api::read_model::DashboardCoverageV1,
@@ -389,7 +351,7 @@ fn check_reset_required_stores(
     match tracedecay_daemon_control::daemon_reset_required_stores(profile, build_version) {
         Ok(stores) => {
             for store in &stores {
-                dc.warn(&format!(
+                dc.pending(&format!(
                     "Store {} requires reset ({}). Pending operator action: run `{}`",
                     store.store, store.reason, store.remedy
                 ));
@@ -571,85 +533,20 @@ fn canonical_daemon_doctor_report(
         })
 }
 
-/// Derive the exit-gating storage verdict from the canonical kernel findings.
+/// Gates the doctor exit code on the counted check lines, the canonical
+/// findings among them.
 ///
-/// A degraded `StorageRuntime` finding is an observed failure. Every other
-/// non-healthy state is unknown evidence, and missing family evidence is also
-/// unknown. Multiple findings retain the strongest state:
-/// `Failed` > `Unknown` > `Healthy`.
-fn database_health_from_canonical_report(
-    report: &tracedecay_contracts::doctor::DoctorReportV1,
-) -> DatabaseHealth {
-    use tracedecay_contracts::doctor::DoctorFindingFamilyV1 as Family;
-
-    database_health_from_storage_runtime_findings(
-        report
-            .findings()
-            .filter(|finding| finding.family() == Family::StorageRuntime),
-    )
-}
-
-fn database_health_from_storage_runtime_findings<'a>(
-    findings: impl IntoIterator<Item = &'a tracedecay_contracts::doctor::DoctorFindingV1>,
-) -> DatabaseHealth {
-    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
-
-    let mut findings = findings.into_iter();
-    let Some(first) = findings.next() else {
-        return DatabaseHealth::unknown("canonical_storage_runtime_missing");
-    };
-    let health = |finding: &tracedecay_contracts::doctor::DoctorFindingV1| {
-        let evidence = finding
-            .evidence()
-            .first()
-            .map_or("canonical_storage_runtime_evidence_missing", |evidence| {
-                evidence.reference().as_str()
-            });
-        match finding.state() {
-            State::Degraded => DatabaseHealth::failed(evidence),
-            State::HealthyCompleteCoverage => DatabaseHealth::Healthy,
-            State::Unsupported
-            | State::Absent
-            | State::Stale
-            | State::Partial
-            | State::Unknown
-            | State::Denied => DatabaseHealth::unknown(evidence),
-        }
-    };
-    findings.fold(health(first), |combined, finding| {
-        combined.merge(health(finding))
-    })
-}
-
-/// Gates the doctor exit code.
-///
-/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown`, a
-/// diagnostic that could not run, is reported to the user but never laundered
-/// into a healthy verdict nor turned into a hard failure. With no issue, a
-/// pending reset or any other operator step is the operator's action, not
-/// health.
-fn doctor_result(
-    dc: &DoctorCounters,
-    storage_health: &DatabaseHealth,
-    pending_reset: bool,
-) -> tracedecay_domain::errors::Result<DoctorCompletion> {
-    match storage_health {
-        DatabaseHealth::Failed { reason } => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("doctor storage health check failed [{reason}]"),
-            })
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if dc.issues > 0 => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("doctor found {} issue(s)", dc.issues),
-            })
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. }
-            if pending_reset || dc.pending_actions > 0 =>
-        {
-            Ok(DoctorCompletion::PendingOperatorAction)
-        }
-        DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(DoctorCompletion::Healthy),
+/// An issue, including a degraded canonical finding, is something the
+/// operator must fix. A diagnostic that could not run is a warning, never
+/// laundered into an issue. With no issue, a pending reset or any other
+/// operator step is the operator's action, not health.
+fn doctor_result(dc: &DoctorCounters, pending_reset: bool) -> DoctorCompletion {
+    if dc.issues > 0 {
+        DoctorCompletion::Issues(dc.issues)
+    } else if pending_reset || dc.pending_actions > 0 {
+        DoctorCompletion::PendingOperatorAction
+    } else {
+        DoctorCompletion::Healthy
     }
 }
 
@@ -691,10 +588,19 @@ async fn daemon_project_status(
             Some(deadline),
         )
         .await?;
-        match daemon_runtime_status(&runtime)? {
-            Some(status) => return Ok(Some(status)),
-            None if tokio::time::Instant::now() >= warmup_deadline => return Ok(None),
-            None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
+        let warmed_up = tokio::time::Instant::now() >= warmup_deadline;
+        match daemon_runtime_status(runtime)? {
+            // The first Doctor call starts the project open, so a warming
+            // owner is polled like missing telemetry until the report lands.
+            Some(status)
+                if warmed_up
+                    || canonical_daemon_doctor_report(&status)?
+                        != CanonicalDoctorReport::Mounting =>
+            {
+                return Ok(Some(status));
+            }
+            None if warmed_up => return Ok(None),
+            Some(_) | None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
         }
     }
 }
@@ -746,68 +652,17 @@ const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted databas
 const RUNTIME_TELEMETRY_WARMUP: std::time::Duration = std::time::Duration::from_secs(15);
 const RUNTIME_TELEMETRY_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// `Ok(None)` is the warming state: the daemon answered but has not published
-/// a `database` block for this project yet.
+/// The runtime reply once the daemon published this project's `database`
+/// block; `Ok(None)` is the warming state before it has.
 fn daemon_runtime_status(
-    runtime: &serde_json::Value,
+    runtime: serde_json::Value,
 ) -> tracedecay_domain::errors::Result<Option<serde_json::Value>> {
-    let Some(mut storage) = runtime.get("database").cloned() else {
-        return Ok(None);
-    };
-    let storage = storage.as_object_mut().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
+    match runtime.get("database") {
+        None => Ok(None),
+        Some(database) if database.is_object() => Ok(Some(runtime)),
+        Some(_) => Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon runtime database telemetry was not an object".to_string(),
-        }
-    })?;
-    if let Some(pid) = runtime.pointer("/process/pid").cloned() {
-        storage.insert("daemon_owner_pid".to_string(), pid);
-    }
-    if let Some(version) = runtime.get("tracedecay_version").cloned() {
-        storage.insert("daemon_version".to_string(), version);
-    }
-    let mut status = serde_json::json!({ "storage_health": storage });
-    if let Some(value) = runtime.get("doctor_report").cloned() {
-        status["doctor_report"] = value;
-    }
-    if let Some(value) = runtime.get("project_open").cloned() {
-        status["project_open"] = value;
-    }
-    Ok(Some(status))
-}
-
-/// What Doctor actually observed about the current project's storage.
-///
-/// Deliberately three-state: a diagnostic that could not run (`Unknown`) is not
-/// evidence of a sound store, so it must never collapse into `Healthy`. Only
-/// `Failed` is an observed failure, and only `Failed` gates the exit code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DatabaseHealth {
-    Healthy,
-    Unknown { reason: String },
-    Failed { reason: String },
-}
-
-impl DatabaseHealth {
-    fn unknown(reason: impl Into<String>) -> Self {
-        Self::Unknown {
-            reason: reason.into(),
-        }
-    }
-
-    fn failed(reason: impl Into<String>) -> Self {
-        Self::Failed {
-            reason: reason.into(),
-        }
-    }
-
-    /// Combines two independent observations, keeping the most severe:
-    /// `Failed` > `Unknown` > `Healthy`.
-    fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (failed @ Self::Failed { .. }, _) | (_, failed @ Self::Failed { .. }) => failed,
-            (unknown @ Self::Unknown { .. }, _) | (_, unknown @ Self::Unknown { .. }) => unknown,
-            (Self::Healthy, Self::Healthy) => Self::Healthy,
-        }
+        }),
     }
 }
 
@@ -821,21 +676,21 @@ fn classify_daemon_status_error(
     profile_root: &Path,
     project_path: &Path,
     error: &tracedecay_domain::errors::TraceDecayError,
-) -> DatabaseHealth {
+) -> DoctorDaemonFindingsV1 {
     if let Some(message) = daemon_warming_doctor_message(project_path, error) {
         dc.warn(&message);
-        return DatabaseHealth::unknown("daemon_warming");
+        return DoctorDaemonFindingsV1::unread("daemon_warming");
     }
     if crate::daemon::error_is_project_not_enrolled(error) {
         report_project_not_enrolled(dc, project_path);
-        return DatabaseHealth::unknown("project_not_enrolled");
+        return DoctorDaemonFindingsV1::unread("project_not_enrolled");
     }
     report_daemon_diagnostics_unavailable(
         dc,
         fallback_database_path(profile_root, project_path).as_deref(),
         error,
     );
-    DatabaseHealth::unknown("canonical_doctor_report_unavailable")
+    DoctorDaemonFindingsV1::unread(CANONICAL_DOCTOR_REPORT_UNAVAILABLE)
 }
 
 fn daemon_warming_doctor_message(
@@ -1205,8 +1060,21 @@ fn check_automation_effect_resets(
 async fn configured_upload_enabled(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> tracedecay_domain::errors::Result<bool> {
+    let setting = configured_setting(profile, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
+    match setting.effective_value {
+        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
+        _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "worldwide counter upload setting is not boolean".to_owned(),
+        }),
+    }
+}
+
+async fn configured_setting(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    key: &str,
+) -> tracedecay_domain::errors::Result<ResolvedSetting> {
     let operation = ApplicationSurfaceOperation::ConfigurationGet;
-    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
+    let key = SettingKey::new(key).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: error.to_string(),
         }
@@ -1263,12 +1131,7 @@ async fn configured_upload_enabled(
             message: "configuration get returned the wrong setting".to_owned(),
         });
     }
-    match setting.effective_value {
-        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "worldwide counter upload setting is not boolean".to_owned(),
-        }),
-    }
+    Ok(setting)
 }
 
 /// The worldwide-counter upload setting as the profile's configuration owner
@@ -1301,11 +1164,28 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if tracedecay_session_memory::user_config::config_path(profile_root).exists() {
-        let config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
-        if config.pending_upload > 0 {
-            dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
+        Ok(config) => {
+            if config.pending_upload > 0 {
+                dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
+            }
+            match github_runtime::check_configured_github_review_sources_v1(profile_root) {
+                Ok(findings) => {
+                    for finding in findings {
+                        dc.fail(&format!(
+                            "GitHub review source {finding}, so it is not registered; fix or \
+                             remove its github_review_sources entry in {}",
+                            tracedecay_session_memory::user_config::config_path(profile_root)
+                                .display()
+                        ));
+                    }
+                }
+                Err(error) => dc.fail(&format!(
+                    "GitHub review sources are unusable, none is registered: {error}"
+                )),
+            }
         }
+        Err(error) => dc.fail(&format!("Profile config is unusable: {error}")),
     }
 }
 
@@ -1315,7 +1195,6 @@ fn check_host_integrations(
     dc: &mut DoctorCounters,
     profile: &tracedecay_runtime_core::config::ProfileRoot,
     project_path: &Path,
-    daemon_status: Option<&serde_json::Value>,
 ) {
     let Some(home) = profile.home() else {
         dc.fail("Could not determine home directory");
@@ -1353,7 +1232,7 @@ fn check_host_integrations(
             },
         };
         match absence {
-            None => agent.healthcheck_with_daemon_status(dc, &hctx, daemon_status),
+            None => agent.healthcheck(dc, &hctx),
             Some((absence, detail)) => {
                 eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
                 dc.skipped(&format!(
@@ -1392,7 +1271,7 @@ fn warn_detected_unintegrated_host(
 /// The hosts the profile tracks; an unreadable profile config is a warning,
 /// with no host treated as tracked.
 fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
-    match tracedecay_session_memory::user_config::UserConfig::load_strict(profile_root) {
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
         Ok(config) => config.installed_agents,
         Err(error) => {
             dc.warn(&format!("Tracked hosts are unknown: {error}"));
@@ -1492,7 +1371,6 @@ fn print_summary(dc: &DoctorCounters) {
             "\x1b[31m{} issue(s), {} warning(s).\x1b[0m",
             dc.issues, dc.warnings
         );
-        eprintln!("Run \x1b[1mtracedecay install\x1b[0m to fix most issues.");
     }
     eprintln!();
 }

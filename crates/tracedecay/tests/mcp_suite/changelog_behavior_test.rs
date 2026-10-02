@@ -120,17 +120,16 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     let not_object = not_object
         .error
         .expect("a non-object argument list is a JSON-RPC error");
-    assert_eq!(not_object.code, -32603);
     assert_eq!(
-        not_object.message,
-        "tool execution failed: config error: invalid arguments: tracedecay_changelog expects a JSON object"
-    );
-    assert_eq!(
-        not_object.data,
-        Some(json!({
-            "tool": "tracedecay_changelog",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool changelog ...` (`tracedecay tool changelog --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly."
-        }))
+        json!({
+            "code": not_object.code,
+            "message": not_object.message,
+            "data": not_object.data,
+        }),
+        crate::support::application_invalid_request_error(
+            "tracedecay_changelog",
+            "invalid arguments: tracedecay_changelog expects a JSON object"
+        )
     );
 }
 

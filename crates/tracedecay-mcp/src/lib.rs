@@ -44,7 +44,6 @@
 
 pub mod analysis;
 pub mod application_output;
-pub mod bench;
 mod broker_stream_transport;
 pub mod context_headings;
 pub mod handlers;
@@ -101,8 +100,8 @@ pub use tool_context::{
 pub(crate) use tool_errors::structured_hook_error_data;
 pub use tool_errors::{
     mark_semantic_tool_error, reset_required_command, reset_required_context,
-    reset_required_remedy, semantic_failure_reason, serialize_response_line, tool_error_response,
-    tool_result_has_semantic_error,
+    reset_required_detail, reset_required_remedy, semantic_failure_reason, serialize_response_line,
+    tool_error_response, tool_result_has_semantic_error,
 };
 pub use tools::render::format_relative_time;
 pub use tools::{

@@ -1,5 +1,6 @@
 //! Production capture-to-store path for canonical external sources.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -379,15 +380,30 @@ impl RuntimeExternalSourceStore {
         if receipts.is_empty() {
             return Ok(Vec::new());
         }
+        let mut binding_identities = Vec::with_capacity(receipts.len());
+        let mut binding_objects = std::collections::BTreeMap::<_, BTreeSet<_>>::new();
+        for receipt in receipts {
+            let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
+            binding_objects
+                .entry(binding_identity.clone())
+                .or_default()
+                .insert(
+                    host_source_object(receipt.observation())?
+                        .native_object()
+                        .clone(),
+                );
+            binding_identities.push(binding_identity);
+        }
         let mut states = std::collections::BTreeMap::new();
+        for (binding_identity, objects) in binding_objects {
+            let state = self.read_state(binding_identity.clone(), objects).await?;
+            states.insert(binding_identity, state);
+        }
         let mut settled = vec![None; receipts.len()];
         let mut pending_commits = Vec::new();
-        for (slot, receipt) in receipts.iter().enumerate() {
-            let (_, _, binding_identity) = host_source_authority(receipt, self.runtime.binding())?;
-            if !states.contains_key(&binding_identity) {
-                let state = self.read_state(binding_identity.clone()).await?;
-                states.insert(binding_identity.clone(), state);
-            }
+        for (slot, (receipt, binding_identity)) in
+            receipts.iter().zip(binding_identities).enumerate()
+        {
             let current = states.get(&binding_identity).and_then(Option::as_ref);
             let predecessor = self
                 .host_source_predecessor(receipt.observation(), current, &binding_identity)
@@ -587,9 +603,13 @@ impl RuntimeExternalSourceStore {
         binding: &tracedecay_domain::SourceBindingIdentityV1,
     ) -> Result<Option<SourceObjectRevisionV1>, RuntimeExternalSourceErrorV1> {
         let object = host_source_object(observation)?;
-        let Some(previous) =
-            current.and_then(|state| state.observed_objects().get(object.native_object()))
-        else {
+        let previous = match current {
+            Some(state) => state
+                .observed_object(object.native_object())
+                .map_err(invalid)?,
+            None => None,
+        };
+        let Some(previous) = previous else {
             return Ok(None);
         };
         if previous == &object {
@@ -618,7 +638,10 @@ impl RuntimeExternalSourceStore {
             .await?
             .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
         let committed_previous = current
-            .and_then(|state| state.latest_mutation(object.native_object()))
+            .map(|state| state.latest_mutation(object.native_object()))
+            .transpose()
+            .map_err(invalid)?
+            .flatten()
             .is_some_and(|mutation| {
                 mutation.observation() == previous && retained.committed(mutation)
             });
@@ -640,7 +663,10 @@ impl RuntimeExternalSourceStore {
         let Some(state) = current else {
             return Ok(false);
         };
-        let Some(latest) = state.observed_objects().get(object.native_object()) else {
+        let Some(latest) = state
+            .observed_object(object.native_object())
+            .map_err(invalid)?
+        else {
             return Ok(false);
         };
         if latest == object {
@@ -695,6 +721,7 @@ impl RuntimeExternalSourceStore {
             };
             return Ok(state
                 .latest_mutation(object.native_object())
+                .map_err(invalid)?
                 .is_some_and(|mutation| {
                     mutation.observation() == latest
                         && mutation.predecessor() == Some(object.revision())
@@ -856,8 +883,9 @@ impl RuntimeExternalSourceStore {
     pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
+        objects: BTreeSet<SourceNativeObjectIdV1>,
     ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
-        let operation = ExternalSourceReadOperationV1::State { binding };
+        let operation = ExternalSourceReadOperationV1::State { binding, objects };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self

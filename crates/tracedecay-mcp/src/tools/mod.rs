@@ -42,6 +42,10 @@ pub struct ToolResult {
     /// What the read cost its stores, recorded by
     /// [`response_trailers::append_request_cost`] beside its trailer.
     cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
+    /// The whole typed result the rendered body describes, unbounded. The
+    /// MCP wire carries only the budgeted body; `tracedecay tool --json`
+    /// prints this as `structuredContent`.
+    structured_result: Option<Value>,
 }
 
 impl ToolResult {
@@ -54,7 +58,20 @@ impl ToolResult {
             failure_message: None,
             token_accounting: None,
             cost: None,
+            structured_result: None,
         }
+    }
+
+    /// Record the whole typed result this body renders.
+    #[must_use]
+    pub fn with_structured_result(mut self, structured_result: Value) -> Self {
+        self.structured_result = Some(structured_result);
+        self
+    }
+
+    /// The whole typed result, when the renderer recorded it.
+    pub fn structured_result(&self) -> Option<&Value> {
+        self.structured_result.as_ref()
     }
 
     /// What the read cost its stores, when the call was metered.

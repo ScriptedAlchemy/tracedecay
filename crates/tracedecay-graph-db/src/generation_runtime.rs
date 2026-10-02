@@ -101,21 +101,6 @@ enum SealedStagingReleaseAuthorityV1 {
     SealedArtifact(String),
 }
 
-/// Whether an on-disk sealed receipt may authorize staging-row release.
-///
-/// [`Self::Denied`] is for callers that have not proved a sealed-code-generation
-/// replay. Inline journaled heads can still carry a verify-once receipt from
-/// publication, and that receipt is not serving authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SealedReleaseReceiptAuthority {
-    /// Constructed by `test-helpers` / `eval-helpers` callers that have not
-    /// proved a sealed-code-generation replay. Production publication always
-    /// passes [`Self::Permitted`].
-    #[allow(dead_code)]
-    Denied,
-    Permitted,
-}
-
 impl SealedStagingReleaseAuthorityV1 {
     fn recovered_digest(&self) -> &str {
         match self {
@@ -1531,31 +1516,19 @@ impl GraphDb {
         Ok(())
     }
 
-    /// Releases one sealed generation's duplicate staging rows.
-    ///
-    /// `relational_recovered_digest` is the digest the relational authority
-    /// records for this projection's verified head, when the caller has it.
-    /// Supplying it is the stronger contract: the installed sealed artifact
-    /// must reproduce that exact digest before anything is deleted. The
-    /// registry hook for it is
-    /// `registry::publication::release_sealed_generation_staging_rows`, which
-    /// already reads `relational_head`, passing
-    /// `Some(relational_head.recovered_digest.as_str())` here binds the
-    /// release to the authority's head instead of letting the artifact vouch
-    /// for itself.
+    /// Releases one sealed generation's duplicate staging rows once the
+    /// installed sealed reader, or the on-disk receipt when none is seated,
+    /// reproduces `relational_recovered_digest`, the digest the relational
+    /// authority records for the projection's verified head. Binding to that
+    /// head keeps the artifact from vouching for itself.
     pub(crate) fn release_sealed_generation_staging_rows_with(
         &self,
         locator: &GenerationLocator,
-        relational_recovered_digest: Option<&str>,
-        receipt_authority: SealedReleaseReceiptAuthority,
+        relational_recovered_digest: &str,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<SealedStagingRelease, GraphDbError> {
         check()?;
-        let evidence = match self.sealed_release_evidence(
-            locator,
-            relational_recovered_digest,
-            receipt_authority,
-        )? {
+        let evidence = match self.sealed_release_evidence(locator, relational_recovered_digest)? {
             Ok(evidence) => evidence,
             Err(reason) => return Ok(Self::retained(locator, reason)),
         };
@@ -1601,13 +1574,10 @@ impl GraphDb {
     fn sealed_release_evidence(
         &self,
         locator: &GenerationLocator,
-        relational_recovered_digest: Option<&str>,
-        receipt_authority: SealedReleaseReceiptAuthority,
+        relational_recovered_digest: &str,
     ) -> Result<Result<SealedReleaseEvidence, SealedStagingRetentionReason>, GraphDbError> {
         if let Some(sealed) = self.sealed_generation_reader(locator) {
-            if let Some(expected) = relational_recovered_digest
-                && sealed.recovered_digest() != expected
-            {
+            if sealed.recovered_digest() != relational_recovered_digest {
                 return Ok(Err(SealedStagingRetentionReason::SealedDigestMismatch));
             }
             let (entities, relations) = sealed.row_counts();
@@ -1617,13 +1587,7 @@ impl GraphDb {
                 relations,
             }));
         }
-        if receipt_authority != SealedReleaseReceiptAuthority::Permitted {
-            return Ok(Err(SealedStagingRetentionReason::NoSealedStore));
-        }
-        let Some(expected) = relational_recovered_digest else {
-            return Ok(Err(SealedStagingRetentionReason::NoSealedStore));
-        };
-        match self.matching_sealed_release_receipt(locator, expected)? {
+        match self.matching_sealed_release_receipt(locator, relational_recovered_digest)? {
             Some(evidence) => Ok(Ok(evidence)),
             None => Ok(Err(SealedStagingRetentionReason::NoSealedStore)),
         }
@@ -1815,8 +1779,7 @@ impl GraphDb {
     ) -> Result<SealedStagingRelease, GraphDbError> {
         self.release_sealed_generation_staging_rows_with(
             &GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
-            Some(relational_recovered_digest),
-            SealedReleaseReceiptAuthority::Denied,
+            relational_recovered_digest,
             &|| Ok(()),
         )
     }

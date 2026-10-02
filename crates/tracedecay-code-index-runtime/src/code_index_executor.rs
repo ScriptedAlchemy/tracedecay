@@ -175,11 +175,10 @@ pub(crate) async fn acquire_execution_permit(
     }
 }
 
-/// How long a search may wait for a restart's retained generation to seat:
-/// half of what its deadline leaves, so the retrieval that runs on the seat
-/// keeps the other half. A request without a deadline declared no wait
-/// budget.
-fn retained_seat_wait_budget(
+/// How long a search may wait for a restart's retained text owners to serve:
+/// half of what its deadline leaves, so the retrieval that runs on them keeps
+/// the other half. A request without a deadline declared no wait budget.
+fn retained_text_serving_wait_budget(
     deadline: Option<&tracedecay_contracts::Deadline>,
 ) -> std::time::Duration {
     deadline.map_or(std::time::Duration::ZERO, |deadline| {
@@ -731,15 +730,17 @@ where
                             {
                                 return None;
                             }
-                            // A restart mounts the authority and reopens its
-                            // query owners only once its retained generation
-                            // seats; wait for that seat rather than answer as
-                            // if nothing were indexed.
-                            let seat = schedulers
-                                .wait_for_retained_graph_seat(
+                            // A restart reopens its retained text owners and
+                            // mounts the authority moments after it mounts;
+                            // wait for those rather than answer as if nothing
+                            // were indexed.
+                            let serving = schedulers
+                                .wait_for_retained_text_serving(
                                     &request.project_root,
                                     &scope,
-                                    retained_seat_wait_budget(request.deadline.as_ref()),
+                                    retained_text_serving_wait_budget(
+                                        request.deadline.as_ref(),
+                                    ),
                                 )
                                 .await;
                             // Once the authority is mounted, search reports
@@ -747,17 +748,17 @@ where
                             if authority_mounted().await {
                                 return None;
                             }
-                            match seat {
-                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Seated
-                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Warming => {
+                            match serving {
+                                code_index_scheduler::CodeIndexSeatWaitV1::Seated(())
+                                | code_index_scheduler::CodeIndexSeatWaitV1::Deadline => {
                                     Some(code_index_search_unavailable(
                                         code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming,
                                         code_search::CodeIndexSearchUnavailableReasonV1::GraphWarming
                                             .as_str(),
                                     ))
                                 }
-                                code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unpublished
-                                | code_index_scheduler::CodeIndexRetainedSeatWaitV1::Unreachable => {
+                                code_index_scheduler::CodeIndexSeatWaitV1::Parked(_)
+                                | code_index_scheduler::CodeIndexSeatWaitV1::Cancelled => {
                                     Some(code_index_search_unavailable(
                                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                                         "query_authority_unavailable",

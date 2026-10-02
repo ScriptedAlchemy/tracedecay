@@ -74,6 +74,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
+use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
 use tracedecay_runtime_core::config::{ProfileRoot, admit_process_host_program_search_path};
 
 pub(crate) fn current_unix_timestamp() -> i64 {
@@ -630,9 +631,11 @@ fn main() -> ExitCode {
         Err(e) => {
             let code = if tracedecay_daemon_identity::daemon_unreachable(&e) {
                 ExitCode::from(tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE)
-            } else if e.project_route_context().is_some_and(|(code, _, _)| {
-                code == tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT
-            }) {
+            } else if matches!(
+                &e,
+                tracedecay_domain::errors::TraceDecayError::ToolRefused(refusal)
+                    if refusal.code.as_deref() == Some(tracedecay_contracts::code_index_freshness::CODE_INDEX_READINESS_WAIT_TIMED_OUT)
+            ) {
                 ExitCode::from(READINESS_WAIT_TIMED_OUT_EXIT_CODE)
             } else {
                 ExitCode::FAILURE
@@ -737,6 +740,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
                 .worker_threads(worker_threads)
                 .max_blocking_threads(blocking_threads)
                 .thread_stack_size(ASYNC_STACK_BYTES)
+                .on_thread_park(collect_idle_thread_heap_v1)
                 .build(),
         };
         build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
@@ -884,7 +888,34 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists(profile_root);
 
     let is_force_flush = matches!(command, Commands::Sync { .. } | Commands::Status { .. });
-    let mut user_config = tracedecay_session_memory::user_config::UserConfig::load(profile_root);
+    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
+        Ok(user_config) => {
+            flush_worldwide_counter(profile, command, is_force_flush, user_config).await;
+        }
+        Err(err) => eprintln!("warning: {err}"),
+    }
+
+    if is_first_run && startup_policy.runs_startup_maintenance() {
+        eprintln!(
+            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
+             \x20     Run `tracedecay enable-upload-counter` to opt in."
+        );
+    }
+
+    if startup_policy.runs_agent_install_check()
+        && let Some(home) = profile.home()
+    {
+        tracedecay_agent_hosts::agents::claude::check_install_stale(home);
+    }
+}
+
+async fn flush_worldwide_counter(
+    profile: &ProfileRoot,
+    command: &Commands,
+    is_force_flush: bool,
+    mut user_config: tracedecay_session_memory::user_config::UserConfig,
+) {
+    let profile_root = profile.data_dir();
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call which can add seconds to
     // `tracedecay serve` startup on slow networks, long enough to blow the
@@ -921,19 +952,6 @@ async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
         && let Err(err) = user_config.save_if_exists(profile_root)
     {
         eprintln!("warning: could not save tracedecay config: {err}");
-    }
-
-    if is_first_run && startup_policy.runs_startup_maintenance() {
-        eprintln!(
-            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
-             \x20     Run `tracedecay enable-upload-counter` to opt in."
-        );
-    }
-
-    if startup_policy.runs_agent_install_check()
-        && let Some(home) = profile.home()
-    {
-        tracedecay_agent_hosts::agents::claude::check_install_stale(home);
     }
 }
 
@@ -1091,11 +1109,9 @@ impl CommandFamily {
             Commands::CurrentCounter { .. }
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
-            | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
+            | Commands::EnableUploadCounter => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor => Self::Diagnostics,
             Commands::Git { .. }
@@ -1310,7 +1326,10 @@ async fn dispatch_project_command(
         Commands::Storage { action } => {
             commands::handle_profile_storage_action(profile, action, assume_yes).await?;
         }
-        Commands::Wipe { all } => {
+        Commands::Wipe { stale: true, .. } => {
+            commands::handle_wipe_stale(profile, assume_yes).await?;
+        }
+        Commands::Wipe { all, stale: false } => {
             commands::handle_wipe(profile, all, assume_yes).await?;
         }
         Commands::List { all } => {
@@ -1886,9 +1905,6 @@ async fn dispatch_configuration_command(
         Commands::EnableUploadCounter => {
             commands::handle_upload_counter(profile, true).await?;
         }
-        Commands::Gitignore { path, action } => {
-            commands::handle_gitignore(profile, path, action).await?;
-        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -1909,10 +1925,16 @@ async fn dispatch_diagnostics_command(
                 label = "cli.doctor.run"
             )
             .await?;
-            if completion == tracedecay::doctor::DoctorCompletion::PendingOperatorAction {
-                return Ok(CommandOutcome::Exit(
-                    agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
-                ));
+            match completion {
+                tracedecay::doctor::DoctorCompletion::Healthy => {}
+                tracedecay::doctor::DoctorCompletion::PendingOperatorAction => {
+                    return Ok(CommandOutcome::Exit(
+                        agent_cmd::PENDING_OPERATOR_ACTION_EXIT_CODE,
+                    ));
+                }
+                tracedecay::doctor::DoctorCompletion::Issues(_) => {
+                    return Ok(CommandOutcome::Exit(1));
+                }
             }
         }
         Commands::Cost {
@@ -1921,14 +1943,6 @@ async fn dispatch_diagnostics_command(
             export,
         } => {
             cost_cmd::handle_cost(profile, range, by_model, export).await?;
-        }
-        Commands::Bench {
-            queries,
-            json,
-            path,
-            max_nodes,
-        } => {
-            commands::handle_bench(profile, queries, json, path, max_nodes).await?;
         }
         Commands::Gain {
             all,
@@ -2035,7 +2049,6 @@ impl CommandStartupPolicy {
             Commands::Status { .. }
             | Commands::CurrentCounter { .. }
             | Commands::Cost { .. }
-            | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor
             | Commands::List { .. }
@@ -2057,7 +2070,6 @@ impl CommandStartupPolicy {
                     },
             }
             | Commands::Channel { channel: None }
-            | Commands::Gitignore { action: None, .. }
             | Commands::Automation {
                 action:
                     AutomationAction::Config {

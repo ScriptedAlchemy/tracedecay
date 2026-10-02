@@ -11,8 +11,12 @@ use tokio::sync::Semaphore;
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
 };
-use tracedecay_domain::errors::{StoreResetRequiredV1, TraceDecayError};
+use tracedecay_domain::errors::{
+    PROFILE_RESET_COMMAND, ResettableStoreV1, STALE_STORE_RESET_COMMAND, StoreResetRequiredV1,
+    TraceDecayError,
+};
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
+use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
 use super::retained_hook_tasks::RetainedHookTaskJoin;
@@ -547,7 +551,14 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Result<RegisteredGlobalDbOwnerV1> {
         let shard_id = runtime.binding().shard_id.clone();
         let attached = self.attach_registered_inner(runtime).await;
-        self.record_registered_admission(shard_id, attached.as_ref().err());
+        let refused_authority = attached
+            .as_ref()
+            .ok()
+            .and_then(RegisteredGlobalDbOwnerV1::reset_required);
+        self.record_registered_admission(
+            shard_id,
+            attached.as_ref().err().or(refused_authority.as_ref()),
+        );
         attached
     }
 
@@ -557,15 +568,25 @@ impl DaemonSessionRuntimeRegistryV1 {
         refusal: Option<&TraceDecayError>,
     ) {
         let reset_required = refusal.and_then(|error| {
-            let store = match &shard_id.scope {
-                StoreShardScopeV1::Profile => "profile authority".to_owned(),
-                StoreShardScopeV1::ProfileSessions => "profile sessions".to_owned(),
+            let resettable = match &shard_id.scope {
+                StoreShardScopeV1::ProfileSessions => Some(ResettableStoreV1::ProfileSessions),
                 StoreShardScopeV1::ProjectSessions { project_id } => {
-                    format!("project sessions {project_id}")
+                    Some(ResettableStoreV1::ProjectSessions {
+                        project_id: project_id.to_string(),
+                    })
                 }
-                scope => format!("{scope:?}"),
+                _ => None,
             };
-            error.store_reset_required(store)
+            match resettable {
+                Some(store) => error.store_reset_required(store.label(), STALE_STORE_RESET_COMMAND),
+                None => {
+                    let store = match &shard_id.scope {
+                        StoreShardScopeV1::Profile => "profile authority".to_owned(),
+                        scope => format!("{scope:?}"),
+                    };
+                    error.store_reset_required(store, PROFILE_RESET_COMMAND)
+                }
+            }
         });
         let mut stores = self
             .reset_required_stores
@@ -593,16 +614,29 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    /// Registered stores currently held in their typed reset-required state,
-    /// each with the exact command that resets it.
+    /// Stores in this profile currently held in their typed reset-required
+    /// state, each with the exact command that resets it: registered stores
+    /// refused at attach, then Hook V2 admission state refused at open.
     #[must_use]
     pub fn reset_required_stores(&self) -> Vec<StoreResetRequiredV1> {
-        self.reset_required_stores
+        let mut stores: Vec<_> = self
+            .reset_required_stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .cloned()
-            .collect()
+            .collect();
+        let profile_root = self.identity.profile_root();
+        let hook_admissions: BTreeMap<_, _> =
+            tracedecay_hooks::hook_admission_reset_required_roots(profile_root)
+                .iter()
+                .map(|root| {
+                    let state = hook_admission_reset_required(profile_root, root);
+                    (state.store.clone(), state)
+                })
+                .collect();
+        stores.extend(hook_admissions.into_values());
+        stores
     }
 
     // Erase the inner state machine before Hotpath wraps it by value. Boxing
@@ -614,20 +648,23 @@ impl DaemonSessionRuntimeRegistryV1 {
         Box::pin(async move {
             let database =
                 Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-            let long_lived = self.long_lived_session_maintenance;
             // Only long-lived daemons defer schema convergence to resumable
-            // maintenance.
+            // maintenance. A store refused for reset is never converged: its
+            // reset deletes it.
+            let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
-                let (database, convergence) =
-                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
-                (database, Some(convergence))
+                RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                    database,
+                    self.registry.open_cancellation(),
+                )
+                .await?
             } else {
                 (
                     RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
                     None,
                 )
             };
-            if long_lived {
+            if convergence.is_some() {
                 let lease = database.issue_lease().map_err(|error| {
                     session_registry_error(
                         "issue registered schema convergence client",
@@ -687,6 +724,53 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.registered_schema_convergence
             .execution_count
             .load(Ordering::Relaxed)
+    }
+}
+
+/// The reset `wipe --stale` applies to Hook V2 admission state refused at
+/// `root`: the profile's ledgers, or one project's ledgers and pre-ledger
+/// work. State anywhere else is reset with the whole profile.
+fn hook_admission_reset_required(profile_root: &Path, root: &Path) -> StoreResetRequiredV1 {
+    let host_parent = root.parent();
+    let scope_root = host_parent.and_then(Path::parent);
+    let kind = host_parent
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str);
+    let project_id = scope_root
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str);
+    let store = match (kind, scope_root, project_id) {
+        (Some(tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR), Some(scope), _)
+            if scope == profile_root =>
+        {
+            Some(ResettableStoreV1::ProfileHookAdmissions)
+        }
+        (
+            Some(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR)
+            | Some(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR),
+            Some(scope),
+            Some(project_id),
+        ) if profile_root_of_sharded_data_root(scope, project_id) == Some(profile_root) => {
+            Some(ResettableStoreV1::ProjectHookAdmissions {
+                project_id: project_id.to_owned(),
+            })
+        }
+        _ => None,
+    };
+    let (store, remedy) = match store {
+        Some(store) => (store.label(), STALE_STORE_RESET_COMMAND),
+        None => (
+            format!("hook admissions at {}", root.display()),
+            PROFILE_RESET_COMMAND,
+        ),
+    };
+    StoreResetRequiredV1 {
+        store,
+        authority: "hook admission ledger".to_owned(),
+        found_version: None,
+        required_version: None,
+        reason: tracedecay_hooks::HookAdmissionLedgerError::ResetRequired.to_string(),
+        remedy: remedy.to_owned(),
     }
 }
 

@@ -62,6 +62,7 @@ use super::{
 
 mod canonical_json;
 mod clone_rows;
+mod edge_rows;
 mod helpers;
 mod lineage_rows;
 mod module_resolution;
@@ -100,8 +101,14 @@ mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
+mod changed_resolution;
+mod graph_base_inputs;
+use changed_resolution::edge_evidence_over_parent;
+pub(crate) use graph_base_inputs::CodeGraphBaseInputsWriterV1;
 mod graph_inputs;
-pub(crate) use graph_inputs::CodeGraphResolutionV1;
+pub(crate) use graph_inputs::{
+    CodeGraphLayeredResolutionV1, CodeGraphRemovedFileV1, CodeGraphResolutionV1,
+};
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
 pub use partitioned_codec::{
@@ -306,6 +313,11 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     CorruptionResetRequired(String),
     #[error("the publication authority is unavailable: {0}")]
     Unavailable(String),
+    /// Another owner holds the code-generation store lock this operation
+    /// needs, exclusive or shared. The holder releases it on its own and emits
+    /// no wake, so the refused pass is retried rather than parked.
+    #[error("the code-generation store lock is held by another owner")]
+    StoreLockContended,
     /// Materializing the whole generation does not fit the process
     /// resident-memory budget now; it succeeds once memory is given back.
     #[error("decoding the generation does not fit the resident-memory budget: {0}")]
@@ -585,6 +597,25 @@ impl SharedPhysicalCodeArtifactPoolV1 {
             state.artifacts.insert(key, Arc::downgrade(artifact));
             state.inserted = state.inserted.saturating_add(1);
         })
+    }
+
+    /// Drop the index entries whose artifact no generation owns any more. A
+    /// `Weak` keeps its allocation, so a dead entry still pins the artifact's
+    /// header, and it can never be reused.
+    pub fn release_dead_entries(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .artifacts
+            .retain(|_, artifact| artifact.strong_count() > 0);
+        let PhysicalCodeArtifactPoolStateV1 {
+            artifacts,
+            insertion_order,
+            ..
+        } = &mut *state;
+        insertion_order.retain(|key| artifacts.contains_key(key));
     }
 
     fn record_clone_payloads(&self, reused: u64, computed: u64) {
@@ -877,7 +908,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// Call sites whose import binding names project code the seal could not
     /// bind; see [`helpers::unresolved_import_calls`].
     pub fn unresolved_import_calls(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
-        unresolved_import_calls(&self.files)
+        unresolved_import_calls(&self.files, None)
     }
 
     pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {
@@ -1867,6 +1898,12 @@ where
         self.retained_parses.stats()
     }
 
+    /// The documents increments retain, as a handle the resident-memory
+    /// inventory samples and releases.
+    pub fn retained_parse_pool(&self) -> SharedRetainedParsePool {
+        self.retained_parses.clone()
+    }
+
     pub fn physical_artifact_pool_stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
         self.physical_artifacts.stats()
     }
@@ -2180,7 +2217,12 @@ where
             );
             let (edges, edge_abstentions) = hotpath::measure_block!(
                 "code_index.build.assemble.edge_evidence",
-                collect_edge_evidence(&staged.files)
+                match (active.as_deref(), staged.parent_shared_occurrences.as_ref()) {
+                    (Some(parent), Some(shared)) => {
+                        edge_evidence_over_parent(&staged.files, parent, shared)
+                    }
+                    _ => collect_edge_evidence(&staged.files),
+                }
             )?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
@@ -2274,6 +2316,7 @@ where
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
         retained_parses: &SharedRetainedParsePool,
+        retain_parse: bool,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
@@ -2366,6 +2409,7 @@ where
             let cancellation = ExtractionControlBridge { control };
             let extraction = match parse_for_indexing(
                 retained_parses,
+                retain_parse,
                 ParseDocumentIdentity::Repository {
                     project_id: config.project_id.clone(),
                     repository_id: snapshot.repository.clone(),
@@ -2498,6 +2542,7 @@ where
                     config,
                     physical_artifacts,
                     retained_parses,
+                    false,
                     intake,
                     capability,
                     manifest,
@@ -2706,6 +2751,7 @@ where
                                 config,
                                 physical_artifacts,
                                 retained_parses,
+                                true,
                                 intake,
                                 capability,
                                 manifest,
@@ -2735,6 +2781,7 @@ where
                             config,
                             physical_artifacts,
                             retained_parses,
+                            true,
                             intake,
                             capability,
                             manifest,
@@ -2884,3 +2931,7 @@ mod worker_tests;
 #[cfg(test)]
 #[path = "arc_share_sequence_tests.rs"]
 mod arc_share_sequence_tests;
+
+#[cfg(test)]
+#[path = "changed_resolution_tests.rs"]
+mod changed_resolution_tests;

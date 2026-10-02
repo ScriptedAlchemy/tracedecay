@@ -20,8 +20,8 @@ impl RemoteSqliteStorageV1 {
     }
 
     /// Status read that reports a never-published authority as the typed
-    /// `Unavailable { PlacementUnknown }` state observed at `observed_at`,
-    /// instead of a storage error.
+    /// `Unavailable { WriterAuthorityUnpublished }` state observed at
+    /// `observed_at`, instead of a storage error.
     pub fn status_at(
         &self,
         brain_id: &BrainId,
@@ -44,12 +44,15 @@ impl RemoteSqliteStorageV1 {
         let pending_spool_items = count(&row, 0)?;
         let quarantined_spool_items = count(&row, 1)?;
         let has_sequence_gap = count(&row, 2)? != 0;
-        let authority = match load_optional_authority_state(self.handle(), brain_id)? {
-            Some(authority) => authority,
-            None => CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-                observed_at,
-            },
+        let authority = match load_authority_state(self.handle(), brain_id) {
+            Ok(authority) => authority,
+            Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
+                CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                    observed_at,
+                }
+            }
+            Err(error) => return Err(error),
         };
         Ok(RemoteStorageStatusSnapshotV1 {
             pending_spool_items,
@@ -58,23 +61,6 @@ impl RemoteSqliteStorageV1 {
             authority,
         })
     }
-}
-
-/// Loads the published authority state, treating an absent registry row as a
-/// typed `None` rather than a storage error.
-fn load_optional_authority_state(
-    handle: &crate::exact_sql::ExactSqlHandle,
-    brain_id: &BrainId,
-) -> Result<Option<CurrentRemoteAuthorityStateV1>, RemoteSqliteStorageErrorV1> {
-    let rows = query(
-        handle,
-        "SELECT EXISTS(SELECT 1 FROM remote_authorities WHERE brain_id = ?1)",
-        vec![text(brain_id.as_str())],
-    )?;
-    if count(&one_row(rows)?, 0)? == 0 {
-        return Ok(None);
-    }
-    load_authority_state(handle, brain_id).map(Some)
 }
 
 /// Read-only summary of the durable recovery journal for one node store:

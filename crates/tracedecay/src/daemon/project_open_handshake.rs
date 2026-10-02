@@ -90,7 +90,7 @@ pub(super) async fn open_project_for_handshake(
         )?;
     }
     let configuration_database = Box::pin(
-        store_administration.registered_project_session_database(project_path, &store_layout),
+        store_administration.registered_project_configuration_database(project_path, &store_layout),
     )
     .await?;
     #[cfg(any(test, feature = "test-helpers"))]
@@ -238,7 +238,7 @@ pub(super) async fn write_project_open_error(
 /// when the refusal is the reset-required terminal, matching the canonical
 /// problem envelope CLI and HTTP callers receive for the same operation.
 /// Non-application tools and every other open failure keep the raw shape.
-fn tool_call_open_refusal_response(
+pub(super) fn tool_call_open_refusal_response(
     request: &JsonRpcRequest,
     connection_scope: &str,
     error: &TraceDecayError,
@@ -246,26 +246,26 @@ fn tool_call_open_refusal_response(
     if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
         return None;
     }
-    let (authority, _) = tracedecay_mcp::reset_required_context(error)?;
-    let detail = tracedecay_contracts::ApplicationProblemDetailV1::from_reset_required(
-        error,
-        tracedecay_mcp::reset_required_command(&authority, None),
-    )?;
+    let detail = tracedecay_mcp::reset_required_detail(error)?;
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
-        tool_name, request_id, detail,
+    let (_, envelope) = tracedecay_daemon_service::application_surface::settled_tool_refusal(
+        tracedecay_tool_catalog::BindingSurface::Mcp,
+        tool_name,
+        request_id,
+        tracedecay_contracts::ApplicationProblem::from_detail(detail),
     )?;
     let text = serde_json::to_string(&envelope).ok()?;
-    let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
+    let structured_content =
+        tracedecay_mcp::tool_errors::problem_structured_content(&envelope.problem).ok()?;
     Some(JsonRpcResponse::success(
         id,
         json!({
             "content": [{ "type": "text", "text": text }],
             "isError": true,
-            "problem": problem,
+            "structuredContent": structured_content,
         }),
     ))
 }
@@ -367,9 +367,13 @@ mod tests {
         assert!(response.error.is_none(), "the refusal is a tool result");
         let result = response.result.expect("tool result payload");
         assert_eq!(result["isError"], serde_json::json!(true));
-        assert_eq!(result["problem"]["kind"], "reset_required");
+        assert_eq!(result.get("problem"), None);
         assert_eq!(
-            result["problem"]["legal_actions"],
+            result["structuredContent"]["problem"]["kind"],
+            "reset_required"
+        );
+        assert_eq!(
+            result["structuredContent"]["problem"]["legal_actions"],
             serde_json::json!(["reset"])
         );
         let text = result["content"][0]["text"]

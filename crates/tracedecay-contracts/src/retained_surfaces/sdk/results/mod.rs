@@ -30,19 +30,20 @@ pub use automation::{
 };
 pub use lcm::{
     CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,
-    LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeExternalPayloadV1, LcmDescribeResultV1,
-    LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1, LcmDescriptionV1,
-    LcmDoctorFindingKindV1, LcmDoctorFindingV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1,
-    LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorResultV1, LcmExpandQueryBudgetV1,
-    LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1, LcmExpandQueryPaginationV1,
-    LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1, LcmExpandResultV1,
-    LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmGrepResultV1, LcmLifecycleStatusV1,
-    LcmLoadSessionResultV1, LcmMessageV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
-    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1, LcmRawMessageOverviewV1,
-    LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1, LcmSourcePaginationV1,
-    LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1, LcmStoreStatusV1,
-    LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1,
-    LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1, LcmTemporalFieldsV1,
+    LcmConvergenceStateV1, LcmConvergenceV1, LcmDagDepthStatusV1, LcmDagStatusV1,
+    LcmDescribeExternalPayloadV1, LcmDescribeResultV1, LcmDescribeSourceOverviewV1,
+    LcmDescribeSummaryNodeV1, LcmDescriptionV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1,
+    LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1,
+    LcmDoctorResultV1, LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
+    LcmExpandQueryPaginationV1, LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1,
+    LcmExpandResultV1, LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmGrepResultV1,
+    LcmLifecycleStatusV1, LcmLoadSessionResultV1, LcmMessageV1, LcmPayloadCoverageStateV1,
+    LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1,
+    LcmRawMessageOverviewV1, LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1,
+    LcmSourcePaginationV1, LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1,
+    LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1,
+    LcmSummaryConvergenceStateV1, LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1,
+    LcmSummaryNodeV1, LcmTemporalFieldsV1,
 };
 pub use memory::{
     FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1,
@@ -236,12 +237,14 @@ mod tests {
             matches!(reason, RetainedSurfaceResultV1::FactStoreReason(_)),
             "{reason:?}"
         );
-        assert!(
+        assert_eq!(
             RetainedSurfaceResultV1::from_operation_value(
                 RetainedSurfaceOperation::FactStoreSearch,
                 page
             )
-            .is_err(),
+            .unwrap_err()
+            .to_string(),
+            "missing field `retrieval_telemetry`",
             "a body decodes only as the named operation's result"
         );
     }
@@ -280,13 +283,15 @@ mod tests {
             }),
             &request,
         );
+        let error = RetainedSurfaceResultV1::from_operation_value(
+            RetainedSurfaceOperation::FactStoreCurate,
+            terminal,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
-            RetainedSurfaceResultV1::from_operation_value(
-                RetainedSurfaceOperation::FactStoreCurate,
-                terminal
-            )
-            .is_err(),
-            "the run terminal is read from the run ledger, not returned by fact_store_curate"
+            error.starts_with("unknown field `committed_receipts`, expected one of"),
+            "the run terminal is read from the run ledger, not returned by fact_store_curate: {error}"
         );
     }
 }

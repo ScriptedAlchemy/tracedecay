@@ -18,8 +18,10 @@ mod publication;
 mod read_meter;
 mod recovery;
 mod registry;
+mod row_index;
 mod runtime;
 mod schema;
+mod sealed_layer;
 mod sealed_store;
 mod state;
 #[cfg(test)]
@@ -36,8 +38,9 @@ pub use generation::{
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
     GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphGenerationRowSpill,
     GraphGenerationRows, GraphProjectionIdentity, GraphProjectorRevision, GraphRelationRef,
-    GraphReplayCollectionOutcome, GraphSpillRowFootprint, SealedCodeGenerationReplay,
-    SealedGraphStateDigest, SpilledGraphGeneration, SupersededReplayRetirement,
+    GraphReplayCollectionOutcome, GraphRowDigestSum, GraphSpillRowFootprint,
+    SealedCodeGenerationReplay, SealedGraphStateDigest, SpilledGraphGeneration,
+    SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
@@ -94,6 +97,9 @@ pub use registry::{
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnapshot};
 pub use schema::graph_stable_identity;
+pub use sealed_layer::{
+    GraphLayeredRowSpill, GraphSealedBaseAbsenceV1, GraphSealedBaseV1, LayeredGraphGeneration,
+};
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.

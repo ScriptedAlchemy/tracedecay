@@ -2,17 +2,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    AgentInstanceId, AnchorProvenanceRelation, CanonicalObservationEnvelopeV1, CopyProofV1,
-    DurableObservationV1, MessageId, MessageOccurrenceIdV1, RetrievalAnchorId,
-    RetrievalAnchorRecord, SessionId, SessionProjectionGenerationV1, TemporalValidityV1, ThreadId,
-    UtcMicros,
+    AgentInstanceId, CopyProofV1, MessageId, MessageOccurrenceIdV1, RetrievalAnchorId, SessionId,
+    SessionProjectionGenerationV1, TemporalValidityV1, ThreadId, UtcMicros,
 };
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use super::operations::CanonicalPublicationManifest;
-use super::projection::observation_envelope_from_payload;
 use super::query::{generation_i64, storage, storage_message};
 use super::relations::{
     AgentHierarchyRelation, LogicalCopyRelation, SessionRelationError, SessionRelationProjection,
@@ -513,7 +510,7 @@ pub(crate) async fn reconstruct_session_relation_projection(
     let occurrences =
         reconstruct_occurrences(conn, session_id, generation, max_entities, &cancellation).await?;
     let (logical_copies, thread_hierarchy, agent_hierarchy, observed_parent) =
-        occurrence_relations(&occurrences)?;
+        occurrence_relations(&occurrences)?.into_parts();
     let (parent_session_id, workflow_agents) =
         reconstruct_session_metadata(conn, session_id, observed_parent, &cancellation).await?;
     let projection = SessionRelationProjection {
@@ -531,158 +528,6 @@ pub(crate) async fn reconstruct_session_relation_projection(
     super::relations::validate_projection(&projection)
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
     Ok(projection)
-}
-
-/// Counts logical copies for a generation whose native graph was never applied.
-///
-/// The refresh baseline used to refuse that state. The graph comment says the
-/// caller must reconstruct instead. This walks occurrences in precedence order
-/// and keeps only the latest predecessor per message, so a large generation is
-/// not one exact-SQL page of `observation_json`.
-pub(crate) async fn count_canonical_logical_copies(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    session_id: &SessionId,
-    generation: SessionProjectionGenerationV1,
-) -> SessionStoreResult<u64> {
-    const PAGE: i64 = 8;
-    let generation = generation_i64(generation, RECONSTRUCT_OPERATION)?;
-    let mut cursor: Option<(i64, i64, String)> = None;
-    let mut predecessors: BTreeMap<String, (UtcMicros, u32, String)> = BTreeMap::new();
-    let mut copies = 0_u64;
-    loop {
-        let mut rows = match &cursor {
-            None => conn
-                .query(
-                    "SELECT occurrence.occurrence_id, occurrence.message_id,
-                            occurrence.projection_output_ordinal, occurrence.knowledge_at,
-                            observation.observation_json
-                     FROM session_occurrences AS occurrence
-                     JOIN observations AS observation
-                       ON observation.observation_id = occurrence.source_observation_id
-                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
-                     ORDER BY occurrence.knowledge_at, occurrence.projection_output_ordinal,
-                              occurrence.occurrence_id
-                     LIMIT ?3",
-                    params![session_id.as_str(), generation, PAGE],
-                )
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            Some((knowledge_at, ordinal, occurrence_id)) => conn
-                .query(
-                    "SELECT occurrence.occurrence_id, occurrence.message_id,
-                            occurrence.projection_output_ordinal, occurrence.knowledge_at,
-                            observation.observation_json
-                     FROM session_occurrences AS occurrence
-                     JOIN observations AS observation
-                       ON observation.observation_id = occurrence.source_observation_id
-                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
-                       AND (
-                            occurrence.knowledge_at > ?3
-                            OR (
-                                occurrence.knowledge_at = ?3
-                                AND occurrence.projection_output_ordinal > ?4
-                            )
-                            OR (
-                                occurrence.knowledge_at = ?3
-                                AND occurrence.projection_output_ordinal = ?4
-                                AND occurrence.occurrence_id > ?5
-                            )
-                       )
-                     ORDER BY occurrence.knowledge_at, occurrence.projection_output_ordinal,
-                              occurrence.occurrence_id
-                     LIMIT ?6",
-                    params![
-                        session_id.as_str(),
-                        generation,
-                        *knowledge_at,
-                        *ordinal,
-                        occurrence_id.as_str(),
-                        PAGE
-                    ],
-                )
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-        };
-        let mut page_rows = 0_i64;
-        let mut page_cursor = None;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-        {
-            let occurrence_id: String = row
-                .get(0)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let message_id: Option<String> = row
-                .get(1)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let ordinal = u32::try_from(
-                row.get::<i64>(2)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let knowledge_at = UtcMicros(
-                row.get(3)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            );
-            let observation: DurableObservationV1 = serde_json::from_str(
-                &row.get::<String>(4)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let parent_message_id = observation_envelope_from_payload(observation.payload())
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                .relations()
-                .parent_message_id()
-                .map(|id| id.as_str().to_owned());
-            page_cursor = Some((knowledge_at.0, i64::from(ordinal), occurrence_id.clone()));
-            page_rows += 1;
-            if let (Some(message_id), Some(parent_message_id)) = (&message_id, &parent_message_id)
-                && message_id == parent_message_id
-                && predecessors.get(parent_message_id).is_some_and(|source| {
-                    (source.0, source.1, source.2.as_str())
-                        < (knowledge_at, ordinal, occurrence_id.as_str())
-                })
-            {
-                copies = copies.saturating_add(1);
-            }
-            if let Some(message_id) = message_id {
-                let candidate = (knowledge_at, ordinal, occurrence_id);
-                match predecessors.get(&message_id) {
-                    Some(existing)
-                        if (existing.0, existing.1, existing.2.as_str())
-                            >= (candidate.0, candidate.1, candidate.2.as_str()) => {}
-                    _ => {
-                        predecessors.insert(message_id, candidate);
-                    }
-                }
-            }
-        }
-        if page_rows < PAGE {
-            break;
-        }
-        cursor = page_cursor;
-    }
-    Ok(copies)
-}
-
-pub(crate) async fn reconstruct_logical_copy_relations(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    session_id: &SessionId,
-    generation: SessionProjectionGenerationV1,
-    max_entities: usize,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> SessionStoreResult<Vec<LogicalCopyRelation>> {
-    if max_entities == 0 {
-        return Err(storage(
-            RECONSTRUCT_OPERATION,
-            SessionRelationError::BudgetExhausted,
-        ));
-    }
-    let occurrences =
-        reconstruct_occurrences(conn, session_id, generation, max_entities, &cancellation).await?;
-    let (logical_copies, _, _, _) = occurrence_relations(&occurrences)?;
-    Ok(logical_copies)
 }
 
 async fn reconstruct_session_context(
@@ -803,6 +648,14 @@ async fn reconstruct_summaries(
     Ok(summaries)
 }
 
+/// The occurrence columns relations derive from; the parent and copied-from
+/// facts were copied from the canonical observation and anchor on persist.
+const RELATION_OCCURRENCE_COLUMNS: &str = "occurrence.occurrence_id,
+    occurrence.retrieval_anchor_id, occurrence.copied_from_anchor_ids_json,
+    occurrence.message_id, occurrence.agent_id, occurrence.projection_output_ordinal,
+    occurrence.knowledge_at, occurrence.valid_time_json, occurrence.thread_id,
+    occurrence.parent_message_id, occurrence.parent_agent_id, occurrence.parent_session_id";
+
 async fn reconstruct_occurrences(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -810,21 +663,34 @@ async fn reconstruct_occurrences(
     max_entities: usize,
     cancellation: &Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<Vec<CanonicalOccurrence>> {
+    query_occurrences(
+        conn,
+        &format!(
+            "SELECT {RELATION_OCCURRENCE_COLUMNS}
+             FROM session_occurrences AS occurrence
+             WHERE occurrence.session_id = ?1 AND +occurrence.generation <= ?2
+             ORDER BY occurrence.projection_output_ordinal, occurrence.occurrence_id
+             LIMIT ?3"
+        ),
+        session_id,
+        generation,
+        max_entities,
+        cancellation,
+    )
+    .await
+}
+
+async fn query_occurrences(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    sql: &str,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<Vec<CanonicalOccurrence>> {
     let mut rows = conn
         .query(
-            "SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
-                    anchor.anchor_json, occurrence.message_id,
-                    occurrence.agent_id, occurrence.projection_output_ordinal,
-                    occurrence.knowledge_at, occurrence.valid_time_json,
-                    observation.observation_json, occurrence.thread_id
-             FROM session_occurrences AS occurrence
-             JOIN retrieval_anchors AS anchor
-               ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             JOIN observations AS observation
-               ON observation.observation_id = occurrence.source_observation_id
-             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
-             ORDER BY occurrence.projection_output_ordinal, occurrence.occurrence_id
-             LIMIT ?3",
+            sql,
             params![
                 session_id.as_str(),
                 generation_i64(generation, RECONSTRUCT_OPERATION)?,
@@ -846,95 +712,257 @@ async fn reconstruct_occurrences(
                 SessionRelationError::BudgetExhausted,
             ));
         }
-        let observation: DurableObservationV1 = serde_json::from_str(
-            &row.get::<String>(8)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-        )
-        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let envelope: CanonicalObservationEnvelopeV1 =
-            observation_envelope_from_payload(observation.payload())
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let anchor: RetrievalAnchorRecord = serde_json::from_str(
-            &row.get::<String>(2)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-        )
-        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        occurrences.push(CanonicalOccurrence {
-            occurrence_id: MessageOccurrenceIdV1::new(
-                row.get::<String>(0)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            retrieval_anchor_id: RetrievalAnchorId::new(
-                row.get::<String>(1)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            copied_from_anchor_ids: anchor
-                .source_anchors()
-                .iter()
-                .filter(|source| source.relation() == AnchorProvenanceRelation::CopiedFrom)
-                .map(|source| source.anchor_id().clone())
-                .collect(),
-            thread_id: row
-                .get::<Option<String>>(9)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                .map(ThreadId::new)
-                .transpose()
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            message_id: row
-                .get::<Option<String>>(3)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                .map(MessageId::new)
-                .transpose()
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            agent_id: row
-                .get::<Option<String>>(4)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                .map(AgentInstanceId::new)
-                .transpose()
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            parent_message_id: envelope
-                .relations()
-                .parent_message_id()
-                .map(|id| MessageId::new(id.as_str()))
-                .transpose()
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            parent_agent_id: envelope
-                .relations()
-                .parent_agent_id()
-                .map(|id| AgentInstanceId::new(id.as_str()))
-                .transpose()
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            parent_session_id: envelope.relations().parent_session_id().cloned(),
-            ordinal: u32::try_from(
-                row.get::<i64>(5)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            knowledge_at: UtcMicros(
-                row.get(6)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            ),
-            valid_time: serde_json::from_str(
-                &row.get::<String>(7)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-        });
+        occurrences.push(decode_occurrence(&row)?);
     }
     Ok(occurrences)
 }
 
-#[allow(clippy::type_complexity)]
+fn decode_occurrence(
+    row: &tracedecay_runtime_core::db::engine::Row,
+) -> SessionStoreResult<CanonicalOccurrence> {
+    let text = |index| {
+        row.get::<String>(index)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+    };
+    let optional_text = |index| {
+        row.get::<Option<String>>(index)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+    };
+    let copied_from_anchor_ids: Vec<RetrievalAnchorId> =
+        serde_json::from_str(&text(2)?).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    Ok(CanonicalOccurrence {
+        occurrence_id: MessageOccurrenceIdV1::new(text(0)?)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        retrieval_anchor_id: RetrievalAnchorId::new(text(1)?)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        copied_from_anchor_ids,
+        message_id: optional_text(3)?
+            .map(MessageId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        agent_id: optional_text(4)?
+            .map(AgentInstanceId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        ordinal: u32::try_from(
+            row.get::<i64>(5)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        )
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        knowledge_at: UtcMicros(
+            row.get(6)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        ),
+        valid_time: serde_json::from_str(&text(7)?)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        thread_id: optional_text(8)?
+            .map(ThreadId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        parent_message_id: optional_text(9)?
+            .map(MessageId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        parent_agent_id: optional_text(10)?
+            .map(AgentInstanceId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        parent_session_id: optional_text(11)?
+            .map(SessionId::new)
+            .transpose()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+    })
+}
+
+/// Relation precedence: occurrences order session-wide by
+/// `(knowledge_at, ordinal, occurrence_id)`, the temporal index order.
+fn precedence_key(occurrence: &CanonicalOccurrence) -> (UtcMicros, u32, &str) {
+    (
+        occurrence.knowledge_at,
+        occurrence.ordinal,
+        occurrence.occurrence_id.as_str(),
+    )
+}
+
+/// Relations of a set of occurrences, keyed as the projection dedupes them.
+///
+/// Every relation looks only at occurrences that precede its subject (an
+/// explicit copy also at ones sharing its instant), so relations of the
+/// occurrences appended after a settled set's last instant extend that set's
+/// relations without changing any of them.
+#[derive(Default)]
+struct OccurrenceRelations {
+    copies: BTreeMap<(String, String), LogicalCopyRelation>,
+    threads: BTreeMap<(String, String), ThreadHierarchyRelation>,
+    agents: BTreeMap<(String, String), AgentHierarchyRelation>,
+    parent_session_id: Option<SessionId>,
+}
+
+impl OccurrenceRelations {
+    fn from_projection(projection: &SessionRelationProjection) -> Self {
+        Self {
+            copies: projection
+                .logical_copies
+                .iter()
+                .map(|copy| {
+                    (
+                        (
+                            copy.occurrence_id.as_str().to_owned(),
+                            copy.copied_from_occurrence_id.as_str().to_owned(),
+                        ),
+                        copy.clone(),
+                    )
+                })
+                .collect(),
+            threads: projection
+                .thread_hierarchy
+                .iter()
+                .map(|thread| {
+                    (
+                        (
+                            thread.parent_thread_id.as_str().to_owned(),
+                            thread.child_thread_id.as_str().to_owned(),
+                        ),
+                        thread.clone(),
+                    )
+                })
+                .collect(),
+            agents: projection
+                .agent_hierarchy
+                .iter()
+                .map(|agent| {
+                    (
+                        (
+                            agent.parent_agent_id.as_str().to_owned(),
+                            agent.child_agent_id.as_str().to_owned(),
+                        ),
+                        agent.clone(),
+                    )
+                })
+                .collect(),
+            parent_session_id: projection.parent_session_id.clone(),
+        }
+    }
+
+    /// Adds `occurrence`'s relations. `parent` is the latest occurrence
+    /// preceding it whose message is its parent message; `copied_from` pairs
+    /// each copied-from anchor with the latest occurrence of that anchor at
+    /// or before its instant.
+    fn add(
+        &mut self,
+        occurrence: &CanonicalOccurrence,
+        parent: Option<&CanonicalOccurrence>,
+        copied_from: &[(&RetrievalAnchorId, &CanonicalOccurrence)],
+    ) -> SessionStoreResult<()> {
+        // A parent-message link normally means "reply to", which is thread
+        // topology rather than evidence that the reply copied its parent. Only
+        // a re-emission whose own logical message identity equals the parent
+        // identity is admitted as a logical copy.
+        if let (Some(message), Some(parent_message), Some(source)) = (
+            &occurrence.message_id,
+            &occurrence.parent_message_id,
+            parent,
+        ) && message == parent_message
+        {
+            self.insert_copy(LogicalCopyRelation {
+                occurrence_id: occurrence.occurrence_id.clone(),
+                copied_from_occurrence_id: source.occurrence_id.clone(),
+                proof: CopyProofV1::ParentMessageLinkage {
+                    source_occurrence_id: source.occurrence_id.clone(),
+                    parent_message_id: parent_message.clone(),
+                },
+                knowledge_at: occurrence.knowledge_at,
+                valid_time: occurrence.valid_time,
+            });
+        }
+        // The copier's anchor record itself asserts the lineage, so a source
+        // projected in the same knowledge instant stays admissible; only
+        // strictly-future occurrences are refused.
+        for (source_anchor, source) in copied_from {
+            self.insert_copy(LogicalCopyRelation {
+                occurrence_id: occurrence.occurrence_id.clone(),
+                copied_from_occurrence_id: source.occurrence_id.clone(),
+                proof: CopyProofV1::ExplicitAnchorAssertion {
+                    source_occurrence_id: source.occurrence_id.clone(),
+                    assertion_anchor_id: (*source_anchor).clone(),
+                },
+                knowledge_at: occurrence.knowledge_at,
+                valid_time: occurrence.valid_time,
+            });
+        }
+        if let (Some(child_thread), Some(parent_occurrence)) = (&occurrence.thread_id, parent)
+            && occurrence.parent_message_id.is_some()
+            && let Some(parent_thread) = &parent_occurrence.thread_id
+            && parent_thread != child_thread
+        {
+            self.threads
+                .entry((
+                    parent_thread.as_str().to_owned(),
+                    child_thread.as_str().to_owned(),
+                ))
+                .and_modify(|relation| relation.ordinal = relation.ordinal.min(occurrence.ordinal))
+                .or_insert_with(|| ThreadHierarchyRelation {
+                    parent_thread_id: parent_thread.clone(),
+                    child_thread_id: child_thread.clone(),
+                    ordinal: occurrence.ordinal,
+                });
+        }
+        if let (Some(parent), Some(child)) = (&occurrence.parent_agent_id, &occurrence.agent_id) {
+            self.agents
+                .entry((parent.as_str().to_owned(), child.as_str().to_owned()))
+                .and_modify(|relation| relation.ordinal = relation.ordinal.min(occurrence.ordinal))
+                .or_insert_with(|| AgentHierarchyRelation {
+                    parent_agent_id: parent.clone(),
+                    child_agent_id: child.clone(),
+                    ordinal: occurrence.ordinal,
+                });
+        }
+        if let Some(parent) = &occurrence.parent_session_id {
+            match &self.parent_session_id {
+                Some(existing) if existing != parent => {
+                    return Err(storage_message(
+                        RECONSTRUCT_OPERATION,
+                        "canonical observations disagree on parent session identity",
+                    ));
+                }
+                Some(_) => {}
+                None => self.parent_session_id = Some(parent.clone()),
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_copy(&mut self, relation: LogicalCopyRelation) {
+        self.copies.insert(
+            (
+                relation.occurrence_id.as_str().to_owned(),
+                relation.copied_from_occurrence_id.as_str().to_owned(),
+            ),
+            relation,
+        );
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn into_parts(
+        self,
+    ) -> (
+        Vec<LogicalCopyRelation>,
+        Vec<ThreadHierarchyRelation>,
+        Vec<AgentHierarchyRelation>,
+        Option<SessionId>,
+    ) {
+        (
+            self.copies.into_values().collect(),
+            self.threads.into_values().collect(),
+            self.agents.into_values().collect(),
+            self.parent_session_id,
+        )
+    }
+}
+
 fn occurrence_relations(
     occurrences: &[CanonicalOccurrence],
-) -> SessionStoreResult<(
-    Vec<LogicalCopyRelation>,
-    Vec<ThreadHierarchyRelation>,
-    Vec<AgentHierarchyRelation>,
-    Option<SessionId>,
-)> {
+) -> SessionStoreResult<OccurrenceRelations> {
     let message_occurrences = occurrences
         .iter()
         .filter_map(|occurrence| {
@@ -960,160 +988,370 @@ fn occurrence_relations(
                     .push(occurrence);
                 index
             });
-    let mut copies = BTreeMap::new();
-    let mut threads = BTreeMap::new();
-    let mut agents = BTreeMap::new();
-    let mut parent_session_id = None;
-    // Projection output ordinals are scoped to one observation projection, so
-    // session-wide precedence is the canonical (knowledge_at, ordinal,
-    // occurrence_id) order used by the temporal indexes.
-    let precedes = |candidate: &CanonicalOccurrence, occurrence: &CanonicalOccurrence| {
-        (
-            candidate.knowledge_at,
-            candidate.ordinal,
-            candidate.occurrence_id.as_str(),
-        ) < (
-            occurrence.knowledge_at,
-            occurrence.ordinal,
-            occurrence.occurrence_id.as_str(),
-        )
-    };
+    let mut relations = OccurrenceRelations::default();
     for occurrence in occurrences {
-        // A parent-message link normally means "reply to", which is thread
-        // topology rather than evidence that the reply copied its parent. Only
-        // a re-emission whose own logical message identity equals the parent
-        // identity is admitted as a logical copy.
-        if let (Some(message), Some(parent)) =
-            (&occurrence.message_id, &occurrence.parent_message_id)
-            && message == parent
-            && let Some(source) = message_occurrences
+        let parent = occurrence.parent_message_id.as_ref().and_then(|parent| {
+            message_occurrences
                 .get(parent.as_str())
                 .into_iter()
                 .flatten()
-                .filter(|candidate| precedes(candidate, occurrence))
-                .max_by_key(|candidate| {
-                    (
-                        candidate.knowledge_at,
-                        candidate.ordinal,
-                        candidate.occurrence_id.as_str(),
-                    )
-                })
-        {
-            let relation = LogicalCopyRelation {
-                occurrence_id: occurrence.occurrence_id.clone(),
-                copied_from_occurrence_id: source.occurrence_id.clone(),
-                proof: CopyProofV1::ParentMessageLinkage {
-                    source_occurrence_id: source.occurrence_id.clone(),
-                    parent_message_id: parent.clone(),
-                },
-                knowledge_at: occurrence.knowledge_at,
-                valid_time: occurrence.valid_time,
-            };
-            copies.insert(
-                (
-                    relation.occurrence_id.as_str().to_owned(),
-                    relation.copied_from_occurrence_id.as_str().to_owned(),
-                ),
-                relation,
-            );
-        }
-        for source_anchor in &occurrence.copied_from_anchor_ids {
-            // The copier's anchor record itself asserts the lineage, so a
-            // source projected in the same knowledge instant stays admissible;
-            // only strictly-future occurrences are refused.
-            let Some(source) = anchor_occurrences
-                .get(source_anchor.as_str())
-                .into_iter()
-                .flatten()
-                .filter(|candidate| {
-                    candidate.occurrence_id != occurrence.occurrence_id
-                        && (candidate.knowledge_at, candidate.ordinal)
-                            <= (occurrence.knowledge_at, occurrence.ordinal)
-                })
-                .max_by_key(|candidate| {
-                    (
-                        candidate.knowledge_at,
-                        candidate.ordinal,
-                        candidate.occurrence_id.as_str(),
-                    )
-                })
-            else {
-                continue;
-            };
-            let relation = LogicalCopyRelation {
-                occurrence_id: occurrence.occurrence_id.clone(),
-                copied_from_occurrence_id: source.occurrence_id.clone(),
-                proof: CopyProofV1::ExplicitAnchorAssertion {
-                    source_occurrence_id: source.occurrence_id.clone(),
-                    assertion_anchor_id: source_anchor.clone(),
-                },
-                knowledge_at: occurrence.knowledge_at,
-                valid_time: occurrence.valid_time,
-            };
-            copies.insert(
-                (
-                    relation.occurrence_id.as_str().to_owned(),
-                    relation.copied_from_occurrence_id.as_str().to_owned(),
-                ),
-                relation,
-            );
-        }
-        if let (Some(parent_message), Some(child_thread)) =
-            (&occurrence.parent_message_id, &occurrence.thread_id)
-            && let Some(parent_occurrence) = message_occurrences
-                .get(parent_message.as_str())
-                .into_iter()
-                .flatten()
-                .filter(|candidate| precedes(candidate, occurrence))
-                .max_by_key(|candidate| {
-                    (
-                        candidate.knowledge_at,
-                        candidate.ordinal,
-                        candidate.occurrence_id.as_str(),
-                    )
-                })
-            && let Some(parent_thread) = &parent_occurrence.thread_id
-            && parent_thread != child_thread
-        {
-            threads
-                .entry((
-                    parent_thread.as_str().to_owned(),
-                    child_thread.as_str().to_owned(),
-                ))
-                .or_insert_with(|| ThreadHierarchyRelation {
-                    parent_thread_id: parent_thread.clone(),
-                    child_thread_id: child_thread.clone(),
-                    ordinal: occurrence.ordinal,
-                });
-        }
-        if let (Some(parent), Some(child)) = (&occurrence.parent_agent_id, &occurrence.agent_id) {
-            agents
-                .entry((parent.as_str().to_owned(), child.as_str().to_owned()))
-                .or_insert_with(|| AgentHierarchyRelation {
-                    parent_agent_id: parent.clone(),
-                    child_agent_id: child.clone(),
-                    ordinal: occurrence.ordinal,
-                });
-        }
-        if let Some(parent) = &occurrence.parent_session_id {
-            match &parent_session_id {
-                Some(existing) if existing != parent => {
-                    return Err(storage_message(
-                        RECONSTRUCT_OPERATION,
-                        "canonical observations disagree on parent session identity",
-                    ));
-                }
-                Some(_) => {}
-                None => parent_session_id = Some(parent.clone()),
-            }
+                .filter(|candidate| precedence_key(candidate) < precedence_key(occurrence))
+                .max_by_key(|candidate| precedence_key(candidate))
+                .copied()
+        });
+        let copied_from = occurrence
+            .copied_from_anchor_ids
+            .iter()
+            .filter_map(|anchor| {
+                anchor_occurrences
+                    .get(anchor.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|candidate| {
+                        candidate.occurrence_id != occurrence.occurrence_id
+                            && (candidate.knowledge_at, candidate.ordinal)
+                                <= (occurrence.knowledge_at, occurrence.ordinal)
+                    })
+                    .max_by_key(|candidate| precedence_key(candidate))
+                    .map(|source| (anchor, *source))
+            })
+            .collect::<Vec<_>>();
+        relations.add(occurrence, parent, &copied_from)?;
+    }
+    Ok(relations)
+}
+
+/// Relations the occurrences a candidate introduced add to its base, or
+/// `None` when one of them sorts before the base's last instant and could
+/// change a settled occurrence's relations.
+async fn introduced_occurrence_relations(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<Option<OccurrenceRelations>> {
+    let introduced = query_occurrences(
+        conn,
+        &format!(
+            "SELECT {RELATION_OCCURRENCE_COLUMNS}
+             FROM session_occurrences AS occurrence
+                  INDEXED BY idx_session_occurrences_introduced
+             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+             ORDER BY occurrence.projection_output_ordinal, occurrence.occurrence_id
+             LIMIT ?3"
+        ),
+        session_id,
+        generation,
+        max_entities,
+        cancellation,
+    )
+    .await?;
+    let Some(first_instant) = introduced
+        .iter()
+        .map(|occurrence| (occurrence.knowledge_at, occurrence.ordinal))
+        .min()
+    else {
+        return Ok(Some(OccurrenceRelations::default()));
+    };
+    let generation_value = generation_i64(generation, RECONSTRUCT_OPERATION)?;
+    let mut rows = conn
+        .query(
+            "SELECT knowledge_at, projection_output_ordinal
+             FROM session_occurrences INDEXED BY idx_session_occurrences_generation_order
+             WHERE session_id = ?1 AND generation < ?2
+             ORDER BY knowledge_at DESC, projection_output_ordinal DESC
+             LIMIT 1",
+            params![session_id.as_str(), generation_value],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+    {
+        let settled_instant = (
+            UtcMicros(
+                row.get(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            ),
+            u32::try_from(
+                row.get::<i64>(1)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        );
+        if settled_instant >= first_instant {
+            record_relation_reconstruction();
+            return Ok(None);
         }
     }
-    Ok((
-        copies.into_values().collect(),
-        threads.into_values().collect(),
-        agents.into_values().collect(),
+    drop(rows);
+    let mut relations = OccurrenceRelations::default();
+    for occurrence in &introduced {
+        require_not_cancelled(cancellation)?;
+        let parent = match &occurrence.parent_message_id {
+            Some(parent_message_id) => {
+                latest_occurrence(
+                    conn,
+                    &format!(
+                        "SELECT {RELATION_OCCURRENCE_COLUMNS}
+                         FROM session_occurrences AS occurrence
+                         WHERE occurrence.session_id = ?1 AND occurrence.message_id = ?3
+                           AND +occurrence.generation <= ?2
+                           AND (occurrence.knowledge_at, occurrence.projection_output_ordinal,
+                                occurrence.occurrence_id) < (?4, ?5, ?6)
+                         ORDER BY occurrence.knowledge_at DESC,
+                                  occurrence.projection_output_ordinal DESC,
+                                  occurrence.occurrence_id DESC
+                         LIMIT 1"
+                    ),
+                    session_id,
+                    generation_value,
+                    parent_message_id.as_str(),
+                    occurrence,
+                )
+                .await?
+            }
+            None => None,
+        };
+        let mut sources = Vec::with_capacity(occurrence.copied_from_anchor_ids.len());
+        for anchor in &occurrence.copied_from_anchor_ids {
+            if let Some(source) = latest_occurrence(
+                conn,
+                &format!(
+                    "SELECT {RELATION_OCCURRENCE_COLUMNS}
+                     FROM session_occurrences AS occurrence
+                     WHERE occurrence.session_id = ?1 AND occurrence.retrieval_anchor_id = ?3
+                       AND +occurrence.generation <= ?2
+                       AND occurrence.occurrence_id <> ?6
+                       AND (occurrence.knowledge_at, occurrence.projection_output_ordinal)
+                           <= (?4, ?5)
+                     ORDER BY occurrence.knowledge_at DESC,
+                              occurrence.projection_output_ordinal DESC,
+                              occurrence.occurrence_id DESC
+                     LIMIT 1"
+                ),
+                session_id,
+                generation_value,
+                anchor.as_str(),
+                occurrence,
+            )
+            .await?
+            {
+                sources.push((anchor, source));
+            }
+        }
+        let copied_from = sources
+            .iter()
+            .map(|(anchor, source)| (*anchor, source))
+            .collect::<Vec<_>>();
+        relations.add(occurrence, parent.as_ref(), &copied_from)?;
+    }
+    Ok(Some(relations))
+}
+
+async fn latest_occurrence(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    sql: &str,
+    session_id: &SessionId,
+    generation: i64,
+    key: &str,
+    subject: &CanonicalOccurrence,
+) -> SessionStoreResult<Option<CanonicalOccurrence>> {
+    let mut rows = conn
+        .query(
+            sql,
+            params![
+                session_id.as_str(),
+                generation,
+                key,
+                subject.knowledge_at.0,
+                i64::from(subject.ordinal),
+                subject.occurrence_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .map(|row| decode_occurrence(&row))
+        .transpose()
+}
+
+#[inline(always)]
+fn record_relation_reconstruction() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.relations.full_reconstructions").inc(1_u64);
+}
+
+/// Logical copies a candidate generation introduced, or every copy of the
+/// generation when an introduced occurrence precedes the base's last instant.
+pub(crate) enum IntroducedCopies {
+    Extend(Vec<LogicalCopyRelation>),
+    Reconstructed(Vec<LogicalCopyRelation>),
+}
+
+pub(crate) async fn introduced_logical_copies(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<IntroducedCopies> {
+    match introduced_occurrence_relations(
+        conn,
+        session_id,
+        generation,
+        DEFAULT_MAX_ENTITIES,
+        &cancellation,
+    )
+    .await?
+    {
+        Some(relations) => Ok(IntroducedCopies::Extend(relations.into_parts().0)),
+        None => {
+            let occurrences = reconstruct_occurrences(
+                conn,
+                session_id,
+                generation,
+                DEFAULT_MAX_ENTITIES,
+                &cancellation,
+            )
+            .await?;
+            Ok(IntroducedCopies::Reconstructed(
+                occurrence_relations(&occurrences)?.into_parts().0,
+            ))
+        }
+    }
+}
+
+/// Relation projection of a candidate generation: its base's applied
+/// projection extended by the relations of the occurrences it introduced,
+/// with summaries and session context read at the candidate. A base without
+/// an applied projection, or an introduced occurrence that sorts before the
+/// base's last instant, reconstructs the whole session instead.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn candidate_session_relation_projection(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    scope: &SessionRelationScope,
+    store: &super::relations::SessionRelationGraphStore,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    max_relations: usize,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<SessionRelationProjection> {
+    let generation_value = generation_i64(generation, RECONSTRUCT_OPERATION)?;
+    let mut rows = conn
+        .query(
+            "SELECT generation FROM session_temporal_generations
+             WHERE session_id = ?1 AND generation < ?2 AND state = 'active'",
+            params![session_id.as_str(), generation_value],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let base_generation = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .map(|row| {
+            row.get::<i64>(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+        })
+        .transpose()?;
+    drop(rows);
+    let reconstruct = || {
+        reconstruct_session_relation_projection(
+            conn,
+            scope,
+            session_id,
+            generation,
+            max_entities,
+            max_relations,
+            Arc::clone(&cancellation),
+        )
+    };
+    let Some(base_generation) = base_generation else {
+        return reconstruct().await;
+    };
+    let base_generation =
+        u64::try_from(base_generation).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let base = match store.load_projection(
+        scope,
+        session_id,
+        base_generation,
+        max_entities,
+        max_relations,
+        Arc::clone(&cancellation),
+    ) {
+        Ok(base) => base,
+        Err(SessionRelationError::NotFound) => {
+            record_relation_reconstruction();
+            return reconstruct().await;
+        }
+        Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),
+    };
+    let Some(introduced) =
+        introduced_occurrence_relations(conn, session_id, generation, max_entities, &cancellation)
+            .await?
+    else {
+        return reconstruct().await;
+    };
+    let mut relations = OccurrenceRelations::from_projection(&base);
+    let (copies, threads, agents, observed_parent) = introduced.into_parts();
+    for copy in copies {
+        relations.insert_copy(copy);
+    }
+    for thread in threads {
+        relations
+            .threads
+            .entry((
+                thread.parent_thread_id.as_str().to_owned(),
+                thread.child_thread_id.as_str().to_owned(),
+            ))
+            .and_modify(|relation| relation.ordinal = relation.ordinal.min(thread.ordinal))
+            .or_insert(thread);
+    }
+    for agent in agents {
+        relations
+            .agents
+            .entry((
+                agent.parent_agent_id.as_str().to_owned(),
+                agent.child_agent_id.as_str().to_owned(),
+            ))
+            .and_modify(|relation| relation.ordinal = relation.ordinal.min(agent.ordinal))
+            .or_insert(agent);
+    }
+    let observed_parent = match (observed_parent, relations.parent_session_id.take()) {
+        (Some(observed), Some(settled)) if observed != settled => {
+            return Err(storage_message(
+                RECONSTRUCT_OPERATION,
+                "canonical observations disagree on parent session identity",
+            ));
+        }
+        (observed, settled) => observed.or(settled),
+    };
+    let summaries =
+        reconstruct_summaries(conn, session_id, generation, max_relations, &cancellation).await?;
+    let (logical_copies, thread_hierarchy, agent_hierarchy, _) = relations.into_parts();
+    let (parent_session_id, workflow_agents) =
+        reconstruct_session_metadata(conn, session_id, observed_parent, &cancellation).await?;
+    let projection = SessionRelationProjection {
+        scope: scope.clone(),
+        session_id: session_id.clone(),
+        generation: generation.value(),
+        summaries,
+        logical_copies,
+        thread_hierarchy,
+        agent_hierarchy,
         parent_session_id,
-    ))
+        workflow_agents,
+    };
+    enforce_projection_bounds(&projection, max_entities, max_relations)?;
+    super::relations::validate_projection(&projection)
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    Ok(projection)
 }
 
 async fn reconstruct_session_metadata(
@@ -1389,7 +1627,9 @@ mod tests {
             3,
         );
 
-        let (_, threads, _, _) = occurrence_relations(&[root, child, grandchild]).unwrap();
+        let (_, threads, _, _) = occurrence_relations(&[root, child, grandchild])
+            .unwrap()
+            .into_parts();
 
         assert_eq!(
             threads,
@@ -1431,7 +1671,9 @@ mod tests {
             )
         };
 
-        let (_, threads, _, _) = occurrence_relations(&[parent(), child()]).unwrap();
+        let (_, threads, _, _) = occurrence_relations(&[parent(), child()])
+            .unwrap()
+            .into_parts();
         assert!(threads.is_empty());
 
         let other_thread = occurrence(
@@ -1442,7 +1684,9 @@ mod tests {
             Some("message.parent"),
             3,
         );
-        let (_, threads, _, _) = occurrence_relations(&[parent(), child(), other_thread]).unwrap();
+        let (_, threads, _, _) = occurrence_relations(&[parent(), child(), other_thread])
+            .unwrap()
+            .into_parts();
         assert_eq!(
             threads,
             vec![ThreadHierarchyRelation {
@@ -1472,7 +1716,9 @@ mod tests {
             2,
         );
 
-        let (_, threads, _, _) = occurrence_relations(&[child, future_parent]).unwrap();
+        let (_, threads, _, _) = occurrence_relations(&[child, future_parent])
+            .unwrap()
+            .into_parts();
         assert!(threads.is_empty());
 
         let earlier_parent = occurrence(
@@ -1491,7 +1737,9 @@ mod tests {
             Some("message.parent"),
             2,
         );
-        let (_, threads, _, _) = occurrence_relations(&[earlier_parent, later_child]).unwrap();
+        let (_, threads, _, _) = occurrence_relations(&[earlier_parent, later_child])
+            .unwrap()
+            .into_parts();
         assert_eq!(
             threads,
             vec![ThreadHierarchyRelation {

@@ -436,12 +436,12 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     );
 }
 
-/// An unregistered store whose own manifest names a project root that no
-/// longer exists is debris the moment the census sees it: the retention
-/// window exists for stores whose root might still come back, and a missing
-/// or unreadable manifest, or a root that is still present, keeps that window.
+/// A manifest root that is gone from disk is no proof the store is
+/// abandoned: its owner can still write into it until it is retired and
+/// joined. Such a store waits out the retention window like one whose root
+/// is present or whose manifest is missing.
 #[tokio::test]
-async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once() {
+async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
@@ -485,28 +485,28 @@ async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once()
         .unwrap();
     assert_eq!(findings.len(), 3);
     let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert!(plan.collect.is_empty(), "{:?}", plan.collect);
+    let mut retained = plan
+        .retained_immature
+        .iter()
+        .map(|finding| (finding.project_dir_name.as_str(), finding.abandoned_root))
+        .collect::<Vec<_>>();
+    retained.sort_unstable();
     assert_eq!(
-        plan.collect
-            .iter()
-            .map(|finding| finding.project_dir_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["proj_vanished_root"],
-        "only the store whose root is gone skips the retention window"
-    );
-    assert!(plan.collect[0].abandoned_root);
-    assert_eq!(plan.retained_immature.len(), 2);
-    assert!(
-        plan.retained_immature
-            .iter()
-            .all(|finding| !finding.abandoned_root)
+        retained,
+        [
+            ("proj_no_manifest", false),
+            ("proj_present_root", false),
+            ("proj_vanished_root", false),
+        ]
     );
 
     let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
         .await
         .unwrap();
-    assert_eq!(outcome.collected.len(), 1);
+    assert!(outcome.collected.is_empty());
     assert!(outcome.errors.is_empty());
-    assert!(!vanished.exists());
+    assert!(vanished.exists());
     assert!(present.exists());
     assert!(unmanifested.exists());
 }
@@ -568,16 +568,11 @@ fn cancelled_content_census_stops_before_hashing_or_mutation() {
     let data_root = profile_root.join("stores/cancelled-census");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("large.bin"), vec![7_u8; 512 * 1024]).unwrap();
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
 
     let result = super::fence::capture_store_content_fence_controlled(
         &profile_root,
         &data_root,
-        CollectionControl::new(
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-        ),
+        cancelled_collection_control(),
     );
 
     assert_eq!(result, Err(CollectionFailureKind::Cancelled));
@@ -593,12 +588,7 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
     let data_root = tmp.path().join("deep");
     std::fs::create_dir_all(data_root.join("a/b/c")).unwrap();
     std::fs::write(data_root.join("a/b/c/payload.bin"), vec![3_u8; 4096]).unwrap();
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
-    let control = CollectionControl::new(
-        &cancellation,
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-    );
+    let control = cancelled_collection_control();
 
     assert_eq!(
         newest_mtime_secs_controlled(&data_root, control),
@@ -746,11 +736,8 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     let page =
-        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
             .unwrap()
             .expect("first bounded portable page completes");
     let cursor = page
@@ -764,7 +751,7 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let interrupted = || cancelled.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || cancelled.is_cancelled();
     assert!(
         super::unregistered_page::read_project_directory_page(
             &profile_root,
@@ -779,7 +766,7 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
 
     super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
 
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || false;
     let hydration_page = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),

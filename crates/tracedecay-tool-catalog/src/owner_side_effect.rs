@@ -55,7 +55,7 @@ impl ApplicationSurfaceOperation {
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
                 identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
-            // A bench action runs every configured query over the graph.
+            // A project automation reconcile waits on that project's scheduler.
             Self::AdminProject => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::MaintainsOwnerState,
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,

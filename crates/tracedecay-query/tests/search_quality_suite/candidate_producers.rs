@@ -1506,6 +1506,41 @@ fn clone_payloads_are_content_addressed_and_postings_page() {
         first.members[0].occurrence.symbol_occurrence_id,
         second.members[0].occurrence.symbol_occurrence_id
     );
+    let family_classes = [
+        CloneNormalizationClassV1::Conservative,
+        CloneNormalizationClassV1::Rename,
+    ];
+    let family_page = |path: Option<&str>, cursor: Option<&str>| {
+        reader.clone_exact_family_page(
+            &authority.project_id,
+            &authority.repository_id,
+            &family_classes,
+            path,
+            None,
+            None,
+            false,
+            cursor,
+            1,
+            &control,
+        )
+    };
+    let first_families = family_page(None, None).expect("first family page");
+    assert_eq!(first_families.families.len(), 1);
+    let family_cursor = first_families
+        .next_cursor
+        .expect("the second match class continues the family page");
+    let foreign = family_page(Some("src"), Some(&family_cursor));
+    assert!(
+        matches!(
+            foreign,
+            Err(CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor)
+        ),
+        "a cursor minted for another request is stale evidence: {foreign:?}"
+    );
+    let resumed = family_page(None, Some(&family_cursor)).expect("second family page");
+    assert_eq!(resumed.families.len(), 1);
+    assert_ne!(resumed.families[0].key, first_families.families[0].key);
+    assert_eq!(resumed.next_cursor, None);
 
     let reduced = real_lexical_source_fixture_from_sources(vec![
         (

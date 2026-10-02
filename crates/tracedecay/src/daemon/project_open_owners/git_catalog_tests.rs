@@ -85,19 +85,11 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     let registry =
         DaemonGitIndexTransactionServiceRegistry::new(build_application_catalog_snapshot);
     registry
-        .ensure(
+        .mount(
             database.clone(),
             project_root.clone(),
-            project_id.clone(),
-            tracedecay_contracts::now_micros(),
-        )
-        .await
-        .unwrap();
-    registry
-        .install_authority(
-            &project_root,
             access.clone(),
-            database.clone(),
+            tracedecay_contracts::now_micros(),
             tokio::runtime::Handle::current(),
         )
         .await
@@ -122,19 +114,11 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     // canonical dependency already retained by the first owner.
     let independent = DaemonGitIndexTransactionServiceRegistry::new(unavailable_catalog);
     independent
-        .ensure(
+        .mount(
             database.clone(),
             project_root.clone(),
-            project_id,
-            tracedecay_contracts::now_micros(),
-        )
-        .await
-        .unwrap();
-    independent
-        .install_authority(
-            &project_root,
             access.clone(),
-            database.clone(),
+            tracedecay_contracts::now_micros(),
             tokio::runtime::Handle::current(),
         )
         .await
@@ -220,10 +204,11 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     let mut revoked = access.clone();
     revoked.effective_capabilities.clear();
     registry
-        .install_authority(
-            &project_root,
-            revoked,
+        .mount(
             database.clone(),
+            project_root.clone(),
+            revoked,
+            tracedecay_contracts::now_micros(),
             tokio::runtime::Handle::current(),
         )
         .await
@@ -256,10 +241,11 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     assert!(issued_at < expired.grant_expires_at);
     assert!(expired.grant_expires_at < observed_at);
     registry
-        .install_authority(
-            &project_root,
-            expired,
+        .mount(
             database,
+            project_root.clone(),
+            expired,
+            tracedecay_contracts::now_micros(),
             tokio::runtime::Handle::current(),
         )
         .await

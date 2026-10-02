@@ -557,21 +557,17 @@ impl HostAdmissionTestRuntimeV1 {
             .await)
     }
 
+    /// Seeds one raw LCM message into its already-registered session.
     #[doc(hidden)]
     #[hotpath::skip]
     pub async fn upsert_session_message_for_test(
         &self,
         scope: HostAdmissionScope,
         message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> Result<bool> {
-        let database = self.session_database_for_test(scope)?;
-        let session = database
-            .get_session(&message.provider, &message.session_id)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "seed registered session message fixture".to_owned(),
-                message: error.to_string(),
-            })?
+    ) -> Result<()> {
+        let session = self
+            .session_for_test(scope, &message.provider, &message.session_id)
+            .await?
             .ok_or_else(|| TraceDecayError::Database {
                 operation: "seed registered session message fixture".to_owned(),
                 message: format!(
@@ -579,17 +575,9 @@ impl HostAdmissionTestRuntimeV1 {
                     message.provider, message.session_id
                 ),
             })?;
-        Ok(database
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(message),
-                &format!(
-                    "host-admission-test-message:{}:{}",
-                    message.provider, message.message_id
-                ),
-                tracedecay_global_db::ParseOffset::default(),
-            )
-            .await)
+        self.seed_session_messages_for_test(scope, &session, std::slice::from_ref(message))
+            .await
+            .map(|_| ())
     }
 
     #[doc(hidden)]
@@ -622,28 +610,31 @@ impl HostAdmissionTestRuntimeV1 {
             .await
     }
 
+    /// Seeds one session row and its raw LCM messages, returning each
+    /// message's raw store id in input order.
     #[doc(hidden)]
     #[hotpath::skip]
-    pub async fn upsert_transcript_batch_for_test(
+    pub async fn seed_session_messages_for_test(
         &self,
         scope: HostAdmissionScope,
         session: &tracedecay_sessions::runtime::SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
-        source: &str,
-        offset: tracedecay_global_db::ParseOffset,
     ) -> Result<Vec<i64>> {
-        let database = self.session_database_for_test(scope)?;
-        if !database
-            .upsert_transcript_batch(session, messages, source, offset)
-            .await
-        {
+        if !self.upsert_session_for_test(scope, session).await? {
             return Err(TraceDecayError::Database {
-                operation: "seed registered transcript batch fixture".to_owned(),
-                message: "registered transcript batch write failed".to_owned(),
+                operation: "seed registered session fixture".to_owned(),
+                message: "registered session write failed".to_owned(),
             });
         }
+        let database = self.session_database_for_test(scope)?;
         let mut store_ids = Vec::with_capacity(messages.len());
         for message in messages {
+            self.lcm_ingest_raw_message_for_test(scope, message)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_owned(),
+                    message: error.to_string(),
+                })?;
             let store_id = database
                 .lcm_raw_message_store_id(&message.provider, &message.message_id)
                 .await
@@ -764,8 +755,9 @@ impl HostAdmissionTestRuntimeV1 {
             )
         })?;
         tracedecay_global_db::GlobalDbGitCorrelationStore::new(database)
-            .sessions_for_with_relation(query, relation)
+            .sessions_for_with_relation_and_presence(query, relation)
             .await
+            .map(|(hits, _)| hits)
     }
 
     /// Fails the calling test loudly: a fixture whose accounting write is

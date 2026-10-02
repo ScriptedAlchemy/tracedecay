@@ -685,7 +685,7 @@ fn codex_project_registration_paths(
 /// A global bundle ships lifecycle hooks (declared in the manifest and trusted
 /// later by Codex itself), invokes `serve` without an explicit project path,
 /// and carries lifecycle hooks. A repo-local bundle ships no hooks, invokes
-/// `serve --path .` with no env, and stays free of user-profile state. The
+/// `serve --path .`, and stays free of user-profile state. The
 /// bundle writer, manifest/MCP renderers, and doctor all consume this type
 /// instead of re-encoding the scope as ad-hoc conditionals.
 #[derive(Debug, Clone, Copy)]
@@ -721,14 +721,6 @@ impl CodexBundlePolicy {
                 .map(|arg| serde_json::Value::String((*arg).to_string()))
                 .collect(),
         )
-    }
-
-    /// The `env` baked into the bundle's `.mcp.json`; `None` strips the key.
-    fn mcp_env(self) -> Option<serde_json::Value> {
-        match self.scope {
-            InstallScope::Global => Some(codex_mcp_server_env_object()),
-            InstallScope::ProjectLocal => None,
-        }
     }
 
     /// Where Codex records trust for this bundle's hooks, `None` for scopes
@@ -851,22 +843,14 @@ fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String>
 }
 
 fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) -> Result<String> {
-    // Reuse the shared command rewrite, then layer the policy's args/env on
-    // top of the result.
+    // Reuse the shared command rewrite, then layer the policy's args on top
+    // of the result.
     let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
     let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args();
     server["startup_timeout_sec"] = CODEX_MCP_STARTUP_TIMEOUT_SECS.into();
     server["tool_timeout_sec"] = CODEX_MCP_TOOL_TIMEOUT_SECS.into();
-    match policy.mcp_env() {
-        Some(env) => server["env"] = env,
-        None => {
-            if let Some(object) = server.as_object_mut() {
-                object.remove("env");
-            }
-        }
-    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
@@ -935,24 +919,6 @@ const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
 /// bundle appends its own `--path .` on top of this base rather than restating
 /// `serve`.
 const CODEX_MCP_SERVER_ARGS: &[&str] = &["serve"];
-
-/// Environment the global-scope server is launched with, in the same shared
-/// role as [`CODEX_MCP_SERVER_ARGS`]: the bundle writer renders it as the
-/// `.mcp.json` `env` object and the registry driver renders one `--env
-/// KEY=VALUE` flag per entry.
-const CODEX_MCP_SERVER_ENV: &[(&str, &str)] = &[("TRACEDECAY_ENABLE_GLOBAL_DB", "1")];
-
-/// [`CODEX_MCP_SERVER_ENV`] as the JSON object the plugin bundle embeds.
-fn codex_mcp_server_env_object() -> serde_json::Value {
-    let mut env = serde_json::Map::new();
-    for (key, value) in CODEX_MCP_SERVER_ENV {
-        env.insert(
-            (*key).to_string(),
-            serde_json::Value::String((*value).to_string()),
-        );
-    }
-    serde_json::Value::Object(env)
-}
 
 fn codex_mcp_timeouts_current(mcp: &serde_json::Value) -> bool {
     let Some(server) = mcp.pointer("/mcpServers/graph") else {
@@ -2384,9 +2350,10 @@ fn doctor_check_hooks(
 /// `~/.codex/memories/`, the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
 fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, profile_root: &Path, home: &Path) {
-    if !crate::hooks::memory_inject::memory_injection_enabled(profile_root) {
+    // An unreadable profile config is the User config section's issue.
+    let Ok(true) = crate::hooks::memory_inject::memory_injection_enabled(profile_root) else {
         return;
-    }
+    };
     let config_path = codex_config_path(home);
     let Ok(config) = load_toml_file(&config_path) else {
         return;

@@ -54,8 +54,8 @@ pub enum CodeIndexSearchUnavailableReasonV1 {
     CapacityUnavailable,
     GenerationUnavailable,
     GenerationUnverified,
-    /// A generation a restart retained is still seating its code graph and
-    /// did not serve within the request's budget.
+    /// A generation a restart retained is still reopening its exact and
+    /// lexical owners and did not serve within the request's budget.
     GraphWarming,
     InvalidRequest,
     CorruptionResetRequired,
@@ -123,6 +123,9 @@ pub mod lane_reason {
     /// The authenticated fallback payload reports that this retriever could
     /// not serve the request.
     pub const RETRIEVER_UNAVAILABLE: &str = "retriever_unavailable";
+    /// The generation's code graph has not seated yet; the lane serves once
+    /// it does, with no action from the caller.
+    pub const GRAPH_WARMING: &str = "graph_warming";
 }
 
 /// Wire tags for [`tracedecay_domain::RetrievalFailure`] variants that bound a
@@ -178,6 +181,7 @@ fn partial_lane_reason(outcome: &tracedecay_domain::RetrieverOutcome<()>) -> Opt
                 partial_reason::CANDIDATE_SOURCES_PRUNED
             }
             RetrievalFailure::AuthorityUnavailable { .. } => partial_reason::AUTHORITY_UNAVAILABLE,
+            RetrievalFailure::GraphWarming => lane_reason::GRAPH_WARMING,
             RetrievalFailure::IncompatibleProjection { .. } => {
                 partial_reason::INCOMPATIBLE_PROJECTION
             }
@@ -305,7 +309,12 @@ impl CodeIndexSearchCoverageV1 {
                 },
                 tracedecay_domain::PublicRetrieverStatus::Unavailable => {
                     CodeIndexLaneStatusV1::Unavailable {
-                        reason: lane_reason::RETRIEVER_UNAVAILABLE,
+                        reason: match internal.get(&kind) {
+                            Some(tracedecay_domain::RetrieverOutcome::Unavailable(
+                                tracedecay_domain::RetrievalFailure::GraphWarming,
+                            )) => lane_reason::GRAPH_WARMING,
+                            _ => lane_reason::RETRIEVER_UNAVAILABLE,
+                        },
                     }
                 }
             }
@@ -708,6 +717,45 @@ mod tests {
             }
         );
         assert!(partial.graph.is_servable());
+    }
+
+    /// A graph lane that cannot serve because its generation's graph has not
+    /// seated yet says so, while any other unavailable graph keeps the
+    /// generic reason.
+    #[test]
+    fn an_unseated_graph_lane_reports_warming() {
+        let fallback = std::collections::BTreeMap::from([(
+            tracedecay_domain::RetrieverKind::Graph,
+            tracedecay_domain::PublicRetrieverStatus::Unavailable,
+        )]);
+        let graph_reason = |failure| {
+            CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+                &fallback,
+                &std::collections::BTreeMap::from([(
+                    tracedecay_domain::RetrieverKind::Graph,
+                    tracedecay_domain::RetrieverOutcome::Unavailable(failure),
+                )]),
+                "generation.current",
+                false,
+            )
+            .graph
+        };
+        assert_eq!(
+            (
+                graph_reason(tracedecay_domain::RetrievalFailure::GraphWarming),
+                graph_reason(tracedecay_domain::RetrievalFailure::AuthorityUnavailable {
+                    detail: "code graph activation was refused by project configuration".to_owned(),
+                }),
+            ),
+            (
+                CodeIndexLaneStatusV1::Unavailable {
+                    reason: "graph_warming",
+                },
+                CodeIndexLaneStatusV1::Unavailable {
+                    reason: "retriever_unavailable",
+                },
+            )
+        );
     }
 
     /// A natural-language task whose common terms exceed the lexical

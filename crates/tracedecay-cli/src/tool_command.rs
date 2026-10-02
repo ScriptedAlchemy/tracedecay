@@ -69,16 +69,17 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tool_errors::{mark_semantic_tool_error, tool_result_problem};
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, REQUEST_COST_TRAILER_PREFIX,
     TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
 };
 use tracedecay_mcp::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, get_tool_definitions, render_tool_cli_help,
     short_tool_name,
 };
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 
@@ -145,7 +146,41 @@ pub(crate) async fn run(
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    run_inner(profile, project, name, args).await
+    let json_requested = args.iter().any(|arg| arg == "--json");
+    let tool_name = name.as_deref().map(canonical_tool_name);
+    let result = run_inner(profile, project, name, args).await;
+    match (&result, tool_name.as_deref()) {
+        (Err(error), Some(tool_name)) if json_requested => {
+            print_settled_route_refusal(tool_name, error).map_err(|print_error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "{error}; the --json refusal could not be rendered: {print_error}"
+                    ),
+                }
+            })?;
+            result
+        }
+        _ => result,
+    }
+}
+
+/// A `--json` call refused before any owner answered it prints the same
+/// tool-result refusal an answered call does.
+fn print_settled_route_refusal(tool_name: &str, error: &TraceDecayError) -> Result<()> {
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate a refusal request id".to_owned(),
+        })?;
+    if let Some(rendered) = tracedecay::mcp::tools::render_settled_route_refusal(
+        BindingSurface::Cli,
+        tool_name,
+        request_id,
+        error,
+        &serde_json::json!({ "format": "json" }),
+    ) {
+        print_tool_output(&rendered?, CliToolOutput::Document)?;
+    }
+    Ok(())
 }
 
 fn run_inner(
@@ -237,12 +272,9 @@ fn run_inner(
                 )
                 .await;
             }
-            let (request, requested_format) =
-                cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+            let (request, requested_format, output) =
+                cli_surface_invocation(tool_name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -250,6 +282,7 @@ fn run_inner(
                 DaemonToolDispatch::project_scoped(profile, explicit_project, tool_name)
                     .project_path,
                 requested_format,
+                output,
                 deadline,
             )
             .await;
@@ -282,11 +315,13 @@ fn run_inner(
             let suggestion = nearest_tool_name(&canonical, &defs)
                 .map(|name| format!(" Did you mean '{name}'?"))
                 .unwrap_or_default();
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_route(
+                "unknown_tool",
+                false,
+                format!(
                     "unknown tool: '{raw_name}'.{suggestion} Run `tracedecay tool` to list available tools."
                 ),
-            });
+            ));
         };
 
         let parsed = parse_invocation(def, &args)?;
@@ -368,12 +403,9 @@ fn run_inner(
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && RetainedSurfaceOperation::from_application(operation).is_none()
         {
-            let (request, requested_format) =
-                cli_surface_invocation(&def.name, tool_args, raw_json).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: error.to_string(),
-                    }
-                })?;
+            let (request, requested_format, output) =
+                cli_surface_invocation(&def.name, tool_args, raw_json)
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             return dispatch_cli_application_surface(
                 profile,
                 operation,
@@ -381,6 +413,7 @@ fn run_inner(
                 DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
                     .project_path,
                 requested_format,
+                output,
                 deadline,
             )
             .await;
@@ -423,18 +456,16 @@ pub(crate) async fn dispatch_catalogued_cli_operation(
     let deadline = Instant::now()
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
-    let (request, requested_format) =
-        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json).map_err(
-            |error| TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )?;
+    let (request, requested_format, output) =
+        cli_surface_invocation(operation.mcp_tool_name(), tool_args, raw_json)
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     dispatch_cli_application_surface(
         profile,
         operation,
         request,
         project,
         requested_format,
+        output,
         deadline,
     )
     .await
@@ -447,14 +478,18 @@ fn cli_surface_invocation(
     tool_name: &str,
     tool_args: Value,
     raw_json: bool,
-) -> std::result::Result<(Value, RequestedOutputFormat), ApplicationSurfaceAdapterError> {
+) -> std::result::Result<
+    (Value, RequestedOutputFormat, CliToolOutput),
+    ApplicationSurfaceAdapterError,
+> {
     let normalized = adapt_application_tool_request(tool_name, tool_args)?;
+    let output = CliToolOutput::new(raw_json, normalized.requested_format);
     let requested_format = if raw_json {
         RequestedOutputFormat::Json
     } else {
         normalized.requested_format
     };
-    Ok((normalized.request, requested_format))
+    Ok((normalized.request, requested_format, output))
 }
 
 /// Every application-surface operation is project-scoped on the daemon side
@@ -470,6 +505,7 @@ async fn dispatch_cli_application_surface(
     tool_args: Value,
     project: Option<PathBuf>,
     requested_format: RequestedOutputFormat,
+    output: CliToolOutput,
     deadline: Instant,
 ) -> Result<()> {
     dispatch_cli_application_surface_inner(
@@ -478,6 +514,7 @@ async fn dispatch_cli_application_surface(
         tool_args,
         project,
         requested_format,
+        output,
         deadline,
     )
     .await
@@ -489,6 +526,7 @@ fn dispatch_cli_application_surface_inner(
     tool_args: Value,
     project: Option<PathBuf>,
     requested_format: RequestedOutputFormat,
+    output: CliToolOutput,
     deadline: Instant,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested application-surface future before it reaches
@@ -520,9 +558,7 @@ fn dispatch_cli_application_surface_inner(
                     )
                     .await;
                 }
-                return Err(TraceDecayError::Config {
-                    message: error.to_string(),
-                });
+                return Err(error.into_trace_decay_error());
             }
         };
         let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -542,11 +578,8 @@ fn dispatch_cli_application_surface_inner(
         let result = loop {
             let request = match next_request.take() {
                 Some(request) => request,
-                None => parse_application_surface_request(operation, tool_args.clone()).map_err(
-                    |error| TraceDecayError::Config {
-                        message: error.to_string(),
-                    },
-                )?,
+                None => parse_application_surface_request(operation, tool_args.clone())
+                    .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?,
             };
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -574,18 +607,7 @@ fn dispatch_cli_application_surface_inner(
                 Some(&client),
             )
             .await
-            .map_err(|error| match error {
-                // The same typed connect failure the compatibility tool path
-                // returns: one restart grace, then fail fast, never another
-                // dispatch attempt against a dead socket.
-                ApplicationSurfaceAdapterError::DaemonUnreachable {
-                    reason_code,
-                    detail,
-                } => TraceDecayError::project_route(reason_code, true, detail),
-                error => TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            })?;
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
             let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
                 break result;
             };
@@ -594,12 +616,7 @@ fn dispatch_cli_application_surface_inner(
             }
             tokio::time::sleep(delay).await;
         };
-        print_cli_application_surface(
-            profile,
-            project.as_deref(),
-            result,
-            requested_format == RequestedOutputFormat::Json,
-        )
+        print_cli_application_surface(profile, project.as_deref(), result, output)
     })
 }
 
@@ -681,7 +698,7 @@ async fn dispatch_cli_retained(
     )?;
     account_tool_result(dispatch.project_path.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -748,7 +765,7 @@ async fn dispatch_cli_source_edit(
     )?;
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -774,37 +791,17 @@ async fn dispatch_cli_graph_tool(
     let outcome =
         invoke_cli_graph_tool(profile, handshake, operation, &tool_args, deadline).await?;
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
-    // `--format json` prints the whole typed result. The rendered body is
-    // bounded for agent contexts, so it feeds only the human view, `--json`'s
-    // exact tool-result object, the beside-result blocks, and the exit status.
-    let typed_format_json =
-        !raw_json && requested_output_format(&tool_args) == RequestedOutputFormat::Json;
-    let (mut result, typed_json) = match outcome {
-        Ok(completion) => {
-            let typed_json = typed_format_json
-                .then(|| completion.result.result_value())
-                .transpose()?;
-            let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-                response_handle_root.as_deref(),
-                &tool_args,
-                completion,
-            )?;
-            (rendered, typed_json)
-        }
-        Err(refusal) => (
-            refusal.render(response_handle_root.as_deref(), &tool_args)?,
-            None,
-        ),
+    let mut result = match outcome {
+        Ok(completion) => tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+            response_handle_root.as_deref(),
+            &tool_args,
+            completion,
+        )?,
+        Err(refusal) => refusal.render(response_handle_root.as_deref(), &tool_args)?,
     };
     account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    match typed_json {
-        Some(typed_json) => {
-            println!("{typed_json}");
-            print_beside_result_blocks(&result.value);
-        }
-        None => print_tool_output(&result.value, raw_json),
-    }
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -960,7 +957,7 @@ async fn dispatch_cli_profile_registry(
     };
     account_tool_result(dispatch.project_path.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
-    print_tool_output(&result.value, raw_json);
+    print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
 }
 
@@ -981,36 +978,33 @@ fn cli_response_handle_root(
 const OWNER_MOUNT_RESEND_DELAY: Duration = Duration::from_millis(250);
 
 /// Prints one settled application-surface call through the renderer its MCP
-/// call uses. `--json` keeps the whole canonical envelope on stdout; the
-/// beside-result trailer and footer go to stderr on every format.
+/// call uses, as every other tool call prints.
 fn print_cli_application_surface(
     profile: &ProfileRoot,
     project: Option<&Path>,
     result: ApplicationSurfaceInvocationResult,
-    raw_json: bool,
+    output: CliToolOutput,
 ) -> Result<()> {
-    let application_problem = result
-        .result
-        .as_ref()
-        .err()
-        .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
+    let application_problem = result.result.as_ref().err().map(|problem| {
+        TraceDecayError::tool_refused(
+            result.operation.mcp_tool_name(),
+            Some(problem.problem.code.clone()),
+            Some(problem.problem.message.clone()),
+        )
+    });
     let response_handle_root = cli_response_handle_root(profile, project)?;
     let mut rendered = tracedecay::mcp::tools::render_application_surface_result(
         response_handle_root.as_deref(),
         &result,
     )?;
     account_tool_result(project, &mut rendered);
-    if raw_json {
-        print!("{}", crate::cli::output::json::json_line(&result.result)?);
-        print_beside_result_blocks(&rendered.value);
-    } else {
-        print_tool_output(&rendered.value, false);
-    }
+    mark_semantic_tool_error(&mut rendered);
+    print_tool_output(&rendered, output)?;
     if application_problem.is_some() {
         std::io::stdout().flush()?;
     }
     match application_problem {
-        Some(message) => Err(TraceDecayError::Config { message }),
+        Some(refusal) => Err(refusal),
         None => Ok(()),
     }
 }
@@ -1181,27 +1175,25 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         let wait: CodeIndexReadinessWaitOutcomeV1 = serde_json::from_value(wait.clone())?;
         let refusal = match wait {
             CodeIndexReadinessWaitOutcomeV1::Reached => None,
-            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                    true,
-                    format!(
-                        "{tool_name} wait_for timed out before the index reached the requested \
-                         state; last state: {last_state}"
-                    ),
-                ))
-            }
-            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
-                Some(TraceDecayError::project_route(
-                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-                    false,
-                    format!("{tool_name} wait_for cannot reach the requested state: {reason}"),
-                ))
-            }
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => Some((
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "wait_for timed out before the index reached the requested state; last \
+                     state: {last_state}"
+                ),
+            )),
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => Some((
+                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                format!("wait_for cannot reach the requested state: {reason}"),
+            )),
         };
-        if let Some(refusal) = refusal {
+        if let Some((code, reason)) = refusal {
             std::io::stdout().flush()?;
-            return Err(refusal);
+            return Err(TraceDecayError::tool_refused(
+                tool_name,
+                Some(code.to_owned()),
+                Some(reason),
+            ));
         }
     }
     if result_value.get("isError").and_then(Value::as_bool) != Some(true) {
@@ -1211,16 +1203,54 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
     // returning the status-only error so the process boundary can drop its
     // profiling guard and then return the nonzero `ExitCode`.
     std::io::stdout().flush()?;
-    Err(TraceDecayError::Config {
-        message: format!("{tool_name} reported an application failure."),
-    })
+    let problem = tool_result_problem(result_value);
+    let problem_text = |key: &str| {
+        problem
+            .and_then(|problem| problem.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    Err(TraceDecayError::tool_refused(
+        tool_name,
+        problem_text("code"),
+        problem_text("message"),
+    ))
 }
 
-fn print_tool_output(result_value: &Value, raw_json: bool) {
-    println!("{}", rendered_tool_output(result_value, raw_json));
-    if !raw_json {
-        print_beside_result_blocks(result_value);
+/// How `tracedecay tool` prints a completed call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CliToolOutput {
+    /// `--json`: the one tool-result document.
+    Document,
+    /// `format: "json"`: an answer's whole typed result, or a refusal's
+    /// rendered envelope.
+    TypedResult,
+    /// The rendered text body.
+    Text,
+}
+
+impl CliToolOutput {
+    fn new(raw_json: bool, requested_format: RequestedOutputFormat) -> Self {
+        match (raw_json, requested_format) {
+            (true, _) => Self::Document,
+            (false, RequestedOutputFormat::Json) => Self::TypedResult,
+            (false, RequestedOutputFormat::Markdown) => Self::Text,
+        }
     }
+
+    fn for_args(raw_json: bool, tool_args: &Value) -> Self {
+        Self::new(raw_json, requested_output_format(tool_args))
+    }
+}
+
+/// Prints one completed tool call; the beside-result blocks go to stderr
+/// unless the document on stdout already carries them.
+fn print_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<()> {
+    println!("{}", rendered_tool_output(result, output)?);
+    if output != CliToolOutput::Document {
+        print_beside_result_blocks(&result.value);
+    }
+    Ok(())
 }
 
 fn print_beside_result_blocks(result_value: &Value) {
@@ -1229,16 +1259,47 @@ fn print_beside_result_blocks(result_value: &Value) {
     }
 }
 
-/// The bytes `tracedecay tool` writes to stdout for a completed compatibility
-/// result: the exact daemon JSON object when `--json` is set, otherwise the
-/// joined `content[*].text` markdown. Status is decided separately from
-/// top-level `isError`.
-fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
-    if raw_json {
-        serde_json::to_string_pretty(result_value).unwrap_or_default()
-    } else {
-        join_content_text(result_value)
+/// The bytes `tracedecay tool` writes to stdout for a completed call. Status
+/// is decided separately from `isError`.
+fn rendered_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<String> {
+    match (output, result.structured_result()) {
+        (CliToolOutput::Document, _) => {
+            Ok(serde_json::to_string_pretty(&json_tool_document(result)?)?)
+        }
+        (CliToolOutput::TypedResult, Some(structured)) if !is_error_result(&result.value) => {
+            Ok(structured.to_string())
+        }
+        (CliToolOutput::TypedResult | CliToolOutput::Text, _) => {
+            Ok(join_content_text(&result.value))
+        }
     }
+}
+
+fn is_error_result(result_value: &Value) -> bool {
+    result_value.get("isError").and_then(Value::as_bool) == Some(true)
+}
+
+/// The one `tracedecay tool --json` document for every tool: the MCP tool
+/// result's `content`, its `isError`, and `structuredContent` holding the
+/// refusal's typed problem record or the answer's whole typed result.
+fn json_tool_document(result: &ToolResult) -> Result<Value> {
+    let mut document = result.value.clone();
+    let is_error = is_error_result(&document);
+    let Some(object) = document.as_object_mut() else {
+        return Err(TraceDecayError::Config {
+            message: "the tool rendered a result that is not a JSON object".to_owned(),
+        });
+    };
+    object.insert("isError".to_owned(), serde_json::json!(is_error));
+    if !is_error {
+        let structured = result
+            .structured_result()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "the tool rendered its answer without its typed result".to_owned(),
+            })?;
+        object.insert("structuredContent".to_owned(), structured.clone());
+    }
+    Ok(document)
 }
 
 /// Joins every payload `content[*].text` block in an MCP tool result,

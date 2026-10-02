@@ -114,6 +114,17 @@ impl fmt::Display for BundleRejection {
     }
 }
 
+impl AttestationRefusal {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::Missing { .. } => "release_attestation_missing",
+            Self::LookupFailed { .. } => "release_attestation_lookup_failed",
+            Self::TrustRootUnusable { .. } => "release_trust_root_unusable",
+            Self::Rejected { .. } => "release_attestation_rejected",
+        }
+    }
+}
+
 impl fmt::Display for AttestationRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

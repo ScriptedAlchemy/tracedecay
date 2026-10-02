@@ -48,7 +48,7 @@ async fn answer(fixture: &ProductionCompositionFixture, arguments: Value) -> Val
 async fn refusal(fixture: &ProductionCompositionFixture, arguments: Value) -> Value {
     let result = call(fixture, TOOL, arguments).await;
     assert_eq!(result["isError"], true, "hook action must refuse: {result}");
-    let problem = &result["problem"];
+    let problem = &result["structuredContent"]["problem"];
     json!({
         "kind": problem["kind"],
         "code": problem["code"],

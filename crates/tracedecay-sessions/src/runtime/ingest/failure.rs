@@ -132,6 +132,22 @@ pub(super) fn cancelled_provider_outcome(
     error.is_cancelled().then(ProviderRunOutcome::skipped)
 }
 
+/// A provider run whose observation capture failed: cancellation skips the
+/// provider, any other failure is warned once and charges `charged_bytes`.
+pub(super) fn failed_observation_run(
+    provider: &'static str,
+    error: &source::TranscriptIngestError,
+    message: &'static str,
+    charged_bytes: u64,
+) -> ProviderRunOutcome {
+    cancelled_provider_outcome(error).unwrap_or_else(|| {
+        ProviderRunOutcome::failed(
+            warn_transcript_catch_up_failure(provider, "observation", error, message),
+            charged_bytes,
+        )
+    })
+}
+
 pub(super) fn cancelled_claude_provider_outcome(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> Option<ProviderRunOutcome> {
@@ -194,6 +210,8 @@ pub struct IngestPassOutcome {
     /// False when an admitted provider API performs an internally unbounded
     /// sweep and therefore cannot honor the pass byte budget end-to-end.
     pub byte_bounds_enforced: bool,
+    /// The pass durably advanced source coverage beyond its upserts.
+    pub coverage_advanced: bool,
 }
 
 impl IngestPassOutcome {
@@ -207,6 +225,7 @@ impl IngestPassOutcome {
             units_completed: 0,
             units_failed: 0,
             byte_bounds_enforced: true,
+            coverage_advanced: false,
         }
     }
 
@@ -349,18 +368,6 @@ pub fn classify_transcript_ingest_disposition(
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidCursorPath) => {
             ("transcript_cursor_path_invalid", false, Degraded)
-        }
-        source::TranscriptIngestError::Store(TranscriptStoreError::InvalidTranscriptPath) => {
-            ("transcript_path_invalid", false, Degraded)
-        }
-        source::TranscriptIngestError::Store(TranscriptStoreError::MissingTranscriptPath {
-            ..
-        }) => ("transcript_path_missing", false, Degraded),
-        source::TranscriptIngestError::Store(TranscriptStoreError::MessageIdentityMismatch {
-            ..
-        }) => ("transcript_message_identity_mismatch", false, Degraded),
-        source::TranscriptIngestError::CursorKeyMismatch { .. } => {
-            ("transcript_cursor_key_mismatch", false, Degraded)
         }
         source::TranscriptIngestError::ScanIo { .. } => {
             ("transcript_source_io_failed", true, Unavailable)

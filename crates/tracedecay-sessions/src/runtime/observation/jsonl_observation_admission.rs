@@ -6,13 +6,12 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, RetentionClass,
-    SanitizationReceiptV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    RetentionClass, SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{
     ObservationCoverageReason, ObservationCursorAdvance, ObservationIdentityCollisionDispositionV1,
@@ -25,14 +24,13 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    JsonlFrameDeferral, JsonlIoAccounting, JsonlResumeState, MAX_JSONL_RECORD_BYTES,
-    ParsedTranscript, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,
-    TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlFrameDeferral, JsonlIoAccounting, JsonlPrefixRecovery, JsonlResumeState,
+    MAX_JSONL_FRAMES_PER_BATCH, MAX_JSONL_RECORD_BYTES, RawJsonlRecord, RawJsonlSkippedRange,
+    RawJsonlSkippedReason, TranscriptIngestError, TranscriptIngestResult,
+    try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
 use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
@@ -84,8 +82,6 @@ pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     retention_class: RetentionClass,
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
-    required_start_cursor: Option<Option<ObservationSourceCursorV1>>,
-    max_end_offset: Option<u64>,
     persisted_cursor_update: PersistedCursorUpdate,
     cancellation: ObservationCancellation,
     shared_frame_preparation: SharedJsonlFramePreparation,
@@ -109,8 +105,6 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
             retention_class,
             max_new_bytes: None,
             max_frames: None,
-            required_start_cursor: None,
-            max_end_offset: None,
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
             cancellation: ObservationCancellation::default(),
             shared_frame_preparation: SharedJsonlFramePreparation::None,
@@ -124,23 +118,6 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
 
     pub(in crate::runtime) fn with_max_frames(mut self, max_frames: usize) -> Self {
         self.max_frames = Some(max_frames);
-        self
-    }
-
-    /// Require this admission to start from the cursor observed by its caller.
-    /// A concurrent winner changes the cursor into a no-op so the caller can
-    /// refresh any external watermark before deciding what the next bytes mean.
-    pub(in crate::runtime) fn with_required_start_cursor(
-        mut self,
-        required_start_cursor: Option<ObservationSourceCursorV1>,
-    ) -> Self {
-        self.required_start_cursor = Some(required_start_cursor);
-        self
-    }
-
-    /// Bound this admission to an absolute source offset.
-    pub(in crate::runtime) fn with_max_end_offset(mut self, max_end_offset: u64) -> Self {
-        self.max_end_offset = Some(max_end_offset);
         self
     }
 
@@ -171,7 +148,6 @@ pub(in crate::runtime) enum JsonlFrameAdmission {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
         identity_collision_retry: bool,
-        skip_if_observation_exists: Option<CanonicalObservationIdV1>,
     },
     NonDurable {
         reason: ObservationCoverageReason,
@@ -211,20 +187,6 @@ impl JsonlFrameAdmission {
             parsed_record,
             native_record_id,
             identity_collision_retry: true,
-            skip_if_observation_exists: None,
-        }
-    }
-
-    pub(in crate::runtime) fn durable_unless_observation_exists(
-        parsed_record: ParsedObservationRecordV1,
-        native_record_id: ObservationId,
-        observation_id: CanonicalObservationIdV1,
-    ) -> Self {
-        Self::Durable {
-            parsed_record,
-            native_record_id,
-            identity_collision_retry: false,
-            skip_if_observation_exists: Some(observation_id),
         }
     }
 
@@ -281,6 +243,9 @@ pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
     /// only evidence a caller has that the source was *already* admitted,
     /// versus never carrying anything: both report zero new frames.
     pub resumed: bool,
+    /// The committed source cursor's position once this pass settled; every
+    /// byte before it is admitted or covered.
+    pub covered_through: u64,
     pub io: crate::runtime::source::JsonlIoAccounting,
 }
 
@@ -444,6 +409,15 @@ pub(in crate::runtime) fn shared_jsonl_background_cpu()
         })
 }
 
+/// Changes each time a shared JSONL memory reservation refused for lack of
+/// headroom could be admitted again. `None` until the composition root mounts
+/// the authority, when nothing has been refused against it either.
+pub(in crate::runtime) fn shared_jsonl_memory_headroom() -> Option<watch::Receiver<u64>> {
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map(|authority| authority.memory.pressure().subscribe_headroom())
+}
+
 pub(in crate::runtime) fn reserve_shared_jsonl_page()
 -> TranscriptIngestResult<Option<ProcessSharedMemoryReservationV1>> {
     reserve_shared_jsonl_bytes(
@@ -509,6 +483,7 @@ struct SharedJsonlPageKey {
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume: Option<(u64, u64, u64)>,
+    prefix_recovery: JsonlPrefixRecovery,
     preparation: SharedJsonlFramePreparation,
 }
 
@@ -570,6 +545,7 @@ struct SharedJsonlPage {
     new_cursor: StoredCursor,
     replacement_generation: bool,
     deferred: Option<JsonlFrameDeferral>,
+    prefix_diverged: bool,
     io: JsonlIoAccounting,
     retained_bytes: u64,
     _prepared_bytes: Option<SharedJsonlPreparedBytesGuard>,
@@ -675,14 +651,9 @@ static SHARED_JSONL_BUILD_OBSERVERS: OnceLock<
     Mutex<HashMap<PathBuf, std::sync::Weak<SharedJsonlBuildObservation>>>,
 > = OnceLock::new();
 #[cfg(test)]
-static SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static SHARED_JSONL_PEAK_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static SHARED_JSONL_TOTAL_FRAME_PREPARATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SHARED_JSONL_PREPARATION_RENDEZVOUS: OnceLock<
+    Mutex<HashMap<u64, Arc<SharedJsonlPreparationRendezvous>>>,
+> = OnceLock::new();
 #[cfg(test)]
 static SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE: OnceLock<Mutex<HashMap<u64, usize>>> =
     OnceLock::new();
@@ -801,24 +772,122 @@ impl Drop for SharedJsonlBuildGuard {
     }
 }
 
+/// Test latch proving that independent frame preparations of one file overlap.
+/// A preparation with a peer in its window waits until two are inside at once,
+/// so the owning test passes only when the path really runs them concurrently.
+/// A preparation that no other thread could join, because it runs outside a
+/// multi-worker pool, records the serialization and proceeds, so a serial path
+/// fails the owning test's assertion instead of hanging it.
 #[cfg(test)]
-struct SharedJsonlFramePreparationGuard;
+#[derive(Default)]
+struct SharedJsonlPreparationRendezvous {
+    state: Mutex<SharedJsonlPreparationRendezvousState>,
+    overlap: std::sync::Condvar,
+}
 
 #[cfg(test)]
-impl SharedJsonlFramePreparationGuard {
-    fn enter(file_identity: u64) -> Self {
-        use std::sync::atomic::Ordering;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SharedJsonlPreparationRendezvousState {
+    inside: usize,
+    overlapped: bool,
+    serialized: bool,
+}
 
-        let active = SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel) + 1;
-        SHARED_JSONL_PEAK_FRAME_PREPARATIONS.fetch_max(active, Ordering::AcqRel);
-        SHARED_JSONL_TOTAL_FRAME_PREPARATIONS.fetch_add(1, Ordering::AcqRel);
-        let preparations =
-            SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut preparations = preparations.lock().unwrap_or_else(PoisonError::into_inner);
-        let count = preparations.entry(file_identity).or_default();
-        *count = count.saturating_add(1);
-        Self
+#[cfg(test)]
+struct SharedJsonlPreparationRendezvousRegistration {
+    file_identity: u64,
+    rendezvous: Arc<SharedJsonlPreparationRendezvous>,
+}
+
+#[cfg(test)]
+impl SharedJsonlPreparationRendezvous {
+    const PEERS: usize = 2;
+
+    fn registry() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Self>>> {
+        SHARED_JSONL_PREPARATION_RENDEZVOUS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn register(file_identity: u64) -> SharedJsonlPreparationRendezvousRegistration {
+        let rendezvous = Arc::new(Self::default());
+        let previous = Self::registry().insert(file_identity, Arc::clone(&rendezvous));
+        assert!(
+            previous.is_none(),
+            "a shared JSONL file may have only one preparation rendezvous"
+        );
+        SharedJsonlPreparationRendezvousRegistration {
+            file_identity,
+            rendezvous,
+        }
+    }
+
+    fn arrive(file_identity: u64, window_preparations: usize) {
+        if window_preparations < Self::PEERS {
+            return;
+        }
+        let Some(rendezvous) = Self::registry().get(&file_identity).cloned() else {
+            return;
+        };
+        let mut state = rendezvous
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.overlapped {
+            return;
+        }
+        state.inside += 1;
+        if state.inside >= Self::PEERS {
+            state.overlapped = true;
+            rendezvous.overlap.notify_all();
+            return;
+        }
+        let joinable =
+            rayon::current_thread_index().is_some() && rayon::current_num_threads() >= Self::PEERS;
+        if !joinable {
+            state.inside -= 1;
+            state.serialized = true;
+            return;
+        }
+        // ponytail: serialization inside a multi-worker pool (one unsplit
+        // chunk) parks here, since this path has no deadline to cancel it.
+        drop(
+            rendezvous
+                .overlap
+                .wait_while(state, |state| !state.overlapped)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+    }
+}
+
+#[cfg(test)]
+impl SharedJsonlPreparationRendezvousRegistration {
+    fn state(&self) -> SharedJsonlPreparationRendezvousState {
+        *self
+            .rendezvous
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SharedJsonlPreparationRendezvousRegistration {
+    fn drop(&mut self) {
+        SharedJsonlPreparationRendezvous::registry().remove(&self.file_identity);
+    }
+}
+
+#[cfg(test)]
+fn enter_shared_jsonl_frame_preparation(file_identity: u64, window_preparations: usize) {
+    let preparations =
+        SHARED_JSONL_FRAME_PREPARATIONS_BY_FILE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut preparations = preparations.lock().unwrap_or_else(PoisonError::into_inner);
+    let count = preparations.entry(file_identity).or_default();
+    *count = count.saturating_add(1);
+    drop(preparations);
+    SharedJsonlPreparationRendezvous::arrive(file_identity, window_preparations);
 }
 
 #[cfg(test)]
@@ -830,13 +899,6 @@ fn shared_jsonl_frame_preparations_for_test(file_identity: u64) -> usize {
         .get(&file_identity)
         .copied()
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-impl Drop for SharedJsonlFramePreparationGuard {
-    fn drop(&mut self) {
-        SHARED_JSONL_ACTIVE_FRAME_PREPARATIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
 }
 
 struct SharedJsonlPreparationWaitGuard;
@@ -1037,6 +1099,7 @@ fn build_shared_jsonl_page(
         max_new_bytes,
         None,
         resume_state,
+        JsonlPrefixRecovery::rescan(),
         options,
     )
 }
@@ -1047,6 +1110,7 @@ fn build_shared_jsonl_page_with_frame_limit(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     options: SharedJsonlBuildOptions,
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
     let SharedJsonlBuildOptions {
@@ -1082,27 +1146,18 @@ fn build_shared_jsonl_page_with_frame_limit(
         };
         hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
         let _active = SharedJsonlPreparationActiveGuard;
-        if let Some(max_frames) = max_frames {
-            crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
-                &path,
-                previous,
-                max_new_bytes,
-                MAX_JSONL_RECORD_BYTES,
-                resume_state,
-                max_frames,
-            )?
-        } else {
-            try_stream_new_jsonl_raw_strict_with_resume(
-                &path,
-                previous,
-                max_new_bytes,
-                MAX_JSONL_RECORD_BYTES,
-                resume_state,
-            )?
-        }
+        try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+            &path,
+            previous,
+            max_new_bytes,
+            MAX_JSONL_RECORD_BYTES,
+            resume_state,
+            prefix_recovery,
+            max_frames.unwrap_or(MAX_JSONL_FRAMES_PER_BATCH),
+        )?
     };
     #[cfg(test)]
-    let preparation_file_identity = raw.file_identity;
+    let (preparation_file_identity, window_preparations) = (raw.file_identity, raw.frames.len());
     if cancellation
         .as_ref()
         .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire))
@@ -1124,8 +1179,10 @@ fn build_shared_jsonl_page_with_frame_limit(
             let prepared = tokio::sync::OnceCell::new();
             if prepare_frames {
                 #[cfg(test)]
-                let _frame_preparation =
-                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
+                enter_shared_jsonl_frame_preparation(
+                    preparation_file_identity,
+                    window_preparations,
+                );
                 let result = prepare_observation_record_v1(
                     bytes.as_ref(),
                     range,
@@ -1231,6 +1288,7 @@ fn build_shared_jsonl_page_with_frame_limit(
         new_cursor: raw.new_cursor,
         replacement_generation: raw.replacement_generation,
         deferred: raw.deferred,
+        prefix_diverged: raw.prefix_diverged,
         io: raw.io,
         retained_bytes,
         _prepared_bytes: prepared_bytes,
@@ -1310,7 +1368,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     )?;
     let task_cancellation = cancellation.clone();
     #[cfg(test)]
-    let preparation_file_identity = page.file_identity;
+    let (preparation_file_identity, window_preparations) = (page.file_identity, jobs.len());
     let prepared = tokio::task::spawn_blocking(move || {
         jobs.into_par_iter()
             .map(|(index, bytes, range)| {
@@ -1334,8 +1392,10 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                 hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
                 let _active = SharedJsonlPreparationActiveGuard;
                 #[cfg(test)]
-                let _frame_preparation =
-                    SharedJsonlFramePreparationGuard::enter(preparation_file_identity);
+                enter_shared_jsonl_frame_preparation(
+                    preparation_file_identity,
+                    window_preparations,
+                );
                 Ok((
                     index,
                     prepare_observation_record_v1(
@@ -1452,6 +1512,7 @@ async fn shared_jsonl_page_with_cancellation(
         max_new_bytes,
         None,
         resume_state,
+        JsonlPrefixRecovery::Report,
         preparation,
         cancellation,
         speculative,
@@ -1473,6 +1534,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
+    prefix_recovery: JsonlPrefixRecovery,
     preparation: impl Into<SharedJsonlFramePreparation>,
     cancellation: SharedJsonlCancellation,
     speculative: bool,
@@ -1512,6 +1574,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         max_frames,
         resume: resume_state
             .map(|resume| (resume.generation, resume.file_identity, resume.fingerprint)),
+        prefix_recovery: prefix_recovery.clone(),
         preparation,
     };
     let cache_lock = SHARED_JSONL_PAGE_CACHE.get_or_init(tokio::sync::Mutex::default);
@@ -1641,6 +1704,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
             max_new_bytes,
             max_frames,
             resume_state,
+            prefix_recovery,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
                 background_cpu,
@@ -1759,7 +1823,6 @@ struct DurableJsonlFrame {
     range: tracedecay_domain::ObservationSourceRangeV1,
     parsed_record: ParsedObservationRecordV1,
     native_record_id: ObservationId,
-    skip_if_observation_exists: Option<CanonicalObservationIdV1>,
     bytes: Arc<[u8]>,
     fallback_prepared: Option<PreparedObservationRecordV1>,
     fallback_hints: JsonlFrameHints,
@@ -2085,29 +2148,6 @@ impl ActiveAdmission<'_> {
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> TranscriptIngestResult<DurableFrameDisposition> {
         let checkpoint = frame.checkpoint;
-        let existing_receipt = match frame.skip_if_observation_exists.as_ref() {
-            Some(observation_id) => self
-                .admission
-                .observation_receipt(
-                    self.provider,
-                    &self.scope,
-                    observation_id,
-                    &self.cancellation,
-                )
-                .await
-                .map_err(|outcome| host_admission_error(self.provider, outcome))?,
-            None => None,
-        };
-        if let Some(receipt) = existing_receipt {
-            self.advance_coverage(
-                expected_cursor,
-                checkpoint,
-                ObservationCoverageReason::DuplicateObservation,
-                Some(receipt),
-            )
-            .await?;
-            return Ok(DurableFrameDisposition::AlreadyDurable);
-        }
         let result = self
             .capture_attempt(expected_cursor.clone(), frame, retention_class)
             .await?;
@@ -2140,34 +2180,6 @@ impl ActiveAdmission<'_> {
         progress: &mut JsonlObservationAdmissionProgress,
     ) -> Result<(), CaptureWindowError> {
         if frames.is_empty() {
-            return Ok(());
-        }
-        if frames
-            .iter()
-            .any(|frame| frame.skip_if_observation_exists.is_some())
-        {
-            for frame in frames {
-                match self
-                    .capture(
-                        expected_cursor,
-                        frame,
-                        retention_class,
-                        persisted_cursor_update,
-                    )
-                    .await?
-                {
-                    DurableFrameDisposition::Persisted => {
-                        progress.frames_accepted = progress.frames_accepted.saturating_add(1);
-                        progress.frames_persisted = progress.frames_persisted.saturating_add(1);
-                    }
-                    DurableFrameDisposition::Refused => {
-                        progress.frames_refused = progress.frames_refused.saturating_add(1);
-                    }
-                    DurableFrameDisposition::AlreadyDurable => {
-                        progress.frames_skipped = progress.frames_skipped.saturating_add(1);
-                    }
-                }
-            }
             return Ok(());
         }
         crate::runtime::pipeline_metrics::record_capture_window(frames.len());
@@ -2293,10 +2305,8 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         source,
         scope,
         retention_class,
-        mut max_new_bytes,
+        max_new_bytes,
         max_frames,
-        required_start_cursor,
-        max_end_offset,
         persisted_cursor_update,
         cancellation,
         shared_frame_preparation,
@@ -2312,20 +2322,11 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 if is_admission_cancellation(&outcome, &cancellation) {
                     TranscriptIngestError::Cancelled { provider }
                 } else {
-                    TranscriptIngestError::InvalidFrameState { provider }
+                    host_admission_error(provider, outcome)
                 }
             })?;
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
-    }
-    if required_start_cursor
-        .as_ref()
-        .is_some_and(|required| required != &expected_cursor)
-    {
-        return Ok(JsonlObservationAdmissionProgress {
-            source_deferred: true,
-            ..JsonlObservationAdmissionProgress::default()
-        });
     }
     let previous = expected_cursor
         .as_ref()
@@ -2334,16 +2335,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             mtime: 0,
             file_id: cursor.generation().generation_id(),
         });
-    if let Some(max_end_offset) = max_end_offset {
-        let remaining = max_end_offset.saturating_sub(previous.position);
-        if remaining == 0 {
-            return Ok(JsonlObservationAdmissionProgress {
-                source_deferred: true,
-                ..JsonlObservationAdmissionProgress::default()
-            });
-        }
-        max_new_bytes = Some(max_new_bytes.map_or(remaining, |limit| limit.min(remaining)));
-    }
     let resume_state = expected_cursor.as_ref().and_then(|cursor| {
         Some(JsonlResumeState {
             generation: cursor.generation().generation_id(),
@@ -2352,40 +2343,64 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
-        path,
-        previous,
-        max_new_bytes,
-        max_frames,
-        resume_state,
-        shared_frame_preparation,
-        SharedJsonlCancellation {
-            blocking: None,
-            operation: Some(cancellation.clone()),
-        },
-        false,
-    )
-    .await
-    {
-        // A dangling symlink or a source removed between discovery and open
-        // cannot be read on the next pass either. Failing the provider keeps
-        // historical catch-up retrying one missing file forever.
-        Err(TranscriptIngestError::ScanIo { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
+    let mut prefix_recovery = JsonlPrefixRecovery::Report;
+    let mut divergence_io = JsonlIoAccounting::default();
+    let (raw, shared_page_hit) = loop {
+        let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
+            path,
+            previous,
+            max_new_bytes,
+            max_frames,
+            resume_state,
+            prefix_recovery.clone(),
+            shared_frame_preparation,
+            SharedJsonlCancellation {
+                blocking: None,
+                operation: Some(cancellation.clone()),
+            },
+            false,
+        )
+        .await
         {
-            return Ok(JsonlObservationAdmissionProgress::default());
+            // A dangling symlink or a source removed between discovery and open
+            // cannot be read on the next pass either. Failing the provider keeps
+            // historical catch-up retrying one missing file forever.
+            Err(TranscriptIngestError::ScanIo { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(JsonlObservationAdmissionProgress::default());
+            }
+            other => other?,
+        };
+        // Only `Report` stops at a diverged prefix, and the retry below
+        // supplies checkpoints, so this runs at most twice.
+        if !raw.prefix_diverged {
+            break (raw, shared_page_hit);
         }
-        other => other?,
+        if !shared_page_hit {
+            divergence_io = raw.io;
+        }
+        let committed = admission
+            .committed_source_cursors(&source, &scope)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    host_admission_error(provider, outcome)
+                }
+            })?;
+        prefix_recovery = JsonlPrefixRecovery::committed(&committed);
     };
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
         resumed: had_expected_cursor,
-        io: if shared_page_hit {
+        io: divergence_io.followed_by(if shared_page_hit {
             JsonlIoAccounting::default()
         } else {
             raw.io
-        },
+        }),
         ..JsonlObservationAdmissionProgress::default()
     };
     let total_frames = raw.frames.len();
@@ -2505,14 +2520,12 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                             parsed_record,
                             native_record_id,
                             identity_collision_retry,
-                            skip_if_observation_exists,
                         } => {
                             let frame = DurableJsonlFrame {
                                 checkpoint,
                                 range,
                                 parsed_record,
                                 native_record_id,
-                                skip_if_observation_exists,
                                 bytes: Arc::clone(&bytes),
                                 fallback_prepared: None,
                                 fallback_hints: hints,
@@ -2522,64 +2535,52 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                                     ObservationIdentityCollisionDispositionV1::SettleTerminal
                                 },
                             };
-                            let disposition = if frame.skip_if_observation_exists.is_some() {
-                                active
-                                    .capture(
-                                        expected_cursor,
-                                        frame,
-                                        policy.retention_class,
-                                        policy.persisted_cursor_update,
-                                    )
-                                    .await?
-                            } else {
-                                let first = active
-                                    .capture_attempt(
-                                        expected_cursor.clone(),
-                                        frame,
-                                        policy.retention_class,
-                                    )
-                                    .await?;
-                                match first {
-                                    Err(outcome)
-                                        if identity_collision_retry
-                                            && matches!(
-                                                &outcome,
-                                                HostAdmissionOutcome {
-                                                    reason_code: Some(
-                                                        "observation_identity_collision"
-                                                    ),
-                                                    retryable: false,
-                                                    ..
-                                                }
-                                            ) =>
-                                    {
-                                        // The provider explicitly proved that the
-                                        // primary identity had no native record
-                                        // id. Re-normalize from the frame's input
-                                        // state so provider carry is applied once,
-                                        // then try exactly one positional identity.
-                                        let mut retry_state = frame_start_state;
-                                        let mut retry_hints = hints;
-                                        retry_hints.identity_collision_retry = true;
-                                        let retry = normalize(
-                                            &mut retry_state,
-                                            bytes.as_ref(),
-                                            range,
-                                            checkpoint.offset,
-                                            prepared,
-                                            retry_hints,
-                                        )?;
-                                        let JsonlFrameAdmission::Durable {
-                                            parsed_record,
-                                            native_record_id,
-                                            ..
-                                        } = retry
-                                        else {
-                                            return Err(TranscriptIngestError::InvalidFrameState {
-                                                provider: active.provider,
-                                            });
-                                        };
-                                        let disposition = active
+                            let first = active
+                                .capture_attempt(
+                                    expected_cursor.clone(),
+                                    frame,
+                                    policy.retention_class,
+                                )
+                                .await?;
+                            let disposition = match first {
+                                Err(outcome)
+                                    if identity_collision_retry
+                                        && matches!(
+                                            &outcome,
+                                            HostAdmissionOutcome {
+                                                reason_code: Some("observation_identity_collision"),
+                                                retryable: false,
+                                                ..
+                                            }
+                                        ) =>
+                                {
+                                    // The provider explicitly proved that the
+                                    // primary identity had no native record
+                                    // id. Re-normalize from the frame's input
+                                    // state so provider carry is applied once,
+                                    // then try exactly one positional identity.
+                                    let mut retry_state = frame_start_state;
+                                    let mut retry_hints = hints;
+                                    retry_hints.identity_collision_retry = true;
+                                    let retry = normalize(
+                                        &mut retry_state,
+                                        bytes.as_ref(),
+                                        range,
+                                        checkpoint.offset,
+                                        prepared,
+                                        retry_hints,
+                                    )?;
+                                    let JsonlFrameAdmission::Durable {
+                                        parsed_record,
+                                        native_record_id,
+                                        ..
+                                    } = retry
+                                    else {
+                                        return Err(TranscriptIngestError::InvalidFrameState {
+                                            provider: active.provider,
+                                        });
+                                    };
+                                    let disposition = active
                                             .capture(
                                                 expected_cursor,
                                                 DurableJsonlFrame {
@@ -2587,7 +2588,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                                                     range,
                                                     parsed_record,
                                                     native_record_id,
-                                                    skip_if_observation_exists: None,
                                                     bytes,
                                                     fallback_prepared: None,
                                                     fallback_hints: retry_hints,
@@ -2598,19 +2598,18 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                                                 policy.persisted_cursor_update,
                                             )
                                             .await?;
-                                        fallback_state = retry_state;
-                                        disposition
-                                    }
-                                    result => {
-                                        active
-                                            .apply_capture_result(
-                                                expected_cursor,
-                                                checkpoint,
-                                                result,
-                                                policy.persisted_cursor_update,
-                                            )
-                                            .await?
-                                    }
+                                    fallback_state = retry_state;
+                                    disposition
+                                }
+                                result => {
+                                    active
+                                        .apply_capture_result(
+                                            expected_cursor,
+                                            checkpoint,
+                                            result,
+                                            policy.persisted_cursor_update,
+                                        )
+                                        .await?
                                 }
                             };
                             match disposition {
@@ -2767,54 +2766,47 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             progress.frames_decoded = progress.frames_decoded.saturating_add(1);
         }
         state = frame_state;
-        let (parsed_record, native_record_id, identity_collision_retry, skip_if_observation_exists) =
-            match admission {
-                JsonlFrameAdmission::Durable {
-                    parsed_record,
-                    native_record_id,
-                    identity_collision_retry,
-                    skip_if_observation_exists,
-                } => (
-                    parsed_record,
-                    native_record_id,
-                    identity_collision_retry,
-                    skip_if_observation_exists,
-                ),
-                JsonlFrameAdmission::NonDurable {
-                    reason,
-                    before_decode,
-                } => {
-                    flush_pending(
-                        &active,
-                        PendingAdmissionWindow {
-                            expected_cursor: &mut expected_cursor,
-                            frames: &mut pending,
-                            bytes: &mut pending_bytes,
-                            start_state: &mut pending_start_state,
-                            progress: &mut progress,
-                        },
-                        FlushPolicy {
-                            retention_class: &retention_class,
-                            persisted_cursor_update,
-                        },
-                        &mut normalize,
-                    )
+        let (parsed_record, native_record_id, identity_collision_retry) = match admission {
+            JsonlFrameAdmission::Durable {
+                parsed_record,
+                native_record_id,
+                identity_collision_retry,
+            } => (parsed_record, native_record_id, identity_collision_retry),
+            JsonlFrameAdmission::NonDurable {
+                reason,
+                before_decode,
+            } => {
+                flush_pending(
+                    &active,
+                    PendingAdmissionWindow {
+                        expected_cursor: &mut expected_cursor,
+                        frames: &mut pending,
+                        bytes: &mut pending_bytes,
+                        start_state: &mut pending_start_state,
+                        progress: &mut progress,
+                    },
+                    FlushPolicy {
+                        retention_class: &retention_class,
+                        persisted_cursor_update,
+                    },
+                    &mut normalize,
+                )
+                .await?;
+                active
+                    .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
                     .await?;
-                    active
-                        .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
-                        .await?;
-                    crate::runtime::pipeline_metrics::record_frame_skipped(reason);
-                    progress.frames_skipped = progress.frames_skipped.saturating_add(1);
-                    if before_decode {
-                        progress.frames_rejected_before_decode =
-                            progress.frames_rejected_before_decode.saturating_add(1);
-                    }
-                    continue;
+                crate::runtime::pipeline_metrics::record_frame_skipped(reason);
+                progress.frames_skipped = progress.frames_skipped.saturating_add(1);
+                if before_decode {
+                    progress.frames_rejected_before_decode =
+                        progress.frames_rejected_before_decode.saturating_add(1);
                 }
-                JsonlFrameAdmission::NeedsPreparation => {
-                    return Err(TranscriptIngestError::InvalidFrameState { provider });
-                }
-            };
+                continue;
+            }
+            JsonlFrameAdmission::NeedsPreparation => {
+                return Err(TranscriptIngestError::InvalidFrameState { provider });
+            }
+        };
         let frame_bytes = u64::try_from(frame.bytes.len())
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
         if !pending.is_empty()
@@ -2842,7 +2834,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             range,
             parsed_record,
             native_record_id,
-            skip_if_observation_exists,
             bytes: Arc::clone(&frame.bytes),
             fallback_prepared: frame
                 .prepared
@@ -2936,6 +2927,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         progress.frames_refused,
         progress.frames_persisted,
     );
+    progress.covered_through = expected_cursor
+        .as_ref()
+        .map_or(0, ObservationSourceCursorV1::position);
     Ok(progress)
 }
 
@@ -2977,27 +2971,8 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     match reason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
         RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
+        RawJsonlSkippedReason::RetainedPrefix => ObservationCoverageReason::RetainedPrefix,
     }
-}
-
-pub(in crate::runtime) fn namespace_replacement_message_ids(
-    messages: &mut [SessionMessageRecord],
-    generation: u64,
-) {
-    for message in messages {
-        message.message_id = format!("{}:generation:{generation}", message.message_id);
-    }
-}
-
-pub(in crate::runtime) fn preflight_and_parse_new(
-    provider: &'static str,
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    parse_new: impl FnOnce() -> Option<ParsedTranscript>,
-) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-    preflight_strict_jsonl(provider, path, prev, max_new_bytes)?;
-    Ok(parse_new())
 }
 
 #[cfg(test)]

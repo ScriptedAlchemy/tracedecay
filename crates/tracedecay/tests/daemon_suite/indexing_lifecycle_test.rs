@@ -181,6 +181,43 @@ async fn wait_for_refreshing_old_generation(
     .unwrap_or_else(|_| panic!("refresh never exposed its truthful in-flight receipt: {last}"))
 }
 
+/// Waits until the refresh admitted after `old_generation` is running.
+///
+/// The scheduler reports it in one of two in-flight shapes: still advertising
+/// the committed generation (`refreshing`), or, once the successor's text
+/// build starts, advertising that successor with its graph pending
+/// (`indexing` with the successor's build progress). The first shape lasts
+/// only until the successor build publishes its first phase.
+async fn wait_for_refresh_in_flight(
+    socket: &Path,
+    handshake: &DaemonHandshake,
+    old_generation: &str,
+) -> Value {
+    let mut last = Value::Null;
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last = status(socket, handshake).await;
+            let worktree = &last["code_index_freshness"]["worktree"];
+            let in_flight = last["code_index_freshness"]["status"] == "warming"
+                && worktree["coverage"] == "partial_refresh_in_progress"
+                && worktree["rebuild_in_flight"] == true;
+            let refreshing_committed = worktree["latest_generation_id"] == old_generation
+                && worktree["staleness_state"] == "refreshing";
+            let building_successor = worktree["staleness_state"] == "indexing"
+                && worktree["progress"]["generation_id"]
+                    .as_str()
+                    .is_some_and(|generation| generation != old_generation)
+                && worktree["progress"]["phase"] != "ready";
+            if in_flight && (refreshing_committed || building_successor) {
+                return last.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("refresh never exposed its truthful in-flight receipt: {last}"))
+}
+
 fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGenerationV1 {
     let layout =
         tracedecay_runtime_core::storage::resolve_layout(project, &home.join(".tracedecay"))

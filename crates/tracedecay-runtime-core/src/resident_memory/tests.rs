@@ -5,6 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use tracedecay_domain::process_heap::{
+    ProcessAllocatorReleaseV1, collect_calling_thread_allocator_v1, collect_idle_thread_heap_v1,
+    install_process_allocator_release_v1, request_idle_thread_collection_v1,
+};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
@@ -812,6 +816,70 @@ fn nominal_rss_refuses_growth_that_would_cross_the_limit() {
 }
 
 #[test]
+fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
+    let (authority, pressure) = pressure_authority();
+    let mut headroom = pressure.subscribe_headroom();
+    let requested = bytes(PRESSURE_TEST_LIMIT_BYTES / 4);
+    let quarter = ResidentMemoryComponentIdV1::new("test.quarter").unwrap();
+    let held = [(); 4].map(|()| {
+        authority
+            .reserve_process_shared(quarter, requested)
+            .expect("four quarters fill the ledger")
+    });
+    let [first, second, third, fourth] = held;
+    drop(first);
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "a release with nothing refused announces nothing"
+    );
+    let refill = authority
+        .reserve_process_shared(quarter, requested)
+        .expect("the freed quarter is admitted");
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("a full ledger refuses");
+    assert!(!headroom.has_changed().unwrap());
+
+    let mut shrinking = second;
+    shrinking.shrink_to(requested.get() - 1).unwrap();
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "one byte back does not fit the refused quarter"
+    );
+    drop(third);
+    assert!(
+        headroom.has_changed().unwrap(),
+        "the quarter the refused request needs is back"
+    );
+    assert_eq!(*headroom.borrow_and_update(), 1);
+    drop(fourth);
+    assert!(
+        !headroom.has_changed().unwrap(),
+        "the waiter was satisfied; later releases wait for a new refusal"
+    );
+
+    let observed = pressure.limit_bytes() - requested.get() + 1;
+    pressure.publish_observed_resident_bytes(observed);
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "canonical"),
+            requested,
+        )
+        .expect_err("measured RSS leaves no room for the quarter");
+    pressure.publish_observed_resident_bytes(observed);
+    assert!(!headroom.has_changed().unwrap());
+    pressure.publish_observed_resident_bytes(observed - 1);
+    assert!(
+        headroom.has_changed().unwrap(),
+        "a sample that fits the refused quarter announces it"
+    );
+    drop((refill, shrinking));
+}
+
+#[test]
 fn measured_rss_above_the_high_watermark_refuses_growth_with_a_typed_state() {
     let (authority, pressure) = pressure_authority();
     let observed = pressure.high_watermark_bytes() + 1;
@@ -1129,27 +1197,57 @@ fn psi_some_avg10_reads_the_memory_stall_share() {
 
 thread_local! {
     static INSTALLED_RELEASES: Cell<usize> = const { Cell::new(0) };
+    static INSTALLED_THREAD_COLLECTS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn count_installed_release() {
     INSTALLED_RELEASES.with(|count| count.set(count.get() + 1));
 }
 
+fn count_installed_thread_collect() {
+    INSTALLED_THREAD_COLLECTS.with(|count| count.set(count.get() + 1));
+}
+
+const COUNTING_RELEASE: ProcessAllocatorReleaseV1 = ProcessAllocatorReleaseV1 {
+    release: count_installed_release,
+    collect_calling_thread: count_installed_thread_collect,
+    owner_heaps: None,
+};
+
 /// The allocator the composition root installed is released: glibc's
-/// `malloc_trim` alone returns nothing from mimalloc's pages. Installation
-/// happens once; a second is refused.
+/// `malloc_trim` alone returns nothing from mimalloc's pages. The process
+/// release and the calling-thread collection each run their own installed
+/// call. Installation happens once; a second is refused.
 #[test]
 fn allocator_release_runs_the_installed_allocator_release() {
-    super::install_process_allocator_release_v1(count_installed_release)
-        .expect("first installation");
-    let before = INSTALLED_RELEASES.with(Cell::get);
+    install_process_allocator_release_v1(COUNTING_RELEASE).expect("first installation");
+    let (releases, collects) = (
+        INSTALLED_RELEASES.with(Cell::get),
+        INSTALLED_THREAD_COLLECTS.with(Cell::get),
+    );
     let trim = super::release_process_allocator_memory_v1();
-    assert_eq!(INSTALLED_RELEASES.with(Cell::get), before + 1);
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects);
     assert!(trim.trimmed);
+    collect_calling_thread_allocator_v1();
+    assert_eq!(INSTALLED_RELEASES.with(Cell::get), releases + 1);
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
     assert_eq!(
-        super::install_process_allocator_release_v1(count_installed_release),
+        install_process_allocator_release_v1(COUNTING_RELEASE),
         Err("the process allocator release is already installed".to_owned())
     );
+
+    // An idle long-lived thread collects once per sampler request: never
+    // before one, once after it, and not again until the next request.
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 1);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 2);
+    request_idle_thread_collection_v1();
+    collect_idle_thread_heap_v1();
+    assert_eq!(INSTALLED_THREAD_COLLECTS.with(Cell::get), collects + 3);
 }
 
 #[cfg(target_os = "linux")]
@@ -1351,7 +1449,6 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
     );
     assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
 }
-
 #[test]
 fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
     let limit = bytes(1024 * 1024 * 1024 * 1024);
@@ -1400,4 +1497,71 @@ fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
             )
             .is_ok()
     );
+}
+
+/// Every admission sizes from one view: the ceiling less the larger of the
+/// ledger and the measured process, and nothing while the pressure latch
+/// holds, so a width planned from it is one admission accepts.
+#[test]
+fn headroom_is_the_ceiling_less_the_larger_of_ledger_and_measurement() {
+    const MIB: u64 = 1024 * 1024;
+    let measured = Arc::new(AtomicU64::new(300 * MIB));
+    let sampled = Arc::clone(&measured);
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000 * MIB),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(1000 * MIB),
+            Arc::new(move || {
+                let observed = sampled.load(Ordering::SeqCst);
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: observed,
+                    unreclaimable_bytes: observed,
+                    swapped_bytes: 0,
+                    cgroup_committed_bytes: None,
+                })
+            }),
+        )),
+    ));
+    let owner = key("project-a", "worktree-a", "generation-a", "reader");
+    let charged = authority
+        .reserve(owner.clone(), bytes(100 * MIB))
+        .expect("charged owner");
+
+    let headroom = authority.headroom_below(u64::MAX);
+    assert_eq!(
+        (
+            headroom.used_bytes,
+            headroom.observed_bytes,
+            headroom.available_bytes
+        ),
+        (100 * MIB, 300 * MIB, 700 * MIB),
+        "state no owner charges counts through the measurement"
+    );
+    assert_eq!(
+        authority.headroom_below(500 * MIB).available_bytes,
+        200 * MIB
+    );
+    assert!(
+        authority.reserve(owner.clone(), bytes(701 * MIB)).is_err(),
+        "admission refuses past the same view"
+    );
+
+    let in_flight = authority
+        .reserve(owner, bytes(300 * MIB))
+        .expect("in-flight work");
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        600 * MIB,
+        "a ledger above the measurement counts in full"
+    );
+
+    measured.store(990 * MIB, Ordering::SeqCst);
+    assert_eq!(authority.headroom_below(u64::MAX).available_bytes, 0);
+    measured.store(800 * MIB, Ordering::SeqCst);
+    assert_eq!(
+        authority.headroom_below(u64::MAX).available_bytes,
+        0,
+        "the latch holds until the low watermark"
+    );
+    drop((charged, in_flight));
 }

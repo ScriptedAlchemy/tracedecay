@@ -56,6 +56,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                 let path_glob = request.path_glob.clone();
                 let max_results = request.window.limit as usize;
                 let scope_prefix = context.scope_prefix.map(str::to_owned);
+                let path_policy = self.source_runtime.path_policy().clone();
                 let search = match super::support::run_bounded_source_search(
                     context.request.deadline(),
                     context.request.cancellation(),
@@ -67,6 +68,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                             path_glob.as_deref(),
                             max_results,
                             scope_prefix.as_deref(),
+                            &path_policy,
                             || cancelled.load(std::sync::atomic::Ordering::Acquire),
                         )
                     },

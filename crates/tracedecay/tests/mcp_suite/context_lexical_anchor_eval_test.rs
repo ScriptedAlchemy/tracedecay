@@ -501,9 +501,25 @@ async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
             "{mode}: the named identifier's definition must lead search_matches: {files:?}"
         );
         assert_eq!(
-            payload["symbols"][0]["name"], "run_update_command",
+            payload["search_matches"][0]["name"], "run_update_command",
             "{mode}: {payload}"
         );
+        // Without `include_code`, graph enrichment races primary search and
+        // is withheld, typed, when search settles first.
+        match payload["retrieval"]["graph"]["state"].as_str() {
+            Some("unavailable") => {
+                assert_eq!(
+                    payload["verified_graph_evidence"]["reason_code"],
+                    "verified-code-graph-read-unavailable",
+                    "{mode}: {payload}"
+                );
+                assert_eq!(payload["symbols"], json!([]), "{mode}: {payload}");
+            }
+            _ => assert_eq!(
+                payload["symbols"][0]["name"], "run_update_command",
+                "{mode}: {payload}"
+            ),
+        }
         // Both definitions and both call sites spell the identifier; the
         // page carries two of those sites.
         assert_eq!(

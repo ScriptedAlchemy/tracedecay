@@ -15,13 +15,13 @@ use tracedecay_domain::{
     AuthorizationRevision, CalibrationProfileId, CodeGenerationId, ComponentRevision,
     DiversityPolicy, ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, PrincipalId,
     QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    RetrievalCursor, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
 use super::{
-    CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexOwnerSignalsV1, CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1,
     serving::CodeTextQueryOwnerReadinessV1,
 };
 use tracedecay_query::retrieval::exact::{
@@ -84,17 +84,12 @@ pub enum DeferredMountAttemptV1 {
 
 /// Waits for the first retained generation of `project_root` and then
 /// retries the query-authority mount. Exits when the mount reaches any terminal
-/// outcome or the publication channel closes (daemon shutdown).
+/// outcome or the registry closes (daemon shutdown).
 ///
 /// The open-time mount runs before code-index activation, so the first ready
-/// check usually misses. Wake sources are event-driven only:
-/// - a matching `Published` broadcast on a fresh build;
-/// - registry-wide root-mounted watches so a pre-activation subscribe can
-///   re-attach the per-worktree serving-generation watch after mount;
-/// - serving-slot / serving-generation watches for a restart `Noop` restore
-///   that never rebroadcasts (partitioned recovery may leave the decoded seat
-///   empty and only flip the generation watch);
-/// - on `Lagged`, retry immediately. Never a standing 1 Hz ready poll.
+/// check usually misses. The root's owner signals wake each retry, including
+/// a restart `Noop` restore that publishes nothing and only flips the
+/// serving-generation watch; there is no standing ready poll.
 pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
@@ -103,19 +98,11 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = DeferredMountAttemptV1>,
 {
-    let mut publications = registry.subscribe_generation_publications();
-    let mut serving_seats = registry.subscribe_serving_seats();
-    let mut root_mounted = registry.subscribe_root_mounted();
-    let mut serving_changes = None;
+    // Subscribe before probing so a seat that lands between subscribe and the
+    // ready check still wakes the retry. The mount needs only the text owner,
+    // so it demands no decoded generation.
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(registry, &project_root).await;
     loop {
-        // Subscribe before probing so a seat that lands between subscribe and
-        // the ready check remains observable. The mount needs only the text
-        // owner, so it demands no decoded generation.
-        if serving_changes.is_none() {
-            serving_changes = registry
-                .subscribe_serving_generation_changes(&project_root)
-                .await;
-        }
         if registry
             .retained_text_owner_for_root(&project_root)
             .await
@@ -124,38 +111,8 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
         {
             return;
         }
-        tokio::select! {
-            publication = publications.recv() => match publication {
-                // Any publication wakes the next attempt at the top of the
-                // loop; a foreign project's publication costs one attempt,
-                // which is what the previous per-root filter also paid.
-                Ok(_) => {}
-                // A lagged receiver dropped publications; one of them may have
-                // been this project's. Retry immediately; do not install a
-                // standing timer.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            },
-            serving = async {
-                match serving_changes.as_mut() {
-                    Some(changes) => changes.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if serving.is_err() {
-                    return;
-                }
-            }
-            seat = serving_seats.changed() => {
-                if seat.is_err() {
-                    return;
-                }
-            }
-            mounted = root_mounted.changed() => {
-                if mounted.is_err() {
-                    return;
-                }
-            }
+        if signals.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -784,6 +741,7 @@ where
             )
         })?;
     let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
+    let graph_activation_enabled = schedulers.graph_activation_enabled_for_scope(scope).await;
     let graph = hotpath::measure_block!("daemon.code_index.query.lane.graph", {
         // Graph retrieval requires at least one seed. An empty seed list is
         // "the lane had nothing to expand", not "the retriever is missing",
@@ -800,28 +758,19 @@ where
         // reads from exactly that owner and deliberately leaves the sealed
         // seat empty; resolving the lane only through the seat reported the
         // recovered graph as `retriever_unavailable` until the next publish.
-        let graph_serving = graph_latest
-            .as_ref()
-            .map_or_else(
-                || text.production_graph_serving(),
-                |latest| latest.production_graph_serving(),
-            )
-            .ok();
-        if graph_seeds.is_empty() {
-            if graph_serving.is_some() {
-                RetrieverOutcome::Complete(RetrieverBatch {
-                    candidates: Vec::new(),
-                    evidence_by_occurrence: BTreeMap::default(),
-                    coverage: RetrieverCoverage::default(),
-                    continuation: None,
-                })
-            } else {
-                RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                    detail: "exact and lexical lanes produced no graph seed".to_owned(),
-                })
-            }
-        } else if let Some(graph_serving) = graph_serving {
-            graph_serving.graph.retrieve_graph(
+        let graph_serving = graph_latest.as_ref().map_or_else(
+            || text.search_graph_serving(graph_activation_enabled),
+            |latest| latest.search_graph_serving(graph_activation_enabled),
+        );
+        match graph_serving {
+            Err(failure) => RetrieverOutcome::Unavailable(failure),
+            Ok(_) if graph_seeds.is_empty() => RetrieverOutcome::Complete(RetrieverBatch {
+                candidates: Vec::new(),
+                evidence_by_occurrence: BTreeMap::default(),
+                coverage: RetrieverCoverage::default(),
+                continuation: None,
+            }),
+            Ok(graph_serving) => graph_serving.graph.retrieve_graph(
                 &GraphLaneRequest {
                     base: request.clone(),
                     generation: generation.clone(),
@@ -831,11 +780,7 @@ where
                     budget: request.budget,
                 },
                 graph_control,
-            )?
-        } else {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "persistent code graph is unavailable for this generation".to_owned(),
-            })
+            )?,
         }
     });
     let lanes = vec![

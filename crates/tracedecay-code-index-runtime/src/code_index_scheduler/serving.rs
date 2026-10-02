@@ -38,9 +38,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
-    ExactAdmissionRuleRevision, ManifestDigest, ProjectId, RetrievalBudget, RetrieverBatch,
-    RetrieverOutcome, ScoreDomainId, WorktreeId, canonical_text::encode_lowercase_hex,
-    sha256_hex_suffix,
+    ExactAdmissionRuleRevision, ManifestDigest, ProjectId, RetrievalBudget, RetrievalFailure,
+    RetrieverBatch, RetrieverOutcome, ScoreDomainId, WorktreeId,
+    canonical_text::encode_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_private_fs::{open_private_file, validate_private_directory};
 use tracedecay_runtime_core::resident_memory::{
@@ -82,7 +82,11 @@ use crate::{
             PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
             code_lexical_artifact_content_key,
         },
-        ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
+        ports::{
+            RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+            TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
+            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+        },
     },
 };
 
@@ -90,12 +94,6 @@ use super::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexPublicationStoreV1, ProfiledStdMutex, queries,
 };
 
-/// Page bounds for streaming one sealed generation into the durable lexical
-/// text artifact. One page is one bounded unit of background build progress.
-pub(super) const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = RETRIEVAL_CANDIDATE_BATCH_SIZE;
-const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
-const TEXT_ARTIFACT_BASE_BATCH_PAGES_V1: usize = 64;
-const TEXT_ARTIFACT_BASE_BATCH_BYTES_V1: usize = 64 * 1024 * 1024;
 const TEXT_ARTIFACT_MAXIMUM_BATCH_SCALE_V1: usize = 8;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_BYTES_V1: usize = 4 * 1024;
 const TEXT_ARTIFACT_RESTORE_WITNESS_MAX_FILES_V1: usize = 64;
@@ -850,6 +848,7 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         ) => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
+        CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor => RetrievalPortError::StaleEvidence,
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
             format!("lexical artifact reservation is unavailable: {detail}"),
@@ -941,24 +940,19 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
-pub(super) fn text_artifact_resident_memory_charges(
+/// The bytes one artifact admission reserves: its ceiling plus the band above
+/// the admission watermark, so the reserve call enforces that watermark
+/// against both the ledger and the measured resident set. The band is not
+/// memory the artifact owns and is released right after the reserve;
+/// retaining it in every overlapping build would charge the same
+/// process-wide margin repeatedly. The process's live set is not charged:
+/// the reserve already compares the request with the measured resident set,
+/// which contains it.
+pub(super) fn text_artifact_resident_memory_charge(
     requested: NonZeroU64,
-    unmodeled_live_bytes: u64,
     watermark_headroom: u64,
-) -> Result<(NonZeroU64, NonZeroU64), RetrievalPortError> {
-    let retained = requested
-        .get()
-        .checked_add(unmodeled_live_bytes)
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact resident-memory accounting overflowed".to_owned(),
-            )
-        })?;
-    // Headroom makes the reserve call enforce the lower admission watermark,
-    // but it is not memory owned by this artifact. Retaining it in every
-    // overlapping build charges the same process-wide margin repeatedly.
-    let accounted = retained
+) -> Result<NonZeroU64, RetrievalPortError> {
+    requested
         .get()
         .checked_add(watermark_headroom)
         .and_then(NonZeroU64::new)
@@ -966,33 +960,24 @@ pub(super) fn text_artifact_resident_memory_charges(
             RetrievalPortError::Contract(
                 "text-artifact resident-memory accounting overflowed".to_owned(),
             )
-        })?;
-    Ok((accounted, retained))
+        })
 }
 
 pub(super) fn text_artifact_admitted_build_budget(
     preferred_bytes: u64,
     minimum_bytes: u64,
-    limit_bytes: u64,
-    used_bytes: u64,
-    observed_bytes: u64,
-    watermark_headroom: u64,
+    available_bytes: u64,
 ) -> Result<u64, RetrievalPortError> {
     if minimum_bytes == 0 || preferred_bytes < minimum_bytes {
         return Err(RetrievalPortError::Contract(
             "text-artifact build budget bounds are invalid".to_owned(),
         ));
     }
-    let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
-    let available_for_growth = limit_bytes
-        .saturating_sub(used_bytes)
-        .saturating_sub(unmodeled_live_bytes)
-        .saturating_sub(watermark_headroom);
-    let admitted_bytes = preferred_bytes.min(available_for_growth);
+    let admitted_bytes = preferred_bytes.min(available_bytes);
     if admitted_bytes < minimum_bytes {
         return Err(RetrievalPortError::ResidentMemoryRefused(format!(
             "text-artifact build needs at least {minimum_bytes} bytes; \
-             {available_for_growth} bytes are available below the resident-memory watermark"
+             {available_bytes} bytes are available below the resident-memory watermark"
         )));
     }
     Ok(admitted_bytes)
@@ -1178,11 +1163,10 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
     }
 
-    /// Reserve one artifact memory ceiling plus the freshly observed process
-    /// live set not already represented by reservations for this admission.
-    /// The atomic reserve also includes the process-wide high-watermark
-    /// headroom, then releases that check-only margin before returning while
-    /// the component ceiling and unmodeled live baseline remain charged.
+    /// Reserve one artifact memory ceiling. The atomic reserve also includes
+    /// the process-wide high-watermark headroom, then releases that
+    /// check-only margin before returning while the component ceiling stays
+    /// charged.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -1193,36 +1177,31 @@ impl DaemonCodeTextArtifactStoreV1 {
             .map(|(reservation, _)| reservation)
     }
 
-    /// Measure headroom and size the build: `(observed, unmodeled live,
-    /// watermark headroom, admitted)` bytes.
+    /// Measure headroom and size the build: `(observed, watermark headroom,
+    /// admitted)` bytes.
     fn text_artifact_admission(
         &self,
         preferred: NonZeroU64,
         minimum: NonZeroU64,
-    ) -> Result<(u64, u64, u64, u64), RetrievalPortError> {
-        let snapshot = self.resident_memory.snapshot();
-        let observed_bytes = self.resident_memory.pressure().measure_admission_bytes();
-        let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
-        let admission_watermark = self
+    ) -> Result<(u64, u64, u64), RetrievalPortError> {
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let headroom = self.resident_memory.headroom_below(admission_watermark);
+        let observed_bytes = headroom.observed_bytes;
+        let watermark_headroom = self
             .resident_memory
-            .pressure()
-            .high_watermark_bytes()
-            .min(snapshot.limit_bytes);
-        let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+            .snapshot()
+            .limit_bytes
+            .saturating_sub(admission_watermark);
         let admitted_bytes = text_artifact_admitted_build_budget(
             preferred.get(),
             minimum.get(),
-            snapshot.limit_bytes,
-            snapshot.used_bytes,
-            observed_bytes,
-            watermark_headroom,
-        )?;
-        Ok((
-            observed_bytes,
-            unmodeled_live_bytes,
-            watermark_headroom,
-            admitted_bytes,
-        ))
+            headroom.available_bytes,
+        )
+        .inspect_err(|_| {
+            self.resident_memory
+                .wait_for_headroom(minimum.get(), admission_watermark);
+        })?;
+        Ok((observed_bytes, watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1250,7 +1229,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (observed_bytes, unmodeled_live_bytes, watermark_headroom, admitted_bytes) =
+        let (observed_bytes, watermark_headroom, admitted_bytes) =
             match self.text_artifact_admission(preferred, minimum) {
                 Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
                     let released = self
@@ -1278,21 +1257,14 @@ impl DaemonCodeTextArtifactStoreV1 {
                 "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
             )
         })?;
-        let (accounted, retained) = text_artifact_resident_memory_charges(
-            admitted,
-            unmodeled_live_bytes,
-            watermark_headroom,
-        )?;
+        let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
         hotpath::gauge!("query.artifact.admission.observed_resident_bytes")
             .set(observed_bytes as f64);
-        hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
-            .set(unmodeled_live_bytes as f64);
         hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
             .set(preferred.get() as f64);
         hotpath::gauge!("query.artifact.admission.admitted_growth_bytes")
             .set(admitted.get() as f64);
         hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
-        hotpath::gauge!("query.artifact.admission.retained_bytes").set(retained.get() as f64);
         let mut reservation = self
             .resident_memory
             .reserve(
@@ -1309,7 +1281,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact resident-memory admission was refused: {error}"
                 ))
             })?;
-        reservation.shrink_to(retained.get()).map_err(|error| {
+        reservation.shrink_to(admitted.get()).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact resident-memory headroom release failed: {error}"
             ))
@@ -2143,11 +2115,18 @@ impl LatestCodeTextGenerationV1 {
     pub(super) fn production_graph_serving(
         &self,
     ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
-        match &*self
-            .graph_activation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
+        Self::graph_serving_in(
+            &self
+                .graph_activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn graph_serving_in(
+        activation: &CodeGraphActivationStateV1,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
+        match activation {
             CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
             CodeGraphActivationStateV1::Refused(reason) => {
                 Err(RetrievalPortError::Contract((*reason).to_owned()))
@@ -2158,6 +2137,33 @@ impl LatestCodeTextGenerationV1 {
             CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
                 "code graph projection has not completed activation".to_owned(),
             )),
+        }
+    }
+
+    /// The graph a search lane expands through, or the typed reason it
+    /// cannot, from one activation read. A pending activation on a
+    /// graph-enabled worktree is warming; on a graph-disabled one it never
+    /// activates.
+    pub(super) fn search_graph_serving(
+        &self,
+        graph_activation_enabled: bool,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalFailure> {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Pending if graph_activation_enabled => {
+                Err(RetrievalFailure::GraphWarming)
+            }
+            CodeGraphActivationStateV1::Pending => Err(RetrievalFailure::AuthorityUnavailable {
+                detail: "graph_activation_disabled".to_owned(),
+            }),
+            activation => Self::graph_serving_in(activation).map_err(|error| {
+                RetrievalFailure::AuthorityUnavailable {
+                    detail: error.to_string(),
+                }
+            }),
         }
     }
 }
@@ -2200,6 +2206,10 @@ impl LatestCompleteCodeIndexV1 {
 
     pub(super) fn graph_publication_budget_spent(&self) -> bool {
         self.text.graph_publication_budget_spent()
+    }
+
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        self.text.generation_graph_refusal()
     }
 }
 
@@ -2287,6 +2297,24 @@ impl LatestCodeTextGenerationV1 {
             CodeGraphActivationStateV1::Refused(reason)
                 if reason == super::graph_activation::GRAPH_PUBLICATION_DEADLINE_REASON
         )
+    }
+
+    /// The refusal that holds this generation's graph for its lifetime: a
+    /// spent publication budget or a configuration refusal. A resident-memory
+    /// refusal is retried once memory is given back, so it is not one.
+    pub fn generation_graph_refusal(&self) -> Option<&'static str> {
+        match *self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Refused(reason)
+                if reason != super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn refuse_graph_activation(&self, reason: &'static str) {

@@ -130,7 +130,6 @@ async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: 
         project_id: project.project_id,
         store_id: store.store_id.clone(),
         branch_name: "main".to_string(),
-        db_relpath: "projects/proj_registry/tracedecay.db".to_string(),
         parent_scope_id: None,
         last_synced_at: Some(102),
         writable: true,

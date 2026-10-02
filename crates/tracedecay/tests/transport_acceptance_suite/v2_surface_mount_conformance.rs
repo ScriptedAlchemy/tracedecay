@@ -55,6 +55,7 @@ use tracedecay_api::{
     is_http_application_operation_exposed,
 };
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
+use tracedecay_runtime_core::ast_grep::AST_GREP_BIN_ENV;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
@@ -204,7 +205,9 @@ impl MountFixture {
         );
         common::initialize_tracedecay_cli_project(&home, &project);
 
-        let daemon = common::spawn_tracedecay_daemon(&home);
+        let daemon = common::spawn_tracedecay_daemon_with(&home, |command| {
+            command.env(AST_GREP_BIN_ENV, ast_grep_executable());
+        });
         let authority = wait_for_http_authority(&common::daemon_authority_path(&profile));
 
         let context = run_ok(
@@ -254,8 +257,27 @@ impl MountFixture {
 
 fn isolated_command(home: &Path) -> Command {
     let mut command = common::tracedecay_command_with_home(home);
-    command.env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
     command
+        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
+        .env(AST_GREP_BIN_ENV, ast_grep_executable());
+    command
+}
+
+/// The ast-grep executable the source-edit bindings are graded against.
+///
+/// A fixture child's PATH is the system directories only, and an npm-installed
+/// ast-grep never lives there, so the child is handed the test process's own
+/// executable through the product's explicit override instead.
+fn ast_grep_executable() -> PathBuf {
+    let name = format!("ast-grep{}", std::env::consts::EXE_SUFFIX);
+    std::env::var_os(AST_GREP_BIN_ENV)
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|dir| dir.join(&name))
+                .find(|path| path.is_file())
+        })
+        .expect("ast-grep must be on the test PATH to grade the ast-grep bindings")
 }
 
 fn wait_for_http_authority(path: &Path) -> Value {

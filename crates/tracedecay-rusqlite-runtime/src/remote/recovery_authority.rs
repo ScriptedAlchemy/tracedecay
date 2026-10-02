@@ -51,6 +51,7 @@ pub enum RemoteRecoveryPhysicalEffectErrorV1 {
     TimedOut,
     Unavailable,
     Corruption,
+    WriterAuthorityUnpublished,
 }
 
 /// Idempotent private effects used by the durable journal.
@@ -269,18 +270,7 @@ impl RemoteSqliteStorageV1 {
         &self,
         expected: &RecoveryAuthorityExpectationV1,
     ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let rows = query(
-            self.handle(),
-            "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(&expected.brain_id)],
-        )?;
-        let row = one_row(rows)?;
-        let encoded = row_text(&row, 0)?;
-        let writer: RemoteWriterAuthorityV1 =
-            serde_json::from_str(encoded).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let writer = self.published_recovery_writer(expected)?;
         if !expected.matches_writer(&writer.authority.fence) {
             return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
@@ -291,18 +281,7 @@ impl RemoteSqliteStorageV1 {
         &self,
         expected: &RecoveryAuthorityExpectationV1,
     ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let rows = query(
-            self.handle(),
-            "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
-            vec![text(&expected.brain_id)],
-        )?;
-        let row = one_row(rows)?;
-        let encoded = row_text(&row, 0)?;
-        let writer: RemoteWriterAuthorityV1 =
-            serde_json::from_str(encoded).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let writer = self.published_recovery_writer(expected)?;
         let fence = &writer.authority.fence;
         if fence.brain_id.as_str() != expected.brain_id
             || fence.shard_id.as_str() != expected.shard_id
@@ -312,6 +291,19 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
         Ok(writer)
+    }
+
+    fn published_recovery_writer(
+        &self,
+        expected: &RecoveryAuthorityExpectationV1,
+    ) -> Result<RemoteWriterAuthorityV1, RemoteSqliteStorageErrorV1> {
+        expected
+            .validate()
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let brain_id = tracedecay_domain::BrainId::new(expected.brain_id.clone())
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let row = authority_row(self.handle(), "writer_json", &brain_id)?;
+        serde_json::from_str(row_text(&row, 0)?).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
     }
 }
 
@@ -481,10 +473,7 @@ fn available_authority_state(
         );
     };
     let Ok(row) = one_row(rows) else {
-        return unavailable(
-            RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-            observed_at,
-        );
+        return unavailable(unseeded_authority_reason(handle, expected), observed_at);
     };
     let Some(ExactSqlValue::Text(encoded)) = row.values.first() else {
         return unavailable(
@@ -498,6 +487,24 @@ fn available_authority_state(
             RemoteAuthorityUnavailableReasonV1::FenceUnverified,
             observed_at,
         ),
+    }
+}
+
+/// Recovery authority is seeded from the published writer, so an unseeded one
+/// is unpublished exactly when this node holds no writer authority.
+fn unseeded_authority_reason(
+    handle: &ExactSqlHandle,
+    expected: &RecoveryAuthorityExpectationV1,
+) -> RemoteAuthorityUnavailableReasonV1 {
+    let published = tracedecay_domain::BrainId::new(expected.brain_id.clone())
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+        .and_then(|brain_id| authority_row(handle, "brain_id", &brain_id));
+    match published {
+        Ok(_) => RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+        Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
+            RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished
+        }
+        Err(_) => RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
     }
 }
 
@@ -727,6 +734,9 @@ fn map_physical_error(
         }
         RemoteRecoveryPhysicalEffectErrorV1::Corruption => {
             RemoteRecoveryOperationErrorV1::Corruption
+        }
+        RemoteRecoveryPhysicalEffectErrorV1::WriterAuthorityUnpublished => {
+            RemoteRecoveryOperationErrorV1::WriterAuthorityUnpublished
         }
     }
 }

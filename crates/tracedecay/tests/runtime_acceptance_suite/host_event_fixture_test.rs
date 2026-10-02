@@ -26,7 +26,6 @@ use tracedecay_sessions::admission::{
 };
 use tracedecay_sessions::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_sessions::runtime::source::try_stream_new_jsonl_raw_strict_with_resume;
 use tracedecay_sessions::runtime::{hosts::claude, hosts::codex, hosts::cursor, hosts::hermes};
 use tracedecay_store::ObservationReplayRequest;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
@@ -277,14 +276,22 @@ fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, 
         );
     }
 
-    let project_path = project.to_string_lossy();
+    // The payload's session is attribution, not content: the row names it so
+    // analytics can join a hook to its session, and no other field repeats it.
     let session_id = format!("{provider}-host-fixture");
+    assert_eq!(row["session_id"], session_id.as_str(), "{label}");
+    let mut unattributed = row.clone();
+    unattributed
+        .as_object_mut()
+        .expect("hook row is an object")
+        .remove("session_id");
+    let project_path = project.to_string_lossy();
     for private in [
         project_path.as_ref(),
         session_id.as_str(),
         "Inspect the fixture.",
     ] {
-        assert_json_strings_omit(row, private, &label);
+        assert_json_strings_omit(&unattributed, private, &label);
     }
 }
 
@@ -695,6 +702,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
                 },
                 None,
                 &ObservationCancellation::default(),
+                None,
             )
             .await
             .unwrap();
@@ -1080,45 +1088,27 @@ async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_sem
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 11000);
 }
 
+/// Binaries before the unified observation identity are the only writers of
+/// the per-session Codex source cursor, so a store holding that cursor beside
+/// admitted rows is a store without the unified-identity marker. Its session
+/// authority is refused with the scoped reset, and its rows are neither
+/// re-admitted nor rewritten.
 #[tokio::test]
-async fn legacy_codex_cursor_migrates_to_v2_without_usage_duplication() {
+async fn retired_codex_source_cursor_store_refuses_sessions_with_scoped_reset() {
     let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let project_id = ProjectId::new("project.codex-current-user-replay").unwrap();
-    assert!(
-        Command::new(git_program())
-            .arg("init")
-            .arg(&project)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
-            &project,
-            project_id.as_str()
-        )
-        .unwrap()
-    );
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join("profile"),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    let facade = runtime.facade();
-    let transcript = tmp.path().join("codex-current-user-replay.jsonl");
-    let session_id = "session-current-user-replay";
-    let initial_lines = [
+    let transcript = tmp.path().join("retired-source.jsonl");
+    let session_id = "session-retired-codex-source";
+    let lines = [
         json!({"timestamp":"2026-09-03T21:08:01.000Z","type":"session_meta","payload":{"id":session_id,"cwd":project}}),
         json!({"timestamp":"2026-09-03T21:08:01.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2,"cached_input_tokens":3,"reasoning_output_tokens":1,"total_tokens":12}}}}),
-        json!({"timestamp":"2026-09-03T21:08:01.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"ordinarily-admitted-user-item","content":[{"type":"text","text":"Recover replay-marker ordinary prompt."}]}}}),
+        json!({"timestamp":"2026-09-03T21:08:01.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"retired-source-user-item","content":[{"type":"text","text":"Admitted before the unified identity."}]}}}),
     ];
     std::fs::write(
         &transcript,
-        initial_lines
+        lines
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -1126,741 +1116,87 @@ async fn legacy_codex_cursor_migrates_to_v2_without_usage_duplication() {
             + "\n",
     )
     .unwrap();
-    let ordinary_source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(session_id).unwrap(),
-    )
-    .unwrap();
-    let project_scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
-    };
-    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let facade = runtime.facade();
+    let admitted = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
         &transcript,
-        &project,
-        project_id.clone(),
+        Some(session_id),
+        &[],
         &facade,
         None,
     )
     .await
     .unwrap();
-    let initial_length = std::fs::metadata(&transcript).unwrap().len();
-    let project_observations = runtime
-        .replay_observations(
-            HostAdmissionScope::Project,
-            ObservationReplayRequest::new(0, 32).unwrap(),
-        )
-        .await
-        .unwrap();
-    let canonical_source = project_observations
-        .first()
-        .expect("ordinary v2 admission must persist project observations")
-        .observation()
-        .source()
-        .clone();
-    assert!(canonical_source.explicit_source_key().is_some());
-    let canonical_cursor = facade
-        .get_source_cursor(&canonical_source, &project_scope)
-        .await
-        .unwrap()
-        .expect("ordinary v2 admission must publish its exact cursor");
-    assert_eq!(canonical_cursor.position(), initial_length);
+    assert_eq!(admitted.frames_persisted, 3);
     let scope = ObservationScopeV1::Profile;
+    let checkpoint = facade
+        .get_source_cursor(
+            &codex::codex_observation_source_v2(session_id).unwrap(),
+            &scope,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     facade
         .advance_non_durable_source_cursor(
             ObservationCursorAdvance::new(
-                ordinary_source.clone(),
-                scope.clone(),
-                canonical_cursor.generation(),
+                ObservationSourceIdentityV1::for_provider(
+                    ProviderId::new("codex").unwrap(),
+                    SessionId::new(session_id).unwrap(),
+                )
+                .unwrap(),
+                scope,
+                checkpoint.generation(),
                 None,
-                ObservationSourceRangeV1::new(0, initial_length).unwrap(),
+                ObservationSourceRangeV1::new(0, checkpoint.position()).unwrap(),
                 ObservationCoverageReason::UnsupportedFact,
             )
             .unwrap()
             .with_resume_checkpoint(
-                canonical_cursor
-                    .file_identity()
-                    .expect("project cursor must retain file identity"),
-                canonical_cursor
-                    .resume_fingerprint()
-                    .expect("project cursor must retain its prefix fingerprint"),
+                checkpoint.file_identity().unwrap(),
+                checkpoint.resume_fingerprint().unwrap(),
             ),
             ObservationCancellation::default(),
         )
         .await
         .unwrap();
+    let db_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
     drop(facade);
     drop(runtime);
 
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join("profile"),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    let facade = runtime.facade();
-    let recovery = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        recovery.source_deferred,
-        "the restart pass is reserved for bounded replay reconciliation"
-    );
-    let recovered_observations = runtime
-        .replay_observations(
-            HostAdmissionScope::Profile,
-            ObservationReplayRequest::new(0, 32).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        recovered_observations
-            .iter()
-            .filter(|stored| {
-                serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                    stored.observation().payload().clone(),
-                )
-                .is_ok_and(|envelope| {
-                    envelope
-                        .facts()
-                        .iter()
-                        .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
-                })
-            })
-            .count(),
-        1
-    );
-    assert_eq!(
-        recovered_observations
-            .iter()
-            .filter(|stored| {
-                serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                    stored.observation().payload().clone(),
-                )
-                .is_ok_and(|envelope| {
-                    envelope.facts().iter().any(|fact| {
-                        matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. })
-                    })
-                })
-            })
-            .count(),
-        0,
-        "migration recovery must not re-admit historical provider usage"
-    );
-    let current = json!({"timestamp":"2026-09-03T21:08:01.541Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"replayed-user-item","content":[{"type":"text","text":"Recover replay-marker current prompt."}]}}});
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    writeln!(file, "{current}").unwrap();
-    drop(file);
-    let first_advanced_length = std::fs::metadata(&transcript).unwrap().len();
-    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-        &transcript,
-        &project,
-        project_id.clone(),
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    let project_cursor = facade
-        .get_source_cursor(&canonical_source, &project_scope)
-        .await
-        .unwrap()
-        .expect("project v2 cursor must cover the appended current message");
-    assert_eq!(project_cursor.position(), first_advanced_length);
-    let ordinary_cursor = facade
-        .get_source_cursor(&ordinary_source, &scope)
-        .await
-        .unwrap()
-        .expect("legacy cursor must survive the admission restart");
-    facade
-        .advance_non_durable_source_cursor(
-            ObservationCursorAdvance::new(
-                ordinary_source.clone(),
-                scope.clone(),
-                ordinary_cursor.generation(),
-                Some(ordinary_cursor),
-                ObservationSourceRangeV1::new(initial_length, first_advanced_length).unwrap(),
-                ObservationCoverageReason::UnsupportedFact,
-            )
+    let observation_count = || -> i64 {
+        rusqlite::Connection::open(&db_path)
             .unwrap()
-            .with_resume_checkpoint(
-                project_cursor
-                    .file_identity()
-                    .expect("project cursor must retain file identity"),
-                project_cursor
-                    .resume_fingerprint()
-                    .expect("project cursor must retain its prefix fingerprint"),
-            ),
-            ObservationCancellation::default(),
-        )
-        .await
-        .unwrap();
-
-    let progress = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        progress.source_deferred,
-        "replay owns one bounded admission pass"
-    );
-    facade
-        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
-        .await
-        .unwrap();
-    let messages = runtime
-        .search_session_messages_for_test(
-            HostAdmissionScope::Profile,
-            "codex",
-            None,
-            "replay-marker",
-            8,
-        )
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 2);
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.message.message_id == "replayed-user-item")
-    );
-    let later_usage = json!({"timestamp":"2026-09-03T21:08:02.500Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":4,"cached_input_tokens":6,"reasoning_output_tokens":2,"total_tokens":24}}}});
-    let later = json!({"timestamp":"2026-09-03T21:08:02.541Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"replayed-user-item-later","content":[{"type":"text","text":"Recover replay-marker later current prompt."}]}}});
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    writeln!(file, "{later_usage}").unwrap();
-    writeln!(file, "{later}").unwrap();
-    drop(file);
-    drop(messages);
-    drop(facade);
-    drop(runtime);
-
-    let reopened = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join("profile"),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    let reopened_facade = reopened.facade();
-    codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &reopened_facade,
-        None,
-    )
-    .await
-    .unwrap();
-    reopened_facade
-        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
-        .await
-        .unwrap();
-    let replayed = reopened
-        .search_session_messages_for_test(
-            HostAdmissionScope::Profile,
-            "codex",
-            None,
-            "replay-marker",
-            8,
-        )
-        .await
-        .unwrap();
-    assert_eq!(replayed.len(), 3);
-    let replayed_ids = replayed
-        .iter()
-        .map(|message| message.message.message_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        replayed_ids,
-        std::collections::BTreeSet::from([
-            "ordinarily-admitted-user-item",
-            "replayed-user-item",
-            "replayed-user-item-later"
-        ])
-    );
-    let replayed_observations = reopened
-        .replay_observations(
-            HostAdmissionScope::Profile,
-            ObservationReplayRequest::new(0, 32).unwrap(),
-        )
-        .await
-        .unwrap();
-    let replayed_usage_count = replayed_observations
-        .iter()
-        .filter(|stored| {
-            serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                stored.observation().payload().clone(),
-            )
-            .is_ok_and(|envelope| {
-                envelope
-                    .facts()
-                    .iter()
-                    .any(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
-            })
-        })
-        .count();
-    assert_eq!(
-        replayed_usage_count, 1,
-        "historical current-message recovery must not re-admit provider usage"
-    );
-    let replayed_message_count = replayed_observations
-        .iter()
-        .filter(|stored| {
-            serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                stored.observation().payload().clone(),
-            )
-            .is_ok_and(|envelope| {
-                envelope
-                    .facts()
-                    .iter()
-                    .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
-            })
-        })
-        .count();
-    assert_eq!(
-        replayed_message_count, 3,
-        "ordinary and recovery sources must not duplicate current-message observations"
-    );
-}
-
-#[tokio::test]
-async fn rewritten_codex_rollout_abandons_legacy_migration_and_admits_replacement() {
-    let tmp = TempDir::new().unwrap();
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = ProjectId::new("project.codex-rewritten-migration").unwrap();
-    assert!(
-        Command::new(git_program())
-            .arg("init")
-            .arg(&project)
-            .status()
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
             .unwrap()
-            .success()
-    );
-    assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
-            &project,
-            project_id.as_str()
-        )
-        .unwrap()
-    );
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join("profile"),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    let facade = runtime.facade();
-    let transcript = tmp.path().join("codex-rewritten-migration.jsonl");
-    let session_id = "session-rewritten-migration";
-    let session_meta = json!({
-        "timestamp":"2026-09-03T21:08:01.000Z",
-        "type":"session_meta",
-        "payload":{"id":session_id,"cwd":project}
-    });
-    let original_lines = [
-        session_meta.clone(),
-        json!({"timestamp":"2026-09-03T21:08:01.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":30,"reasoning_output_tokens":10,"total_tokens":120}}}}),
-        json!({"timestamp":"2026-09-03T21:08:01.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"rewritten-user-item","content":[{"type":"text","text":"Original prompt whose long suffix ensures the replacement is shorter than the stale migration watermark."}]}}}),
-    ];
-    std::fs::write(
-        &transcript,
-        original_lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n",
-    )
-    .unwrap();
-    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-        &transcript,
-        &project,
-        project_id.clone(),
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    let project_scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
     };
-    let project_observations = runtime
-        .replay_observations(
-            HostAdmissionScope::Project,
-            ObservationReplayRequest::new(0, 16).unwrap(),
-        )
-        .await
-        .unwrap();
-    let canonical_source = project_observations[0].observation().source().clone();
-    let project_cursor = facade
-        .get_source_cursor(&canonical_source, &project_scope)
-        .await
+    rusqlite::Connection::open(&db_path)
         .unwrap()
-        .expect("project admission cursor");
-    let original_length = project_cursor.position();
-    let legacy_source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(session_id).unwrap(),
-    )
-    .unwrap();
-    let profile_scope = ObservationScopeV1::Profile;
-    facade
-        .advance_non_durable_source_cursor(
-            ObservationCursorAdvance::new(
-                legacy_source,
-                profile_scope.clone(),
-                project_cursor.generation(),
-                None,
-                ObservationSourceRangeV1::new(0, original_length).unwrap(),
-                ObservationCoverageReason::UnsupportedFact,
-            )
-            .unwrap()
-            .with_resume_checkpoint(
-                project_cursor.file_identity().unwrap(),
-                project_cursor.resume_fingerprint().unwrap(),
-            ),
-            ObservationCancellation::default(),
+        .execute(
+            "DELETE FROM global_schema_migrations \
+             WHERE migration = 'observations-unified-identity-v1'",
+            [],
         )
-        .await
         .unwrap();
+    assert_eq!(observation_count(), 3);
 
-    let migrated = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(migrated.source_deferred);
-    let pre_rewrite_cursor = facade
-        .get_source_cursor(&canonical_source, &profile_scope)
-        .await
-        .unwrap()
-        .expect("v2 migration cursor");
-    assert_eq!(pre_rewrite_cursor.position(), original_length);
-
-    let replacement_lines = [
-        session_meta,
-        json!({"timestamp":"2026-09-03T21:08:02.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":7,"output_tokens":2,"cached_input_tokens":1,"reasoning_output_tokens":0,"total_tokens":9}}}}),
-        json!({"timestamp":"2026-09-03T21:08:02.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"rewritten-user-item","content":[{"type":"text","text":"Replacement prompt."}]}}}),
-    ];
-    std::fs::write(
-        &transcript,
-        replacement_lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n",
-    )
-    .unwrap();
-    let replacement_length = std::fs::metadata(&transcript).unwrap().len();
-    assert!(replacement_length < original_length);
-
-    let replacement = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        !replacement.source_deferred,
-        "a stale legacy watermark must not retain migration ownership"
-    );
-    assert_eq!(replacement.frames_persisted, 3);
-    let replacement_cursor = facade
-        .get_source_cursor(&canonical_source, &profile_scope)
-        .await
-        .unwrap()
-        .expect("replacement v2 cursor");
-    assert_eq!(replacement_cursor.position(), replacement_length);
-    assert_ne!(
-        replacement_cursor.generation(),
-        pre_rewrite_cursor.generation()
-    );
-    facade
-        .drain_projection_queue(
-            "codex",
-            &profile_scope,
-            &ObservationCancellation::default(),
-            16,
-        )
-        .await
-        .unwrap();
-    let messages = runtime
-        .search_session_messages_for_test(
-            HostAdmissionScope::Profile,
-            "codex",
-            None,
-            "Replacement prompt",
-            8,
-        )
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].message.message_id, "rewritten-user-item");
-    let observations = runtime
-        .replay_observations(
-            HostAdmissionScope::Profile,
-            ObservationReplayRequest::new(0, 32).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        observations
-            .iter()
-            .filter(|stored| {
-                serde_json::from_value::<CanonicalObservationEnvelopeV1>(
-                    stored.observation().payload().clone(),
-                )
-                .is_ok_and(|envelope| {
-                    envelope.facts().iter().any(|fact| {
-                        matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. })
-                    })
-                })
-            })
-            .count(),
-        1,
-        "replacement usage must be admitted instead of skipped below a stale watermark"
-    );
-}
-
-#[tokio::test]
-async fn replacement_generation_supersedes_a_valid_legacy_prefix_watermark() {
-    let tmp = TempDir::new().unwrap();
-    let project = tmp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = ProjectId::new("project.codex-replacement-generation").unwrap();
-    assert!(
-        Command::new(git_program())
-            .arg("init")
-            .arg(&project)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
-            &project,
-            project_id.as_str()
-        )
-        .unwrap()
-    );
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        tmp.path().join("profile"),
-        &project,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
-    let facade = runtime.facade();
-    let transcript = tmp.path().join("codex-replacement-generation.jsonl");
-    let session_id = "session-replacement-generation";
-    let session_meta = json!({
-        "timestamp":"2026-09-03T21:08:01.000Z",
-        "type":"session_meta",
-        "payload":{"id":session_id,"cwd":project}
-    });
-    let session_meta_line = session_meta.to_string() + "\n";
-    let original_suffix = [
-        json!({"timestamp":"2026-09-03T21:08:01.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":30,"reasoning_output_tokens":10,"total_tokens":120}}}}),
-        json!({"timestamp":"2026-09-03T21:08:01.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"old-generation-item","content":[{"type":"text","text":"Old generation prompt."}]}}}),
-    ];
-    std::fs::write(
-        &transcript,
-        session_meta_line.clone()
-            + &original_suffix
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-            + "\n",
-    )
-    .unwrap();
-    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-        &transcript,
-        &project,
-        project_id.clone(),
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    let project_scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
+    let error = match HostAdmissionTestRuntimeV1::profile(&profile).await {
+        Ok(_) => panic!("a store holding the retired Codex source must refuse its sessions"),
+        Err(error) => error,
     };
-    let project_observations = runtime
-        .replay_observations(
-            HostAdmissionScope::Project,
-            ObservationReplayRequest::new(0, 16).unwrap(),
-        )
-        .await
-        .unwrap();
-    let canonical_source = project_observations[0].observation().source().clone();
-    let project_cursor = facade
-        .get_source_cursor(&canonical_source, &project_scope)
-        .await
-        .unwrap()
-        .expect("project admission cursor");
-    let prefix_scan = try_stream_new_jsonl_raw_strict_with_resume(
-        &transcript,
-        Default::default(),
-        Some(session_meta_line.len() as u64),
-        1024 * 1024,
-        None,
-    )
-    .unwrap();
-    assert_eq!(prefix_scan.frames.len(), 1);
-    let legacy_position = prefix_scan.frames[0].end_offset;
-    let legacy_source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(session_id).unwrap(),
-    )
-    .unwrap();
-    let profile_scope = ObservationScopeV1::Profile;
-    facade
-        .advance_non_durable_source_cursor(
-            ObservationCursorAdvance::new(
-                legacy_source,
-                profile_scope.clone(),
-                project_cursor.generation(),
-                None,
-                ObservationSourceRangeV1::new(0, legacy_position).unwrap(),
-                ObservationCoverageReason::UnsupportedFact,
-            )
-            .unwrap()
-            .with_resume_checkpoint(
-                prefix_scan.file_identity,
-                prefix_scan.frames[0].resume_fingerprint,
-            ),
-            ObservationCancellation::default(),
-        )
-        .await
-        .unwrap();
-
-    let migration = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(migration.source_deferred);
-    codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    let old_cursor = facade
-        .get_source_cursor(&canonical_source, &profile_scope)
-        .await
-        .unwrap()
-        .expect("ordinary v2 cursor");
-
-    let replacement_suffix = [
-        json!({"timestamp":"2026-09-03T21:08:02.250Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":7,"output_tokens":2,"cached_input_tokens":1,"reasoning_output_tokens":0,"total_tokens":9}}}}),
-        json!({"timestamp":"2026-09-03T21:08:02.300Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"replacement-generation-item","content":[{"type":"text","text":"Replacement generation prompt."}]}}}),
-    ];
-    std::fs::write(
-        &transcript,
-        session_meta_line
-            + &replacement_suffix
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-            + "\n",
-    )
-    .unwrap();
-    let replacement = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(!replacement.source_deferred);
-    let replacement_cursor = facade
-        .get_source_cursor(&canonical_source, &profile_scope)
-        .await
-        .unwrap()
-        .expect("replacement v2 cursor");
-    assert_ne!(replacement_cursor.generation(), old_cursor.generation());
-
-    let observations_before_retry = runtime
-        .replay_observations(
-            HostAdmissionScope::Profile,
-            ObservationReplayRequest::new(0, 32).unwrap(),
-        )
-        .await
-        .unwrap()
-        .len();
-    let retry = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &transcript,
-        Some(session_id),
-        &[],
-        &facade,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        !retry.source_deferred,
-        "a replacement v2 generation is the sole live cursor authority"
-    );
-    assert_eq!(retry.bytes_consumed, 0);
     assert_eq!(
-        facade
-            .get_source_cursor(&canonical_source, &profile_scope)
-            .await
-            .unwrap()
-            .expect("stable replacement cursor")
-            .generation(),
-        replacement_cursor.generation()
+        error.reset_required_context(),
+        Some((
+            "observations",
+            "observation rows predate the unified observation identity and cannot be read; \
+             reset the profile so ingestion can rebuild them from host transcripts"
+        ))
     );
-    assert_eq!(
-        runtime
-            .replay_observations(
-                HostAdmissionScope::Profile,
-                ObservationReplayRequest::new(0, 32).unwrap(),
-            )
-            .await
-            .unwrap()
-            .len(),
-        observations_before_retry
-    );
+    assert_eq!(observation_count(), 3);
 }
 
 #[tokio::test]

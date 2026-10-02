@@ -145,6 +145,7 @@ pub fn local_branch_snapshots_controlled(
 mod tests {
     use std::process::Command;
 
+    use tracedecay_contracts::branch_snapshots::LocalBranchSnapshotErrorV1;
     use tracedecay_contracts::{CancellationSignal, Deadline, clock};
 
     use super::*;
@@ -220,7 +221,13 @@ mod tests {
             resolved.commit.as_str(),
             git(root.path(), &["rev-parse", "HEAD"])
         );
-        assert!(local_branch_revision_controlled(root.path(), "missing", &control(1)).is_err());
+        assert_eq!(
+            local_branch_revision_controlled(root.path(), "missing", &control(1))
+                .expect_err("missing ref"),
+            LocalBranchSnapshotErrorV1::NotFound {
+                branch: "missing".to_owned(),
+            }
+        );
     }
 
     #[test]

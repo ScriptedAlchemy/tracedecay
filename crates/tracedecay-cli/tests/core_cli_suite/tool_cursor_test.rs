@@ -627,3 +627,217 @@ fn search_format_json_prints_the_whole_typed_result() {
         stdout.len()
     );
 }
+
+/// Where a `tool --json` stdout document carries its refusal: its members,
+/// `isError`, and the members of its structured content.
+fn refusal_placement(stdout: &str) -> Value {
+    let printed: Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|error| panic!("refusal printed non-JSON ({error}):\n{stdout}"));
+    let members = |value: &Value| {
+        value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+    };
+    json!({
+        "members": members(&printed),
+        "is_error": printed["isError"],
+        "structured_members": members(&printed["structuredContent"]),
+    })
+}
+
+fn problem_of(stdout: &str) -> Value {
+    serde_json::from_str::<Value>(stdout).unwrap()["structuredContent"]["problem"].clone()
+}
+
+/// A compatibility tool's refusal, a typed application tool's refusal, and a
+/// refusal no daemon was there to answer all print one `--json` shape: the
+/// typed problem record at `structuredContent.problem`, beside `isError`.
+#[test]
+fn every_json_refusal_prints_one_typed_problem_placement() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &hub_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    hub_node_id(&home, &project);
+
+    let search = run_tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &json!({"query": "hub", "limit": 2, "cursor": "not-a-cursor", "format": "json"}),
+    );
+    let callers = run_tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &json!({"node_id": "symbol.no-such-node"}),
+    );
+    let socket = home.join("no-daemon.sock");
+    let unreachable = tracedecay_command_with_home(&home)
+        .current_dir(&project)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket)
+        .args(["tool", "tracedecay_status", "--json"])
+        .output()
+        .expect("tracedecay tool should run");
+    stop_managed_daemon(&home);
+    let unreachable_stdout = String::from_utf8_lossy(&unreachable.stdout).into_owned();
+
+    let expected = json!({
+        "members": ["content", "isError", "structuredContent"],
+        "is_error": true,
+        "structured_members": ["problem"],
+    });
+    assert_eq!(
+        [
+            refusal_placement(&search.stdout),
+            refusal_placement(&callers.stdout),
+            refusal_placement(&unreachable_stdout),
+        ],
+        [expected.clone(), expected.clone(), expected],
+        "search:\n{}\ncallers:\n{}\nunreachable:\n{unreachable_stdout}",
+        search.stdout,
+        callers.stdout,
+    );
+    assert_eq!(
+        (search.success, callers.success, unreachable.status.code()),
+        (false, false, Some(69))
+    );
+
+    let search = problem_of(&search.stdout);
+    let callers = problem_of(&callers.stdout);
+    let unreachable = problem_of(&unreachable_stdout);
+    assert_eq!(
+        [
+            (&search["kind"], &search["code"], &search["retry"]),
+            (&callers["kind"], &callers["code"], &callers["retry"]),
+            (
+                &unreachable["kind"],
+                &unreachable["diagnostic"]["code"],
+                &unreachable["retry"]
+            ),
+        ],
+        [
+            (
+                &json!("invalid_request"),
+                &json!("cursor.invalid"),
+                &json!("never")
+            ),
+            (
+                &json!("not_found_or_not_authorized"),
+                &json!("not_found_or_not_authorized"),
+                &json!("never"),
+            ),
+            (
+                &json!("unavailable"),
+                &json!("daemon.unreachable"),
+                &json!("after_delay")
+            ),
+        ],
+        "search {search}\ncallers {callers}\nunreachable {unreachable}"
+    );
+    assert_eq!(
+        (&unreachable["detail"], &unreachable["legal_actions"]),
+        (
+            &json!({
+                "kind": "daemon_unreachable",
+                "socket": socket.display().to_string(),
+                "named_by": "TRACEDECAY_DAEMON_SOCKET",
+                "service_unit": {"state": "not_installed"},
+            }),
+            &json!(["retry"]),
+        ),
+        "{unreachable}"
+    );
+}
+
+/// A tool's `--json` answer as it printed it, and the JSON body inside it.
+fn json_answer(run: &ToolRun) -> (Value, Value) {
+    assert!(run.success, "{}\n{}", run.stdout, run.stderr);
+    let printed: Value = serde_json::from_str(&run.stdout)
+        .unwrap_or_else(|error| panic!("answer printed non-JSON ({error}):\n{}", run.stdout));
+    let body = printed["content"][0]["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(Value::Null);
+    (printed, body)
+}
+
+/// A graph read (`search`) and a typed application read (`callers`) print one
+/// `--json` answer shape: the tool result with the whole typed result under
+/// `structuredContent`, the same document a refusal prints.
+#[test]
+fn every_json_answer_prints_one_tool_result_shape() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    committed_git_project(&project, &hub_source());
+    initialize_tracedecay_cli_project(&home, &project);
+    hub_node_id(&home, &project);
+    let leaf = node_id(&home, &project, "leaf_01");
+
+    let (search, search_body) = json_answer(&run_tool(
+        &home,
+        &project,
+        "tracedecay_search",
+        &json!({"query": "leaf", "limit": 2, "format": "json"}),
+    ));
+    let (callers, callers_body) = json_answer(&run_tool(
+        &home,
+        &project,
+        "tracedecay_callers",
+        &json!({"node_id": leaf, "format": "json"}),
+    ));
+    stop_managed_daemon(&home);
+
+    let members = |value: &Value| {
+        value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+    };
+    assert_eq!(
+        [
+            (members(&search), &search["isError"]),
+            (members(&callers), &callers["isError"]),
+        ],
+        [
+            (
+                Some(vec![
+                    "content".to_owned(),
+                    "isError".to_owned(),
+                    "structuredContent".to_owned()
+                ]),
+                &json!(false)
+            ),
+            (
+                Some(vec![
+                    "content".to_owned(),
+                    "isError".to_owned(),
+                    "structuredContent".to_owned()
+                ]),
+                &json!(false)
+            ),
+        ],
+        "search:\n{search:#}\ncallers:\n{callers:#}"
+    );
+    assert_eq!(
+        (&search["structuredContent"], &callers["structuredContent"]),
+        (&search_body, &callers_body),
+        "structuredContent is the whole typed result the body renders"
+    );
+    assert_eq!(
+        (
+            search_body["results"].as_array().map(Vec::len),
+            callers_body["outcome"]["value"]["payload"]["items"]
+                .as_array()
+                .map(|items| items
+                    .iter()
+                    .map(|item| item["symbol"]["name"].clone())
+                    .collect::<Vec<_>>()),
+        ),
+        (Some(2), Some(vec![json!("hub")])),
+        "search {search_body}\ncallers {callers_body}"
+    );
+}

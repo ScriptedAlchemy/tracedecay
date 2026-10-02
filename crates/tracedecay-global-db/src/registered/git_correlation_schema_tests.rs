@@ -8,8 +8,8 @@ use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use crate::tests::harness::open_registered_test_database_fixture;
 
 /// A store recorded at the whole-projection Git evidence schema (version 5)
-/// is refused with the typed reset and left byte-for-byte untouched: nothing
-/// converts or copies the older shape.
+/// is admitted in its typed reset-required state and left byte-for-byte
+/// untouched: nothing converts or copies the older shape.
 #[tokio::test]
 async fn an_older_git_correlation_schema_is_refused_without_mutation() {
     crate::register_registered_schema_installer();
@@ -33,19 +33,23 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
         .unwrap();
     let before = fs::read(&database_path).unwrap();
 
-    let error = match open_registered_test_database_fixture(&database_path, scope()).await {
-        Ok(_) => panic!("an older Git correlation schema must not be admitted"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        TraceDecayError::ProfileResetRequired {
-            component: "git correlation",
-            found_version: Some(5),
-            required_version: 6,
-        }
-    ));
+    let (lease, owner) = open_registered_test_database_fixture(&database_path, scope())
+        .await
+        .expect("the store's other authorities stay admissible");
+    for refusal in [lease.reset_required(), owner.reset_required()] {
+        assert!(
+            matches!(
+                refusal,
+                Some(TraceDecayError::ProfileResetRequired {
+                    component: "git correlation",
+                    found_version: Some(5),
+                    required_version: 6,
+                })
+            ),
+            "an older Git correlation schema refuses session features: {refusal:?}"
+        );
+    }
+    drop((lease, owner));
     assert_eq!(
         fs::read(&database_path).unwrap(),
         before,

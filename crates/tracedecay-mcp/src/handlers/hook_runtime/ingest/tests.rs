@@ -1,7 +1,12 @@
 use super::super::*;
+use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
+use super::kernels::{TranscriptCaptureContext, transcript_capture_kernel};
 use crate::structured_hook_error_data;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_sessions::observation::ObservationCancellation;
 
 use super::*;
 
@@ -260,41 +265,66 @@ fn claude_postcompact_without_machine_provenance_is_read_only_unavailable() {
     );
 }
 
-#[test]
-fn capture_registry_owns_every_supported_transcript_route() {
-    use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
+#[tokio::test]
+async fn capture_registry_owns_every_supported_transcript_route() {
+    let request = HookIngestTranscriptRequestV1 {
+        provider: "fixture".to_owned(),
+        user_scope: false,
+        session_id: None,
+        event_json: None,
+        messages: None,
+        max_new_bytes: None,
+    };
+    let cancellation = ObservationCancellation::default();
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
+    let context = TranscriptCaptureContext {
+        cg: None,
+        request: &request,
+        user_scope: false,
+        profile_root: None,
+        global_db: None,
+        session_authorities: SessionAuthorities::default(),
+        facade: &facade,
+        max_new_bytes: None,
+        cancellation: &cancellation,
+    };
 
-    for route in [
-        ("claude", true, SourceScan),
-        ("codex", true, SourceScan),
-        ("cursor", true, SourceScan),
-        ("hermes", true, SourceScan),
-        ("kiro", true, SourceScan),
-        ("codex", false, SourceScan),
-        ("cursor", false, SourceScan),
-        ("hermes", false, SourceScan),
-        ("kiro", false, SourceScan),
-        // The Hermes turn callback inlines its messages; it is a registered
-        // capture route, not a branch above the lookup.
-        ("hermes", true, InlineMessages),
-        ("hermes", false, InlineMessages),
-    ] {
-        assert!(
-            super::kernels::transcript_capture_kernel(route.0, route.1, route.2).is_some(),
-            "no capture kernel registered for {route:?}"
-        );
+    let profile = "missing client profile";
+    let project = "project transcript ingest requires a project";
+    let session = "missing required parameter `session_id`";
+    let registered = [
+        ("claude", true, SourceScan, profile),
+        ("codex", true, SourceScan, profile),
+        ("cursor", true, SourceScan, profile),
+        ("hermes", true, SourceScan, profile),
+        ("kiro", true, SourceScan, profile),
+        ("codex", false, SourceScan, project),
+        ("cursor", false, SourceScan, project),
+        ("hermes", false, SourceScan, project),
+        ("kiro", false, SourceScan, project),
+        ("pi", false, SourceScan, project),
+        ("hermes", true, InlineMessages, session),
+        ("hermes", false, InlineMessages, session),
+    ];
+    for (provider, user_scope, route, message) in registered {
+        let kernel = transcript_capture_kernel(provider, user_scope, route).unwrap_or_else(|| {
+            panic!("no capture kernel registered for ({provider}, {user_scope}, {route:?})")
+        });
+        match kernel.capture(context.clone()).await {
+            Err(TraceDecayError::Config { message: actual }) => assert_eq!(actual, message),
+            Err(other) => panic!("expected a config refusal, got {other}"),
+            Ok(_) => panic!("capture must refuse an empty context for {provider}"),
+        }
     }
-    // Routes with no registered kernel are reported through the typed
-    // `unknown_provider` admission status rather than a generic config error.
-    for route in [
+    for (provider, user_scope, route) in [
         ("claude", false, SourceScan),
         ("claude", true, InlineMessages),
         ("codex", false, InlineMessages),
         ("unknown-provider-v99", true, SourceScan),
     ] {
         assert!(
-            super::kernels::transcript_capture_kernel(route.0, route.1, route.2).is_none(),
-            "unexpected capture kernel registered for {route:?}"
+            transcript_capture_kernel(provider, user_scope, route).is_none(),
+            "unexpected capture kernel registered for ({provider}, {user_scope}, {route:?})"
         );
     }
 }

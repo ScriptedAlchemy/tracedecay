@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
-use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
+use tracedecay_code_extraction::{CallableArityV1, ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_domain::{NodeKind, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use super::FileGenerationArtifactsV1;
@@ -95,6 +95,8 @@ pub(super) struct ModuleImportIndexV1<'a> {
     ruby_load_path: HashMap<&'a str, Vec<usize>>,
     /// Per Ruby file, the files its require chain loads (itself included).
     ruby_loaded: Vec<OnceLock<(Vec<usize>, bool)>>,
+    /// Declared parameter lists, by symbol.
+    arities: HashMap<&'a SymbolOccurrenceId, CallableArityV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,7 @@ impl<'a> ModuleImportIndexV1<'a> {
             ruby_constants: HashSet::new(),
             ruby_load_path: HashMap::new(),
             ruby_loaded: (0..files.len()).map(|_| OnceLock::new()).collect(),
+            arities: HashMap::new(),
         };
         for (file_index, file) in files.iter().enumerate() {
             let file = file.as_ref();
@@ -168,6 +171,9 @@ impl<'a> ModuleImportIndexV1<'a> {
                 .or_default()
                 .push((file_index, symbol));
             self.register_declaration(language, file_index, symbol);
+        }
+        for row in &file.artifacts.callable_arities {
+            self.arities.insert(&row.occurrence, row.arity);
         }
         match language {
             "python" if name == "__init__.py" => {
@@ -276,7 +282,12 @@ impl<'a> ModuleImportIndexV1<'a> {
         let target = match file.extraction.language.as_str() {
             "python" => self.python_call(file, &identifier_path(name, &["."])?),
             "go" => self.go_call(index, file, &identifier_path(name, &["."])?),
-            "java" => self.java_call(index, file, &identifier_path(name, &["."])?),
+            "java" => self.java_call(
+                index,
+                file,
+                &identifier_path(name, &["."])?,
+                reference.argument_count,
+            ),
             "ruby" => {
                 let (absolute, name) = match name.strip_prefix("::") {
                     Some(rest) => (true, rest),
@@ -305,18 +316,16 @@ impl<'a> ModuleImportIndexV1<'a> {
     }
 
     /// Every retained Python, Go, Java, and Ruby call that is a caller gap.
-    pub(super) fn call_gaps(&self) -> Vec<CodeIndexUnresolvedReferenceV1> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| is_module_import_language(file.extraction.language.as_str()))
-            .flat_map(|(index, file)| {
-                file.artifacts
-                    .unresolved_references
-                    .iter()
-                    .filter(move |reference| self.is_call_gap(index, reference))
+    pub(super) fn call_gaps<'r>(
+        &self,
+        references: impl Iterator<Item = (usize, &'r CodeIndexUnresolvedReferenceV1)>,
+    ) -> Vec<CodeIndexUnresolvedReferenceV1> {
+        references
+            .filter(|&(index, reference)| {
+                is_module_import_language(self.files[index].extraction.language.as_str())
+                    && self.is_call_gap(index, reference)
             })
-            .cloned()
+            .map(|(_, reference)| reference.clone())
             .collect()
     }
 
@@ -350,6 +359,19 @@ impl<'a> ModuleImportIndexV1<'a> {
     /// clause is no member: `package main` shares `main.go::main` with
     /// `func main`.
     fn member(&self, file_index: usize, container: &str, name: &str) -> Option<TargetV1<'a>> {
+        self.member_accepting(file_index, container, name, None)
+    }
+
+    /// [`Self::member`] among the overloads whose declared parameters accept
+    /// a call passing `arguments`; overloads the count cannot tell apart,
+    /// or none that accepts it, are a gap.
+    fn member_accepting(
+        &self,
+        file_index: usize,
+        container: &str,
+        name: &str,
+        arguments: Option<u32>,
+    ) -> Option<TargetV1<'a>> {
         let found = self
             .by_qualified
             .get(format!("{container}::{name}").as_str())
@@ -362,11 +384,21 @@ impl<'a> ModuleImportIndexV1<'a> {
             })
             .copied()
             .collect::<Vec<_>>();
-        match found.as_slice() {
-            [] => None,
-            [symbol] => Some(TargetV1::Symbol(*symbol)),
-            _ => Some(TargetV1::Unresolved),
+        if found.is_empty() {
+            return None;
         }
+        let accepting = found
+            .into_iter()
+            .filter(|(_, symbol)| {
+                arguments
+                    .zip(self.arities.get(&symbol.occurrence))
+                    .is_none_or(|(arguments, arity)| arity.accepts(arguments))
+            })
+            .collect::<Vec<_>>();
+        Some(match accepting.as_slice() {
+            [symbol] => TargetV1::Symbol(*symbol),
+            _ => TargetV1::Unresolved,
+        })
     }
 
     // --- Python ---------------------------------------------------------
@@ -684,10 +716,11 @@ impl<'a> ModuleImportIndexV1<'a> {
         index: usize,
         file: &FileGenerationArtifactsV1,
         segments: &[&str],
+        arguments: Option<u32>,
     ) -> Option<TargetV1<'a>> {
         let (method, qualifier) = segments.split_last()?;
         if qualifier.is_empty() {
-            return self.java_static_import(file, method);
+            return self.java_static_import(file, method, arguments);
         }
         let class = match qualifier {
             [simple] => self.java_class_name(index, file, simple)?,
@@ -698,7 +731,7 @@ impl<'a> ModuleImportIndexV1<'a> {
                 qualified
             }
         };
-        Some(self.java_class_member(&class, method))
+        Some(self.java_class_member(&class, method, arguments))
     }
 
     /// A bare call through `import static a.C.m` or `import static a.C.*`:
@@ -708,6 +741,7 @@ impl<'a> ModuleImportIndexV1<'a> {
         &self,
         file: &FileGenerationArtifactsV1,
         method: &str,
+        arguments: Option<u32>,
     ) -> Option<TargetV1<'a>> {
         let statics = file
             .artifacts
@@ -718,12 +752,12 @@ impl<'a> ModuleImportIndexV1<'a> {
             .clone()
             .find(|row| !row.is_glob && row.local_name.as_deref() == Some(method))
         {
-            return Some(self.java_class_member(&row.module_specifier, method));
+            return Some(self.java_class_member(&row.module_specifier, method, arguments));
         }
         let mut found = Vec::new();
         let mut project_glob = false;
         for row in statics.filter(|row| row.is_glob) {
-            match self.java_class_member(&row.module_specifier, method) {
+            match self.java_class_member(&row.module_specifier, method, arguments) {
                 TargetV1::External => {}
                 TargetV1::Symbol(symbol) => found.push(symbol),
                 _ => project_glob = true,
@@ -791,10 +825,11 @@ impl<'a> ModuleImportIndexV1<'a> {
             })
     }
 
-    /// Method `method` of class `class`; a project class without that
-    /// method (inherited, overloaded) is a gap, a class outside the project
+    /// Method `method` of class `class`, the overload that accepts the
+    /// call's `arguments`; a project class without that method (inherited)
+    /// or without one such overload is a gap, a class outside the project
     /// binds nothing.
-    fn java_class_member(&self, class: &str, method: &str) -> TargetV1<'a> {
+    fn java_class_member(&self, class: &str, method: &str, arguments: Option<u32>) -> TargetV1<'a> {
         let Some((file_index, symbol)) = self.java_class(class) else {
             let package = class.rsplit_once('.').map_or("", |(package, _)| package);
             return if self.java_packages.contains_key(package) {
@@ -803,7 +838,7 @@ impl<'a> ModuleImportIndexV1<'a> {
                 TargetV1::External
             };
         };
-        self.member(file_index, &symbol.qualified_name, method)
+        self.member_accepting(file_index, &symbol.qualified_name, method, arguments)
             .unwrap_or(TargetV1::Unresolved)
     }
 

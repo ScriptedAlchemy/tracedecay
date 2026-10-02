@@ -19,7 +19,7 @@ use crate::runtime::{
 use super::failure::{
     ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
-    warn_transcript_catch_up_failure,
+    failed_observation_run, warn_transcript_catch_up_failure,
 };
 use super::project_provider::hermes_run_outcome;
 use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
@@ -66,6 +66,7 @@ fn claude_provider_run_outcome(
         stats.source_bytes_scanned,
         stats.deferred_sources > 0 || stats.source_bytes_scanned > max_new_bytes,
     );
+    outcome.coverage_advanced = stats.advanced_coverage();
     if let Some(error) = error.filter(|error| !error.is_typed_cancellation()) {
         let failure = claude_catch_up_failure("observation", error);
         tracing::warn!(
@@ -236,20 +237,12 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 );
                 run
             }
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "codex",
-                        "observation",
-                        &error,
-                        "Codex transcript catch-up failed",
-                    ),
-                    self.max_new_bytes,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "codex",
+                &error,
+                "Codex transcript catch-up failed",
+                self.max_new_bytes,
+            ),
         }
     }
 
@@ -342,20 +335,12 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "kiro",
-                        "observation",
-                        &error,
-                        "user Kiro observation catch-up failed",
-                    ),
-                    self.max_new_bytes,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "kiro",
+                &error,
+                "user Kiro observation catch-up failed",
+                self.max_new_bytes,
+            ),
         }
     }
 
@@ -372,6 +357,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -434,6 +420,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -605,6 +592,7 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            self.codex_discovery,
         )
         .await
         {
@@ -613,20 +601,12 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                 outcome.bytes_consumed,
                 outcome.deferred,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
-                        "vibe",
-                        "observation",
-                        &error,
-                        "user Vibe observation catch-up failed",
-                    ),
-                    self.max_new_bytes,
-                )
-            }
+            Err(error) => failed_observation_run(
+                "vibe",
+                &error,
+                "user Vibe observation catch-up failed",
+                self.max_new_bytes,
+            ),
         }
     }
 }

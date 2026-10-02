@@ -3,6 +3,7 @@
 //! mounted or not, is a unit of the maintenance tick's store window
 //! (`store_maintenance::run_registered_code_generation_retention`).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,12 +56,14 @@ impl Default for ColdStorePageReportV1 {
     }
 }
 
-/// Applies one bounded orphan and debris page to profile stores.
+/// Applies one bounded orphan and debris page to profile stores. A store of
+/// any of `owner_roots` is live whether or not its root is still on disk.
 #[hotpath::measure(label = "maintenance.cold_store.page", future = true)]
 pub async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &RegisteredGlobalDb,
     orphan_store_gc_days: Option<u64>,
+    owner_roots: &BTreeSet<PathBuf>,
     cancellation: &CancellationToken,
 ) -> tracedecay_domain::errors::Result<ColdStorePageReportV1> {
     let checkpoint_path = checkpoint_path(profile_root);
@@ -97,13 +100,14 @@ pub async fn run_cold_store_page(
             }
         }
     }
+    let mut collected_store_ids = BTreeSet::new();
     if let Some(days) = orphan_store_gc_days {
         let now = now_secs_i64().map_err(|message| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: message.to_owned(),
             }
         })?;
-        let findings = orphan_stores::classify_stores(&page.entries, now);
+        let findings = orphan_stores::classify_stores(&page.entries, now, owner_roots);
         let plan = orphan_stores::plan_collection(findings, retention_window_secs(days));
         let (outcome, _) =
             orphan_stores::execute_registered_collection(profile_database, &plan, profile_root)
@@ -117,8 +121,16 @@ pub async fn run_cold_store_page(
         if !outcome.errors.is_empty() {
             report.outcome = ColdStorePageOutcomeV1::Unreadable;
         }
+        collected_store_ids.extend(outcome.collected.into_iter().map(|store| store.store_id));
     }
-    let sweep = incident_debris::sweep_incident_debris(&page.entries, profile_root);
+    // A store this page collected is gone, so it has no debris left to sweep.
+    let surviving: Vec<_> = page
+        .entries
+        .iter()
+        .filter(|entry| !collected_store_ids.contains(&entry.store_id))
+        .cloned()
+        .collect();
+    let sweep = incident_debris::sweep_incident_debris(&surviving, profile_root);
     report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(sweep.reclaimed_bytes);
     report.unavailable_stores = report
         .unavailable_stores

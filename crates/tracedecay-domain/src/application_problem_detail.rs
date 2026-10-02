@@ -31,6 +31,10 @@ pub enum ApplicationProblemDetailV1 {
         requested: u64,
         current: u64,
     },
+    /// A workflow step effect named placement digest `found`, but the step's
+    /// current placement is `expected`: the effect was settled against a
+    /// placement the run has since replaced.
+    WorkflowPlacementDigestStale { expected: String, found: String },
     /// A writer lock stayed held by other writers past its admission
     /// deadline.
     LockDeadline { resource: String, deadline_ms: u64 },
@@ -59,6 +63,31 @@ pub enum ApplicationProblemDetailV1 {
     DiagnosticsPending {
         producer: String,
         generation: Option<String>,
+    },
+    /// No TraceDecay daemon accepts connections on `socket`. `named_by` is
+    /// the environment variable that chose the socket, when one did;
+    /// `service_unit` is what this client observed of the managed service.
+    DaemonUnreachable {
+        socket: String,
+        named_by: Option<String>,
+        service_unit: DaemonServiceUnitObservationV1,
+    },
+}
+
+/// The managed daemon service unit as a client observed it, from the unit
+/// file alone.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DaemonServiceUnitObservationV1 {
+    NotInstalled,
+    /// The unit file could not be read.
+    Unobservable {
+        error: String,
+    },
+    /// The unit file at `path` serves the socket `serves`.
+    Installed {
+        path: String,
+        serves: String,
     },
 }
 
@@ -122,10 +151,12 @@ impl ApplicationProblemDetailV1 {
             Self::Parked { .. } => "application.code-index.parked",
             Self::StaleRefreshFrontier { .. } => "application.retained.refresh-frontier-stale",
             Self::StalePrecondition { .. } => "application.precondition-stale",
+            Self::WorkflowPlacementDigestStale { .. } => "workflow.placement_digest_stale",
             Self::LockDeadline { .. } => "application.lock-deadline",
             Self::ResetRequired { .. } => "application.reset-required",
             Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
             Self::DiagnosticsPending { .. } => "application.diagnostics.pending",
+            Self::DaemonUnreachable { .. } => "daemon.unreachable",
         }
     }
 
@@ -148,6 +179,10 @@ impl ApplicationProblemDetailV1 {
             } => format!(
                 "{field} {requested} does not match the current value {current}; refresh and \
                  resend with {field} {current}."
+            ),
+            Self::WorkflowPlacementDigestStale { expected, found } => format!(
+                "The step effect names placement digest {found}, but the step's current \
+                 placement is {expected}; reread the run and settle against its current placement."
             ),
             Self::LockDeadline {
                 resource,
@@ -194,6 +229,11 @@ impl ApplicationProblemDetailV1 {
                      a complete generation. Retry shortly."
                 )
             }
+            Self::DaemonUnreachable {
+                socket,
+                named_by,
+                service_unit,
+            } => daemon_unreachable_sentence(socket, named_by.as_deref(), service_unit),
         };
         let folded = crate::fold_control_characters(&text);
         crate::utf8_prefix_at_or_before(folded.trim(), MAX_RENDERED_MESSAGE_BYTES)
@@ -230,6 +270,10 @@ impl ApplicationProblemDetailV1 {
                 ("Precondition", field.clone()),
                 ("Requested value", requested.to_string()),
                 ("Current value", current.to_string()),
+            ],
+            Self::WorkflowPlacementDigestStale { expected, found } => vec![
+                ("Expected placement digest", expected.clone()),
+                ("Found placement digest", found.clone()),
             ],
             Self::LockDeadline {
                 resource,
@@ -284,8 +328,60 @@ impl ApplicationProblemDetailV1 {
                     generation.clone().unwrap_or_else(|| "none".to_owned()),
                 ),
             ],
+            // The unbounded sentence names the socket, the variable that chose
+            // it, and the observed unit together with the next step.
+            Self::DaemonUnreachable {
+                socket,
+                named_by,
+                service_unit,
+            } => vec![(
+                "Daemon unreachable",
+                daemon_unreachable_sentence(socket, named_by.as_deref(), service_unit),
+            )],
         }
     }
+}
+
+impl DaemonServiceUnitObservationV1 {
+    /// What the observed unit means for a client that cannot reach `socket`.
+    pub fn advice(&self, socket: &str) -> String {
+        match self {
+            DaemonServiceUnitObservationV1::NotInstalled => {
+                "No managed TraceDecay daemon service is installed. Run `tracedecay \
+                         daemon install-service` only if you want a managed daemon."
+                    .to_owned()
+            }
+            DaemonServiceUnitObservationV1::Unobservable { error } => format!(
+                "This client cannot see whether a managed TraceDecay daemon service is \
+                         installed ({error}). Check `tracedecay daemon status` before starting \
+                         or installing a daemon."
+            ),
+            DaemonServiceUnitObservationV1::Installed { path, serves } if serves == socket => {
+                format!(
+                    "The managed TraceDecay daemon service is installed at '{path}' and \
+                             serves this socket; it may be intentionally held, and passive \
+                             clients do not start it. Check `tracedecay daemon status`, and run \
+                             `tracedecay daemon start` only if you want it running."
+                )
+            }
+            DaemonServiceUnitObservationV1::Installed { path, serves } => format!(
+                "The managed TraceDecay daemon service is installed at '{path}' and \
+                         serves '{serves}', not this socket."
+            ),
+        }
+    }
+}
+
+fn daemon_unreachable_sentence(
+    socket: &str,
+    named_by: Option<&str>,
+    service_unit: &DaemonServiceUnitObservationV1,
+) -> String {
+    let named_by = named_by.map_or_else(String::new, |variable| format!(" named by {variable}"));
+    format!(
+        "TraceDecay daemon socket '{socket}'{named_by} is not available. {}",
+        service_unit.advice(socket)
+    )
 }
 
 fn searched_list(searched: &[DiagnosticsSearchedTsconfigV1]) -> String {

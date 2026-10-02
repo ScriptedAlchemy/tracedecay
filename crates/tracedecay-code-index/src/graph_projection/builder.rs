@@ -70,9 +70,14 @@ pub fn build_sealed_code_graph_rows(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    let inputs = crate::production::CodeGraphBaseInputsWriterV1::create(
+        &spill.attachment_path(),
+        &generation,
+        projector_revision.as_str(),
+    )?;
     let resolution: CodeGraphResolutionV1<'_> = hotpath::measure_block!(
         "code_index.graph.build_rows.resolve",
-        source.resolve_code_graph(read_segment, check)
+        source.resolve_code_graph(read_segment, Some(inputs), check)
     )?;
     let CodeGraphResolutionV1 {
         bound,
@@ -257,7 +262,7 @@ pub(crate) fn unresolved_call_limitations<'a>(
     Ok(unresolved_calls)
 }
 
-fn group_unresolved_calls<'a>(
+pub(super) fn group_unresolved_calls<'a>(
     unresolved_calls: &'a [CodeIndexUnresolvedReferenceV1],
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<BTreeMap<&'a SymbolOccurrenceId, Vec<CodeIndexUnresolvedReferenceV1>>, GraphDbError> {
@@ -500,30 +505,31 @@ where
 /// What the whole generation contributes to every batch's rows: the snapshot
 /// files bindings and imports must belong to, the symbols some batch binds or
 /// describes, and the unresolved calls each source symbol discloses.
-struct CodeGraphRowContext<'a> {
-    projection: &'a GraphProjectionIdentity,
-    generation: &'a CodeGenerationId,
+pub(super) struct CodeGraphRowContext<'a> {
+    pub(super) projection: &'a GraphProjectionIdentity,
+    pub(super) generation: &'a CodeGenerationId,
     /// `None` for a hermetic publish without a snapshot, whose chunks must
     /// name the serving generation instead.
-    files: Option<&'a BTreeMap<&'a FileOccurrenceId, &'a SanitizedCodeFileV1>>,
-    bound: &'a HashSet<SymbolOccurrenceId>,
-    unresolved_by_source: &'a BTreeMap<&'a SymbolOccurrenceId, Vec<CodeIndexUnresolvedReferenceV1>>,
+    pub(super) files: Option<&'a BTreeMap<&'a FileOccurrenceId, &'a SanitizedCodeFileV1>>,
+    pub(super) bound: &'a HashSet<SymbolOccurrenceId>,
+    pub(super) unresolved_by_source:
+        &'a BTreeMap<&'a SymbolOccurrenceId, Vec<CodeIndexUnresolvedReferenceV1>>,
 }
 
 /// One batch of a generation's rows: the files it owns and the chunks,
 /// symbols, imports, and edges those files produced.
-struct CodeGraphRowBatch<'a> {
-    files: &'a [&'a SanitizedCodeFileV1],
-    imports: &'a [CodeIndexImportEvidenceV1],
-    chunks: &'a [Arc<CodeSearchChunkV1>],
-    symbols: &'a [Arc<LineageSymbolRecordV1>],
-    edges: &'a [CanonicalRelationEdgeV1],
-    bindings: Option<&'a BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>>,
+pub(super) struct CodeGraphRowBatch<'a> {
+    pub(super) files: &'a [&'a SanitizedCodeFileV1],
+    pub(super) imports: &'a [CodeIndexImportEvidenceV1],
+    pub(super) chunks: &'a [Arc<CodeSearchChunkV1>],
+    pub(super) symbols: &'a [Arc<LineageSymbolRecordV1>],
+    pub(super) edges: &'a [CanonicalRelationEdgeV1],
+    pub(super) bindings: Option<&'a BTreeMap<SymbolOccurrenceId, CodeGraphSymbolBindingV1>>,
 }
 
-struct EmittedRows {
-    entities: Vec<GraphEntity>,
-    relations: Vec<GraphGenerationRelation>,
+pub(super) struct EmittedRows {
+    pub(super) entities: Vec<GraphEntity>,
+    pub(super) relations: Vec<GraphGenerationRelation>,
 }
 
 pub(super) fn build_projection(
@@ -600,7 +606,7 @@ pub(super) fn build_projection(
 /// one batch, except that an edge target no batch binds or describes is
 /// emitted by each batch whose edges reach it, identically, so the union of
 /// all batches, sorted and deduplicated, is the whole-set projection.
-fn emit_code_graph_rows(
+pub(super) fn emit_code_graph_rows(
     context: &CodeGraphRowContext<'_>,
     batch: &CodeGraphRowBatch<'_>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -862,7 +868,7 @@ fn edge_relation(
     symbol_ids: &BTreeMap<SymbolOccurrenceId, GraphEntityId>,
 ) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
     let payload = serialize(edge)?;
-    let identity = GraphRelationId::new(stable_identity("edge", &hex::encode(&payload)))?;
+    let identity = edge_relation_id_of(&payload)?;
     let from = endpoint_symbol_id(symbol_ids, &edge.from_occurrence)?;
     let to = endpoint_symbol_id(symbol_ids, &edge.to_occurrence)?;
     GraphGenerationRelation::new(
@@ -875,6 +881,29 @@ fn edge_relation(
             record_property(payload)?,
         )]),
     )
+    .map_err(Into::into)
+}
+
+fn edge_relation_id_of(payload: &[u8]) -> Result<GraphRelationId, CodeGraphProjectionError> {
+    GraphRelationId::new(stable_identity("edge", &hex::encode(payload))).map_err(Into::into)
+}
+
+/// The relation identity one retained edge projects to.
+pub(super) fn edge_relation_id(
+    edge: &CanonicalRelationEdgeV1,
+) -> Result<GraphRelationId, CodeGraphProjectionError> {
+    edge_relation_id_of(&serialize(edge)?)
+}
+
+/// The relation identity binding `occurrence` to the file it is bound in.
+pub(super) fn file_symbol_relation_id(
+    binding: &CodeGraphSymbolBindingV1,
+    occurrence: &SymbolOccurrenceId,
+) -> Result<GraphRelationId, CodeGraphProjectionError> {
+    GraphRelationId::new(stable_identity(
+        "file-symbol",
+        &format!("{}\0{}", binding.file.as_str(), occurrence.as_str()),
+    ))
     .map_err(Into::into)
 }
 
@@ -918,10 +947,7 @@ fn file_symbol_relation(
     symbol_id: &GraphEntityId,
 ) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
     GraphGenerationRelation::new(
-        GraphRelationId::new(stable_identity(
-            "file-symbol",
-            &format!("{}\0{}", binding.file.as_str(), occurrence.as_str()),
-        ))?,
+        file_symbol_relation_id(binding, occurrence)?,
         GraphEntityRef::new(projection.clone(), file_id),
         GraphEntityRef::new(projection.clone(), symbol_id.clone()),
         GraphRelationKind::new(FILE_SYMBOL_EDGE_KIND)?,

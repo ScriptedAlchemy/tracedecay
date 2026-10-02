@@ -340,7 +340,7 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = concat!(
            o.source_provider,
            o.snippet_text, ?4
     FROM session_occurrences AS o
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND instr(o.snippet_text, ?4) > 0
       ",
@@ -360,7 +360,7 @@ pub(super) const SCOPE_CANDIDATE_QUERY: &str = concat!(
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
     FROM session_occurrences AS o
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       ",
     occurrence_keyset!("?4", "?5"),
@@ -416,7 +416,7 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
                o.turn_id AS turn_id, o.session_id AS session_id, o.role AS evidence_role,
                o.source_provider AS provider
         FROM session_occurrences AS o
-        WHERE o.session_id = ?1 AND o.generation = ?2
+        WHERE o.session_id = ?1 AND +o.generation <= ?2
           AND (?3 IS NULL OR o.source_provider = ?3)
           AND o.retrieval_anchor_id = ?4
         UNION ALL
@@ -447,7 +447,7 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
-     AND o.generation = frozen.generation
+     AND +o.generation <= frozen.generation
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
@@ -474,7 +474,7 @@ pub(super) const OCCURRENCE_FTS_QUERY: &str = concat!(
            o.source_provider
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND session_occurrences_fts MATCH ?4
       ",
@@ -493,7 +493,7 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
     FROM session_occurrences AS o INDEXED BY idx_session_occurrences_generation_order
-    WHERE o.session_id = ?1 AND o.generation = ?2
+    WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
       AND o.knowledge_at >= ?4 AND o.knowledge_at < ?5
       ",
@@ -544,7 +544,7 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
-     AND frozen.generation = o.generation
+     AND +o.generation <= frozen.generation
      AND frozen.state = 'active'
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
@@ -581,7 +581,7 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
-     AND frozen.generation = o.generation
+     AND +o.generation <= frozen.generation
      AND frozen.state = 'active'
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
@@ -616,7 +616,7 @@ pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
         JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
         JOIN session_temporal_generations AS frozen
           ON frozen.session_id = o.session_id
-         AND frozen.generation = o.generation
+         AND +o.generation <= frozen.generation
          AND frozen.state = 'active'
         JOIN retrieval_anchors AS authority_anchor
           ON authority_anchor.anchor_id = o.retrieval_anchor_id
@@ -648,7 +648,7 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     JOIN session_occurrences AS o
       INDEXED BY idx_session_occurrences_root_generation_order
       ON o.session_id = frozen.session_id
-     AND o.generation = frozen.generation
+     AND +o.generation <= frozen.generation
     JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
     JOIN sessions AS authority_session
@@ -769,9 +769,9 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
     FROM session_derived_evidence AS evidence
     JOIN session_occurrences AS first_occurrence
       ON first_occurrence.session_id = evidence.session_id
-     AND first_occurrence.generation = evidence.generation
+     AND +first_occurrence.generation <= ?2
      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-    WHERE evidence.session_id = ?1 AND evidence.generation = ?2
+    WHERE evidence.session_id = ?1 AND +evidence.generation <= ?2
       AND evidence.evidence_kind = ?3
       AND (?4 IS NULL OR first_occurrence.source_provider = ?4)
       AND EXISTS (
@@ -779,14 +779,14 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
           FROM session_derived_evidence_members AS member
           JOIN session_occurrences AS member_occurrence
             ON member_occurrence.session_id = member.session_id
-           AND member_occurrence.generation = member.generation
+           AND +member_occurrence.generation <= ?2
            AND member_occurrence.occurrence_id = member.occurrence_id
           JOIN session_occurrences_fts
             ON session_occurrences_fts.rowid = member_occurrence.rowid
           WHERE member.session_id = evidence.session_id
-            AND member.generation = evidence.generation
+            AND +member.generation <= ?2
             AND member.evidence_kind = evidence.evidence_kind
-            AND member.evidence_id = evidence.evidence_id
+            AND member.first_occurrence_id = evidence.first_occurrence_id
             AND session_occurrences_fts MATCH ?5
       )
       ",
@@ -815,21 +815,21 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
       ON member_occurrence.rowid = session_occurrences_fts.rowid
     CROSS JOIN session_derived_evidence_members AS member
       ON member.session_id = member_occurrence.session_id
-     AND member.generation = member_occurrence.generation
      AND member.occurrence_id = member_occurrence.occurrence_id
      AND member.evidence_kind = ?2
     CROSS JOIN session_derived_evidence AS evidence
       ON evidence.session_id = member.session_id
-     AND evidence.generation = member.generation
      AND evidence.evidence_kind = member.evidence_kind
-     AND evidence.evidence_id = member.evidence_id
+     AND evidence.first_occurrence_id = member.first_occurrence_id
     CROSS JOIN session_temporal_generations AS frozen
       ON frozen.session_id = evidence.session_id
-     AND frozen.generation = evidence.generation
+     AND +member_occurrence.generation <= frozen.generation
+     AND +member.generation <= frozen.generation
+     AND +evidence.generation <= frozen.generation
      AND frozen.state = 'active'
     CROSS JOIN session_occurrences AS first_occurrence
       ON first_occurrence.session_id = evidence.session_id
-     AND first_occurrence.generation = evidence.generation
+     AND +first_occurrence.generation <= frozen.generation
      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
     CROSS JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = evidence.retrieval_anchor_id
@@ -845,7 +845,7 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
       ",
     derived_root_keyset!("?5", "?6", "?7"),
     "
-    GROUP BY evidence.session_id, evidence.generation,
+    GROUP BY evidence.session_id, frozen.generation,
              evidence.evidence_kind, evidence.evidence_id
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"

@@ -1,13 +1,15 @@
-//! Opens registered projects whose hook spools hold events no running
-//! replay consumer will drain: at startup for every project with spooled
-//! records, and afterwards for each append the spool watch reports on a
-//! project that is not open. Only the Unix daemon composes a `DaemonEngine`.
+//! Opens registered projects whose hook spools hold events or delivery
+//! receipts no running replay consumer will drain: at startup for every
+//! project with spooled records or receipts, and afterwards for each append
+//! or receipt the spool watch reports on a project that is not open. Only the Unix daemon composes a `DaemonEngine`.
 
 use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_hooks::{HookSpoolV1, hook_v2_spool_root};
+use tracedecay_hooks::{
+    HookDeliveryReceiptSpoolV1, HookSpoolV1, hook_delivery_receipt_spool_root, hook_v2_spool_root,
+};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::spool_watch::{SpooledProject, consumer_attached, install_opener, watch_project};
@@ -19,11 +21,31 @@ use crate::daemon::project_routing::{
 
 const REGISTRY_PAGE: usize = 256;
 
+/// Whether any host spool holds records or receipts to drain. A spool that
+/// cannot be read is reported and counted as holding work, so the project's
+/// replay consumer surfaces the fault instead of the opener hiding it.
 fn has_spooled_records(data_root: &Path) -> bool {
     tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS
         .iter()
         .any(|host| {
-            HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)).unwrap_or(false)
+            let records = HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host))
+                .map_err(|error| error.to_string());
+            let receipts = HookDeliveryReceiptSpoolV1::has_receipts(
+                &hook_delivery_receipt_spool_root(data_root, *host),
+            )
+            .map_err(|error| error.to_string());
+            match (records, receipts) {
+                (Ok(records), Ok(receipts)) => records || receipts,
+                (Err(error), _) | (_, Err(error)) => {
+                    tracing::warn!(
+                        host = host.hook_key(),
+                        %error,
+                        data_root = %data_root.display(),
+                        "hook spool could not be inspected at startup; opening its project to drain it"
+                    );
+                    true
+                }
+            }
         })
 }
 

@@ -254,11 +254,7 @@ pub(super) fn clone_artifact_error(error: CodeLexicalArtifactErrorV1) -> Retriev
         CodeLexicalArtifactErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded) => {
             RetrievalPortError::BudgetExceeded
         }
-        CodeLexicalArtifactErrorV1::Contract(message)
-            if message == "clone family cursor does not match its artifact or request" =>
-        {
-            RetrievalPortError::StaleEvidence
-        }
+        CodeLexicalArtifactErrorV1::StaleCloneFamilyCursor => RetrievalPortError::StaleEvidence,
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
 }

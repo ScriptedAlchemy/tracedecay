@@ -1,13 +1,15 @@
+use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use tracedecay_store::{
     AdmissionConfigV1, BatchBudgetV1, OperationPriorityV1, QueueBudgetV1, RuntimeSubmitOutcomeV1,
 };
 
 use super::support::{
-    ExecutorControl, TestBinding, TestDatabase, TestProbe, release, request, runtime, unwrap_arc,
-    writer,
+    ExecutorControl, ReleaseOnDrop, TestBinding, TestDatabase, TestProbe, release, request,
+    runtime, unwrap_arc, writer,
 };
 
 #[test]
@@ -53,6 +55,7 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
             ..ExecutorControl::default()
         },
     ));
+    let _open_gate_on_failure = ReleaseOnDrop(Arc::clone(&gate));
     runtime().block_on(async {
         let first_writer = Arc::clone(&writer);
         let first_probe = TestProbe::fixed(&first);
@@ -67,12 +70,14 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
             'b',
             OperationPriorityV1::Foreground,
         );
-        let started = Instant::now();
-        let outcome = writer
-            .submit(overflow.clone(), TestProbe::fixed(&overflow))
-            .await
-            .unwrap();
-        assert!(started.elapsed() < Duration::from_millis(50));
+        // Immediate means the overflow is refused on its first poll, without
+        // ever waiting for the occupied queue to drain.
+        let outcome = match pin!(writer.submit(overflow.clone(), TestProbe::fixed(&overflow)))
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(outcome) => outcome.unwrap(),
+            Poll::Pending => panic!("saturated overflow waited for queue capacity"),
+        };
         assert!(matches!(outcome, RuntimeSubmitOutcomeV1::Saturated { .. }));
 
         let health = request(

@@ -28,10 +28,7 @@ pub(crate) fn global_db_operation_message(
 pub enum AccountingMode {
     /// No env override, global accounting is on by default.
     Default,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` explicitly enabled it.
-    EnabledByEnv,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
-    /// `TRACEDECAY_DISABLE_GLOBAL_DB` explicitly disabled it.
+    /// A truthy `TRACEDECAY_DISABLE_GLOBAL_DB` disabled it.
     DisabledByEnv,
 }
 
@@ -43,7 +40,6 @@ impl AccountingMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
-            Self::EnabledByEnv => "enabled_by_env",
             Self::DisabledByEnv => "disabled_by_env",
         }
     }
@@ -71,26 +67,14 @@ pub fn env_flag(name: &str) -> bool {
 /// Enabled **by default**: every other writer of the user-level `global.db`
 /// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the
 /// Savings dashboard reads the ledger, an opt-in gate here silently left
-/// the ledger empty while lifetime counters kept growing. Precedence:
-///
-/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.
-/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
-/// 3. Otherwise → enabled.
+/// the ledger empty while lifetime counters kept growing. A truthy
+/// `TRACEDECAY_DISABLE_GLOBAL_DB` is the one opt-out.
 pub fn global_accounting_mode() -> AccountingMode {
-    if let Ok(value) = std::env::var("TRACEDECAY_ENABLE_GLOBAL_DB") {
-        return if env_value_truthy(&value) {
-            AccountingMode::EnabledByEnv
-        } else {
-            AccountingMode::DisabledByEnv
-        };
+    if env_flag("TRACEDECAY_DISABLE_GLOBAL_DB") {
+        AccountingMode::DisabledByEnv
+    } else {
+        AccountingMode::Default
     }
-    if std::env::var("TRACEDECAY_DISABLE_GLOBAL_DB")
-        .ok()
-        .is_some_and(|value| env_value_truthy(&value))
-    {
-        return AccountingMode::DisabledByEnv;
-    }
-    AccountingMode::Default
 }
 
 pub fn global_accounting_enabled() -> bool {
@@ -207,139 +191,4 @@ pub(crate) fn normalize_git_remote_url(remote: &str) -> Option<String> {
         normalized = stripped.to_string();
     }
     Some(normalized.to_ascii_lowercase())
-}
-
-pub(crate) async fn table_column_exists(
-    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
-    table: &str,
-    column: &str,
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
-    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
-        conn,
-        "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE",
-        tracedecay_runtime_core::db::engine::params![table, column],
-    )
-    .await?;
-    Ok(rows.next().await?.is_some())
-}
-
-pub(crate) async fn add_table_column_after_missing_check(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-    table: &str,
-    column: &str,
-    ddl: &str,
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
-    match tracedecay_runtime_core::db::engine::Executor::execute(conn, ddl, ()).await {
-        Ok(_) => Ok(true),
-        Err(error) => {
-            if table_column_exists(conn, table, column).await? {
-                Ok(false)
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-pub(crate) async fn ensure_table_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-    table: &str,
-    columns: &[(&str, &str)],
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    for &(column, ddl) in columns {
-        if !table_column_exists(conn, table, column).await? {
-            add_table_column_after_missing_check(conn, table, column, ddl).await?;
-        }
-    }
-    Ok(())
-}
-
-const CODE_PROJECT_PRIMARY_ROOT_COLUMNS: &[(&str, &str)] = &[
-    (
-        "primary_root_platform",
-        "ALTER TABLE code_projects ADD COLUMN primary_root_platform TEXT",
-    ),
-    (
-        "primary_root_bytes",
-        "ALTER TABLE code_projects ADD COLUMN primary_root_bytes BLOB",
-    ),
-    (
-        "primary_root_last_seen_at",
-        "ALTER TABLE code_projects ADD COLUMN primary_root_last_seen_at INTEGER",
-    ),
-];
-
-pub(crate) async fn table_exists(
-    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
-    table: &str,
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
-    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
-        conn,
-        "SELECT 1 FROM pragma_table_info(?1) LIMIT 1",
-        tracedecay_runtime_core::db::engine::params![table],
-    )
-    .await?;
-    Ok(rows.next().await?.is_some())
-}
-
-/// Adds the nullable `primary_root_*` columns the final `code_projects`
-/// contract requires to a registry created by a released pre-`primary_root`
-/// binary. Purely additive: existing rows are preserved with NULL values
-/// until the next project registration backfills them. A registry without
-/// the table at all is left for contract validation to refuse with its typed
-/// reset state rather than fabricated here.
-pub(crate) async fn ensure_code_project_primary_root_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    if !table_exists(conn, "code_projects").await? {
-        return Ok(());
-    }
-    ensure_table_columns(conn, "code_projects", CODE_PROJECT_PRIMARY_ROOT_COLUMNS).await
-}
-
-pub(crate) async fn ensure_session_parent_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    ensure_table_columns(
-        conn,
-        "sessions",
-        &[
-            (
-                "parent_session_id",
-                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-            ),
-            (
-                "is_subagent",
-                "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
-            ),
-            ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
-            (
-                "parent_tool_use_id",
-                "ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT",
-            ),
-        ],
-    )
-    .await?;
-    tracedecay_runtime_core::db::engine::Executor::execute(
-        conn,
-        "CREATE INDEX IF NOT EXISTS idx_sessions_parent
-            ON sessions(provider, parent_session_id)",
-        (),
-    )
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn ensure_parse_offset_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    ensure_table_columns(
-        conn,
-        "parse_offsets",
-        &[(
-            "file_id",
-            "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
-        )],
-    )
-    .await
 }

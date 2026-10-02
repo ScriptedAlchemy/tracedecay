@@ -7,7 +7,7 @@ pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
@@ -216,11 +216,16 @@ impl IsolatedHome {
 
     /// Reuses the installed toolchain in a child whose `HOME` is this
     /// isolated home: rustup and cargo would otherwise resolve their state
-    /// under the empty throwaway home.
+    /// under the empty throwaway home. The child's hermetic `PATH` gains only
+    /// the toolchain's own `$CARGO_HOME/bin`, where rustup installs `cargo`
+    /// and the `rust-analyzer` proxy the daemon resolves through `PATH`.
     pub fn apply_toolchain_env(&self, command: &mut Command) {
         for (key, value) in &self.toolchain_environment {
             match value {
                 Some(value) => {
+                    if *key == "CARGO_HOME" {
+                        command.env("PATH", hermetic_path(&[Path::new(value).join("bin")]));
+                    }
                     command.env(key, value);
                 }
                 None => {
@@ -650,27 +655,29 @@ impl TestChildProcess {
         self.release_recorded_socket();
         status
     }
+}
 
-    /// Streams the child's stderr to `log` (else a developer's
-    /// `TRACEDECAY_TEST_DAEMON_LOG`), or discards it.
-    fn drain_stderr(&mut self, log: Option<PathBuf>) {
-        let Some(mut stderr) = self.child.stderr.take() else {
+/// Streams a daemon's stderr, after the `startup` lines already read from it,
+/// to `log` (else a developer's `TRACEDECAY_TEST_DAEMON_LOG`), or discards it.
+fn drain_daemon_stderr(
+    startup: String,
+    mut stderr: BufReader<std::process::ChildStderr>,
+    log: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        if let Some(path) =
+            log.or_else(|| std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map(PathBuf::from))
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = file.write_all(startup.as_bytes());
+            let _ = std::io::copy(&mut stderr, &mut file);
             return;
-        };
-        std::thread::spawn(move || {
-            if let Some(path) =
-                log.or_else(|| std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map(PathBuf::from))
-                && let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-            {
-                let _ = std::io::copy(&mut stderr, &mut file);
-                return;
-            }
-            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-        });
-    }
+        }
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+    });
 }
 
 impl Drop for TestChildProcess {
@@ -871,6 +878,84 @@ pub fn tracedecay_bin() -> PathBuf {
         binary.display()
     );
     binary
+}
+
+/// Runs `command` to completion while draining its pipes, so a large stdout
+/// cannot block the child; panics with both streams once `timeout` passes.
+pub fn output_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::process::Output {
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout {
+            std::io::Read::read_to_end(&mut out, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr {
+            std::io::Read::read_to_end(&mut err, &mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
+        }
+        buf
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
+        {
+            let stdout = stdout_handle.join().expect("stdout reader");
+            let stderr = stderr_handle.join().expect("stderr reader");
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child
+                .wait()
+                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            panic!(
+                "tracedecay hung after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// What a `tracedecay tool --json` call printed under `structuredContent`:
+/// an answer's whole typed result, or a refusal's `{"problem": <record>}`.
+pub fn tool_json_structured_content(stdout: &[u8]) -> serde_json::Value {
+    let printed: serde_json::Value = serde_json::from_slice(stdout).unwrap_or_else(|error| {
+        panic!(
+            "tool --json printed non-JSON ({error}):\n{}",
+            String::from_utf8_lossy(stdout)
+        )
+    });
+    assert!(
+        printed["structuredContent"].is_object(),
+        "tool --json printed no structuredContent: {printed:#}"
+    );
+    printed["structuredContent"].clone()
 }
 
 pub fn tracedecay_command_with_home(home: &Path) -> Command {
@@ -1145,42 +1230,54 @@ fn spawn_tracedecay_daemon_process(
     #[cfg(unix)]
     daemon.release_socket_on_stop(socket_path.clone());
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    poll_until(
-        deadline,
-        Duration::from_millis(25),
-        || {
+    // Startup has no product deadline. The daemon logs `daemon_listening`
+    // once its endpoint is bound and published, so that line is readiness;
+    // stderr closing first means it exited.
+    let Some(stderr) = daemon.child.stderr.take() else {
+        // A caller redirected stderr, so only the endpoint can show readiness.
+        loop {
             #[cfg(unix)]
             let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
             #[cfg(not(unix))]
             let ready = portable_daemon_connectable();
             if ready {
-                return Some(());
+                return daemon;
             }
             if let Some(status) = daemon
                 .child
                 .try_wait()
                 .expect("daemon status should be readable")
             {
-                let mut stderr = String::new();
-                if let Some(mut child_stderr) = daemon.child.stderr.take() {
-                    let _ = child_stderr.read_to_string(&mut stderr);
-                }
                 panic!(
-                    "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
-                    stderr.trim()
+                    "tracedecay daemon exited before accepting connections at {}: {status}",
+                    authority_path.display()
                 );
             }
-            None
-        },
-        || {
-            format!(
-                "timed out waiting for daemon authority at {}",
-                authority_path.display()
-            )
-        },
-    );
-    daemon.drain_stderr(log);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let mut stderr = BufReader::new(stderr);
+    let mut startup = String::new();
+    loop {
+        let line_start = startup.len();
+        let read = stderr
+            .read_line(&mut startup)
+            .expect("daemon stderr should be readable");
+        if read == 0 {
+            let status = daemon
+                .child
+                .wait()
+                .expect("daemon status should be readable");
+            panic!(
+                "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
+                startup.trim()
+            );
+        }
+        if startup[line_start..].starts_with("[tracedecay] event=daemon_listening ") {
+            break;
+        }
+    }
+    drain_daemon_stderr(startup, stderr, log);
     daemon
 }
 
@@ -1341,7 +1438,7 @@ impl LcmTestRuntime {
         self.runtime
             .upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
-            .unwrap_or(false)
+            .is_ok()
     }
 
     pub async fn lcm_load_raw_message(

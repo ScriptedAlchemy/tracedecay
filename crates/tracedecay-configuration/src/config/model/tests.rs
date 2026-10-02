@@ -1,4 +1,3 @@
-use super::is_generated_path_segment;
 use std::fs;
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::{ProfileRoot, get_tracedecay_dir, is_generated_dir_segment};
@@ -43,17 +42,6 @@ fn is_generated_dir_segment_delegates_for_segments_unique_to_one_former_list() {
     assert!(!is_generated_dir_segment("builder"));
 }
 
-#[test]
-fn is_generated_path_segment_matches_segments_and_minified_suffix() {
-    assert!(is_generated_path_segment("packages/web/target/debug/x"));
-    assert!(is_generated_path_segment("web/node_modules/react/index.js"));
-    assert!(is_generated_path_segment(".worktrees/feature/src/lib.rs"));
-    assert!(is_generated_path_segment("assets/app.min.js"));
-    assert!(is_generated_path_segment("assets/app.min.css"));
-    assert!(!is_generated_path_segment("src/helpers.rs"));
-    assert!(!is_generated_path_segment("builder/mod.rs"));
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
@@ -67,7 +55,6 @@ mod retention_config_tests {
         let nested: RetentionConfig =
             serde_json::from_str(r#"{"session_lcm":{},"observation":{}}"#).unwrap();
         assert_eq!(nested, RetentionConfig::default());
-        assert!(nested.observation.reclaim_superseded_cursor_advances);
     }
 
     #[test]

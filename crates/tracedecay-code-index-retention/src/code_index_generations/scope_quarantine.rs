@@ -829,6 +829,61 @@ mod tests {
         );
     }
 
+    /// Collection runs only once the scope has no scheduler owner, so a write
+    /// into the source after `prepare` is a foreign writer: rollback refuses
+    /// and keeps its journal instead of treating the scope as settled.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_a_source_a_foreign_writer_changed_before_quarantine() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let source = store.path().join(SCOPE_HASH);
+        std::fs::write(source.join("late-write"), b"worker").expect("write into the scope");
+        // Pin the new mtime so the change never hides inside one clock tick.
+        std::fs::File::open(&source)
+            .expect("open the scope directory")
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400))
+            .expect("move the scope mtime");
+
+        let refused = authority.stage(std::slice::from_ref(&scope));
+        assert!(
+            matches!(&refused, Err(CodeGenerationRetentionErrorV1::UnsafeState(message))
+                if message.ends_with("changed filesystem identity before quarantine")),
+            "{refused:?}"
+        );
+        let error = authority
+            .rollback(std::slice::from_ref(&scope))
+            .expect_err("a source whose identity changed cannot be settled");
+
+        let CodeGenerationRetentionErrorV1::UnsafeState(message) = error else {
+            panic!("identity mismatch must fail as unsafe state");
+        };
+        assert_eq!(
+            message,
+            format!("stranded scope '{SCOPE_HASH}' changed filesystem identity during rollback")
+        );
+        let mut kept = std::fs::read_dir(&source)
+            .expect("source survives")
+            .map(|entry| entry.expect("source entry").file_name())
+            .collect::<Vec<_>>();
+        kept.sort();
+        assert_eq!(kept, ["late-write", "payload"]);
+        assert!(
+            !store
+                .path()
+                .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+                .join(RECEIPT_DIGEST)
+                .join(SCOPE_HASH)
+                .exists(),
+            "nothing of the scope was quarantined"
+        );
+    }
+
     #[test]
     fn rollback_retains_a_mismatched_staged_identity() {
         let (store, scope) = fixture();

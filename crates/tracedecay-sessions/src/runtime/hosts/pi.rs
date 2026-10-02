@@ -28,11 +28,12 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
 };
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, HostProviderCoverage, TranscriptDiscoveryBounds,
@@ -211,6 +212,7 @@ impl PiSource {
         bounds: TranscriptDiscoveryBounds,
         frontier_path: Option<PathBuf>,
         mut budget: HostScanBudget,
+        convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(PiDiscoveryReport, HostScanBudget)> {
         hotpath::measure_block!("sessions.hosts.pi.discover", {
             let mut discovery = PiDiscoveryReport {
@@ -251,6 +253,21 @@ impl PiSource {
                     {
                         continue;
                     }
+                    let pending = match PendingTranscript::observe_blocking(convergence, &candidate)
+                    {
+                        Ok(Some(pending)) => pending,
+                        Ok(None) => continue,
+                        Err(TranscriptIngestError::ScanIo { source, .. }) => {
+                            discovery.record_failure(
+                                PiDiscoveryFailureKind::SessionHeaderUnavailable,
+                                &candidate,
+                                &source,
+                                &mut budget,
+                            );
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let header = match read_session_header(&candidate) {
                         Ok(HeaderRead::Header(header)) => header,
                         Ok(HeaderRead::Incomplete) => {
@@ -267,7 +284,11 @@ impl PiSource {
                         discovery.reached_end = false;
                         break 'cwd_dirs;
                     }
-                    if !matcher.accepts(Some(Path::new(&header.cwd))) {
+                    let cwd = Some(Path::new(&header.cwd));
+                    if !matcher.accepts(cwd) {
+                        if matcher.membership(cwd) == ProjectMembership::NoMatch {
+                            pending.finished(&candidate)?;
+                        }
                         continue;
                     }
                     if paths.len() < limit {
@@ -481,6 +502,7 @@ pub async fn capture_pi_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    convergence: Option<(&CodexDiscoveryHub, &str)>,
 ) -> TranscriptIngestResult<PiCaptureOutcome> {
     hotpath::future!(
         async {
@@ -509,6 +531,8 @@ pub async fn capture_pi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
+            let owned_convergence =
+                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
             let (discovery, scan_budget) = hotpath::future!(
                 tokio::task::spawn_blocking(move || {
                     owned_source.discover(
@@ -516,6 +540,9 @@ pub async fn capture_pi_observations(
                         TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
                         frontier_path,
                         scan_budget,
+                        owned_convergence
+                            .as_ref()
+                            .map(|(hub, consumer)| (hub, consumer.as_str())),
                     )
                 }),
                 label = "sessions.hosts.pi.discover_task"
@@ -581,7 +608,15 @@ pub async fn capture_pi_observations(
                     break;
                 }
                 processed_sequence = Some(sequence);
-                admit_scheduled_file(
+                let pending = match PendingTranscript::observe(convergence, &path) {
+                    Ok(Some(pending)) => pending,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        isolate_source_failure(&path, error, &mut outcome)?;
+                        continue;
+                    }
+                };
+                if let Some(progress) = admit_scheduled_file(
                     facade,
                     &path,
                     None,
@@ -590,7 +625,10 @@ pub async fn capture_pi_observations(
                     cancellation,
                     &mut outcome,
                 )
-                .await?;
+                .await?
+                {
+                    pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
+                }
                 remaining = max_new_bytes.map_or(u64::MAX, |budget| {
                     budget.saturating_sub(outcome.bytes_consumed)
                 });
@@ -697,22 +735,22 @@ async fn admit_scheduled_file(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
     outcome: &mut PiCaptureOutcome,
-) -> TranscriptIngestResult<()> {
+) -> TranscriptIngestResult<Option<JsonlObservationAdmissionProgress>> {
     let header = match run_blocking_transcript_section(|| read_session_header(path)) {
         Ok(HeaderRead::Header(header)) => header,
         Ok(HeaderRead::Incomplete) => {
             outcome.deferred = true;
-            return Ok(());
+            return Ok(None);
         }
         Err((kind, error)) => {
             warn_isolated_source(path, kind, error.kind());
             outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
             outcome.deferred = true;
-            return Ok(());
+            return Ok(None);
         }
     };
     if matcher.is_some_and(|matcher| !matcher.accepts(Some(Path::new(&header.cwd)))) {
-        return Ok(());
+        return Ok(None);
     }
     match admit_session_file(facade, path, &header, scope, max_new_bytes, cancellation).await {
         Ok(progress) => {
@@ -720,20 +758,28 @@ async fn admit_scheduled_file(
                 .bytes_consumed
                 .saturating_add(progress.bytes_consumed);
             outcome.deferred |= progress.source_deferred;
-            Ok(())
+            Ok(Some(progress))
         }
-        Err(error) if isolatable_source_error(&error) => {
-            warn_isolated_source(
-                path,
-                PiDiscoveryFailureKind::SessionHeaderUnavailable,
-                io::ErrorKind::Other,
-            );
-            outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
-            outcome.deferred = true;
-            Ok(())
-        }
-        Err(error) => Err(error),
+        Err(error) => isolate_source_failure(path, error, outcome).map(|()| None),
     }
+}
+
+fn isolate_source_failure(
+    path: &Path,
+    error: TranscriptIngestError,
+    outcome: &mut PiCaptureOutcome,
+) -> TranscriptIngestResult<()> {
+    if !isolatable_source_error(&error) {
+        return Err(error);
+    }
+    warn_isolated_source(
+        path,
+        PiDiscoveryFailureKind::SessionHeaderUnavailable,
+        io::ErrorKind::Other,
+    );
+    outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
+    outcome.deferred = true;
+    Ok(())
 }
 
 async fn admit_session_file(

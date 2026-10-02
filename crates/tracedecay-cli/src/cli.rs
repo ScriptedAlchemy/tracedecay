@@ -162,9 +162,9 @@ pub enum Commands {
         path: Option<String>,
         /// Project path, as an explicit flag. Equivalent to the positional
         /// PATH argument above; accepted for consistency with `-p`/`--path`
-        /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
-        /// `bench`). Conflicts with the positional PATH, pass one or the
-        /// other, not both.
+        /// on other project-scoped commands (e.g. `dashboard`).
+        /// Conflicts with the positional PATH, pass one or the other, not
+        /// both.
         #[arg(
             short = 'p',
             long = "path",
@@ -559,19 +559,6 @@ pub enum Commands {
         after_help = ENABLE_UPLOAD_COUNTER_AFTER_HELP
     )]
     EnableUploadCounter,
-    /// Show or change whether .gitignore rules are respected during indexing
-    #[command(
-        name = "gitignore",
-        long_about = GITIGNORE_LONG_ABOUT,
-        after_help = GITIGNORE_AFTER_HELP
-    )]
-    Gitignore {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-        /// "on" to enable, "off" to disable, omit to show current setting
-        action: Option<String>,
-    },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
     Doctor {
@@ -592,22 +579,6 @@ pub enum Commands {
         /// Export format: csv or json
         #[arg(long)]
         export: Option<String>,
-    },
-    /// Run a reproducible retrieval benchmark against the current project.
-    #[command(long_about = BENCH_LONG_ABOUT, after_help = BENCH_AFTER_HELP)]
-    Bench {
-        /// Path to a TOML query file (defaults to the shipped default set).
-        #[arg(long)]
-        queries: Option<String>,
-        /// Output as JSON instead of the colored console table.
-        #[arg(long)]
-        json: bool,
-        /// Project path (default: current directory).
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Max nodes per query (default: 20).
-        #[arg(long, default_value = "20")]
-        max_nodes: usize,
     },
     /// Show token savings (and dollar estimates) recorded in the global ledger.
     #[command(long_about = GAIN_LONG_ABOUT, after_help = GAIN_AFTER_HELP)]
@@ -674,8 +645,11 @@ pub enum Commands {
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
     Wipe {
         /// Wipe ALL profile database state while preserving identity and config
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "stale")]
         all: bool,
+        /// Delete only the stores the running daemon reports as requiring reset
+        #[arg(long)]
+        stale: bool,
     },
     /// List tracedecay projects (current folder, parents, and children)
     #[command(long_about = LIST_LONG_ABOUT, after_help = LIST_AFTER_HELP)]
@@ -1271,13 +1245,13 @@ pub enum ProfileStorageAction {
 
 #[derive(Subcommand)]
 pub enum BranchAction {
-    /// List tracked branches and their DB sizes
+    /// List tracked branches and their readiness
     List {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Track a new branch (copies nearest ancestor DB + incremental sync)
+    /// Track a new branch as a scope of the project graph
     Add {
         /// Branch name to track (default: current branch)
         name: Option<String>,
@@ -1285,7 +1259,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove a tracked branch and delete its DB
+    /// Stop tracking a branch and drop its graph scope
     Remove {
         /// Branch name to remove
         name: String,
@@ -1299,7 +1273,7 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Remove DBs for branches that no longer exist in git
+    /// Stop tracking branches that no longer exist in git
     Gc {
         /// Project path (default: current directory)
         #[arg(short, long)]

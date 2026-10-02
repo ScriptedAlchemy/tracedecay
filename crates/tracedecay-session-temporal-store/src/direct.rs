@@ -71,7 +71,7 @@ async fn resolve_canonical_occurrence_anchor(
              FROM session_temporal_generations AS generation
              JOIN session_occurrences AS occurrence
                ON occurrence.session_id = generation.session_id
-              AND occurrence.generation = generation.generation
+              AND +occurrence.generation <= generation.generation
              WHERE generation.session_id = ?1
                AND generation.state = 'active'
                AND occurrence.message_id = ?2
@@ -126,7 +126,7 @@ async fn resolve_occurrence_anchor(
               AND generation.state = 'active'
              JOIN session_occurrences AS occurrence
                ON occurrence.session_id = raw.session_id
-              AND occurrence.generation = generation.generation
+              AND +occurrence.generation <= generation.generation
               AND occurrence.message_id = raw.message_id
              WHERE raw.provider = ?1
                AND raw.store_id = ?2
@@ -225,7 +225,7 @@ async fn resolve_external_anchor(
               AND generation.state = 'active'
              JOIN session_occurrences AS occurrence
                ON occurrence.session_id = raw.session_id
-              AND occurrence.generation = generation.generation
+              AND +occurrence.generation <= generation.generation
               AND occurrence.message_id = raw.message_id
              WHERE raw.provider = ?1
                AND raw.session_id = ?2

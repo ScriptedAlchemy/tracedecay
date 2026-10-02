@@ -36,7 +36,7 @@ pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()>
     DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     #[cfg(unix)]
     {
-        match File::open(dir).and_then(|directory| sync_owned_file(&directory)) {
+        match File::open(dir).and_then(|directory| sync_owned_file(dir, &directory)) {
             Ok(()) => Ok(()),
             Err(error)
                 if matches!(policy, DirectorySyncPolicy::TolerateUnsupported)
@@ -99,8 +99,7 @@ impl DurableFileBatch {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = path;
-            sync_owned_file(file)
+            sync_owned_file(path, file)
         }
     }
 
@@ -133,7 +132,7 @@ pub fn sync_file_at(path: &Path) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(path)
-        .and_then(|file| sync_owned_file(&file))
+        .and_then(|file| sync_owned_file(path, &file))
 }
 
 pub fn file_len(path: &Path) -> io::Result<u64> {
@@ -338,8 +337,139 @@ fn remove_owned_temp_if_contents_match(path: &Path, owned_contents: &[u8]) {
     }
 }
 
-fn sync_owned_file(file: &File) -> io::Result<()> {
+/// Fixture fsync latency for every durability barrier this module issues at
+/// or below a root, so a test models a slow disk through the same authority
+/// production writes use instead of sleeping around it.
+#[cfg(feature = "test-helpers")]
+pub mod sync_latency {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
+
+    struct Injection {
+        id: u64,
+        root: PathBuf,
+        delay: Duration,
+        syncs: Arc<AtomicU64>,
+    }
+
+    static INJECTIONS: Mutex<Vec<Injection>> = Mutex::new(Vec::new());
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// Active while alive; counts the barriers it delayed.
+    pub struct SyncLatencyGuard {
+        id: u64,
+        syncs: Arc<AtomicU64>,
+    }
+
+    impl SyncLatencyGuard {
+        /// File and directory fsyncs issued at or below the root so far.
+        #[must_use]
+        pub fn syncs(&self) -> u64 {
+            self.syncs.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for SyncLatencyGuard {
+        fn drop(&mut self) {
+            INJECTIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|injection| injection.id != self.id);
+        }
+    }
+
+    /// Delay every fsync of `root` or a path below it by `delay`.
+    #[must_use]
+    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let syncs = Arc::new(AtomicU64::new(0));
+        INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Injection {
+                id,
+                root: root.to_path_buf(),
+                delay,
+                syncs: Arc::clone(&syncs),
+            });
+        SyncLatencyGuard { id, syncs }
+    }
+
+    pub(super) fn before_sync(path: &Path) {
+        let matched = INJECTIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|injection| path.starts_with(&injection.root))
+            .map(|injection| (injection.delay, Arc::clone(&injection.syncs)));
+        if let Some((delay, syncs)) = matched {
+            syncs.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+        }
+    }
+}
+
+fn before_sync(path: &Path) {
+    #[cfg(feature = "test-helpers")]
+    sync_latency::before_sync(path);
+    #[cfg(not(feature = "test-helpers"))]
+    let _ = path;
+}
+
+fn sync_owned_file(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
     hotpath::measure_block!("private_fs.framed_log.fsync", file.sync_all())
+}
+
+/// `File::sync_data` on a caller-held handle of `path`.
+pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
+    before_sync(path);
+    hotpath::measure_block!("private_fs.framed_log.fdatasync", file.sync_data())
+}
+
+/// A synced replacement for `destination`, staged so its durability barrier
+/// runs before, and outside, whatever lock guards publication.
+///
+/// [`Self::publish`] renames it into place without a barrier; the caller makes
+/// the directory entry durable. Dropping it unpublished removes the staging.
+#[derive(Debug)]
+pub struct StagedReplacement {
+    temporary: PathBuf,
+    destination: PathBuf,
+    published: bool,
+}
+
+impl StagedReplacement {
+    #[hotpath::measure(label = "private_fs.framed_log.stage_replacement")]
+    pub fn stage(destination: &Path, kind: &str, bytes: &[u8]) -> io::Result<Self> {
+        validate_regular_or_missing(destination)?;
+        let (temporary, mut output) = create_owned_temp(destination, kind)?;
+        let staged = Self {
+            temporary,
+            destination: destination.to_path_buf(),
+            published: false,
+        };
+        output.write_all(bytes)?;
+        sync_owned_file(&staged.temporary, &output)?;
+        Ok(staged)
+    }
+
+    pub fn publish(mut self) -> io::Result<()> {
+        validate_regular_or_missing(&self.destination)?;
+        replace_via_rename(&self.temporary, &self.destination)?;
+        self.published = true;
+        tighten_existing_file(&self.destination)
+    }
+}
+
+impl Drop for StagedReplacement {
+    fn drop(&mut self) {
+        if !self.published {
+            remove_owned_temp(&self.temporary);
+        }
+    }
 }
 
 fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
@@ -375,7 +505,7 @@ pub fn with_owned_temp_publish<T>(
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         let value = write(&mut output)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         publish(&temporary, destination)?;
         tighten_existing_file(destination)?;
@@ -603,12 +733,12 @@ pub fn atomic_write_prepared(
     let (temporary, mut output) = create_owned_temp(destination, kind)?;
     let result = (|| {
         output.write_all(bytes)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         prepare(&temporary)?;
         // Keep flushing through the original writable handle. Windows rejects
         // FlushFileBuffers on a read-only reopen, and `prepare` may also have
         // applied destination permissions that prevent a writable reopen.
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         replace_via_rename(&temporary, destination)?;
         sync_parent_directory(destination, directory_policy)
@@ -667,9 +797,9 @@ where
     let published_existing = std::cell::Cell::new(false);
     let result = (|| {
         output.write_all(bytes)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         prepare(&temporary)?;
-        sync_owned_file(&output)?;
+        sync_owned_file(&temporary, &output)?;
         drop(output);
         before_publish();
         match expectation {
@@ -810,32 +940,23 @@ pub fn append_durable(
     let (mut output, created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
-    sync_owned_file(&output)?;
+    sync_owned_file(path, &output)?;
     if created {
         sync_parent_directory(path, directory_policy)?;
     }
     Ok(offset)
 }
 
-/// Appends `frame` without syncing it. Only a newly created file and its
-/// directory entry are made durable here; the caller owns the frame's
-/// durability, typically one group commit that syncs every frame appended
-/// before it.
+/// Appends `frame` without any durability barrier. The caller owns the
+/// frame's durability and, when this creates the file, its directory entry's:
+/// typically one group commit that syncs every frame appended before it.
 #[hotpath::measure(label = "private_fs.framed_log.append_unsynced")]
-pub fn append_unsynced(
-    path: &Path,
-    frame: &[u8],
-    directory_policy: DirectorySyncPolicy,
-) -> io::Result<u64> {
+pub fn append_unsynced(path: &Path, frame: &[u8]) -> io::Result<u64> {
     hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
     tighten_existing_file(path)?;
-    let (mut output, created) = open_append_target(path)?;
+    let (mut output, _created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
-    if created {
-        sync_owned_file(&output)?;
-        sync_parent_directory(path, directory_policy)?;
-    }
     Ok(offset)
 }
 
@@ -868,7 +989,7 @@ pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;
-    sync_owned_file(&output)?;
+    sync_owned_file(path, &output)?;
     tighten_existing_file(path)
 }
 

@@ -110,6 +110,7 @@ export function generationAnchor() { return 1; }
                     runtime.code_graph_seat_port(),
                     database,
                     CodeGraphActivationPolicyV1::Enabled,
+                    tracedecay_code_index_runtime::registry_default_index_path_policy(),
                 )
                 .await
                 .expect("mount persistent graph-backed scheduler");

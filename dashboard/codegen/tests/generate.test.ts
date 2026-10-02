@@ -318,6 +318,10 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
         moduleResolution: ts.ModuleResolutionKind.Bundler,
         allowImportingTsExtensions: true,
         exactOptionalPropertyTypes: true,
+        // The fixture needs only zod and ES2022; the default DOM lib and the
+        // installed @types packages were most of the program.
+        lib: ["lib.es2022.d.ts"],
+        types: [],
       };
       const program = ts.createProgram([decodersPath, consumerPath], options);
       expect(diagnosticText(ts.getPreEmitDiagnostics(program))).toEqual([]);

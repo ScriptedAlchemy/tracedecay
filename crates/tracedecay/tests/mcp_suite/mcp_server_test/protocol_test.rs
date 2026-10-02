@@ -10,7 +10,7 @@ use tracedecay::mcp::McpServer;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Logging is deprecated by MCP SEP-2577 and the server emits no log
@@ -1280,7 +1280,7 @@ async fn test_resources_list() {
                     {
                         "uri": "tracedecay://branches",
                         "name": "Tracked Branches",
-                        "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
+                        "description": "List of tracked branches with parent branch and last sync time. Empty if multi-branch is not active.",
                         "mimeType": "application/json"
                     },
                     {
@@ -1380,6 +1380,61 @@ async fn test_resources_read_overview() {
                     canonical_existing_identity(dir.path()).unwrap().display()
                 )
             }]
+        })
+    );
+}
+
+/// Branch metadata written before the per-branch store layout was retired
+/// still names the project store as each branch's `db_file`; it opens, and
+/// the branches resource reports provenance scopes without a store reference.
+#[tokio::test]
+async fn test_resources_read_branches_reports_provenance_scopes() {
+    let dir = TempDir::new().unwrap();
+    let project = canonical_root_identity(dir.path());
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let cg = Box::pin(tracedecay_project::project::TraceDecay::init(&project))
+        .await
+        .unwrap();
+    fs::write(
+        cg.store_layout().data_root.join("branch-meta.json"),
+        r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"7","gc_protected":false}}}"#,
+    )
+    .unwrap();
+    let server = Box::pin(McpServer::new(cg, None)).await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(435),
+            "resources/read",
+            json!({ "uri": "tracedecay://branches" }),
+        )],
+    )
+    .await;
+
+    let result = &response_with_id(&responses, json!(435))["result"];
+    assert_eq!(result["contents"][0]["uri"], "tracedecay://branches");
+    let text = result["contents"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap(),
+        json!({
+            "branch_count": 2,
+            "branches": [
+                {
+                    "name": "feature/one",
+                    "parent": "main",
+                    "last_synced_at": "7",
+                    "is_current": false,
+                    "is_default": false
+                },
+                {
+                    "name": "main",
+                    "parent": null,
+                    "last_synced_at": "0",
+                    "is_current": false,
+                    "is_default": true
+                }
+            ]
         })
     );
 }

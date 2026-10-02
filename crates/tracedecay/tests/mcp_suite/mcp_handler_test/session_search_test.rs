@@ -95,24 +95,21 @@ async fn production_codex_message_search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
-    // A `partial` generation is the store saying "still converging", the same
-    // not-ready contract as `stale`: re-read it. Every other outcome answers
-    // now, so an empty `complete_zero` still fails the assertions below.
-    let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let payload = production_codex_message_search_once(harness, project).await;
-            if payload["outcome"] != "partial"
-                || payload["results"]
-                    .as_array()
-                    .is_some_and(|results| !results.is_empty())
-            {
-                break payload;
-            }
-            tokio::task::yield_now().await;
+    // An empty partial or stale answer is not yet converged; a complete zero
+    // must still fail when the final Codex source has not appeared. Background
+    // catch-up has no deadline, so the wait ends on the answer's own
+    // freshness, not on a wall clock.
+    let payload = loop {
+        let payload = production_codex_message_search_once(harness, project).await;
+        if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
+            || payload["results"]
+                .as_array()
+                .is_some_and(|results| !results.is_empty())
+        {
+            break payload;
         }
-    })
-    .await
-    .expect("production Codex message search convergence deadline");
+        tokio::task::yield_now().await;
+    };
     assert!(
         payload["results"].as_array().is_some_and(|results| {
             results.iter().any(|result| {
@@ -804,11 +801,11 @@ async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn completed_session_import_immediately_searches_canonical_message() {
+async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
-    // `sessions_import` is the composition's own pass, so it reads the
-    // isolated transcript layout rather than the process home.
+    // `sessions_import` schedules the composition's own workers, so they read
+    // the isolated transcript layout rather than the process home.
     let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
@@ -820,8 +817,8 @@ async fn completed_session_import_immediately_searches_canonical_message() {
         .expect("git init");
     assert!(init.success(), "git init must succeed");
     // More than one bounded transcript pass admits. The searchable message is
-    // in the final source, so Complete proves the production continuation
-    // worker consumed every durable Codex frontier before returning.
+    // in the final source, so finding it proves the continuation worker
+    // consumed every durable Codex frontier after the import returned.
     write_production_codex_rollouts(&transcripts, &project, 33);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
@@ -846,60 +843,56 @@ async fn completed_session_import_immediately_searches_canonical_message() {
         .expect("session import idempotency key")
         .to_owned();
 
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let status = harness
-                .call_tool(
-                    &project,
-                    "tracedecay_admin_cli",
-                    json!({
-                        "action": "sessions_sync_status",
-                        "idempotency_key": idempotency_key,
-                        "format": "json",
-                    }),
-                )
-                .await
-                .expect("production transcript import status");
-            let result = status.result.expect("production transcript status result");
-            assert_ne!(result["isError"], true, "{result}");
-            let payload = recovered_owner_payload(&harness, &project, result).await;
-            if payload["status"] == "complete" {
-                break payload;
-            }
-            assert!(
-                matches!(payload["status"].as_str(), Some("accepted" | "joined")),
-                "session import did not remain active: {payload}"
-            );
-            tokio::task::yield_now().await;
+    let completed = loop {
+        let status = harness
+            .call_tool(
+                &project,
+                "tracedecay_admin_cli",
+                json!({
+                    "action": "sessions_sync_status",
+                    "idempotency_key": idempotency_key,
+                    "format": "json",
+                }),
+            )
+            .await
+            .expect("production transcript import status");
+        let result = status.result.expect("production transcript status result");
+        assert_ne!(result["isError"], true, "{result}");
+        let payload = recovered_owner_payload(&harness, &project, result).await;
+        if payload["status"] == "complete" {
+            break payload;
         }
-    })
-    .await
-    .expect("session import completion deadline");
-    assert_eq!(completed["termination"], "completed", "{completed}");
-    assert!(
-        completed["stats"]["sessions_imported"]
-            .as_u64()
-            .is_some_and(|count| count > 0)
-            && completed["stats"]["messages_imported"]
-                .as_u64()
-                .is_some_and(|count| count > 0),
+        assert!(
+            matches!(payload["status"].as_str(), Some("accepted" | "joined")),
+            "session import did not remain active: {payload}"
+        );
+        tokio::task::yield_now().await;
+    };
+    // The import hands catch-up to the workers and admits nothing itself, so
+    // its receipt is one deferred unit per store, never a completed claim.
+    assert_eq!(completed["termination"], "partial", "{completed}");
+    assert_eq!(completed["failure_codes"], json!([]), "{completed}");
+    assert_eq!(
+        completed["coverage"],
+        json!([
+            {"store_scope": "project", "coverage": {"outcome": "partial", "deferred_units": 1}},
+            {"store_scope": "profile", "coverage": {"outcome": "partial", "deferred_units": 1}},
+        ]),
         "{completed}"
     );
-    assert!(
-        completed["failure_codes"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "{completed}"
-    );
-    assert!(
-        completed["coverage"].as_array().is_some_and(|coverage| {
-            coverage
-                .iter()
-                .all(|entry| entry["coverage"]["outcome"] == "complete")
-        }),
-        "{completed}"
-    );
+    assert_eq!(completed["stats"]["messages_imported"], 0, "{completed}");
 
+    let initial = production_codex_message_search_once(&harness, &project).await;
+    if initial["results"].as_array().is_some_and(Vec::is_empty) {
+        assert!(
+            matches!(initial["outcome"].as_str(), Some("partial" | "stale")),
+            "empty search claimed convergence before the final source arrived: {initial}"
+        );
+        assert_ne!(
+            initial["temporal"]["freshness"]["state"], "fresh",
+            "{initial}"
+        );
+    }
     production_codex_message_search(&harness, &project).await;
     harness.shutdown().await;
 }

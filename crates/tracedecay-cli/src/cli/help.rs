@@ -35,7 +35,8 @@ scheduler, and without one it refuses with \
 with `tracedecay daemon install-service` (or `tracedecay daemon start`) and \
 confirm with `tracedecay daemon status`. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
-incrementally. Respects .gitignore by default (see `tracedecay gitignore`).";
+incrementally. Indexes what Git sees (tracked files and untracked files \
+.gitignore does not ignore) minus the project's `index.exclude.v1` patterns.";
 
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
@@ -47,8 +48,8 @@ Examples:
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
 Related: tracedecay daemon (the daemon init requires), tracedecay sync
-(incremental refresh), tracedecay status, tracedecay gitignore,
-tracedecay wipe (delete local stores).";
+(incremental refresh), tracedecay status, tracedecay wipe (delete local \
+stores).";
 
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Asks the daemon to reconcile the project's code index and returns once the \
@@ -362,7 +363,8 @@ Exit status (a completed binary upgrade stays installed in every case):
       Code's `/plugins install`); act on the printed step, then rerun. Also
       75 when the restored daemon serves a store whose persisted shape this
       binary does not open: it names the store and the exact reset command
-      (`tracedecay wipe --all --yes`), which nothing runs on your behalf
+      (`tracedecay wipe --stale --yes` for session stores), which nothing
+      runs on your behalf
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";
@@ -429,19 +431,6 @@ Examples:
 
 Related: tracedecay disable-upload-counter, tracedecay gain.";
 
-pub(crate) const GITIGNORE_LONG_ABOUT: &str = "\
-Shows or toggles whether indexing respects .gitignore rules for this project. \
-Turning it off indexes ignored folders too (generated code, vendored deps); \
-re-run `tracedecay sync` afterwards so the change takes effect.";
-
-pub(crate) const GITIGNORE_AFTER_HELP: &str = "\
-Examples:
-  tracedecay gitignore                           Show the current setting
-  tracedecay gitignore off                       Index ignored files too
-  tracedecay gitignore on                        Respect .gitignore again
-
-Related: tracedecay sync (apply the change).";
-
 pub(crate) const DOCTOR_LONG_ABOUT: &str = "\
 Checks the binary, PATH, daemon service, project index, and every agent \
 integration, printing actionable fixes for anything broken. The running \
@@ -483,20 +472,6 @@ Examples:
   tracedecay cost all --export csv               Export the full history
 
 Related: tracedecay gain (savings ledger), tracedecay monitor.";
-
-pub(crate) const BENCH_LONG_ABOUT: &str = "\
-Runs a reproducible retrieval benchmark (a fixed query set against the \
-current project's index) and reports latency and result quality. Use it to \
-compare index configurations or verify a tracedecay upgrade did not regress \
-retrieval.";
-
-pub(crate) const BENCH_AFTER_HELP: &str = "\
-Examples:
-  tracedecay bench                               Shipped default query set
-  tracedecay bench --json                        Machine-readable results
-  tracedecay bench --queries my-queries.toml --max-nodes 10
-
-Related: tracedecay status (index size context).";
 
 pub(crate) const GAIN_LONG_ABOUT: &str = "\
 Reports token savings (and dollar estimates) recorded in the persistent \
@@ -601,16 +576,16 @@ view), tracedecay wipe (path-scoped removal), tracedecay tool project_search
 (MCP twin).";
 
 pub(crate) const BRANCH_LONG_ABOUT: &str = "\
-Manages per-branch code-graph databases so queries reflect the branch you \
-are on. Adding a branch copies the nearest ancestor's DB and syncs \
-incrementally; gc removes DBs for branches deleted from git. Cross-branch \
+Tracks branches as scopes of the project's one code graph so queries reflect \
+the branch you are on. An untracked branch is served from its nearest \
+tracked ancestor; gc stops tracking branches deleted from git. Cross-branch \
 queries are served by the branch_search/branch_diff MCP tools.";
 
 pub(crate) const BRANCH_AFTER_HELP: &str = "\
 Examples:
-  tracedecay branch list                         Tracked branches and DB sizes
+  tracedecay branch list                         Tracked branches and readiness
   tracedecay branch add feature/login            Track a branch explicitly
-  tracedecay branch gc                           Drop DBs for deleted branches
+  tracedecay branch gc                           Untrack branches deleted from git
   tracedecay branch remove feature/login
 
 Related: tracedecay tool branch_search / branch_diff / branch_list
@@ -667,8 +642,11 @@ pub(crate) const WIPE_LONG_ABOUT: &str = "\
 Deletes .tracedecay stores (code graph, memory, sessions) for the current \
 folder, its parents, and its children. With --all, deletes the complete \
 profile-scoped database state, including global, user memory/session, project, \
-legacy, remote, Grafeo WAL, and host-admission stores. Profile identity, \
-configuration, and agent integration config remain untouched. \
+legacy, remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
+exactly the stores the running daemon reports as requiring reset (a persisted \
+shape this binary does not open) and nothing else; the daemon recreates each \
+one empty. Profile identity, configuration, and agent integration config \
+remain untouched. \
 Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
 Prompts for a `go!` confirmation unless `--yes` is passed. When the managed \
 daemon holds the profile (even wedged or hung), wipe stops the installed \
@@ -680,6 +658,7 @@ Examples:
   tracedecay wipe                                Wipe stores around the cwd
   tracedecay wipe --all                          Wipe all profile database state
   tracedecay wipe --all --yes                    Confirm without the prompt
+  tracedecay wipe --stale --yes                  Reset only the stores the daemon refuses
 
 Related: tracedecay list (inspect nearby project stores), tracedecay init
 (re-index afterwards), tracedecay uninstall (remove agent config instead).";

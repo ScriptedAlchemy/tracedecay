@@ -155,7 +155,7 @@ async fn graph_lookup_tools_refuse_arguments_outside_their_typed_request() {
         &fixture,
         "tracedecay_derives",
         json!({"qualified_name": "src/lib.rs::TypedWidget", "include_generated": true}),
-        "invalid arguments for tracedecay_derives: unknown field `include_generated`, expected one of `id`, `node_id`, `qualified_name`",
+        "invalid arguments for tracedecay_derives: unknown field `include_generated`, expected `node_id` or `qualified_name`",
     )
     .await;
     assert_refused(
@@ -165,6 +165,108 @@ async fn graph_lookup_tools_refuse_arguments_outside_their_typed_request() {
         "invalid arguments for tracedecay_find_exact_symbol: invalid type: string \"3\", expected u32",
     )
     .await;
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn node_selectors_answer_node_id_and_refuse_the_id_spelling() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), SOURCE).unwrap();
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production graph server");
+    warm_code_index_search(&server, "fetch_typed_widget").await;
+    drop(server);
+
+    let widget = call_json(
+        &fixture,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "TypedWidget", "format": "json"}),
+    )
+    .await;
+    let widget_id = widget["matches"][0]["id"].clone();
+    let fetch = call_json(
+        &fixture,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "fetch_typed_widget", "format": "json"}),
+    )
+    .await;
+    let fetch_id = fetch["matches"][0]["id"].clone();
+
+    let derives = call_json(
+        &fixture,
+        "tracedecay_derives",
+        json!({"node_id": widget_id, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        (
+            &derives[0]["name"],
+            &derives[0]["derives"][0]["name"],
+            &derives[0]["derives"][1]["name"],
+        ),
+        (&json!("TypedWidget"), &json!("Clone"), &json!("Debug"))
+    );
+    let signature = call_json(
+        &fixture,
+        "tracedecay_signature",
+        json!({"node_id": fetch_id, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        (&signature[0]["name"], &signature[0]["signature"]),
+        (
+            &json!("fetch_typed_widget"),
+            &json!("pub fn fetch_typed_widget() -> u32")
+        )
+    );
+    let test_map = call_json(
+        &fixture,
+        "tracedecay_test_map",
+        json!({"node_id": fetch_id, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        (
+            &test_map["covered_symbols"],
+            &test_map["uncovered_symbols"],
+            &test_map["uncovered"][0]["name"],
+            &test_map["uncovered"][0]["line"],
+        ),
+        (
+            &json!(0),
+            &json!(1),
+            &json!("fetch_typed_widget"),
+            &json!(6)
+        )
+    );
+
+    for (tool_name, id, expected) in [
+        (
+            "tracedecay_derives",
+            &widget_id,
+            "`node_id` or `qualified_name`",
+        ),
+        (
+            "tracedecay_signature",
+            &fetch_id,
+            "`node_id` or `qualified_name`",
+        ),
+        ("tracedecay_test_map", &fetch_id, "`file` or `node_id`"),
+    ] {
+        assert_refused(
+            &fixture,
+            tool_name,
+            json!({"id": id}),
+            &format!("invalid arguments for {tool_name}: unknown field `id`, expected {expected}"),
+        )
+        .await;
+    }
 
     fixture.harness.shutdown().await;
 }

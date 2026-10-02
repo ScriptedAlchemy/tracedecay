@@ -1,8 +1,8 @@
 //! Canonical CLI/MCP wire contract for `tracedecay_admin_project`, the
 //! internal operation first-party commands use to maintain the bookkeeping
 //! the daemon keeps for a project or profile: its usage counter, registry
-//! token accounting, gitignore status, bench report, automatic-fact receipts,
-//! and automation scheduler reconciliation.
+//! token accounting, automatic-fact receipts, and
+//! automation scheduler reconciliation.
 //!
 //! Presentation-only transport keys such as `format` are removed before the
 //! request body is decoded.
@@ -45,17 +45,6 @@ pub enum AdminProjectSurfaceRequestV1 {
     /// Record the project's saved-token total in the profile registry and
     /// read it back beside the other projects' total.
     StatusAccounting {},
-    /// Read whether the project's store is gitignored.
-    GitignoreStatus {},
-    /// Run the bench queries over the served graph.
-    Bench {
-        /// TOML query set (default: the built-in query set).
-        queries_toml: Option<String>,
-        /// Render the report as JSON instead of console text.
-        json: bool,
-        /// Cap on graph nodes each query may return.
-        max_nodes: usize,
-    },
     /// List terminal automatic-fact receipts.
     AutomaticFactReceiptList {
         /// Only receipts in this state (default: every state).
@@ -87,21 +76,6 @@ pub struct AdminProjectStatusAccountingV1 {
     pub tokens_saved: u64,
     /// Tokens the profile's other projects saved; null when they saved none.
     pub global_tokens_saved: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminProjectGitignoreStatusV1 {
-    pub git_ignore: bool,
-    /// The configuration revision the status was read at.
-    pub revision_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminProjectBenchV1 {
-    /// The rendered bench report.
-    pub output: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -227,8 +201,6 @@ pub enum AdminProjectResultV1 {
     Counter(AdminProjectCounterV1),
     CounterReset(AdminProjectCounterResetV1),
     StatusAccounting(AdminProjectStatusAccountingV1),
-    GitignoreStatus(AdminProjectGitignoreStatusV1),
-    Bench(AdminProjectBenchV1),
     AutomaticFactReceiptList(AutomaticFactReceiptListV1),
     AutomaticFactReceiptView(Box<AutomaticFactReceiptViewV1>),
     ProjectAutomationReconcile(ProjectAutomationReconcileReport),
@@ -255,6 +227,10 @@ mod tests {
             (
                 json!({ "action": "fact_apply", "id": "fact_1" }),
                 "unknown variant `fact_apply`",
+            ),
+            (
+                json!({ "action": "bench", "json": false, "max_nodes": 20 }),
+                "unknown variant `bench`",
             ),
         ] {
             let error = serde_json::from_value::<AdminProjectSurfaceRequestV1>(request)

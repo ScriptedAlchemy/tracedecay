@@ -122,11 +122,33 @@ async fn sealed_json_status(
     payload
 }
 
+/// The sealed status once session projection has converged. Readiness covers
+/// the sealed code generation only; projection convergence lands on its own
+/// background pass.
+async fn converged_json_status(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &Path,
+) -> Value {
+    let started = Instant::now();
+    loop {
+        let status = sealed_json_status(harness, project_root).await;
+        if status["session_projection"]["convergence"]["state"] == "converged" {
+            return status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "session projection never converged: {}",
+            status["session_projection"]
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_in() {
     let project = open_status_project().await;
     let root = project.project_root.display().to_string();
-    let compact = sealed_json_status(&project.harness, &project.project_root).await;
+    let compact = converged_json_status(&project.harness, &project.project_root).await;
     let markdown = call_status(&project.harness, &project.project_root, json!({})).await;
     let detailed = opted_in_status(&project).await;
 
@@ -177,8 +199,17 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(compact["schema_convergence"]["findings"], json!([]));
     assert!(compact.get("code_index_freshness_warning").is_none());
     assert!(compact.get("node_count").is_none());
+    let mut session_projection = compact["session_projection"].clone();
+    let converged_at = session_projection["convergence"]["converged_at_unix_micros"].take();
+    let converged_at_unix_micros = converged_at
+        .as_i64()
+        .expect("sealed refresh publishes a convergence timestamp");
+    assert!(
+        converged_at_unix_micros > 1_000_000_000_000_000,
+        "convergence time is unix microseconds: {converged_at_unix_micros}"
+    );
     assert_eq!(
-        compact["session_projection"],
+        session_projection,
         json!({
             "state": "current",
             "worker": {
@@ -186,6 +217,11 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
                 "backlog": 0,
                 "blocker": null,
                 "retry_class": null
+            },
+            "convergence": {
+                "state": "converged",
+                "epoch": 1,
+                "converged_at_unix_micros": null
             }
         })
     );
@@ -211,6 +247,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(
         memory["shed_order"],
         json!([
+            "retained_parses",
             "superseded_generation",
             "graph_catalog",
             "decoded_generation",
@@ -218,7 +255,9 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
             "session"
         ])
     );
-    assert_eq!(memory["unmeasured_owners"], 0, "{memory}");
+    // `retained_bytes` and `unmeasured_owners` are daemon-wide totals over a
+    // process-wide registry that every harness in this suite shares, so only
+    // this project's own rows are asserted here.
     assert_eq!(
         memory["owners"]
             .as_array()
@@ -260,6 +299,48 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         json!(BRANCH)
     );
     assert_eq!(detailed["branch_diagnostics"]["warnings"], json!([]));
+    let mut branch_diagnostics = detailed["branch_diagnostics"].clone();
+    let tracked = &mut branch_diagnostics["branches"][0];
+    for timestamp in ["created_at", "last_synced_at"] {
+        let unix = tracked[timestamp].take();
+        assert!(
+            unix.as_str()
+                .is_some_and(|unix| unix.parse::<u64>().is_ok()),
+            "{timestamp} must be a unix timestamp: {detailed}"
+        );
+    }
+    assert_eq!(
+        branch_diagnostics,
+        json!({
+            "tracking_enabled": true,
+            "default_branch": BRANCH,
+            "current_branch": BRANCH,
+            "open_active_branch": BRANCH,
+            "serving_branch": BRANCH,
+            "branch_drifted": false,
+            "branch_resolution": "exact",
+            "is_fallback": false,
+            "fallback_target": null,
+            "fallback_warning": null,
+            "live_branch_tracked": true,
+            "live_branch_ready": true,
+            "nearest_tracked_ancestor": null,
+            "tracked_branch_count": 1,
+            "branches": [{
+                "name": BRANCH,
+                "parent": null,
+                "created_at": null,
+                "last_synced_at": null,
+                "is_default": true,
+                "is_current": true,
+                "is_open_active": true,
+                "is_serving": true,
+                "is_ready": true,
+            }],
+            "warnings": [],
+        }),
+        "branch diagnostics report branch provenance scopes of the one project store"
+    );
     assert_eq!(
         detailed["git_staleness"],
         json!({ "status": "current", "watermark": project.head })

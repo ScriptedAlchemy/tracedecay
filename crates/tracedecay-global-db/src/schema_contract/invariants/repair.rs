@@ -8,6 +8,7 @@ use tracedecay_store::observation::ObservationCoverageV1;
 
 use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL;
 
 use super::rows::{authority_violation, decode_authority_json, encode_authority_json};
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
@@ -336,6 +337,17 @@ async fn write_source_cursor(
             candidate.source_json.as_str(),
             candidate.scope_json.as_str(),
             candidate.cursor_json.as_str()
+        ],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    // Like every cursor commit, a repaired cursor drops the advances it now
+    // strictly supersedes; no other pass reclaims them.
+    conn.execute(
+        PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+        params![
+            candidate.source_json.as_str(),
+            candidate.scope_json.as_str()
         ],
     )
     .await

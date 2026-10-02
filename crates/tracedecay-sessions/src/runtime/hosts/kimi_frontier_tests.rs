@@ -69,6 +69,7 @@ async fn durable_queue_revisits_a_recreated_entry() {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -95,6 +96,7 @@ async fn durable_queue_revisits_a_recreated_entry() {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
+            None,
         )
         .await
         .unwrap();
@@ -122,6 +124,7 @@ async fn cancelled_discovery_does_not_advance_the_durable_frontier() {
         ObservationScopeV1::Profile,
         None,
         &cancellation,
+        None,
     )
     .await
     .unwrap();
@@ -170,6 +173,7 @@ async fn cancellation_after_discovery_preserves_the_exact_frontier() {
         scope.clone(),
         None,
         &cancellation,
+        None,
     )
     .await
     .unwrap();

@@ -124,7 +124,7 @@ async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
     let server = harness
         .server(&project_root)
         .expect("restarted production MCP server");
-    let before = wait_for_lost_attempt_state(&server).await;
+    let before = wait_for_startup_fence(&server).await;
     let held_epoch = evidence.held_status["lease"]["epoch"]
         .as_u64()
         .expect("pre-crash lease epoch");
@@ -170,14 +170,9 @@ async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
     );
     assert_eq!(fenced["lease"]["lease_id"], before["lease"]["lease_id"]);
     assert_eq!(fenced["lease"]["epoch"], held_epoch + 1, "{report}");
-    let observed_at = if before["state"] == "running" {
-        occurred_at
-    } else {
-        assert_eq!(before["state"], "recovery_required", "{before}");
-        before["recovery"]["observed_at"]
-            .as_i64()
-            .expect("startup fence observation")
-    };
+    let observed_at = before["recovery"]["observed_at"]
+        .as_i64()
+        .expect("startup fence observation");
     assert_eq!(
         fenced["recovery"],
         json!({
@@ -470,24 +465,25 @@ async fn drive_live_daemon(
     )
 }
 
-async fn wait_for_lost_attempt_state(server: &McpServer) -> Value {
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        last = call(
+/// The restarted daemon's startup recovery always fences the lost attempt,
+/// in the background. A resume call issued before that fence races it, so
+/// the journey waits for the fence it is about to report.
+async fn wait_for_startup_fence(server: &McpServer) -> Value {
+    loop {
+        let status = call(
             server,
             "tracedecay_work_attempt_status",
             attempt_status_args(HELD_ATTEMPT_ID),
         )
         .await;
-        match last["state"].as_str() {
-            Some("recovery_required" | "running") => return last,
-            Some("leased") => {
+        match status["state"].as_str() {
+            Some("recovery_required") => return status,
+            Some("leased" | "running") => {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            _ => break,
+            _ => panic!("lost attempt was neither live nor fenced: {status}"),
         }
     }
-    panic!("lost attempt was not left running or fenced: {last}");
 }
 
 fn attempt_status_args(attempt_id: &str) -> Value {

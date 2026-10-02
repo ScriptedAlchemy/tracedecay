@@ -239,7 +239,7 @@ pub(super) async fn execute_git_read(
     }
     let initial = match owner.current_read_authority(&request.request) {
         Ok(authority) => authority,
-        Err(_) => return concealed_application_problem(wire_request_id),
+        Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0).max(0) as u64;
     let bounds = tracedecay_application::git_query::GitQueryBounds {
@@ -357,7 +357,7 @@ pub(super) async fn execute_git_read(
     );
     let terminal = match owner.current_read_authority(&request.request) {
         Ok(authority) => authority,
-        Err(_) => return concealed_application_problem(wire_request_id),
+        Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
     if initial.scope != terminal.scope
         || initial.requester != terminal.requester
@@ -1098,6 +1098,7 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
             },
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
+            detail: None,
         },
         GitIndexTransactionPortError::Unsupported => ApplicationProblem::Unsupported {
             diagnostic: SafeDiagnostic {

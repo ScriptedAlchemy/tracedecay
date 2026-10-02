@@ -1039,10 +1039,10 @@ fn apply_canonical_component_set(
     Ok(HostLifecycleResult::Applied)
 }
 
-fn load_host_lifecycle_user_config(
+pub(crate) fn load_host_lifecycle_user_config(
     profile: &ProfileRoot,
 ) -> tracedecay_domain::errors::Result<UserConfig> {
-    UserConfig::load_strict(profile.data_dir()).map_err(|error| {
+    UserConfig::load(profile.data_dir()).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("failed to load host lifecycle policy: {error}"),
         }

@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_global_db::profile_registry_maintenance::{
@@ -104,7 +105,7 @@ fn validate_complete_wipe_profile_root(
     Ok(())
 }
 
-fn remove_fixed_profile_path(
+pub(super) fn remove_fixed_profile_path(
     profile_root: &Path,
     name: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -330,7 +331,7 @@ mod wipe_safety_tests {
         assert!(profile.contains("session temporal persisted shape requires reset"));
         assert!(profile.contains("refused authority: session temporal"));
         assert!(
-            profile.contains("\n  tracedecay wipe --all --yes"),
+            profile.contains("\n  tracedecay wipe --stale --yes"),
             "{profile}"
         );
 
@@ -806,7 +807,7 @@ fn handle_list_inner(
             }
             let has_data = location.data_root.exists();
             let size = if has_data {
-                global::tracedecay_dir_size(&location.data_root)
+                dir_size_bytes(&location.data_root)
             } else {
                 0
             };
@@ -952,7 +953,7 @@ fn append_orphan_manifest_rows(
         let data_root = profile_root.join(&plan.store.store_relpath);
         let has_data = data_root.exists();
         let size = if has_data {
-            global::tracedecay_dir_size(&data_root)
+            dir_size_bytes(&data_root)
         } else {
             0
         };

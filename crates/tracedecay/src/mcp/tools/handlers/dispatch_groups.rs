@@ -5,6 +5,7 @@ use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
+use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
@@ -207,16 +208,10 @@ fn dispatch_application_surface_tools_inner<'a>(
             arguments.remove("project_selector");
         }
         let normalized_args =
-            match tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args) {
-                Ok(args) => args,
-                Err(error) => {
-                    return Err(TraceDecayError::Config {
-                        message: error.to_string(),
-                    });
-                }
-            };
+            tracedecay_daemon_protocol::adapt_application_tool_request(tool_name, args)
+                .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
         application_surface::handle_application_surface(
-            cg,
+            Some(&cg.store_layout().response_handle_root),
             operation,
             normalized_args,
             options.application_invocation_executor,
@@ -450,6 +445,7 @@ fn admitted_project_authorities(
         cg.db_path(),
         cg.store_runtime_registry.clone(),
         cg.configuration_runtime().clone(),
+        cg.get_config().index_paths.clone(),
         options.registered_project_session_db.clone(),
     )
     .map_err(Into::into)
@@ -705,17 +701,20 @@ async fn compute_run_affected_tests(
     args: Value,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
-    let store = options.registered_project_session_db.clone().ok_or_else(|| {
-        TraceDecayError::project_route(
-            "runtime_mounting",
-            true,
-            "managed test runs are recorded in the project session store, which is still mounting",
-        )
-    })?;
-    let recording = workflow::ManagedTestRunRecording {
-        store,
-        session_id: mcp_analytics_session_id(&args),
-    };
+    let recording = options
+        .registered_project_session_db
+        .clone()
+        .map(|store| workflow::ManagedTestRunRecording {
+            store,
+            session_id: mcp_analytics_session_id(&args),
+        })
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "runtime_mounting",
+                true,
+                "managed test runs are recorded in the project session store, which is still mounting",
+            )
+        });
     workflow::compute_run_affected_tests(
         cg,
         admitted_graph_query(options, "file_dependents"),

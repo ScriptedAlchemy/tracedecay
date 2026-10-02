@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::runtime::hosts::claude::scan_claude_source_frames;
+use crate::runtime::source::{JsonlPrefixRecovery, spin_until_jsonl_change_settled};
 
 #[path = "tests/projection.rs"]
 mod projection;
@@ -142,7 +143,42 @@ async fn assert_invalid_frame_preserves_observation_state(session_id: &str, fram
     assert_eq!(fixture.admission.pending_projection_count(), 0);
 }
 
-async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
+async fn assert_invalid_frame_is_covered(session_id: &str, frame: &[u8]) {
+    let fixture = Fixture::new(session_id);
+    fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
+    let source_adapter = fixture.source(session_id);
+    let source = observation_source(&fixture.transcript);
+
+    let stats = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("a complete invalid frame is covered, not deferred");
+    assert_eq!(stats.observations_committed, 0);
+    assert_eq!(stats.deferred_sources, 0, "{stats:?}");
+    assert!(fixture.admission.observations().is_empty());
+    let cursor = fixture
+        .admission
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("coverage must advance past the invalid frame");
+    assert_eq!(cursor.byte_offset(), u64::try_from(frame.len()).unwrap());
+
+    let replay = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("a covered source converges");
+    assert_eq!(replay.deferred_sources, 0, "{replay:?}");
+    assert_eq!(replay.observations_committed, 0);
+}
+
+/// A complete invalid suffix is covered past; a partial one is deferred at
+/// the valid prefix until its writer finishes the line.
+async fn assert_invalid_suffix_preserves_valid_prefix(
+    session_id: &str,
+    suffix: &[u8],
+    suffix_covered: bool,
+) {
     let fixture = Fixture::new(session_id);
     let marker = format!("valid prefix before {session_id}");
     let record = json!({
@@ -156,6 +192,11 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let mut bytes = format!("{record}\n").into_bytes();
     let suffix_start = u64::try_from(bytes.len()).unwrap();
     bytes.extend_from_slice(suffix);
+    let (expected_deferred, expected_cursor) = if suffix_covered {
+        (0, u64::try_from(bytes.len()).unwrap())
+    } else {
+        (1, suffix_start)
+    };
     fs::write(&fixture.transcript, bytes).expect("write valid prefix and invalid suffix");
 
     let source_adapter = fixture.source(session_id);
@@ -163,11 +204,11 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
         .await
-        .expect("valid prefix must commit before invalid suffix defers");
+        .expect("valid prefix must commit before the invalid suffix");
     assert_eq!(first.observations_committed, 1);
     assert_eq!(first.transcript.messages_upserted, 1);
     assert_eq!(first.projections_completed, 1);
-    assert_eq!(first.deferred_sources, 1);
+    assert_eq!(first.deferred_sources, expected_deferred);
 
     let source_cursor = fixture
         .admission
@@ -175,7 +216,7 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
         .await
         .unwrap()
         .expect("valid prefix source cursor");
-    assert_eq!(source_cursor.byte_offset(), suffix_start);
+    assert_eq!(source_cursor.byte_offset(), expected_cursor);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
     let cursor_path = identity.cursor_key.store_path();
     let transcript_cursor = fixture
@@ -198,8 +239,8 @@ async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: 
     let retry = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
         .await
-        .expect("invalid suffix retry must remain deferred");
-    assert_eq!(retry.deferred_sources, 1);
+        .expect("invalid suffix retry");
+    assert_eq!(retry.deferred_sources, expected_deferred);
     assert_eq!(retry.transcript, TranscriptIngestStats::default());
     assert_eq!(fixture.admission.observations(), committed);
 }
@@ -218,18 +259,20 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
             .paths,
         vec![fixture.transcript.clone()]
     );
-    let (scheduled, deferred) =
+    let (scheduled, deferred, rotating) =
         scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
             .await
             .unwrap();
     assert_eq!(scheduled, vec![fixture.transcript.clone()]);
     assert_eq!(deferred, 0);
+    assert!(!rotating);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
     let scan = try_scan_claude_source_frames_with_resume(
         identity,
         StoredCursor::default(),
         Some(STRICT_JSONL_BATCH_BYTES),
         None,
+        JsonlPrefixRecovery::rescan(),
     )
     .unwrap()
     .unwrap();
@@ -258,7 +301,14 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     assert_eq!(observations.len(), 1);
     let payload = observations[0].observation().payload();
     let payload = payload.to_string();
+    let root = fixture.temp.path().to_string_lossy().into_owned();
+    let normalized = payload.replace(&root, "/fixture");
+    assert_eq!(
+        normalized,
+        r#"{"evidence":{"native_timestamp":1784073600,"ordering_domain":"file_bytes","range":{"end":255,"start":0}},"facts":[{"kind":"session","location_path":"/fixture","location_provenance":"transcript_record","project_path":"/fixture","source":"claude_transcript"},{"content":"production vertical searchable","kind":"message","role":"user","timestamp":1784073600}],"native_record_kind":"user","provider":"claude","relations":{"message_id":"message-production-vertical","session_id":"production-session"},"stable_record_id":"message-production-vertical","version":1}"#
+    );
     assert!(!payload.contains("never-persist-this-secret"));
+    assert!(payload.contains("production vertical searchable"));
     let canonical_transcript = std::fs::canonicalize(&fixture.transcript).unwrap();
     let authority_json = fixture.authority_documents();
     assert_eq!(authority_json.len(), 3);
@@ -339,7 +389,7 @@ async fn native_observation_id_survives_identical_transcript_relocation() {
         .await
         .unwrap();
     assert_eq!(second.observations_committed, 0);
-    assert_eq!(second.observation_duplicates, 1);
+    assert_eq!(second.observation_duplicates, 0);
     let after = fixture.admission.observations();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].observation().observation_id(), &before_id);
@@ -600,8 +650,14 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
     fixture.write_record("protected cursor restart", "restart-secret");
     let source_adapter = fixture.source(&raw_session_id);
     let identity = identify_claude_source(&fixture.transcript).unwrap();
-    assert!(identity.session_id.starts_with("privacy.structural-id.v1."));
-    assert!(!identity.session_id.contains(&raw_session_id));
+    assert_eq!(
+        identity.session_id,
+        "privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d"
+    );
+    assert_eq!(
+        identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"
+    );
 
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -633,6 +689,10 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
         .expect("reopened protected source cursor");
     assert!(cursor.byte_offset() > 0);
     let durable = serde_json::to_string(cursor.source()).unwrap();
+    assert_eq!(
+        durable,
+        r#"{"provider":"claude","session_id":"privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d","source_key":"tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"}"#
+    );
     assert!(!durable.contains(&raw_session_id));
 }
 
@@ -684,7 +744,16 @@ async fn partial_backlog_and_cancellation_never_advance_observation_state() {
 }
 
 #[tokio::test]
-async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
+async fn partial_frame_preserves_all_observation_state() {
+    assert_invalid_frame_preserves_observation_state(
+        "invalid-partial",
+        br#"{"type":"user""#.as_slice(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn malformed_and_oversized_frames_are_covered_not_deferred() {
     let oversized = format!(
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
         "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
@@ -696,10 +765,9 @@ async fn malformed_partial_and_oversized_frames_preserve_all_observation_state()
 "#
             .as_slice(),
         ),
-        ("invalid-partial", br#"{"type":"user""#.as_slice()),
         ("invalid-oversized", oversized.as_bytes()),
     ] {
-        assert_invalid_frame_preserves_observation_state(session_id, frame).await;
+        assert_invalid_frame_is_covered(session_id, frame).await;
     }
 }
 
@@ -709,18 +777,71 @@ async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() 
         "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
         "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
-    for (session_id, suffix) in [
+    for (session_id, suffix, covered) in [
         (
             "prefix-malformed",
             br#"{"type":"user",malformed}
 "#
             .as_slice(),
+            true,
         ),
-        ("prefix-partial", br#"{"type":"user""#.as_slice()),
-        ("prefix-oversized", oversized.as_bytes()),
+        ("prefix-partial", br#"{"type":"user""#.as_slice(), false),
+        ("prefix-oversized", oversized.as_bytes(), true),
     ] {
-        assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
+        assert_invalid_suffix_preserves_valid_prefix(session_id, suffix, covered).await;
     }
+}
+
+#[tokio::test]
+async fn claude_rotation_keeps_advancing_after_one_full_walk() {
+    let fixture = Fixture::new("rotation-anchor");
+    let project = fixture.transcript.parent().unwrap().to_path_buf();
+    let total = MAX_CLAUDE_SOURCES_PER_PASS + 20;
+    for index in 0..total {
+        let session_id = format!("rotation-{index:03}");
+        let record = json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": format!("message-{index:03}"),
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": format!("rotation {index}")}
+        });
+        fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            format!("{record}\n"),
+        )
+        .unwrap();
+    }
+    let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+    let frontier = || async {
+        fixture
+            .admission
+            .get_parse_offset(&ObservationScopeV1::Profile, CLAUDE_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .map(|offset| offset.byte_offset)
+    };
+    let pass = MAX_CLAUDE_SOURCES_PER_PASS as u64;
+    for expected in [pass, 2 * pass, 3 * pass] {
+        fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .expect("rotation pass");
+        assert_eq!(frontier().await, Some(expected));
+    }
+    let (scheduled, deferred, rotating) =
+        scheduled_source_paths(&fixture.admission, &ObservationScopeV1::Profile, &source)
+            .await
+            .unwrap();
+    assert!(rotating);
+    assert_eq!(deferred, 0);
+    let start = (3 * MAX_CLAUDE_SOURCES_PER_PASS) % total;
+    assert_eq!(
+        scheduled.first(),
+        Some(&project.join(format!("rotation-{start:03}.jsonl"))),
+        "the window after a full walk starts past the previous one"
+    );
 }
 
 #[test]
@@ -737,4 +858,79 @@ fn claude_rotation_tail_stops_deferring_after_one_full_walk() {
         1,
         "a walk that never listed the rest of the tree is still deferred"
     );
+}
+
+#[tokio::test]
+async fn edited_middle_record_rescans_only_the_claude_bytes_after_the_edit() {
+    let session_id = "edited-middle-session";
+    let fixture = Fixture::new(session_id);
+    let record = |uuid: &str, content: &str| {
+        let record = json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": uuid,
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": content},
+        });
+        format!("{record}\n")
+    };
+    let lines = (0..40)
+        .map(|index| {
+            record(
+                &format!("message-{index:04}"),
+                &format!("original-{index:04}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let line_bytes = lines[0].len() as u64;
+    assert!(lines.iter().all(|line| line.len() as u64 == line_bytes));
+    fs::write(&fixture.transcript, lines.concat()).unwrap();
+    spin_until_jsonl_change_settled(&fixture.transcript);
+    let source_adapter = fixture.source(session_id);
+    let source = observation_source(&fixture.transcript);
+
+    let cold = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+    assert_eq!(cold.observations_committed, 40);
+    assert_eq!(cold.source_bytes_scanned, 40 * line_bytes);
+
+    let mut edited = lines;
+    edited[20] = record("revised-0020", "replaced-0020");
+    assert_eq!(edited[20].len() as u64, line_bytes);
+    fs::write(&fixture.transcript, edited.concat()).unwrap();
+    spin_until_jsonl_change_settled(&fixture.transcript);
+    let rescan = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rescan.source_bytes_scanned,
+        20 * line_bytes,
+        "only the edited record and those after it are framed again"
+    );
+    assert_eq!(rescan.observations_committed, 1);
+    let retained = fixture
+        .admission
+        .non_durable_advances()
+        .into_iter()
+        .filter(|advance| advance.reason() == ObservationCoverageReason::RetainedPrefix)
+        .map(|advance| advance.coverage().range())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        [ObservationSourceRangeV1::new(0, 20 * line_bytes).unwrap()]
+    );
+    assert_eq!(fixture.admission.observations().len(), 41);
+    assert_eq!(fixture.matching_observation_count("replaced-0020"), 1);
+    let cursor = fixture
+        .admission
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cursor.byte_offset(), 40 * line_bytes);
 }

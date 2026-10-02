@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::shared::StoredCursor;
+use crate::runtime::source::JsonlPrefixRecovery;
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
@@ -162,15 +163,27 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
     let first_identity = identify_claude_source(&first).unwrap();
     let second_identity = identify_claude_source(&second).unwrap();
     assert_ne!(first_identity.session_id, second_identity.session_id);
-    assert_ne!(first_identity.source_id, second_identity.source_id);
-    assert!(!first_identity.source_id.contains('/'));
+    assert_eq!(
+        first_identity.session_id,
+        "privacy.structural-id.v1.990ebdd27bde227d2152d560d71fa5669c60d1b06315adf3201371792f5b3b77"
+    );
+    assert_eq!(
+        second_identity.session_id,
+        "privacy.structural-id.v1.ee63d9294be4d710712850f8e5dd96b296ba64b79a4dfb53995e1ecd9c7e6f49"
+    );
+    assert_eq!(
+        first_identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-b878c24deeee723afacac8f34481430383c0bb4a1aa04880ad1af6c0b128187c"
+    );
+    assert_eq!(
+        second_identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-0dc1ffe6e231fc3d7ed7f6634dd60932564ce1ef0fcb0ee959a4359a1d9d4477"
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
-    use std::os::unix::ffi::OsStrExt;
-
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("account-one/session.jsonl");
     let second = root.path().join("account-two/session.jsonl");
@@ -185,28 +198,17 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
     let second_identity = identify_claude_source(&second).unwrap();
     let other_identity = identify_claude_source(&other).unwrap();
     assert_eq!(first_identity.session_id, second_identity.session_id);
-    assert_eq!(first_identity.source_id, second_identity.source_id);
-    assert_ne!(first_identity.source_id, other_identity.source_id);
-    assert!(!first_identity.source_id.contains("session"));
-    assert!(!other_identity.source_id.contains("other-session"));
-    for (identity, path) in [
-        (&first_identity, &first),
-        (&second_identity, &second),
-        (&other_identity, &other),
-    ] {
-        let canonical = std::fs::canonicalize(path).unwrap();
-        let raw_hex = hex::encode(canonical.as_os_str().as_bytes());
-        assert!(!identity.source_id.contains(&raw_hex));
-        assert!(
-            !identity
-                .source_id
-                .contains(canonical.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            identity.source_id.len(),
-            "tracedecay-claude-observation-source-v1-sha256-".len() + 64
-        );
-    }
+    assert_eq!(first_identity.session_id, "session");
+    assert_eq!(other_identity.session_id, "other-session");
+    assert_eq!(
+        first_identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-13f767a4cb9df80b65b90e859dee16bdb99ac3eba0d792e0bcc5c8c09dea501f"
+    );
+    assert_eq!(second_identity.source_id, first_identity.source_id);
+    assert_eq!(
+        other_identity.source_id,
+        "tracedecay-claude-observation-source-v1-sha256-6af786644f998205035a6b817210583dd95133bb265cb54908fef24a75c40f23"
+    );
 }
 
 #[test]
@@ -341,9 +343,12 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
         "typed and authored facts must retain provider block order"
     );
     let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_timestamp":1767225605,"ordering_domain":"file_bytes","range":{"end":775,"start":0}},"facts":[{"kind":"session","location_path":"/redacted/project","location_provenance":"transcript_record","project_path":"/redacted/project","source":"claude_transcript"},{"counter_semantics":"delta","counters":{"input_tokens":1200,"output_tokens":340,"state":"known"},"kind":"provider_usage","model":{"model":"claude-opus-4-8","state":"known"},"native_field":"message.usage","native_kind":"assistant","native_scope":"message"},{"content":"Inspect the parser before editing.","kind":"reasoning","visibility":"visible"},{"content":"The visible provider-authored answer.","kind":"message","model":"claude-opus-4-8","role":"assistant","timestamp":1767225605},{"arguments":{"file_path":"src/lib.rs"},"invocation_id":"toolu_mixed_1","kind":"tool_invocation","name":"Read"}],"native_record_kind":"assistant","provider":"claude","relations":{"message_id":"msg_claude_mixed_1","session_id":"claude-mixed-session"},"stable_record_id":"mixed-u2","version":1}"#
+    );
     assert!(!rendered.contains("signature-redacted"));
-    assert!(!rendered.contains("\"type\":\"thinking\""));
-    assert!(!rendered.contains("\"type\":\"tool_use\""));
+    assert!(rendered.contains("The visible provider-authored answer."));
 }
 
 #[test]
@@ -518,7 +523,12 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
             if name == "TaskCreate"
     )));
     let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert_eq!(
+        rendered,
+        r#"{"evidence":{"native_timestamp":1767225605,"ordering_domain":"file_bytes","range":{"end":664,"start":0}},"facts":[{"kind":"session","location_path":"/redacted/project","location_provenance":"transcript_record","project_path":"/redacted/project","source":"claude_transcript"},{"arguments":{"activeForm":"Gathering simplify review scope","description":"Collect the branch and working-tree diffs.","subject":"Gather simplify review scope"},"invocation_id":"call_task_create_1","kind":"tool_invocation","name":"TaskCreate"},{"content":{"activeForm":"Gathering simplify review scope","description":"Collect the branch and working-tree diffs.","subject":"Gather simplify review scope"},"kind":"workflow_lifecycle","semantic_kind":"task","state":"TaskCreate"},{"arguments":{"status":"in_progress","taskId":"1"},"invocation_id":"call_task_update_1","kind":"tool_invocation","name":"TaskUpdate"},{"content":{"status":"in_progress","taskId":"1"},"item_id":"1","kind":"workflow_lifecycle","provider_reference":"1","semantic_kind":"task","state":"TaskUpdate","status":"in_progress"},{"arguments":{"file_path":"src/lib.rs"},"invocation_id":"call_read_1","kind":"tool_invocation","name":"Read"}],"native_record_kind":"assistant","provider":"claude","relations":{"message_id":"msg_claude_task_create","session_id":"claude-task-session"},"stable_record_id":"claude-task-1","version":1}"#
+    );
     assert!(!rendered.contains("\"type\":\"tool_use\""));
+    assert!(rendered.contains("Gather simplify review scope"));
 }
 
 static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize =
@@ -572,6 +582,7 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
             StoredCursor::default(),
             None,
             None,
+            JsonlPrefixRecovery::rescan(),
         )
         .unwrap()
         .unwrap()

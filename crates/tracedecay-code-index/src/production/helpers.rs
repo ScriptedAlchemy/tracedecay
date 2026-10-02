@@ -371,6 +371,18 @@ where
     // made, and the one exact-capacity vector never regrows, so the peak is
     // the edges this returns plus one sort buffer.
     let cross_file = resolve_cross_file_references(files)?;
+    Ok(edge_evidence(files, cross_file))
+}
+
+/// `files`' edge evidence: each file's own edges and `cross_file`, the
+/// edges resolution derives between them.
+pub(crate) fn edge_evidence<T>(
+    files: &[T],
+    cross_file: Vec<CanonicalRelationEdgeV1>,
+) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
     let per_file = files
         .iter()
         .map(|file| file.as_ref().artifacts.edges.len())
@@ -386,7 +398,7 @@ where
         .flat_map(|file| file.as_ref().artifacts.edge_abstentions.clone())
         .collect::<Vec<_>>();
     abstentions.sort();
-    Ok((edges, abstentions))
+    (edges, abstentions)
 }
 
 /// Resolve the retained per-file unresolved references against the whole
@@ -410,16 +422,65 @@ where
 {
     #[cfg(test)]
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
+    resolve_references(files, None)
+}
+
+/// The retained references a resolution pass decides: per file index, the
+/// indices of its references to decide, ascending.
+pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
+
+/// Resolves only `selection`'s references against the whole staged file set.
+/// Each reference binds exactly as [`resolve_cross_file_references`] binds
+/// it; the result is the edges those references contribute.
+#[hotpath::measure(label = "code_index.seal.resolve_selected")]
+pub(crate) fn resolve_selected_cross_file_references<T>(
+    files: &[T],
+    selection: &ReferenceSelectionV1,
+) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+where
+    T: AsRef<FileGenerationArtifactsV1> + Sync,
+{
+    resolve_references(files, Some(selection))
+}
+
+/// `selection`'s references, or every retained reference, as `(file index,
+/// reference)` in file and reference order.
+pub(crate) fn selected_references<'f, T>(
+    files: &'f [T],
+    selection: Option<&ReferenceSelectionV1>,
+) -> impl Iterator<Item = (usize, &'f CodeIndexUnresolvedReferenceV1)>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let every = selection.is_none().then(|| {
+        files.iter().enumerate().flat_map(|(index, file)| {
+            file.as_ref()
+                .artifacts
+                .unresolved_references
+                .iter()
+                .map(move |reference| (index, reference))
+        })
+    });
+    let selected = selection.into_iter().flatten().flat_map(|(index, picks)| {
+        let references = &files[*index].as_ref().artifacts.unresolved_references;
+        picks.iter().map(move |&pick| (*index, &references[pick]))
+    });
+    every.into_iter().flatten().chain(selected)
+}
+
+fn resolve_references<T>(
+    files: &[T],
+    selection: Option<&ReferenceSelectionV1>,
+) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
+where
+    T: AsRef<FileGenerationArtifactsV1> + Sync,
+{
     let workers = crate::parallelism::indexing_workers().max(1);
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!("code_index.seal.resolve.effective_workers").set(workers);
-        hotpath::gauge!("code_index.seal.resolve.unresolved_references").set(
-            files
-                .iter()
-                .map(|file| file.as_ref().artifacts.unresolved_references.len() as u64)
-                .sum::<u64>(),
-        );
+        hotpath::gauge!("code_index.seal.resolve.unresolved_references")
+            .set(selected_references(files, selection).count() as u64);
     }
     let (by_simple_name, rust_files, typescript_modules, modules) =
         hotpath::measure_block!("code_index.seal.reference_index", {
@@ -445,7 +506,12 @@ where
     // edges in file-index order reproduces the exact sequence the serial loop
     // pushed, so the stable sort and dedup below, and therefore every edge
     // digest downstream, do not depend on the width.
-    let per_file = collect_by_file_index_ordered(files.len(), workers, &|index| {
+    let units = selection.map_or(files.len(), <[_]>::len);
+    let per_file = collect_by_file_index_ordered(units, workers, &|unit| {
+        let (index, picks) = match selection {
+            Some(selection) => (selection[unit].0, Some(selection[unit].1.as_slice())),
+            None => (unit, None),
+        };
         resolve_one_file_cross_file_references(
             files,
             &by_simple_name,
@@ -453,6 +519,7 @@ where
             &typescript_modules,
             &modules,
             index,
+            picks,
         )
     })?;
     drop((by_simple_name, rust_files, typescript_modules, modules));
@@ -475,11 +542,16 @@ where
 /// Python, Go, Java, and Ruby: see [`ModuleImportIndexV1::call_gaps`].
 /// These are the sites `callers` and `file_dependents` must disclose as gaps;
 /// an import of an external dependency is not one of them.
-pub(crate) fn unresolved_import_calls<T>(files: &[T]) -> Vec<CodeIndexUnresolvedReferenceV1>
+/// `selection`, when given, limits the sites decided to its references.
+pub(crate) fn unresolved_import_calls<T>(
+    files: &[T],
+    selection: Option<&ReferenceSelectionV1>,
+) -> Vec<CodeIndexUnresolvedReferenceV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let mut unresolved = ModuleImportIndexV1::new(files).call_gaps();
+    let mut unresolved =
+        ModuleImportIndexV1::new(files).call_gaps(selected_references(files, selection));
     let typescript_modules = TypeScriptModuleIndexV1::new(files);
     if !typescript_modules.has_sources() {
         return unresolved;
@@ -493,27 +565,23 @@ where
                 .push((index, symbol));
         }
     }
-    for file in files {
-        let file = file.as_ref();
-        if !is_typescript_family(file.extraction.language.as_str()) {
+    for (index, reference) in selected_references(files, selection) {
+        let file = files[index].as_ref();
+        if !is_typescript_family(file.extraction.language.as_str())
+            || reference.kind != RelationEdgeKindV1::Calls
+            || reference.reference_name.contains("::")
+        {
             continue;
         }
-        for reference in &file.artifacts.unresolved_references {
-            if reference.kind != RelationEdgeKindV1::Calls
-                || reference.reference_name.contains("::")
-            {
-                continue;
-            }
-            if typescript_import_call_outcome(
-                files,
-                &by_simple_name,
-                &typescript_modules,
-                file,
-                reference,
-            ) == Some(ImportBindingOutcomeV1::Unresolved)
-            {
-                unresolved.push(reference.clone());
-            }
+        if typescript_import_call_outcome(
+            files,
+            &by_simple_name,
+            &typescript_modules,
+            file,
+            reference,
+        ) == Some(ImportBindingOutcomeV1::Unresolved)
+        {
+            unresolved.push(reference.clone());
         }
     }
     unresolved
@@ -607,6 +675,7 @@ fn resolve_one_file_cross_file_references<T>(
     typescript_modules: &TypeScriptModuleIndexV1,
     modules: &ModuleImportIndexV1<'_>,
     index: usize,
+    picks: Option<&[usize]>,
 ) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -617,8 +686,16 @@ where
         is_module_import_language(files[index].as_ref().extraction.language.as_str());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
-    for reference in &files[index].as_ref().artifacts.unresolved_references {
-        let cache_key = (index, reference.reference_name.as_str(), reference.kind);
+    let references = &files[index].as_ref().artifacts.unresolved_references;
+    let every = picks.is_none().then(|| references.iter());
+    let picked = picks.into_iter().flatten().map(|&pick| &references[pick]);
+    for reference in every.into_iter().flatten().chain(picked) {
+        let cache_key = (
+            index,
+            reference.reference_name.as_str(),
+            reference.kind,
+            reference.argument_count,
+        );
         let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
         } else {
@@ -664,8 +741,10 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.replace(0))
 }
 
-type ResolvedReferenceCacheV1<'a> =
-    HashMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, Vec<SymbolOccurrenceId>)>>;
+type ResolvedReferenceCacheV1<'a> = HashMap<
+    (usize, &'a str, RelationEdgeKindV1, Option<u32>),
+    Option<(usize, Vec<SymbolOccurrenceId>)>,
+>;
 
 fn resolve_cross_file_reference<T>(
     files: &[T],

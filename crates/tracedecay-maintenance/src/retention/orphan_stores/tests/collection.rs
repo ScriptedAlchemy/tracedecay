@@ -23,7 +23,10 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     .await;
 
     let census = build_store_census(&db, &profile_root).await.unwrap();
-    let plan = plan_collection(classify_stores(&census, 1_700_000_000), 7 * DAY);
+    let plan = plan_collection(
+        classify_stores(&census, 1_700_000_000, &BTreeSet::new()),
+        7 * DAY,
+    );
     assert_eq!(
         plan.collect.len(),
         1,
@@ -94,7 +97,10 @@ async fn registered_collection_rejects_profile_contained_data_root_symlink() {
     .await;
 
     let census = build_store_census(&db, &profile_root).await.unwrap();
-    let plan = plan_collection(classify_stores(&census, 1_700_000_000), 7 * DAY);
+    let plan = plan_collection(
+        classify_stores(&census, 1_700_000_000, &BTreeSet::new()),
+        7 * DAY,
+    );
     assert_eq!(
         plan.collect.len(),
         1,
@@ -254,67 +260,6 @@ async fn durable_memory_rows_block_orphan_store_collection() {
             .any(|project| project.project_id == "proj_memory"),
         "registry row for a protected store must not be retired"
     );
-}
-
-/// Store registration records graph-scope databases relative to the profile
-/// root. A durable row in a registered scope that is not the manifest graph
-/// must protect the store, which requires resolving the scope from the
-/// profile root rather than from the store directory.
-#[tokio::test]
-async fn durable_memory_in_registered_graph_scope_blocks_collection() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let dead_root = tmp.path().join("moved-away-repo");
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let base = 1_700_000_000i64;
-    let data_root = seed_store(
-        &db,
-        &profile_root,
-        "proj_scope",
-        "store_scope",
-        &dead_root,
-        base - 100 * DAY,
-    )
-    .await;
-    assert_eq!(data_root, profile_root.join("stores/store_scope"));
-    {
-        let connection = rusqlite::Connection::open(data_root.join("tracedecay.db")).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'scope fact');",
-            )
-            .unwrap();
-    }
-    db.upsert_graph_scope(tracedecay_global_db::GraphScopeUpsert {
-        graph_scope_id: "scope_store_scope_main".to_string(),
-        project_id: "proj_scope".to_string(),
-        store_id: "store_scope".to_string(),
-        branch_name: "main".to_string(),
-        db_relpath: "stores/store_scope/tracedecay.db".to_string(),
-        parent_scope_id: None,
-        last_synced_at: None,
-        writable: true,
-    })
-    .await
-    .unwrap();
-
-    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, true)
-        .await
-        .unwrap();
-
-    assert_eq!(report.outcome.collected, Vec::new());
-    assert_eq!(
-        report
-            .outcome
-            .errors
-            .iter()
-            .map(|error| (error.store_id.as_str(), error.kind.clone()))
-            .collect::<Vec<_>>(),
-        [("store_scope", CollectionFailureKind::DurableDataProtected)]
-    );
-    assert!(data_root.join("tracedecay.db").is_file());
 }
 
 /// The guard is schema-discovered, so current and future Memory V2 tables are
@@ -569,9 +514,9 @@ fn delete_boundary_refuses_empty_directory_replacement() {
     assert!(displaced.is_dir(), "inspected empty directory must survive");
 }
 
-/// Cancellation is checked before any recursive SHA-256 read. A cancelled
-/// maintenance admission cannot turn a deep inventory into a partial plan or
-/// an implicit deletion permit.
+/// Once the apply loop admits a finding, the payload-mtime fence is the first
+/// gate to read the admission control. A cancellation it observes is a typed
+/// interruption, never a per-store refusal or an implicit deletion permit.
 #[tokio::test]
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -580,41 +525,23 @@ async fn registered_collection_payload_fence_cancellation_is_terminal() {
     seed_payload_fence_work(&data_root);
     let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "stores/payload-fence-cancelled");
-    let plan = CollectionPlan {
-        collect: vec![finding],
-        ..CollectionPlan::default()
-    };
     let cancellation = CancellationToken::new();
-    let started = std::sync::Arc::new(AtomicBool::new(false));
-    let started_thread = std::sync::Arc::clone(&started);
-    let cancellation_thread = cancellation.clone();
-    let signal = std::thread::spawn(move || {
-        while !started_thread.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-        cancellation_thread.cancel();
-    });
-    started.store(true, Ordering::Release);
+    cancellation.cancel();
 
-    let (outcome, retired) = execute_registered_collection_controlled(
+    let step = collect_registered_finding(
         &db,
-        &plan,
+        &finding,
         &profile_root,
-        CollectionControl::new(
-            &cancellation,
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-        ),
+        CollectionControl::new(&cancellation, unbounded_deadline()),
     )
     .await
     .unwrap();
-    signal.join().unwrap();
 
-    assert_eq!(retired, 0);
-    assert_eq!(outcome.completion, CollectionCompletionV1::Cancelled);
-    assert!(outcome.errors.is_empty());
-    assert!(outcome.collected.is_empty());
-    assert!(data_root.exists());
+    assert_eq!(
+        step,
+        FindingStep::Interrupted(CollectionCompletionV1::Cancelled)
+    );
+    assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
 #[tokio::test]
@@ -625,39 +552,33 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     seed_payload_fence_work(&data_root);
     let (_runtime, db) = open_registered_db(&profile_root).await;
     let finding = payload_fence_finding(data_root.clone(), "projects/proj_payload_fence_deadline");
-    let plan = UnregisteredCollectionPlan {
-        collect: vec![UnregisteredStoreFinding {
-            project_dir_name: "proj_payload_fence_deadline".to_owned(),
-            data_root: finding.data_root,
-            age_secs: finding.age_secs,
-            size_bytes: finding.size_bytes,
-            expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
-            expected_data_root_fence: finding.expected_data_root_fence,
-            expected_content_fence: finding.expected_content_fence,
-            abandoned_root: false,
-        }],
-        ..UnregisteredCollectionPlan::default()
+    let finding = UnregisteredStoreFinding {
+        project_dir_name: "proj_payload_fence_deadline".to_owned(),
+        data_root: finding.data_root,
+        age_secs: finding.age_secs,
+        size_bytes: finding.size_bytes,
+        expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
+        expected_data_root_fence: finding.expected_data_root_fence,
+        expected_content_fence: finding.expected_content_fence,
+        abandoned_root: false,
     };
-
     let cancellation = CancellationToken::new();
-    let (outcome, deadline) = {
-        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_millis(20));
-        let outcome = execute_unregistered_collection_controlled(
-            &db,
-            &plan,
-            &profile_root,
-            CollectionControl::new(&cancellation, deadline),
-        )
-        .await
-        .unwrap();
-        (outcome, deadline)
-    };
+    let expired = MonotonicDeadline::at(Instant::now());
 
-    assert!(deadline.is_elapsed_at(Instant::now()));
-    assert_eq!(outcome.completion, CollectionCompletionV1::DeadlineExceeded);
-    assert!(outcome.errors.is_empty());
-    assert!(outcome.collected.is_empty());
-    assert!(data_root.exists());
+    let step = collect_unregistered_finding(
+        &db,
+        &finding,
+        &profile_root,
+        CollectionControl::new(&cancellation, expired),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        step,
+        FindingStep::Interrupted(CollectionCompletionV1::DeadlineExceeded)
+    );
+    assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
 /// A durable-memory guard applies to unregistered directories exactly as it
@@ -773,6 +694,70 @@ async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
     );
 }
 
+/// The cold-store page over stores whose roots were removed from disk keeps
+/// the one whose exact registered root still has a live owner, which can
+/// still write into it, and collects the rest, including the store of a root
+/// that merely shares a prefix with the owned one.
+#[tokio::test]
+async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_has_an_owner() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(profile_root.join("projects")).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .cast_signed();
+    let removed_root = |name: &str| tmp.path().join("removed-worktrees").join(name);
+    for (project_id, store_id, root) in [
+        ("proj_owned", "store_owned", "wt"),
+        ("proj_unowned", "store_unowned", "other"),
+        ("proj_prefix", "store_prefix", "wt-old"),
+    ] {
+        seed_store(
+            &db,
+            &profile_root,
+            project_id,
+            store_id,
+            &removed_root(root),
+            now,
+        )
+        .await;
+    }
+
+    let page = crate::retention::cold_store::run_cold_store_page(
+        &profile_root,
+        &db,
+        Some(0),
+        &BTreeSet::from([removed_root("wt")]),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        page.outcome,
+        crate::retention::cold_store::ColdStorePageOutcomeV1::Processed
+    );
+    let mut kept = std::fs::read_dir(profile_root.join("stores"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    kept.sort_unstable();
+    assert_eq!(kept, ["store_owned"]);
+    for (project_id, registered) in [("proj_owned", 1), ("proj_unowned", 0), ("proj_prefix", 0)] {
+        assert_eq!(
+            db.try_list_store_instances_for_project(project_id)
+                .await
+                .unwrap()
+                .len(),
+            registered,
+            "{project_id}"
+        );
+    }
+}
+
 /// Production journey over one profile: a live registered store carrying a
 /// stray `branches/*.db` is reported by Doctor, the maintenance cold-store
 /// orphan-collection page deletes it without a copy, Doctor is then clean, and
@@ -812,6 +797,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     let before = crate::retention::diagnostics::collect_profile_storage_findings(
         &db,
         &profile_root,
+        &BTreeSet::new(),
         7 * DAY,
         now,
     )
@@ -835,6 +821,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
         &profile_root,
         &db,
         Some(7),
+        &BTreeSet::new(),
         &CancellationToken::new(),
     )
     .await
@@ -870,6 +857,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     let after = crate::retention::diagnostics::collect_profile_storage_findings(
         &db,
         &profile_root,
+        &BTreeSet::new(),
         7 * DAY,
         now,
     )
@@ -891,9 +879,8 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     assert_eq!(after.unregistered_stores, DoctorStorageFamilyReadV1::Absent);
 }
 
-/// The durable-data check covers the manifest-selected project graph and every
-/// registered project graph scope, and refuses to answer when the manifest
-/// that names them cannot be read.
+/// The durable-data check covers the manifest-selected project graph and
+/// refuses to answer when the manifest that names it cannot be read.
 mod durable_inventory {
     use super::*;
 
@@ -916,21 +903,14 @@ mod durable_inventory {
     }
 
     #[test]
-    fn registered_graph_scopes_at_custom_paths_are_covered() {
-        let custom = PathBuf::from("stores/inventory/scopes/custom-scope.db");
-
-        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
-            Some(&manifest_bytes("custom-main.db")),
-            Path::new("stores/inventory"),
-            std::slice::from_ref(&custom),
-            unbounded_collection_control(),
-        ) else {
-            panic!("a readable manifest must resolve an inventory");
-        };
-
+    fn the_manifest_graph_path_is_honoured() {
         assert_eq!(
-            inventory,
-            [PathBuf::from("stores/inventory/custom-main.db"), custom],
+            durable_database_inventory(
+                Some(&manifest_bytes("custom-main.db")),
+                Path::new("stores/inventory"),
+                unbounded_collection_control(),
+            ),
+            DurableDatabaseInventoryV1::Resolved(PathBuf::from("stores/inventory/custom-main.db")),
             "the manifest's custom main graph path must be honoured, not the default filename"
         );
     }
@@ -941,7 +921,6 @@ mod durable_inventory {
             durable_database_inventory(
                 None,
                 Path::new("stores/inventory"),
-                &[],
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -957,7 +936,6 @@ mod durable_inventory {
                 durable_database_inventory(
                     Some(&bytes),
                     Path::new("stores/inventory"),
-                    &[],
                     unbounded_collection_control(),
                 ),
                 DurableDatabaseInventoryV1::Unverifiable,
@@ -969,7 +947,6 @@ mod durable_inventory {
             durable_database_inventory(
                 Some(&manifest_bytes("/tmp/graph.db")),
                 Path::new("stores/inventory"),
-                &[],
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -978,41 +955,12 @@ mod durable_inventory {
     }
 
     #[test]
-    fn registered_graph_scope_path_must_be_normalized_relative() {
-        assert_eq!(
-            durable_database_inventory(
-                Some(&manifest_bytes("graph.db")),
-                Path::new("stores/inventory"),
-                &[PathBuf::from("scopes/../../escape.db")],
-                unbounded_collection_control(),
-            ),
-            DurableDatabaseInventoryV1::Unverifiable
-        );
-        assert_eq!(
-            durable_database_inventory(
-                Some(&manifest_bytes("graph.db")),
-                Path::new("stores/inventory"),
-                &[PathBuf::from("/tmp/escape.db")],
-                unbounded_collection_control(),
-            ),
-            DurableDatabaseInventoryV1::Unverifiable
-        );
-    }
-
-    #[test]
     fn cancelled_control_interrupts_the_inventory() {
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-
         assert_eq!(
             durable_database_inventory(
                 Some(&manifest_bytes("graph.db")),
                 Path::new("stores/inventory"),
-                &[],
-                CollectionControl::new(
-                    &cancellation,
-                    MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-                ),
+                cancelled_collection_control(),
             ),
             DurableDatabaseInventoryV1::Interrupted,
             "a cancelled admission must not resolve an inventory"
@@ -1029,7 +977,6 @@ mod durable_inventory {
             profile.path(),
             &data_root,
             Some(b"{ not json"),
-            &[],
             &durable_check_scratch_root(profile.path()),
             unbounded_collection_control(),
         )
@@ -1049,18 +996,12 @@ mod durable_inventory {
         std::fs::create_dir_all(&data_root).unwrap();
         rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
 
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
         let check = check_store_durable_memory(
             profile.path(),
             &data_root,
             Some(&manifest_bytes("graph.db")),
-            &[],
             &durable_check_scratch_root(profile.path()),
-            CollectionControl::new(
-                &cancellation,
-                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
-            ),
+            cancelled_collection_control(),
         )
         .await;
 

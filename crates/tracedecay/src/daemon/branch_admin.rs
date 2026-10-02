@@ -42,9 +42,7 @@ pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
-pub(crate) use project_retirement::{
-    CapacityRetirementRelease, retire_registered_context_scout_owner,
-};
+pub(crate) use project_retirement::retire_registered_context_scout_owner;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
@@ -102,6 +100,14 @@ pub(super) fn graph_writer_scope(
     class: StoreWriterClass,
 ) -> WriterScope {
     store_writer_scope(&cg.store_layout().data_root, class)
+}
+
+/// What a caller reads from a project session store: session features are
+/// refused while the store is held reset-required, its configuration is not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectSessionShardUse {
+    Sessions,
+    Configuration,
 }
 
 #[cfg(unix)]
@@ -1048,11 +1054,48 @@ impl StoreAdministration {
         graphs
     }
 
+    /// The project session store for session features. A store held in its
+    /// typed reset-required state answers that refusal.
     #[hotpath::measure(label = "daemon.branch_admin.project_session_database", future = true)]
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,
         store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Sessions,
+        ))
+        .await
+    }
+
+    /// The project session store as the project's configuration authority,
+    /// served even while the store's session features answer a reset
+    /// refusal.
+    #[hotpath::measure(
+        label = "daemon.branch_admin.project_configuration_database",
+        future = true
+    )]
+    pub(super) async fn registered_project_configuration_database(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
+        Box::pin(self.registered_project_session_shard(
+            project_root,
+            store_layout,
+            ProjectSessionShardUse::Configuration,
+        ))
+        .await
+    }
+
+    #[hotpath::skip]
+    async fn registered_project_session_shard(
+        &self,
+        project_root: &Path,
+        store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+        shard_use: ProjectSessionShardUse,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
@@ -1098,7 +1141,14 @@ impl StoreAdministration {
             &project_id,
         ))
         .await?;
-        Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+        match shard_use {
+            ProjectSessionShardUse::Sessions => {
+                Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
+            }
+            ProjectSessionShardUse::Configuration => {
+                Box::pin(registry.project_session_store(project_id, enrollment_roots)).await
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1804,7 +1854,7 @@ impl StoreAdministration {
             });
         };
         let configuration_database = self
-            .registered_project_session_database(project_root, &layout)
+            .registered_project_configuration_database(project_root, &layout)
             .await?;
         // Branch administration runs inside the daemon, which owns the durable
         // configuration store. Resolve the pinned snapshot on demand when this
@@ -2187,15 +2237,7 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
-        let log_path = temp.path().join("bootstrap.log");
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(Arc::new(std::fs::File::create(&log_path).unwrap()))
-            .finish();
-        // This current-thread runtime also polls the spawned bootstrap worker
-        // under the ordinary daemon WARN filter.
-        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let capture = tracedecay_runtime_core::logging::FormattedTracingCapture::start();
         // The profile identity root must be a directory `load_or_create`
         // creates (and restricts to 0700) itself; a umask-default tempdir
         // trips the fail-closed private-root validation.
@@ -2250,7 +2292,7 @@ mod tests {
         );
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
-        let log = std::fs::read_to_string(&log_path).unwrap();
+        let log = capture.text();
         assert!(
             log.contains("profile_host_admission_bootstrap_stopped"),
             "{log}"

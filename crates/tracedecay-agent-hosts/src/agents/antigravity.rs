@@ -25,9 +25,12 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::json;
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
+use super::mcp_registration::{
+    McpRegistrationOutcome, remove_mcp_server_entry, set_mcp_server_entry,
+};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, report_mcp_registration,
@@ -225,33 +228,20 @@ fn doctor_check_registration(
     );
 }
 
-fn parse_document(config: &Path, existing: &str) -> Result<serde_json::Value> {
-    let settings = JsonConfigDialect::Json.parse_for_edit(config, existing)?;
-    if !settings.is_object() {
-        return Err(TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", config.display()),
-        });
-    }
-    if settings
-        .get("mcpServers")
-        .is_some_and(|value| !value.is_object())
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("{}.mcpServers must be a JSON object", config.display()),
-        });
-    }
-    Ok(settings)
-}
-
 fn add_registration(config: &Path, existing: &str, binary: &str) -> Result<TextFileMutation> {
-    let mut settings = parse_document(config, existing)?;
-    settings["mcpServers"]["tracedecay"] = json!({
+    let mut settings = JsonConfigDialect::Json.parse_for_edit(config, existing)?;
+    let entry = json!({
         "command": binary,
         "args": ["serve"],
         "env": {},
         "transport": "stdio",
     });
-    JsonConfigDialect::Json.mutation(config, existing, settings)
+    match set_mcp_server_entry(config, &mut settings, "mcpServers", entry)? {
+        McpRegistrationOutcome::Unchanged => Ok(TextFileMutation::Unchanged),
+        McpRegistrationOutcome::Added | McpRegistrationOutcome::Updated => {
+            JsonConfigDialect::Json.mutation(config, existing, settings)
+        }
+    }
 }
 
 fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext) -> Result<()> {
@@ -270,22 +260,12 @@ fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext)
 }
 
 fn remove_registration(config: &Path, existing: &str) -> Result<TextFileMutation> {
-    let mut settings = parse_document(config, existing)?;
-    let Some(root) = settings.as_object_mut() else {
-        return Err(TraceDecayError::Config {
-            message: format!("{} must contain a JSON object", config.display()),
-        });
-    };
-    let Some(servers) = root
-        .get_mut("mcpServers")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return Ok(TextFileMutation::Unchanged);
-    };
-    if servers.remove("tracedecay").is_none() {
-        return Ok(TextFileMutation::Unchanged);
+    let mut settings = JsonConfigDialect::Json.parse_for_edit(config, existing)?;
+    if remove_mcp_server_entry(&mut settings, "mcpServers") {
+        JsonConfigDialect::Json.mutation(config, existing, settings)
+    } else {
+        Ok(TextFileMutation::Unchanged)
     }
-    JsonConfigDialect::Json.mutation(config, existing, settings)
 }
 
 fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Result<()> {

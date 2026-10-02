@@ -16,13 +16,13 @@ use tracedecay_application::diagnostics_producer::{
     CompilerProducerRunV1, TypeScriptProducerStateV1, run_typescript_producer_v1,
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_lsp::{TypeScriptProject, typescript_projects};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::DaemonInvocationState;
-use super::advisory_runtime::wait_for_generation_change;
 
 /// The project store's directory for tsc's incremental build-info, one file
 /// per checked tsconfig; it leaves with the store.
@@ -70,23 +70,14 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                 ],
             );
             let schedulers = invocation.code_index_schedulers.clone();
-            let mut publications = schedulers.subscribe_generation_publications();
-            let mut serving_seats = schedulers.subscribe_serving_seats();
-            let mut root_mounted = schedulers.subscribe_root_mounted();
-            let mut serving_changes = None;
+            let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
             let mut state = TypeScriptProducerStateV1::default();
-            // One producer run per generation, whatever its outcome: the
-            // wake sources below are registry-wide, and a project whose
-            // compiler keeps failing must not re-run it on every other
-            // project's publication.
+            // One producer run per generation, whatever its outcome: the root's
+            // signals also wake on serving and pass changes, and a project
+            // whose compiler keeps failing must not re-run it on each of them.
             let mut attempted_for: Option<CodeGenerationId> = None;
             loop {
-                if serving_changes.is_none() {
-                    serving_changes = schedulers
-                        .subscribe_serving_generation_changes(&project_root)
-                        .await;
-                }
                 // The sealed generation, not the serving one: tsc reads only
                 // the source the seal proved, so the check starts at the seal
                 // rather than after the text projection and serving swap. A
@@ -125,15 +116,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
                         ],
                     ),
                 }
-                if !wait_for_generation_change(
-                    &project_root,
-                    &mut publications,
-                    &mut serving_changes,
-                    &mut serving_seats,
-                    &mut root_mounted,
-                )
-                .await
-                {
+                if signals.changed().await.is_err() {
                     return;
                 }
             }

@@ -239,6 +239,7 @@ fn verified_graph_options_with_freshness<'a>(
                 cg.db().clone(),
                 cg.is_read_only(),
                 project_id.as_str().to_owned(),
+                tracedecay_code_index_runtime::registry_default_index_path_policy(),
             )),
         ),
     );
@@ -370,8 +371,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
     let owned = |result: Result<ToolResult>| {
         !matches!(
             &result,
-            Err(TraceDecayError::Config { message })
-                if message == &format!("unknown tool: {tool_name}")
+            Err(error) if error.project_route_context().is_some_and(|(reason_code, _, detail)| {
+                reason_code == "unknown_tool" && detail == format!("unknown tool: {tool_name}")
+            })
         )
     };
     match group {

@@ -282,7 +282,7 @@ fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset()
                     "found_version": 5,
                     "required_version": 6,
                     "reason": "git correlation profile schema 5 is incompatible with required schema 6; reset the profile",
-                    "remedy": "tracedecay wipe --all --yes",
+                    "remedy": "tracedecay wipe --stale --yes",
                 }],
             },
         }),
@@ -317,7 +317,7 @@ fn restore_check_accepts_a_reset_required_daemon_and_returns_its_pending_reset()
                 reason: "git correlation profile schema 5 is incompatible with required schema 6; \
                          reset the profile"
                     .to_owned(),
-                remedy: "tracedecay wipe --all --yes".to_owned(),
+                remedy: "tracedecay wipe --stale --yes".to_owned(),
             }],
         }
     );

@@ -598,6 +598,70 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
 }
 
 #[test]
+fn run_projection_answers_an_effect_from_a_replaced_placement_as_stale() {
+    let definition = definition(vec![step("prepare", &[], vec![], &["context"])]).unwrap();
+    let admitted = WorkflowRunEvent::admitted(
+        id::<RunId>("run.workflow.stale-placement"),
+        definition,
+        digest('d'),
+        digest('8'),
+        run_context("workflow.stale.admit", '3', 1),
+    )
+    .unwrap();
+    let placed = placement("run.workflow.stale-placement", "prepare", 'b', 'd', '8');
+    let replaced = placement("run.workflow.stale-placement", "prepare", 'c', 'd', '8');
+    assert_ne!(placed.placement_digest(), replaced.placement_digest());
+    let mut run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
+    run = run
+        .apply(
+            &run.next_event(
+                WorkflowRunCommand::StartStep {
+                    step_id: id("prepare"),
+                    placement: placed.clone(),
+                },
+                run_context("workflow.stale.start", '4', 2),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let artifact =
+        WorkArtifactRefV1::new(id::<WorkArtifactId>("artifact.context"), digest('1'), 4).unwrap();
+    let completed_output = step_output("context", "prepare", artifact);
+
+    let error = run
+        .next_event(
+            WorkflowRunCommand::CompleteStep {
+                step_id: id("prepare"),
+                outputs: vec![completed_output.clone()],
+                effect_receipt: WorkflowStepEffectReceipt::new(
+                    id::<RunId>("run.workflow.stale-placement"),
+                    id::<WorkflowStepId>("prepare"),
+                    replaced.placement_digest().clone(),
+                    WorkflowStepEffectOutcome::Completed,
+                    digest('9'),
+                    &[completed_output],
+                )
+                .unwrap(),
+            },
+            run_context("workflow.stale.complete", '6', 3),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tracedecay_domain::WorkflowRunStateError::PlacementDigestStale {
+            expected: placed.placement_digest().clone(),
+            found: replaced.placement_digest().clone(),
+        }
+    );
+    assert_eq!(
+        run.step(&id("prepare")).unwrap().status(),
+        WorkflowStepStatus::Running,
+        "a stale effect leaves the step running"
+    );
+}
+
+#[test]
 fn run_projection_journals_bound_placement_and_effect_receipts() {
     let run_id = id::<RunId>("run.workflow.receipts");
     let step_id = id::<WorkflowStepId>("prepare");

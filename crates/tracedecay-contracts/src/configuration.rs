@@ -147,6 +147,31 @@ pub struct ResolvedSetting {
     pub effective_behavior_digest: ManifestDigest,
     pub resolution_provenance_digest: ManifestDigest,
     pub candidates: Vec<ConfigurationCandidateV1>,
+    /// Parts of the stored value this release does not apply. Empty when the
+    /// effective value applies in full.
+    pub findings: Vec<ConfigurationSettingFindingV1>,
+}
+
+/// A stored value the running release keeps but does not apply. The value
+/// stays readable so `legal_actions` on the same key can replace it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigurationSettingFindingV1 {
+    /// An `index.exclude.v1` / `index.include.v1` pattern that does not
+    /// compile. An earlier release stored it unchecked; indexing runs
+    /// without it.
+    InvalidIndexPathPattern {
+        pattern: String,
+        message: String,
+        legal_actions: Vec<ConfigurationSettingActionV1>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSettingActionV1 {
+    Set,
+    Unset,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

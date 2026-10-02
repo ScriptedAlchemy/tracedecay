@@ -209,14 +209,17 @@ pub use ignored_dependencies::{
 };
 pub use registry::CodeIndexReconcileAdmissionV1;
 pub use registry::CodeIndexSchedulerRegistryV1;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use registry::RetainedGraphRecoveryPauseV1;
 pub use registry::watch_ingress::GitStateChangeRequestV1;
 pub use registry::{
     CodeIndexOwnerActivityV1, CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1,
-    CodeIndexRetainedSeatWaitV1, CodeIndexWorkerPhaseV1, ScopedFeedbackDocumentIdentityV1,
-    ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
-    feedback_document_identity_from_generation,
+    CodeIndexSeatParkV1, CodeIndexSeatWaitV1, CodeIndexWorkerPhaseV1,
+    ScopedFeedbackDocumentIdentityV1, ServingGenerationInstallationOutcomeV1,
+    ServingGenerationRollbackOutcomeV1, feedback_document_identity_from_generation,
     feedback_language_document_identity_from_generation,
 };
+pub(crate) use residency::ServingReadLeaseV1;
 pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 
 // The scheduler body is split by seam: `publication_store` (durable sealed
@@ -224,6 +227,8 @@ pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublished
 // text artifact), and `reconcile` (the per-worktree scheduler). Re-export
 // every item the siblings, the tests, and the crate reach through this
 // module so no path outside the seam files changes.
+#[cfg(test)]
+use crate::query::retrieval::ports::TEXT_ARTIFACT_PAGE_CHUNKS_V1;
 use publication_store::DaemonProjectionSinkV1;
 #[cfg(test)]
 pub use publication_store::{CodeIndexBytePoolStatsV1, HeldActiveDecodeV1};
@@ -255,8 +260,8 @@ pub use serving::{
 };
 #[cfg(test)]
 use serving::{
-    CodeIndexCommittedProgressSampleV1, CodeTextProjectionSlotV1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-    map_sealed_page_source_error, sha256_private_file_and_size,
-    text_artifact_admitted_build_budget, text_artifact_builder_budget,
-    text_artifact_resident_memory_charges, text_artifact_source_batch_limits,
+    CodeIndexCommittedProgressSampleV1, CodeTextProjectionSlotV1, map_sealed_page_source_error,
+    sha256_private_file_and_size, text_artifact_admitted_build_budget,
+    text_artifact_builder_budget, text_artifact_resident_memory_charge,
+    text_artifact_source_batch_limits,
 };

@@ -322,28 +322,6 @@ pub fn sanitize_branch_name(name: &str) -> String {
     result.trim_matches('_').to_string()
 }
 
-/// Resolves the DB path for a given branch.
-///
-/// If the branch is tracked in metadata, returns its `db_file` path.
-/// Returns `None` if untracked or if the path would escape `tracedecay_dir`.
-#[must_use]
-pub fn resolve_branch_db_path(
-    tracedecay_dir: &Path,
-    branch: &str,
-    meta: &crate::branch_meta::BranchMeta,
-) -> Option<std::path::PathBuf> {
-    let entry = meta.branches.get(branch)?;
-    let resolved = tracedecay_dir.join(&entry.db_file);
-    // Prevent path traversal: resolved path must stay within tracedecay_dir
-    if let (Ok(canonical_dir), Ok(canonical_path)) =
-        (tracedecay_dir.canonicalize(), resolved.canonicalize())
-        && !canonical_path.starts_with(&canonical_dir)
-    {
-        return None;
-    }
-    Some(resolved)
-}
-
 #[cfg(test)]
 mod branch_memo_tests {
     use std::path::Path;
@@ -455,5 +433,55 @@ mod branch_memo_tests {
             1,
             "a memo must resolve the live branch at most once"
         );
+    }
+
+    /// Branch reads that arrive while another thread walks the checkout share
+    /// that walk. Reading it as "no repository" made branch tracking refuse a
+    /// checkout on `main` as detached; walking again repaid the discovery the
+    /// topology memo exists to avoid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_reads_share_the_discovery_walk_another_thread_owns() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repository directory");
+        let root = root.canonicalize().expect("canonical repository");
+        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+
+        let mut block = crate::git_repository::block_repository_discovery_for_test(&root);
+        let owner = std::thread::spawn({
+            let root = root.clone();
+            move || super::detect_default_branch(&root)
+        });
+        block.wait_entered().await;
+        let head = std::thread::spawn({
+            let root = root.clone();
+            move || super::checkout_head(&root)
+        });
+        let default_branch = std::thread::spawn({
+            let root = root.clone();
+            move || super::detect_default_branch(&root)
+        });
+        crate::git_repository::wait_for_topology_callers_for_test(&root, 2, || {
+            u64::from(head.is_finished()) + u64::from(default_branch.is_finished())
+        })
+        .await;
+        block.release();
+
+        assert_eq!(owner.join().expect("owner").as_deref(), Some("main"));
+        assert_eq!(
+            head.join().expect("checkout head"),
+            Some(super::CheckoutHead::Branch("main".to_owned()))
+        );
+        assert_eq!(
+            default_branch.join().expect("default branch").as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            crate::git_repository::repository_discovery_count_for_test(&root),
+            1,
+            "every caller must be answered by the one parked walk"
+        );
+        crate::git_repository::reset_repository_discovery_for_test(&root);
     }
 }

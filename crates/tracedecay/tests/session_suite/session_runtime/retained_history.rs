@@ -23,10 +23,11 @@ use tracedecay_domain::{
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_runtime::session_sync::test_harness::configure_scheduler;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
-    SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
+    SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
+    SessionHistoricalIngestor,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::projector::{
-    SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
+    CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
     SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector,
 };
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry;
@@ -41,7 +42,8 @@ use tracedecay_store::{
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::serving::{
-    SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+    SessionConvergenceState, SessionProjectionServingState, SessionProjectionServingStatusPort,
+    SessionProjectionStaleReason,
 };
 
 struct ScriptedHistoricalIngestor {
@@ -70,6 +72,10 @@ impl SessionHistoricalIngestor for ScriptedHistoricalIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
 }
 
@@ -84,12 +90,14 @@ struct RetryThenBlockHistoricalIngestor {
     passes: AtomicUsize,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
     third_entered: AtomicBool,
     release_third: tokio::sync::Notify,
+    capacity: tokio::sync::watch::Sender<u64>,
 }
 
 struct CountingDeferredProjector {
@@ -181,7 +189,67 @@ impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
+}
+
+/// Admits the same two healthy provider sessions and reports the source
+/// frontier reached.
+struct CompleteHealthyProvidersIngestor(HealthyProvidersWithBlockedCursorIngestor);
+
+impl SessionHistoricalIngestor for CompleteHealthyProvidersIngestor {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            self.0.passes.fetch_add(1, Ordering::AcqRel);
+            self.0
+                .admit_healthy_provider("claude", "session.healthy.claude")
+                .await;
+            self.0
+                .admit_healthy_provider("codex", "session.healthy.codex")
+                .await;
+            SessionHistoricalIngestOutcome::Complete
+        })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
+    fn cancel(&self) {}
+}
+
+/// The canonical projector, holding one session's first projection until the
+/// test releases it: that session is durably committed but not yet published.
+struct HeldSessionProjector {
+    session_id: &'static str,
+    held: AtomicBool,
+    release: tokio::sync::Semaphore,
+}
+
+impl SessionTemporalRefreshProjector for HeldSessionProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if recovery.session_id().as_str() == self.session_id
+                && !self.held.swap(true, Ordering::AcqRel)
+            {
+                self.release
+                    .acquire()
+                    .await
+                    .expect("projection gate stays open")
+                    .forget();
+            }
+            CanonicalSessionTemporalProjector
+                .project(database, recovery)
+                .await
+        })
+    }
 }
 
 impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
@@ -195,6 +263,10 @@ impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
         })
     }
 
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
     fn cancel(&self) {}
 }
 
@@ -204,6 +276,7 @@ impl RetryThenBlockHistoricalIngestor {
             passes: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
+            capacity: tokio::sync::watch::Sender::new(0),
         }
     }
 }
@@ -214,6 +287,7 @@ impl BlockThirdHistoricalIngestor {
             passes: AtomicUsize::new(0),
             third_entered: AtomicBool::new(false),
             release_third: tokio::sync::Notify::new(),
+            capacity: tokio::sync::watch::Sender::new(0),
         }
     }
 }
@@ -223,9 +297,13 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
         Box::pin(async move {
             match self.passes.fetch_add(1, Ordering::AcqRel) {
                 0 => SessionHistoricalIngestOutcome::Complete,
-                1 => SessionHistoricalIngestOutcome::Pending {
-                    made_progress: false,
-                },
+                1 => {
+                    // The refused capacity frees while this pass is running.
+                    self.capacity.send_modify(|epoch| *epoch += 1);
+                    SessionHistoricalIngestOutcome::Pending {
+                        made_progress: false,
+                    }
+                }
                 _ => {
                     self.third_entered.store(true, Ordering::Release);
                     self.release_third.notified().await;
@@ -236,6 +314,10 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                 }
             }
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(vec![self.capacity.subscribe()])
     }
 
     fn cancel(&self) {
@@ -258,6 +340,10 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
             }
             SessionHistoricalIngestOutcome::Cancelled
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(vec![self.capacity.subscribe()])
     }
 
     fn cancel(&self) {
@@ -289,6 +375,10 @@ impl SessionHistoricalIngestor for CancelAwareHistoricalIngestor {
             self.exited.store(true, Ordering::Release);
             SessionHistoricalIngestOutcome::Cancelled
         })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
     }
 
     fn cancel(&self) {
@@ -706,12 +796,17 @@ async fn retrying_history_is_typed_stale() {
         .await;
     assert!(
         wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 2,
+            || ingestor.passes.load(Ordering::Acquire) >= 1,
             Duration::from_secs(2),
         )
         .await
     );
-
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        ingestor.passes.load(Ordering::Acquire),
+        1,
+        "a pass that committed nothing must not rerun before its capacity is released"
+    );
     let status = wake.serving_status();
     assert_eq!(
         status.state,
@@ -720,6 +815,16 @@ async fn retrying_history_is_typed_stale() {
                 reason_code: "provider_busy".to_owned(),
             },
         }
+    );
+
+    ingestor.capacity.send_modify(|epoch| *epoch += 1);
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 2,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the released capacity must resume the backpressured pass"
     );
 
     registry.shutdown().await;
@@ -763,6 +868,19 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
             },
         },
         "a permanent Cursor failure remains typed blocked"
+    );
+    assert_eq!(
+        (
+            wake.serving_status().convergence.state,
+            wake.serving_status().convergence.epoch
+        ),
+        (
+            SessionConvergenceState::Blocked {
+                reason_code: "observation_cursor_advance_collision".to_owned(),
+            },
+            0,
+        ),
+        "a settled worker whose discovery is blocked must not publish convergence"
     );
     assert!(
         wake.serving_status().last_progress_at_unix_micros.is_some(),
@@ -824,4 +942,107 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
     assert_eq!(ingestor.duplicates.load(Ordering::Acquire), 2);
 
     restarted.shutdown().await;
+}
+
+async fn occurrences_of_healthy_sessions(database: &RegisteredGlobalDb) -> i64 {
+    scalar(
+        database,
+        "SELECT COUNT(*) FROM session_occurrences
+         WHERE session_id IN ('session.healthy.claude', 'session.healthy.codex')",
+    )
+    .await
+}
+
+/// Yields to the worker until it reports `Converged`, then proves the report
+/// was published only after every owed item reached the projection.
+async fn await_convergence(
+    wake: &impl SessionProjectionServingStatusPort,
+    database: &RegisteredGlobalDb,
+) -> u64 {
+    loop {
+        let convergence = wake.serving_status().convergence;
+        if convergence.state == SessionConvergenceState::Converged {
+            assert_eq!(
+                occurrences_of_healthy_sessions(database).await,
+                2,
+                "convergence was published before the last owed projection committed"
+            );
+            assert!(convergence.converged_at_unix_micros.is_some());
+            return convergence.epoch;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn convergence_is_published_only_after_the_last_owed_projection_commits() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-convergence").await;
+    let ingestor = Arc::new(CompleteHealthyProvidersIngestor(
+        HealthyProvidersWithBlockedCursorIngestor::new(authority.database.clone()),
+    ));
+    let projector = Arc::new(HeldSessionProjector {
+        session_id: "session.healthy.codex",
+        held: AtomicBool::new(false),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
+    configure_scheduler(
+        &mut registry,
+        projector.clone(),
+        SessionTemporalRefreshPolicy::default(),
+    );
+
+    let wake = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert_eq!(
+        wake.serving_status().convergence.state,
+        SessionConvergenceState::Converging,
+        "a worker with history still owed must not start converged"
+    );
+    while !projector.held.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    let held = wake.serving_status();
+    assert_eq!(
+        (
+            held.state,
+            held.convergence.state,
+            ingestor.0.committed.load(Ordering::Acquire),
+        ),
+        (
+            SessionProjectionServingState::Current,
+            SessionConvergenceState::Converging,
+            2,
+        ),
+        "discovery reached its frontier and both sessions committed, \
+         but one projection is still owed"
+    );
+    let held_epoch = held.convergence.epoch;
+
+    projector.release.add_permits(1);
+    assert_eq!(
+        await_convergence(&wake, authority.database()).await,
+        held_epoch + 1,
+        "settling the owed projection publishes one convergence event"
+    );
+
+    assert!(wake.wake(), "the worker is still mounted");
+    assert_eq!(
+        wake.serving_status().convergence.state,
+        SessionConvergenceState::Converging,
+        "requeued work withdraws the converged state before the worker runs it"
+    );
+    assert_eq!(
+        await_convergence(&wake, authority.database()).await,
+        held_epoch + 2,
+        "settling the requeued pass publishes a new convergence event"
+    );
+
+    registry.shutdown().await;
 }

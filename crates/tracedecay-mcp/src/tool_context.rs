@@ -36,6 +36,7 @@ use tracedecay_contracts::code_index_freshness::{
 };
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -201,6 +202,7 @@ pub struct McpAdmittedProjectV1 {
     graph_db_path: PathBuf,
     store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
     configuration_runtime: Arc<ProjectConfigurationRuntime>,
+    index_path_policy: IndexPathPolicyV1,
     project_session_store: Option<RegisteredGlobalDbLeaseV1>,
 }
 
@@ -211,6 +213,7 @@ impl McpAdmittedProjectV1 {
     /// store layout must name that same project, and a session lease, when
     /// present, must be a `ProjectSessions` shard for that project. Nothing
     /// is defaulted or repaired.
+    #[allow(clippy::too_many_arguments)] // One admitted snapshot binds every project authority.
     pub fn new(
         identity: McpProjectIdentityV1,
         store_layout: StoreLayout,
@@ -218,6 +221,7 @@ impl McpAdmittedProjectV1 {
         graph_db_path: PathBuf,
         store_runtime: Arc<DaemonSessionRuntimeRegistryV1>,
         configuration_runtime: Arc<ProjectConfigurationRuntime>,
+        index_path_policy: IndexPathPolicyV1,
         project_session_store: Option<RegisteredGlobalDbLeaseV1>,
     ) -> std::result::Result<Self, McpToolBindingError> {
         if !identity.project_root.is_absolute() {
@@ -249,6 +253,7 @@ impl McpAdmittedProjectV1 {
             graph_db_path,
             store_runtime,
             configuration_runtime,
+            index_path_policy,
             project_session_store,
         })
     }
@@ -273,7 +278,6 @@ impl McpAdmittedProjectV1 {
             self.identity.active_branch.clone(),
             self.identity.serving_branch.clone(),
             self.identity.fallback_warning.clone(),
-            self.graph_db_path.clone(),
             serving_source_reference.map(|reference| {
                 tracedecay_application::tracedecay::ServingGraphSource {
                     reference,
@@ -512,6 +516,12 @@ impl<'a> McpToolContext<'a> {
     #[must_use]
     pub fn configuration_runtime(&self) -> &'a ProjectConfigurationRuntime {
         self.project.configuration_runtime()
+    }
+
+    /// The project's mounted `index.exclude.v1` / `index.include.v1` policy.
+    #[must_use]
+    pub fn index_path_policy(&self) -> &IndexPathPolicyV1 {
+        &self.project.index_path_policy
     }
 
     #[must_use]
@@ -1007,6 +1017,7 @@ pub(crate) mod tests {
             graph_db_path,
             store_runtime,
             configuration_runtime,
+            IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("fixture path policy"),
             lease,
         )
     }
@@ -1401,6 +1412,29 @@ pub(crate) mod tests {
             ),
             "the typed unavailable census is what a handler must emit, not an empty success"
         );
+    }
+
+    #[test]
+    fn source_walks_keep_the_mounted_policy_instead_of_reading_current_configuration() {
+        let root = tempfile::tempdir().expect("project root");
+        let admitted = scope("admitted");
+        let pinned = IndexPathPolicyV1::new(vec!["secrets/**".into()], vec![]).unwrap();
+        let (graph_database, store_runtime, configuration_runtime) = runtime_handles();
+        let project = McpAdmittedProjectV1::new(
+            project_identity(root.path(), &admitted),
+            test_store_layout(root.path(), admitted.project_id.as_str()),
+            graph_database,
+            root.path().join("graph.db"),
+            store_runtime,
+            configuration_runtime,
+            pinned,
+            None,
+        )
+        .expect("admitted project");
+        let bound = fixture_context(&project);
+
+        assert!(bound.index_path_policy().excludes("secrets/token.rs"));
+        assert!(!bound.index_path_policy().excludes("src/lib.rs"));
     }
 
     /// An admitted snapshot is the only source of root, scope, and store.

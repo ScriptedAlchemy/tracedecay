@@ -22,7 +22,9 @@ use super::super::{
     CodeGraphProjectionError, EDGE_RECORD_PROPERTY, SymbolRecordV1, code_edge_kind_edge,
     symbol_entity_id, validate_symbol_record,
 };
-use super::models::{CatalogSymbol, CodeGraphFileDependenciesV1, InteractiveCatalog};
+use super::models::{
+    CatalogBuilder, CatalogSymbol, CodeGraphFileDependenciesV1, InteractiveCatalog,
+};
 use crate::chunks::CodeIndexImportEvidenceV1;
 
 const CATALOG_SCAN_PAGE_ITEMS: usize = 1_024;
@@ -92,7 +94,7 @@ pub(super) fn build_interactive_catalog(
 }
 
 struct CatalogScan {
-    catalog: InteractiveCatalog,
+    catalog: CatalogBuilder,
     imports_by_entity: BTreeMap<GraphEntityId, CodeIndexImportEvidenceV1>,
     import_links: BTreeMap<GraphEntityId, GraphRelation>,
     degrees: SymbolDegreeCounts<GraphEntityId>,
@@ -114,7 +116,7 @@ struct DependencyEdgeRecord {
 impl CatalogScan {
     fn new() -> Self {
         Self {
-            catalog: InteractiveCatalog::empty(),
+            catalog: CatalogBuilder::new(),
             imports_by_entity: BTreeMap::new(),
             import_links: BTreeMap::new(),
             degrees: SymbolDegreeCounts::default(),
@@ -388,17 +390,15 @@ impl CatalogScan {
             (symbol.outgoing, symbol.incoming) = self.degrees.take(&symbol_entity_id(occurrence)?);
         }
         self.degrees.require_drained()?;
-        self.catalog.file_dependencies = file_dependencies(&self.catalog, &self.dependency_edges);
-
-        self.catalog.imports = self.imports_by_entity.into_values().collect();
-        self.catalog.imports.sort_by(canonical_import_order);
-        self.catalog.finalize();
-        Ok(self.catalog)
+        let file_dependencies = file_dependencies(&self.catalog, &self.dependency_edges);
+        let mut imports: Vec<_> = self.imports_by_entity.into_values().collect();
+        imports.sort_by(canonical_import_order);
+        Ok(self.catalog.finish(imports, file_dependencies))
     }
 }
 
 fn file_dependencies(
-    catalog: &InteractiveCatalog,
+    catalog: &CatalogBuilder,
     edges: &[(SymbolOccurrenceId, SymbolOccurrenceId)],
 ) -> CodeGraphFileDependenciesV1 {
     let logical_path = |occurrence: &SymbolOccurrenceId| {

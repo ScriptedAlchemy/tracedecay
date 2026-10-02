@@ -7,11 +7,29 @@ use tempfile::TempDir;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_domain::canonical_text::sha256_hex;
+#[cfg(test)]
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, RetrievalAnchorRecord,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
+};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
+use tracedecay_rusqlite_runtime::repository::RepositoryWriterRuntimeSnapshot;
+#[cfg(test)]
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
+};
 
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -492,10 +510,12 @@ impl RegisteredGlobalDbHarness {
             .await
             .expect("publish daemon test runtime")
             .into_parts();
-        let (database, convergence) =
-            RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner)
-                .await
-                .expect("daemon admission");
+        let (database, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database_owner,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await
+        .expect("daemon admission");
         let registered = database.issue_lease().expect("issue daemon test lease");
         (
             Self {
@@ -504,7 +524,7 @@ impl RegisteredGlobalDbHarness {
                 _directory,
                 _scope,
             },
-            convergence,
+            convergence.expect("an admissible store returns its convergence plan"),
         )
     }
 }
@@ -726,41 +746,6 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(self
             .session_database_for_test(scope)?
             .upsert_session(session)
-            .await)
-    }
-
-    pub async fn upsert_session_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        message: &tracedecay_sessions::runtime::SessionMessageRecord,
-    ) -> tracedecay_domain::errors::Result<bool> {
-        let database = self.session_database_for_test(scope)?;
-        let session = database
-            .get_session(&message.provider, &message.session_id)
-            .await
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "seed registered session message fixture".to_owned(),
-                    message: error.to_string(),
-                },
-            )?
-            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "seed registered session message fixture".to_owned(),
-                message: format!(
-                    "session {}/{} is unavailable",
-                    message.provider, message.session_id
-                ),
-            })?;
-        Ok(database
-            .upsert_transcript_batch(
-                &session,
-                std::slice::from_ref(message),
-                &format!(
-                    "global-db-test-message:{}:{}",
-                    message.provider, message.message_id
-                ),
-                crate::ParseOffset::default(),
-            )
             .await)
     }
 
@@ -1167,6 +1152,132 @@ pub async fn publish_test_session_relation_projection(
             message: format!("{error:?}"),
         },
     )
+}
+
+/// Commits and projects messages `indexes` of one session through the real
+/// observation store, continuing its source cursor from the message before
+/// the first index. Returns each observation with the retrieval anchor it was
+/// persisted under.
+#[cfg(test)]
+pub(crate) async fn seed_projected_messages(
+    runtime: &HostAdmissionTestRuntimeV1,
+    indexes: std::ops::Range<usize>,
+) -> Vec<(DurableObservationV1, RetrievalAnchorRecord)> {
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let provider = ProviderId::new("codex").unwrap();
+    let session_id = SessionId::new("session.audit-batch").unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let mut expected_cursor = (indexes.start > 0).then(|| {
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            u64::try_from(indexes.start).unwrap() * 100,
+        )
+        .unwrap()
+    });
+    let mut seeded = Vec::with_capacity(indexes.len());
+    for index in indexes {
+        let record_id = format!("record.audit-batch-{index}");
+        let record = ObservationId::new(record_id.clone()).unwrap();
+        let start = u64::try_from(index).unwrap() * 100;
+        let range = ObservationSourceRangeV1::new(start, start + 100).unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(format!("message.{record_id}")).unwrap());
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider.clone(),
+            "message",
+            record.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: serde_json::json!({ "text": format!("audit batch {index}") }),
+                model: None,
+                timestamp: Some(1_750_000_000),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!("receipt.audit-batch-{index}")).unwrap(),
+                ComponentVersion::new("sanitizer.audit-batch.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source.clone(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                record,
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.audit-batch").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(
+            observation.clone(),
+            expected_cursor.clone(),
+            next_cursor.clone(),
+        )
+        .unwrap();
+        let generation = ProjectionGenerationId::new("projection.audit-batch.v1").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(write.observation(), "audit-batch")
+                .unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        let anchored = AnchoredObservationWrite::new(write, anchor.clone(), generation).unwrap();
+        assert!(matches!(
+            store.persist_observation(anchored).await.unwrap(),
+            ObservationPersistOutcome::Committed(_)
+        ));
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+        expected_cursor = Some(next_cursor);
+        seeded.push((observation, anchor));
+    }
+    seeded
+}
+
+/// The mounted writer's rusqlite telemetry for `database`: the SQLite work its
+/// write transactions executed and how they ended.
+pub fn writer_telemetry(database: &RegisteredGlobalDb) -> RepositoryWriterRuntimeSnapshot {
+    database
+        .runtime_client()
+        .writer_telemetry_snapshot()
+        .expect("registered database must expose rusqlite writer telemetry")
+        .writer
+        .expect("mounted writer must carry rusqlite writer telemetry")
 }
 
 /// Mounts the daemon-owned relation graph a registered session shard needs to

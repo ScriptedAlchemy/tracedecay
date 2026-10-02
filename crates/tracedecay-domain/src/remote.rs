@@ -421,6 +421,9 @@ impl CurrentRemoteAuthorityV1 {
 pub enum RemoteAuthorityUnavailableReasonV1 {
     RegistryUnavailable,
     PlacementUnknown,
+    /// The RemoteNode store has never had a writer authority published for
+    /// this Brain, so no capture, replay, query, or failover can bind to one.
+    WriterAuthorityUnpublished,
     AuthorityUnreachable,
     AuthorityAuthenticationFailed,
     CallerAuthenticationFailed,

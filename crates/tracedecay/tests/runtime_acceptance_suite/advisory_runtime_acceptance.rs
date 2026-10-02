@@ -972,7 +972,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         // children never touch the operator ledger. This journey depends on
         // the registered profile accounting owner for hint-outcome settlement.
         command
-            .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+            .env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
             .stderr(Stdio::from(
                 std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
             ));
@@ -1231,8 +1231,9 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             serde_json::from_str::<Value>(&stdout)
                 .ok()
                 .is_some_and(|response| {
-                    response["problem"]["code"] == "feedback.advisory-cycle.unavailable"
-                        && response["problem"]["retryable"] == true
+                    let problem = &response["structuredContent"]["problem"];
+                    problem["code"] == "feedback.advisory-cycle.unavailable"
+                        && problem["retryable"] == true
                 });
         assert!(
             retryable_unavailable,

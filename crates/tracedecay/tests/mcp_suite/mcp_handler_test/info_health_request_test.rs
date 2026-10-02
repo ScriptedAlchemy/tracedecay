@@ -87,7 +87,7 @@ async fn refusal(
         .result
         .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result"));
     assert_eq!(result["isError"], true, "{tool_name} must refuse: {result}");
-    let problem = &result["problem"];
+    let problem = &result["structuredContent"]["problem"];
     json!({
         "kind": problem["kind"],
         "code": problem["code"],

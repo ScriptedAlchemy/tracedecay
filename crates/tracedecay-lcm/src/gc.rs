@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
@@ -23,9 +23,9 @@ pub use pending_delete::{
 };
 pub(crate) use placeholder_scan::{
     PlaceholderScanScope, PlaceholderTextRow, all_placeholder_like_patterns,
-    any_placeholder_text_row, bind_placeholder_like_patterns, count_placeholder_text_rows,
-    gc_prefix_like_patterns, gc_prefix_ref_like_patterns, live_prefix_like_patterns,
-    live_prefix_ref_like_patterns, placeholder_text_like_sql, scan_placeholder_text_rows,
+    any_placeholder_text_row, count_placeholder_text_rows, gc_prefix_like_patterns,
+    gc_prefix_ref_like_patterns, live_prefix_like_patterns, placeholder_text_rows_by_store_id,
+    scan_placeholder_text_rows, scan_placeholder_text_rows_between,
 };
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
@@ -195,86 +195,122 @@ impl LcmGcReport {
     }
 }
 
-pub async fn referenced_payload_refs(
+/// The raw row a payload's metadata names as its owner. Payload refs hash
+/// `(provider, session_id, message_id, content)`, so a payload has exactly one
+/// owner row, and expansion already refuses every other row
+/// (`payload::expand_payload`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadOwner {
+    pub(crate) payload_ref: String,
+    pub(crate) provider: String,
+    pub(crate) session_id: String,
+    pub(crate) message_id: String,
+}
+
+/// Owner probes per query. Owner rows carry message bodies, so a chunk stays
+/// far below the SQL channel's materialization limit.
+const OWNER_PROBE_CHUNK: usize = 64;
+
+/// The payloads among `owners` whose owner row still references them: the
+/// row stores the payload as its external body, or its text carries a live
+/// placeholder naming it. Each probe is one unique-index lookup, so the cost
+/// follows the candidates, never the store.
+pub(crate) async fn owner_referenced_payloads(
     conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
+    owners: &[PayloadOwner],
 ) -> Result<BTreeSet<String>, LcmError> {
-    // Read through byte-bounded `store_id` keyset pages: the raw-message text
-    // for a whole profile exceeds what the SQLite runtime will materialize for
-    // one query. Every page folds into the same set, so the answer stays the
-    // complete reference closure.
-    let mut refs = BTreeSet::new();
-    let mut after_store_id = 0_i64;
-    loop {
+    let mut referenced = BTreeSet::new();
+    for chunk in owners.chunks(OWNER_PROBE_CHUNK) {
+        let wanted = serde_json::to_string(
+            &chunk
+                .iter()
+                .map(|owner| {
+                    [
+                        owner.payload_ref.as_str(),
+                        owner.provider.as_str(),
+                        owner.message_id.as_str(),
+                        owner.session_id.as_str(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| LcmError::Db(format!("encode payload owner probe: {error}")))?;
         let mut rows = conn
             .query(
-                "WITH page AS (
-                     SELECT store_id, storage_kind, payload_ref,
-                            content, snippet_text, index_text, metadata_json
-                     FROM lcm_raw_messages
-                     WHERE (?1 = 'all' OR provider = ?1)
-                       AND (?2 IS NULL OR session_id = ?2)
-                       AND store_id > ?3
-                     ORDER BY store_id
-                     LIMIT ?4
-                 ),
-                 bounded AS (
-                     SELECT store_id, storage_kind, payload_ref,
-                            content, snippet_text, index_text, metadata_json,
-                            ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
-                            SUM(length(CAST(COALESCE(content, '') AS BLOB))
-                                + length(CAST(COALESCE(snippet_text, '') AS BLOB))
-                                + length(CAST(COALESCE(index_text, '') AS BLOB))
-                                + length(CAST(COALESCE(metadata_json, '') AS BLOB)))
-                                OVER (ORDER BY store_id) AS cumulative_bytes
-                     FROM page
-                 )
-                 SELECT store_id, storage_kind, payload_ref,
-                        content, snippet_text, index_text, metadata_json
-                 FROM bounded
-                 WHERE cumulative_bytes <= ?5 OR page_row = 1
-                 ORDER BY store_id",
-                params![
-                    provider,
-                    session_id,
-                    after_store_id,
-                    LCM_SCAN_PAGE_ROWS,
-                    LCM_SCAN_PAGE_MAX_BYTES
-                ],
+                "SELECT json_extract(wanted.value, '$[0]'), r.storage_kind, r.payload_ref,
+                        r.content, r.placeholder_text, r.metadata_json
+                 FROM json_each(?1) AS wanted
+                 JOIN lcm_raw_messages AS r
+                   ON r.provider = json_extract(wanted.value, '$[1]')
+                  AND r.message_id = json_extract(wanted.value, '$[2]')
+                  AND r.session_id = json_extract(wanted.value, '$[3]')",
+                params![wanted],
             )
             .await?;
-        let mut page_rows = 0_usize;
         while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(0)?;
-            if store_id <= after_store_id {
-                return Err(LcmError::Db(
-                    "LCM referenced payload scan page did not advance".to_string(),
-                ));
-            }
-            after_store_id = store_id;
-            page_rows += 1;
+            let payload_ref: String = row.get(0)?;
             let storage_kind: String = row.get(1)?;
-            let payload_ref: Option<String> = row.get(2).unwrap_or(None);
-            if storage_kind == "external"
-                && let Some(payload_ref) = payload_ref
+            let stored_ref: Option<String> = row.get(2)?;
+            let stores_body =
+                storage_kind == "external" && stored_ref.as_deref() == Some(payload_ref.as_str());
+            let mut texts = [row.get::<Option<String>>(3)?, row.get(4)?, row.get(5)?].into_iter();
+            if stores_body
+                || texts.any(|text| {
+                    text.is_some_and(|text| {
+                        extract_live_payload_refs_from_text(&text).contains(&payload_ref)
+                    })
+                })
             {
-                refs.insert(payload_ref);
+                referenced.insert(payload_ref);
             }
-            for index in 3..7 {
-                let value: Option<String> = row.get(index).unwrap_or(None);
-                if let Some(value) = value.as_deref() {
-                    refs.extend(extract_live_payload_refs_from_text(value));
-                }
-            }
-        }
-        drop(rows);
-        // A byte-bounded page can stop short of the row budget, so only an
-        // empty page proves the scan is complete.
-        if page_rows == 0 {
-            return Ok(refs);
         }
     }
+    Ok(referenced)
+}
+
+/// The payloads among `payload_refs` with metadata whose owner row still
+/// references them.
+pub(crate) async fn owner_referenced_metadata(
+    conn: &(impl QueryExecutor + ?Sized),
+    payload_refs: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, LcmError> {
+    let payload_refs = payload_refs.iter().cloned().collect::<Vec<_>>();
+    let owners = payload_owners(conn, &payload_refs).await?;
+    owner_referenced_payloads(conn, &owners).await
+}
+
+/// Owners of the payloads in `payload_refs` that still have metadata.
+async fn payload_owners(
+    conn: &(impl QueryExecutor + ?Sized),
+    payload_refs: &[String],
+) -> Result<Vec<PayloadOwner>, LcmError> {
+    let mut owners = Vec::with_capacity(payload_refs.len());
+    for chunk in payload_refs.chunks(util::SQLITE_IN_BATCH_SIZE) {
+        let sql = format!(
+            "SELECT payload_ref, provider, session_id, message_id
+             FROM lcm_external_payloads WHERE payload_ref IN ({})",
+            util::sql_in_placeholders(chunk.len())
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(SqlValue::Text)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            owners.push(PayloadOwner {
+                payload_ref: row.get(0)?,
+                provider: row.get(1)?,
+                session_id: row.get(2)?,
+                message_id: row.get(3)?,
+            });
+        }
+    }
+    Ok(owners)
 }
 
 fn extract_live_payload_refs_from_text(text: &str) -> Vec<String> {
@@ -377,24 +413,6 @@ pub async fn payload_metadata_refs_for_scope(
     maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await
 }
 
-async fn payload_metadata_bytes(
-    conn: &(impl QueryExecutor + ?Sized),
-) -> Result<BTreeMap<String, u64>, LcmError> {
-    let mut bytes = BTreeMap::new();
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref, byte_count FROM lcm_external_payloads",
-            (),
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let payload_ref: String = row.get(0)?;
-        let byte_count: i64 = row.get(1)?;
-        bytes.insert(payload_ref, byte_count.max(0) as u64);
-    }
-    Ok(bytes)
-}
-
 /// Read-only payload GC preview. Mutation runs through
 /// [`run_payload_gc_in_transaction`]; this entry point never writes.
 #[hotpath::measure(label = "sessions.lcm.gc.preview", future = true)]
@@ -414,48 +432,360 @@ pub async fn run_payload_gc(
     report.last_error = schema::get_gc_meta(conn, "last_error").await?;
 
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
-    let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
-    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
-    let metadata_bytes = payload_metadata_bytes(conn).await?;
+    let snapshot = read_payload_gc_snapshot(conn, storage_root, provider, session_id).await?;
     let mut remaining = cfg.max_batch_size.max(1);
 
     if let Some(dir) = dir.as_deref() {
         preview_orphan_files(
             dir,
-            &all_metadata_refs,
+            &snapshot.all_metadata_refs,
             now,
             &cfg,
             &mut remaining,
             &mut report,
         )?;
     }
-    preview_unreferenced_metadata(
+    plan_unreferenced(conn, provider, session_id, &cfg, now)
+        .await?
+        .preview(&mut remaining, &mut report);
+    let missing = plan_missing(
         conn,
-        &scoped_metadata_refs,
-        &referenced,
-        &metadata_bytes,
-        now,
-        &cfg,
-        &mut remaining,
+        dir.as_deref(),
+        &snapshot.scoped_metadata_refs,
         &mut report,
     )
     .await?;
-    preview_missing_metadata(
-        conn,
-        storage_root,
-        &all_metadata_refs,
-        &referenced,
-        now,
-        &cfg,
-        &mut remaining,
-        &mut report,
-    )
-    .await?;
-    preview_dangling_placeholders(dir.as_deref(), &all_metadata_refs, &referenced, &mut report);
+    preview_missing_reaps(conn, &missing, &cfg, now, &mut remaining, &mut report).await?;
+    snapshot.dangling.preview(&mut report);
     report.ended_at = now;
     crate::metrics::record_lcm_gc(report.totals.bytes, report.totals.files);
     Ok(report)
+}
+
+/// Unreferenced-payload candidates one GC pass acts on.
+struct UnreferencedPlan {
+    /// Marks whose payload metadata is gone; only unscoped passes see them.
+    stale: Vec<String>,
+    /// Due candidates whose owner row still references them.
+    referenced: Vec<String>,
+    /// Due candidates no owner row references, with their metadata size.
+    unreferenced: Vec<(PayloadOwner, u64)>,
+    within_grace: u64,
+    /// Due candidates beyond this pass's batch.
+    beyond_batch: u64,
+}
+
+impl UnreferencedPlan {
+    fn record_deferred(&self, report: &mut LcmGcReport) {
+        if self.within_grace > 0 {
+            report.deferred.count += usize::try_from(self.within_grace).unwrap_or(usize::MAX);
+            report
+                .deferred
+                .reason
+                .get_or_insert_with(|| "within_grace".to_string());
+        }
+        report.batch_cap(usize::try_from(self.beyond_batch).unwrap_or(usize::MAX));
+    }
+
+    fn preview(&self, remaining: &mut usize, report: &mut LcmGcReport) {
+        self.record_deferred(report);
+        for (owner, bytes) in &self.unreferenced {
+            if *remaining == 0 {
+                report.batch_cap(1);
+                continue;
+            }
+            report.unreferenced.add(&owner.payload_ref, *bytes);
+            *remaining -= 1;
+        }
+    }
+}
+
+/// Reports the referenced missing payloads and counts the ones an applied
+/// pass would reap.
+async fn preview_missing_reaps(
+    conn: &(impl QueryExecutor + ?Sized),
+    missing: &MissingPlan,
+    cfg: &LcmGcConfig,
+    now: i64,
+    remaining: &mut usize,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    for payload_ref in &missing.referenced {
+        report.missing.add(payload_ref, 0);
+    }
+    if !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
+        return Ok(());
+    }
+    let marks = gc_marks(conn, &missing.referenced).await?;
+    for payload_ref in &missing.referenced {
+        let due = marks
+            .get(payload_ref.as_str())
+            .is_some_and(|(state, first_seen_at)| {
+                state == "missing"
+                    && now.saturating_sub(*first_seen_at) >= cfg.reap_missing_after as i64
+            });
+        if !due {
+            continue;
+        }
+        if *remaining == 0 {
+            report.batch_cap(1);
+            continue;
+        }
+        *remaining -= 1;
+    }
+    Ok(())
+}
+
+/// Scope predicate over a mark's metadata row aliased `e`. A mark without
+/// metadata belongs to no provider, so only an unscoped pass selects it.
+const MARK_SCOPE_SQL: &str =
+    "(?1 = 'all' OR e.provider = ?1) AND (?2 IS NULL OR e.session_id = ?2)";
+
+/// Reads the `unreferenced` marks past the grace window, oldest first, and
+/// verifies each against its owner row. Marks still inside the window are only
+/// counted. Every read is a range of the marks index or an owner-row lookup,
+/// so a pass costs what changed since the candidates were recorded.
+async fn plan_unreferenced(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+    cfg: &LcmGcConfig,
+    now: i64,
+) -> Result<UnreferencedPlan, LcmError> {
+    let due_before = now.saturating_sub(i64::try_from(cfg.grace_seconds).unwrap_or(i64::MAX));
+    let count = |comparison: &'static str| {
+        format!(
+            "SELECT COUNT(*) FROM lcm_gc_marks AS m
+             LEFT JOIN lcm_external_payloads AS e ON e.payload_ref = m.payload_ref
+             WHERE m.state = 'unreferenced' AND m.first_seen_at {comparison} ?3
+               AND {MARK_SCOPE_SQL}"
+        )
+    };
+    let marks_count = |comparison| {
+        let sql = count(comparison);
+        async move {
+            util::fetch_i64(
+                conn,
+                &sql,
+                params![provider, session_id, due_before],
+                "payload GC mark count returned no row",
+            )
+            .await
+            .map(|count| count.max(0) as u64)
+        }
+    };
+    let within_grace = marks_count(">").await?;
+    let due_total = marks_count("<=").await?;
+    let batch = i64::try_from(cfg.max_batch_size.max(1)).unwrap_or(i64::MAX);
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT m.payload_ref, e.provider, e.session_id, e.message_id, e.byte_count
+                 FROM lcm_gc_marks AS m
+                 LEFT JOIN lcm_external_payloads AS e ON e.payload_ref = m.payload_ref
+                 WHERE m.state = 'unreferenced' AND m.first_seen_at <= ?3
+                   AND {MARK_SCOPE_SQL}
+                 ORDER BY m.first_seen_at, m.payload_ref
+                 LIMIT ?4"
+            ),
+            params![provider, session_id, due_before, batch],
+        )
+        .await?;
+    let mut stale = Vec::new();
+    let mut due = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        match (
+            row.get::<Option<String>>(1)?,
+            row.get::<Option<String>>(2)?,
+            row.get::<Option<String>>(3)?,
+        ) {
+            (Some(provider), Some(session_id), Some(message_id)) => due.push((
+                PayloadOwner {
+                    payload_ref,
+                    provider,
+                    session_id,
+                    message_id,
+                },
+                row.get::<Option<i64>>(4)?.unwrap_or_default().max(0) as u64,
+            )),
+            _ => stale.push(payload_ref),
+        }
+    }
+    drop(rows);
+    let examined = (stale.len() + due.len()) as u64;
+    let owners = due
+        .iter()
+        .map(|(owner, _)| owner.clone())
+        .collect::<Vec<_>>();
+    let still_referenced = owner_referenced_payloads(conn, &owners).await?;
+    let (referenced, unreferenced): (Vec<_>, Vec<_>) = due
+        .into_iter()
+        .partition(|(owner, _)| still_referenced.contains(&owner.payload_ref));
+    Ok(UnreferencedPlan {
+        stale,
+        referenced: referenced
+            .into_iter()
+            .map(|(owner, _)| owner.payload_ref)
+            .collect(),
+        unreferenced,
+        within_grace,
+        beyond_batch: due_total.saturating_sub(examined),
+    })
+}
+
+/// Referenced payloads whose file is missing, and `missing` marks whose file
+/// is back.
+struct MissingPlan {
+    referenced: Vec<String>,
+    restored: Vec<String>,
+}
+
+/// Stats every in-scope payload file and verifies the missing ones against
+/// their owner rows.
+///
+/// ponytail: one `stat` per payload per pass; a file removed behind the
+/// store's back has no other signal. Track payload file loss at its source
+/// if payload counts ever make this measurable.
+async fn plan_missing(
+    conn: &(impl QueryExecutor + ?Sized),
+    dir: Option<&Path>,
+    metadata_refs: &BTreeSet<String>,
+    report: &mut LcmGcReport,
+) -> Result<MissingPlan, LcmError> {
+    let mut missing = Vec::new();
+    let mut present = BTreeSet::new();
+    for payload_ref in metadata_refs {
+        match payload_file_present(dir, payload_ref) {
+            Ok(true) => {
+                present.insert(payload_ref.clone());
+            }
+            Ok(false) => missing.push(payload_ref.clone()),
+            Err(error) => report.add_error(payload_ref, "payload_stat_failed", error.to_string()),
+        }
+    }
+    let owners = payload_owners(conn, &missing).await?;
+    let referenced_set = owner_referenced_payloads(conn, &owners).await?;
+    let referenced = missing
+        .into_iter()
+        .filter(|payload_ref| referenced_set.contains(payload_ref))
+        .collect::<Vec<_>>();
+    let mut rows = conn
+        .query(
+            "SELECT payload_ref FROM lcm_gc_marks WHERE state = 'missing'",
+            (),
+        )
+        .await?;
+    let mut restored = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
+        if present.contains(&payload_ref) {
+            restored.push(payload_ref);
+        }
+    }
+    Ok(MissingPlan {
+        referenced,
+        restored,
+    })
+}
+
+/// Live placeholders in rows written since the last applied pass that name a
+/// payload with neither metadata nor a file.
+struct DanglingPlan {
+    refs: BTreeSet<String>,
+    /// Rows carrying one of `refs`, re-read by the transaction that rewrites
+    /// them.
+    store_ids: Vec<i64>,
+    scanned_through: i64,
+    stat_errors: Vec<(String, String)>,
+}
+
+impl DanglingPlan {
+    fn preview(&self, report: &mut LcmGcReport) {
+        for (payload_ref, detail) in &self.stat_errors {
+            report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
+        }
+        for payload_ref in &self.refs {
+            report.dangling.add(payload_ref, 0);
+        }
+    }
+}
+
+pub(crate) const DANGLING_SCAN_CURSOR: &str = "dangling_scan_store_id";
+
+/// Scans only the rows written since the last applied pass. An owner row
+/// loses its placeholders when its payload is deleted, so a dangling
+/// placeholder can only arrive with new text.
+async fn plan_dangling(
+    conn: &(impl QueryExecutor + ?Sized),
+    dir: Option<&Path>,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<DanglingPlan, LcmError> {
+    let after = schema::get_gc_meta(conn, DANGLING_SCAN_CURSOR)
+        .await?
+        .ok_or_else(|| LcmError::Db("payload GC dangling scan cursor is missing".to_string()))?
+        .parse::<i64>()
+        .map_err(|error| LcmError::Db(format!("payload GC dangling scan cursor: {error}")))?;
+    let scanned_through = util::fetch_i64(
+        conn,
+        "SELECT COALESCE(MAX(store_id), 0) FROM lcm_raw_messages",
+        (),
+        "payload GC raw row watermark returned no row",
+    )
+    .await?
+    .max(after);
+    let rows = scan_placeholder_text_rows_between(
+        conn,
+        PlaceholderScanScope::ProviderOrAll {
+            provider,
+            session_id,
+        },
+        &live_prefix_like_patterns(),
+        after,
+        scanned_through,
+    )
+    .await?;
+    let mut named = BTreeSet::new();
+    for row in &rows {
+        for text in row.texts() {
+            named.extend(extract_live_payload_refs_from_text(text));
+        }
+    }
+    let named = named.into_iter().collect::<Vec<_>>();
+    let owners = payload_owners(conn, &named).await?;
+    let with_metadata = owners
+        .into_iter()
+        .map(|owner| owner.payload_ref)
+        .collect::<BTreeSet<_>>();
+    let mut refs = BTreeSet::new();
+    let mut stat_errors = Vec::new();
+    for payload_ref in named {
+        if with_metadata.contains(&payload_ref) {
+            continue;
+        }
+        match payload_file_present(dir, &payload_ref) {
+            Ok(true) => {}
+            Ok(false) => {
+                refs.insert(payload_ref);
+            }
+            Err(error) => stat_errors.push((payload_ref, error.to_string())),
+        }
+    }
+    let store_ids = rows
+        .iter()
+        .filter(|row| {
+            row.texts()
+                .any(|text| refs.iter().any(|payload_ref| text.contains(payload_ref)))
+        })
+        .map(|row| row.store_id)
+        .collect();
+    Ok(DanglingPlan {
+        refs,
+        store_ids,
+        scanned_through,
+        stat_errors,
+    })
 }
 
 #[cfg(test)]
@@ -472,6 +802,7 @@ pub async fn run_payload_gc_with_apply(
         return run_payload_gc(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
+    let snapshot = read_payload_gc_snapshot(conn, storage_root, provider, session_id).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -483,6 +814,7 @@ pub async fn run_payload_gc_with_apply(
         cfg,
         true,
         now,
+        &snapshot,
     )
     .await?;
     transaction.commit().await?;
@@ -517,7 +849,41 @@ pub async fn finalize_gc_report(
     Ok(())
 }
 
+/// What payload GC reads on the reader before its write transaction: every
+/// metadata ref, which orphan detection subtracts from the payload directory;
+/// the refs in scope, whose files the missing phase checks; and the dangling
+/// placeholders in rows written since the last applied pass. The transaction
+/// re-reads each payload and row it acts on.
+pub struct PayloadGcSnapshot {
+    all_metadata_refs: BTreeSet<String>,
+    scoped_metadata_refs: BTreeSet<String>,
+    dangling: DanglingPlan,
+}
+
+#[hotpath::measure(label = "sessions.lcm.gc.snapshot", future = true)]
+pub async fn read_payload_gc_snapshot(
+    conn: &(impl QueryExecutor + ?Sized),
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<PayloadGcSnapshot, LcmError> {
+    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
+    let scoped_metadata_refs = if provider == "all" && session_id.is_none() {
+        all_metadata_refs.clone()
+    } else {
+        payload_metadata_refs_for_scope(conn, provider, session_id).await?
+    };
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let dangling = plan_dangling(conn, dir.as_deref(), provider, session_id).await?;
+    Ok(PayloadGcSnapshot {
+        all_metadata_refs,
+        scoped_metadata_refs,
+        dangling,
+    })
+}
+
 #[hotpath::measure(label = "sessions.lcm.gc.apply", future = true)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
@@ -526,6 +892,7 @@ pub async fn run_payload_gc_in_transaction(
     cfg: &LcmGcConfig,
     apply: bool,
     now: i64,
+    snapshot: &PayloadGcSnapshot,
 ) -> Result<LcmGcReport, LcmError> {
     let started = Instant::now();
     let cfg = cfg.clone().normalized();
@@ -540,11 +907,11 @@ pub async fn run_payload_gc_in_transaction(
     // while the DB-side phases below still run (missing payloads, stale
     // marks, dangling placeholders).
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
-
-    let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
-    let referenced = referenced_payload_refs(conn, provider, session_id).await?;
-    let metadata_bytes = payload_metadata_bytes(conn).await?;
+    let PayloadGcSnapshot {
+        all_metadata_refs,
+        scoped_metadata_refs,
+        dangling,
+    } = snapshot;
 
     let mut remaining = cfg.max_batch_size.max(1);
     // Orphan files have no metadata row, so they cannot be attributed to a
@@ -555,7 +922,7 @@ pub async fn run_payload_gc_in_transaction(
             stage_orphan_files(
                 conn,
                 dir,
-                &all_metadata_refs,
+                all_metadata_refs,
                 now,
                 &cfg,
                 &mut remaining,
@@ -565,7 +932,7 @@ pub async fn run_payload_gc_in_transaction(
         } else {
             preview_orphan_files(
                 dir,
-                &all_metadata_refs,
+                all_metadata_refs,
                 now,
                 &cfg,
                 &mut remaining,
@@ -573,45 +940,35 @@ pub async fn run_payload_gc_in_transaction(
             )?;
         }
     }
-    reap_unreferenced_metadata(ReapUnreferencedMetadataRequest {
+    reap_unreferenced_metadata(ReapRequest {
         conn,
         storage_root,
-        metadata_refs: &scoped_metadata_refs,
-        referenced: &referenced,
-        metadata_bytes: &metadata_bytes,
-        now,
-        cfg: &cfg,
-        apply,
-        remaining: &mut remaining,
-        report: &mut report,
-    })
-    .await?;
-    reap_missing_metadata(ReapMissingMetadataRequest {
-        conn,
-        storage_root,
-        metadata_refs: &all_metadata_refs,
-        referenced: &referenced,
-        now,
-        cfg: &cfg,
-        apply,
-        remaining: &mut remaining,
-        report: &mut report,
-    })
-    .await?;
-    // Reusing the phase-A/B/C reference set is exact here: any ref those
-    // phases tombstoned out of the live reference set is a member of
-    // `all_metadata_refs`, which this phase subtracts anyway.
-    rewrite_dangling_placeholders(RewriteDanglingPlaceholdersRequest {
-        conn,
-        dir: dir.as_deref(),
-        metadata_refs: &all_metadata_refs,
-        referenced: &referenced,
         provider,
         session_id,
+        now,
+        cfg: &cfg,
         apply,
+        remaining: &mut remaining,
         report: &mut report,
     })
     .await?;
+    reap_missing_metadata(
+        ReapRequest {
+            conn,
+            storage_root,
+            provider,
+            session_id,
+            now,
+            cfg: &cfg,
+            apply,
+            remaining: &mut remaining,
+            report: &mut report,
+        },
+        dir.as_deref(),
+        scoped_metadata_refs,
+    )
+    .await?;
+    rewrite_dangling_placeholders(conn, dangling, provider, session_id, apply, &mut report).await?;
 
     report.ended_at = now;
     if apply {
@@ -637,128 +994,11 @@ pub async fn run_payload_gc_in_transaction(
     Ok(report)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn preview_unreferenced_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
-    metadata_bytes: &BTreeMap<String, u64>,
-    now: i64,
-    cfg: &LcmGcConfig,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
-    let candidates = metadata_refs
-        .difference(referenced)
-        .cloned()
-        .collect::<Vec<_>>();
-    let marks = gc_marks(conn, &candidates).await?;
-    for payload_ref in &candidates {
-        let Some((state, first_seen_at)) = marks.get(payload_ref.as_str()) else {
-            report.deferred.count += 1;
-            report
-                .deferred
-                .reason
-                .get_or_insert_with(|| "within_grace".to_string());
-            continue;
-        };
-        if state.as_str() != "unreferenced"
-            || now.saturating_sub(*first_seen_at) < cfg.grace_seconds as i64
-        {
-            report.deferred.count += 1;
-            report
-                .deferred
-                .reason
-                .get_or_insert_with(|| "within_grace".to_string());
-            continue;
-        }
-        if *remaining == 0 {
-            report.batch_cap(1);
-            continue;
-        }
-        report.unreferenced.add(
-            payload_ref,
-            metadata_bytes.get(payload_ref).copied().unwrap_or_default(),
-        );
-        *remaining -= 1;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn preview_missing_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    storage_root: &Path,
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
-    now: i64,
-    cfg: &LcmGcConfig,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
-    let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let mut candidates = Vec::new();
-    for payload_ref in metadata_refs.intersection(referenced) {
-        match payload_file_present(dir.as_deref(), payload_ref) {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(error) => {
-                report.add_error(payload_ref, "payload_stat_failed", error.to_string());
-                continue;
-            }
-        }
-        report.missing.add(payload_ref, 0);
-        if !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
-            continue;
-        }
-        candidates.push(payload_ref.clone());
-    }
-    let marks = gc_marks(conn, &candidates).await?;
-    for payload_ref in &candidates {
-        let Some((state, first_seen_at)) = marks.get(payload_ref.as_str()) else {
-            continue;
-        };
-        if state.as_str() != "missing"
-            || now.saturating_sub(*first_seen_at) < cfg.reap_missing_after as i64
-        {
-            continue;
-        }
-        if *remaining == 0 {
-            report.batch_cap(1);
-            continue;
-        }
-        *remaining -= 1;
-    }
-    Ok(())
-}
-
-fn preview_dangling_placeholders(
-    dir: Option<&Path>,
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
-    report: &mut LcmGcReport,
-) {
-    for payload_ref in referenced.difference(metadata_refs) {
-        match payload_file_present(dir, payload_ref) {
-            Ok(true) => {}
-            Ok(false) => report.dangling.add(payload_ref, 0),
-            Err(error) => {
-                report.add_error(
-                    payload_ref,
-                    "dangling_payload_stat_failed",
-                    error.to_string(),
-                );
-            }
-        }
-    }
-}
-
-struct ReapUnreferencedMetadataRequest<'a, E: Executor + ?Sized> {
+struct ReapRequest<'a, E: Executor + ?Sized> {
     conn: &'a E,
     storage_root: &'a Path,
-    metadata_refs: &'a BTreeSet<String>,
-    referenced: &'a BTreeSet<String>,
-    metadata_bytes: &'a BTreeMap<String, u64>,
+    provider: &'a str,
+    session_id: Option<&'a str>,
     now: i64,
     cfg: &'a LcmGcConfig,
     apply: bool,
@@ -767,77 +1007,38 @@ struct ReapUnreferencedMetadataRequest<'a, E: Executor + ?Sized> {
 }
 
 async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
-    request: ReapUnreferencedMetadataRequest<'_, E>,
+    request: ReapRequest<'_, E>,
 ) -> Result<(), LcmError> {
-    let ReapUnreferencedMetadataRequest {
+    let ReapRequest {
         conn,
         storage_root,
-        metadata_refs,
-        referenced,
-        metadata_bytes,
+        provider,
+        session_id,
         now,
         cfg,
         apply,
         remaining,
         report,
     } = request;
-    let still_referenced = metadata_refs
-        .intersection(referenced)
-        .cloned()
-        .collect::<Vec<_>>();
-    let candidates = metadata_refs
-        .difference(referenced)
-        .cloned()
-        .collect::<Vec<_>>();
-    if apply {
-        delete_gc_marks_in_state(conn, &still_referenced, "unreferenced").await?;
-    }
-    let marks = gc_marks(conn, &candidates).await?;
-    let mut marks_to_upsert = Vec::new();
+    let plan = plan_unreferenced(conn, provider, session_id, cfg, now).await?;
+    plan.record_deferred(report);
     let mut marks_to_delete = Vec::new();
-    // One reference-closure scan for the whole batch instead of one per
-    // candidate: only a payload's own deletion can change its own membership.
-    let mut referenced_closure = payload::ReferencedClosureCache::default();
-
-    for payload_ref in &candidates {
-        let mark = marks.get(payload_ref);
-        let Some((state, first_seen_at)) = mark else {
-            if apply {
-                marks_to_upsert.push(payload_ref.clone());
-            }
-            report.deferred.count += 1;
-            report
-                .deferred
-                .reason
-                .get_or_insert_with(|| "within_grace".to_string());
-            continue;
-        };
-        if state != "unreferenced" {
-            if apply {
-                marks_to_upsert.push(payload_ref.clone());
-            }
-            continue;
-        }
-        if now.saturating_sub(*first_seen_at) < cfg.grace_seconds as i64 {
-            report.deferred.count += 1;
-            report
-                .deferred
-                .reason
-                .get_or_insert_with(|| "within_grace".to_string());
-            continue;
-        }
+    if apply {
+        marks_to_delete.extend(plan.stale.iter().cloned());
+        marks_to_delete.extend(plan.referenced.iter().cloned());
+    }
+    for (owner, bytes) in &plan.unreferenced {
+        let payload_ref = &owner.payload_ref;
         if *remaining == 0 {
             report.batch_cap(1);
             continue;
         }
-        let bytes = metadata_bytes.get(payload_ref).copied().unwrap_or_default();
         if apply {
-            match payload::prepare_external_payload_delete_in_transaction_with_cache(
+            match payload::prepare_external_payload_delete_in_transaction(
                 conn,
                 storage_root,
                 payload_ref,
                 &payload::DeleteOpts::default(),
-                &mut referenced_closure,
             )
             .await
             {
@@ -867,75 +1068,47 @@ async fn reap_unreferenced_metadata<E: Executor + ?Sized>(
                 }
             }
         }
-        report.unreferenced.add(payload_ref, bytes);
+        report.unreferenced.add(payload_ref, *bytes);
         *remaining -= 1;
     }
     if apply {
-        upsert_gc_marks(conn, &marks_to_upsert, "unreferenced", now).await?;
         delete_gc_marks(conn, &marks_to_delete).await?;
     }
     Ok(())
 }
 
-struct ReapMissingMetadataRequest<'a, E: Executor + ?Sized> {
-    conn: &'a E,
-    storage_root: &'a Path,
-    metadata_refs: &'a BTreeSet<String>,
-    referenced: &'a BTreeSet<String>,
-    now: i64,
-    cfg: &'a LcmGcConfig,
-    apply: bool,
-    remaining: &'a mut usize,
-    report: &'a mut LcmGcReport,
-}
-
 async fn reap_missing_metadata<E: Executor + ?Sized>(
-    request: ReapMissingMetadataRequest<'_, E>,
+    request: ReapRequest<'_, E>,
+    dir: Option<&Path>,
+    metadata_refs: &BTreeSet<String>,
 ) -> Result<(), LcmError> {
-    let ReapMissingMetadataRequest {
+    let ReapRequest {
         conn,
         storage_root,
-        metadata_refs,
-        referenced,
         now,
         cfg,
         apply,
         remaining,
         report,
+        ..
     } = request;
-    let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let mut present_refs = Vec::new();
-    let mut missing_refs = Vec::new();
-    for payload_ref in metadata_refs.intersection(referenced) {
-        let file_present = match payload_file_present(dir.as_deref(), payload_ref) {
-            Ok(present) => present,
-            Err(err) => {
-                report.add_error(payload_ref, "payload_stat_failed", err.to_string());
-                continue;
-            }
-        };
-        if file_present {
-            if apply {
-                present_refs.push(payload_ref.clone());
-            }
-            continue;
-        }
+    let plan = plan_missing(conn, dir, metadata_refs, report).await?;
+    for payload_ref in &plan.referenced {
         report.missing.add(payload_ref, 0);
-        if apply && cfg.reap_missing_enabled && cfg.reap_missing_after != 0 {
-            missing_refs.push(payload_ref.clone());
-        }
     }
     if apply {
-        delete_gc_marks_in_state(conn, &present_refs, "missing").await?;
+        delete_gc_marks_in_state(conn, &plan.restored, "missing").await?;
     }
+    if !apply || !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
+        return Ok(());
+    }
+    let missing_refs = plan.referenced;
     if missing_refs.is_empty() {
         return Ok(());
     }
     let marks = gc_marks(conn, &missing_refs).await?;
     let mut marks_to_upsert = Vec::new();
     let mut marks_to_delete = Vec::new();
-    // As in `reap_unreferenced_metadata`: one scan per provider for the batch.
-    let mut referenced_closure = payload::ReferencedClosureCache::default();
     for payload_ref in &missing_refs {
         let first_seen_at = match marks.get(payload_ref) {
             Some((state, first_seen_at)) if state == "missing" => *first_seen_at,
@@ -951,7 +1124,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
             report.batch_cap(1);
             continue;
         }
-        match payload::prepare_external_payload_delete_in_transaction_with_cache(
+        match payload::prepare_external_payload_delete_in_transaction(
             conn,
             storage_root,
             payload_ref,
@@ -960,7 +1133,6 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
                 remove_file: false,
                 verify_hash: false,
             },
-            &mut referenced_closure,
         )
         .await
         {
@@ -986,79 +1158,50 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
-pub struct RewriteDanglingPlaceholdersRequest<'a, E: Executor + ?Sized> {
-    pub conn: &'a E,
-    pub dir: Option<&'a Path>,
-    pub metadata_refs: &'a BTreeSet<String>,
-    pub referenced: &'a BTreeSet<String>,
-    pub provider: &'a str,
-    pub session_id: Option<&'a str>,
-    pub apply: bool,
-    pub report: &'a mut LcmGcReport,
-}
-
-pub async fn rewrite_dangling_placeholders<E: Executor + ?Sized>(
-    request: RewriteDanglingPlaceholdersRequest<'_, E>,
-) -> Result<(), LcmError> {
-    let RewriteDanglingPlaceholdersRequest {
-        conn,
-        dir,
-        metadata_refs,
-        referenced,
-        provider,
-        session_id,
-        apply,
-        report,
-    } = request;
-    let mut dangling = BTreeSet::new();
-    for payload_ref in referenced.difference(metadata_refs) {
-        match payload_file_present(dir, payload_ref) {
-            Ok(true) => continue,
-            Ok(false) => {
-                dangling.insert(payload_ref.clone());
-            }
-            Err(err) => {
-                report.add_error(payload_ref, "dangling_payload_stat_failed", err.to_string());
-            }
-        }
-    }
-    for payload_ref in &dangling {
-        report.dangling.add(payload_ref, 0);
-    }
-    if apply && !dangling.is_empty() {
-        report.totals.placeholders_rewritten +=
-            tombstone_dangling_refs_in_transaction(conn, &dangling, provider, session_id).await?;
-    }
-    Ok(())
-}
-
-async fn tombstone_dangling_refs_in_transaction(
+/// Tombstones the dangling placeholders the reader snapshot found in rows
+/// written since the last applied pass. Only an unscoped pass advances the
+/// scan cursor, so a scoped pass never hides rows outside its scope from the
+/// next full pass.
+async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
-    dangling: &BTreeSet<String>,
+    plan: &DanglingPlan,
     provider: &str,
     session_id: Option<&str>,
-) -> Result<usize, LcmError> {
-    let rows = scan_placeholder_text_rows(
-        conn,
-        PlaceholderScanScope::ExactProvider {
-            provider,
-            session_id,
-        },
-        &live_prefix_like_patterns(),
-    )
-    .await?;
+    apply: bool,
+    report: &mut LcmGcReport,
+) -> Result<(), LcmError> {
+    for (payload_ref, detail) in &plan.stat_errors {
+        report.add_error(payload_ref, "dangling_payload_stat_failed", detail.clone());
+    }
+    let mut refs = plan.refs.clone();
+    if apply && !refs.is_empty() {
+        // A payload written since the snapshot owns its placeholders again.
+        let probe =
+            pending_delete::probe_metadata_rows(conn, &refs.iter().cloned().collect::<Vec<_>>())
+                .await;
+        for (payload_ref, detail) in &probe.failures {
+            report.add_error(payload_ref, "metadata_check_failed", detail.clone());
+        }
+        refs.retain(|payload_ref| {
+            !probe.existing.contains(payload_ref) && !probe.failures.contains_key(payload_ref)
+        });
+    }
+    for payload_ref in &refs {
+        report.dangling.add(payload_ref, 0);
+    }
+    if !apply {
+        return Ok(());
+    }
+    let rows = if refs.is_empty() {
+        Vec::new()
+    } else {
+        placeholder_text_rows_by_store_id(conn, &plan.store_ids).await?
+    };
     let mut total = 0usize;
     for row in rows {
-        if !row.texts().any(|text| {
-            dangling
-                .iter()
-                .any(|payload_ref| text.contains(payload_ref))
-        }) {
-            continue;
-        }
         let store_id = row.store_id;
         let (content, placeholder_text, metadata_json, changed) =
-            tombstone_row_for_refs(row, dangling);
+            tombstone_row_for_refs(row, &refs);
         if changed == 0 {
             continue;
         }
@@ -1076,7 +1219,16 @@ async fn tombstone_dangling_refs_in_transaction(
         .await?;
         total += changed;
     }
-    Ok(total)
+    report.totals.placeholders_rewritten += total;
+    if provider == "all" && session_id.is_none() {
+        schema::set_gc_meta(
+            conn,
+            DANGLING_SCAN_CURSOR,
+            &plan.scanned_through.to_string(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn tombstone_row_for_refs(

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, watch};
-use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexGenerationPublishedV1;
+use tokio::sync::watch;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 
 use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
 use super::{
@@ -10,8 +10,107 @@ use super::{
     register_production_feedback_and_advisory, register_production_feedback_cycle,
     selected_feedback_generation,
 };
-use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationUnavailableClassV1, LegalAction, RetryDirective, SafeDiagnostic,
+    now_micros,
+};
 use tracedecay_runtime_core::logging::log_daemon_event;
+
+/// What the project-open advisory mount is doing for its checkout. The
+/// pre-mount placeholder owner answers from this state alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon::project_open_owners) enum AdvisoryMountStateV1 {
+    /// No generation this mount could admit exists yet.
+    AwaitingGeneration,
+    /// A sealed generation, or a retained one awaiting its source proof, is
+    /// being mounted.
+    Mounting,
+    /// The full advisory owner replaced the placeholder.
+    Mounted,
+    Failed(AdvisoryMountFailureV1),
+}
+
+/// Why the advisory mount ended without publishing the full owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon::project_open_owners) enum AdvisoryMountFailureV1 {
+    CodeIndexDisabled,
+    FeedbackCycle,
+    LspScopeGrant,
+    LspOwner,
+    AdvisoryOwner,
+    /// The mount task stopped (daemon shutdown or a closed generation
+    /// channel) before it reached a verdict.
+    Abandoned,
+}
+
+impl AdvisoryMountFailureV1 {
+    pub(in crate::daemon::project_open_owners) fn problem(self) -> ApplicationProblem {
+        let message = match self {
+            Self::CodeIndexDisabled => {
+                "The code index was disabled when this checkout opened, so the advisory feedback cycle never mounted"
+            }
+            Self::FeedbackCycle => {
+                "The advisory feedback cycle could not mount its feedback cycle over the sealed code-index generation"
+            }
+            Self::LspScopeGrant => {
+                "The advisory feedback cycle could not obtain its language-server workspace grant"
+            }
+            Self::LspOwner => {
+                "The advisory feedback cycle could not mount its language-server owner"
+            }
+            Self::AdvisoryOwner => {
+                "The advisory feedback cycle owner could not be published for this checkout"
+            }
+            Self::Abandoned => {
+                "The advisory feedback cycle mount stopped before publishing its owner"
+            }
+        };
+        ApplicationProblem::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic: SafeDiagnostic {
+                code: "feedback.advisory-cycle.mount-failed".to_owned(),
+                message: message.to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+            detail: None,
+        }
+    }
+}
+
+/// The advisory mount's sole write handle on its published state. Dropping it
+/// before a verdict publishes `Failed(Abandoned)`, so no placeholder waits on
+/// a mount that no longer runs.
+pub(in crate::daemon::project_open_owners) struct AdvisoryMountPublisherV1(
+    watch::Sender<AdvisoryMountStateV1>,
+);
+
+impl AdvisoryMountPublisherV1 {
+    pub(in crate::daemon::project_open_owners) fn channel()
+    -> (Self, watch::Receiver<AdvisoryMountStateV1>) {
+        let (sender, receiver) = watch::channel(AdvisoryMountStateV1::Mounting);
+        (Self(sender), receiver)
+    }
+
+    pub(in crate::daemon::project_open_owners) fn publish(&self, state: AdvisoryMountStateV1) {
+        self.0.send_replace(state);
+    }
+}
+
+impl Drop for AdvisoryMountPublisherV1 {
+    fn drop(&mut self) {
+        self.0.send_if_modified(|state| {
+            let open = matches!(
+                state,
+                AdvisoryMountStateV1::AwaitingGeneration | AdvisoryMountStateV1::Mounting
+            );
+            if open {
+                *state = AdvisoryMountStateV1::Failed(AdvisoryMountFailureV1::Abandoned);
+            }
+            open
+        });
+    }
+}
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a
@@ -33,6 +132,7 @@ pub(super) fn spawn(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     mut state: ProjectOpenDependentOwnerState,
+    publisher: AdvisoryMountPublisherV1,
 ) -> bool {
     // Nothing user-facing may wait on a layer this route disables by contract.
     // With no code index there is no generation to defer to, so the wait below
@@ -42,101 +142,78 @@ pub(super) fn spawn(
         &state.scope,
     ) {
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
+        publisher.publish(AdvisoryMountStateV1::Failed(
+            AdvisoryMountFailureV1::CodeIndexDisabled,
+        ));
         return false;
     }
-    // Project-open schedules this owner before code-index activation. Capture
-    // the registry-wide seat and root-mounted cursors now so a retained
-    // generation seated before the background task's first poll remains
-    // observable, and so a pre-mount subscribe can re-attach after activation.
-    // The exact project and scope are still revalidated by `try_mount` after
-    // every wake.
-    let mut serving_seats = invocation.code_index_schedulers.subscribe_serving_seats();
-    let mut root_mounted = invocation.code_index_schedulers.subscribe_root_mounted();
     owner.spawn_background_task(hotpath::future!(
         async move {
-            let mut publications = invocation
-                .code_index_schedulers
-                .subscribe_generation_publications();
-            let mut serving_changes = None;
+            // Project-open schedules this owner before code-index activation,
+            // and sealing announces durable source before its text owner is
+            // installed. Subscribe before the first probe so a generation
+            // seated or installed after it still wakes this mount; the exact
+            // project and scope are revalidated by `try_mount` after every wake.
+            let mut signals = CodeIndexOwnerSignalsV1::subscribe(
+                &invocation.code_index_schedulers,
+                &project_root,
+            )
+            .await;
             let mut partial_publication_retried = false;
-            loop {
-                // Sealing announces durable source before its text owner is
-                // installed. Subscribe before probing that owner so a later
-                // installation can finish this mount without another edit.
-                if serving_changes.is_none() {
-                    serving_changes = invocation
-                        .code_index_schedulers
-                        .subscribe_serving_generation_changes(&project_root)
-                        .await;
-                }
+            let settled = loop {
+                publisher.publish(AdvisoryMountStateV1::Mounting);
                 match try_mount(&invocation, &project_root, &mut state).await {
-                    Attempt::Terminal => return,
+                    Attempt::Settled(settled) => break settled,
                     Attempt::RetryPartialPublication if !partial_publication_retried => {
                         partial_publication_retried = true;
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    Attempt::RetryPartialPublication => return,
+                    Attempt::RetryPartialPublication => {
+                        break AdvisoryMountStateV1::Failed(AdvisoryMountFailureV1::AdvisoryOwner);
+                    }
                     Attempt::AwaitNextPublication => {
+                        let awaiting = awaiting_state(&invocation, &state.scope).await;
+                        publisher.publish(awaiting);
                         tracing::info!(
                             event = "advisory_deferred_generation_unavailable",
                             project = %project_root.display(),
-                            serving_watch_registered = serving_changes.is_some(),
+                            state = ?awaiting,
                             "waiting after exact complete-generation admission declined"
                         );
                     }
                 }
-                if !wait_for_generation_change(
-                    &project_root,
-                    &mut publications,
-                    &mut serving_changes,
-                    &mut serving_seats,
-                    &mut root_mounted,
-                )
-                .await
-                {
+                if signals.changed().await.is_err() {
                     return;
                 }
                 partial_publication_retried = false;
-            }
+            };
+            publisher.publish(settled);
         },
         label = "daemon.project.owners.advisory_deferred"
     ))
 }
 
-/// Waits for the next signal that `project_root` may have a new generation:
-/// a sealed publication for this root, a serving swap, a retained seat, or a
-/// root mount. `false` when the scheduler's publication channel closed.
-pub(in crate::daemon::project_open_owners) async fn wait_for_generation_change(
-    project_root: &Path,
-    publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
-    serving_changes: &mut Option<watch::Receiver<()>>,
-    serving_seats: &mut watch::Receiver<u64>,
-    root_mounted: &mut watch::Receiver<u64>,
-) -> bool {
-    loop {
-        tokio::select! {
-            publication = publications.recv() => match publication {
-                Ok(publication) if publication.project_root == project_root => return true,
-                Ok(_) => {},
-                Err(broadcast::error::RecvError::Lagged(_)) => return true,
-                Err(broadcast::error::RecvError::Closed) => return false,
-            },
-            serving = async {
-                match serving_changes.as_mut() {
-                    Some(changes) => changes.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => return serving.is_ok(),
-            seat = serving_seats.changed() => return seat.is_ok(),
-            mounted = root_mounted.changed() => return mounted.is_ok(),
-        }
-    }
+/// A retained generation's pending source proof, or the successor it finds
+/// owed, publishes the generation this mount then admits, so that wait is
+/// still a mount in progress rather than a wait for a first generation.
+async fn awaiting_state(
+    invocation: &DaemonInvocationState,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> AdvisoryMountStateV1 {
+    invocation
+        .code_index_schedulers
+        .retained_text_owner_freshness_for_scope(scope)
+        .await
+        .map_or(AdvisoryMountStateV1::AwaitingGeneration, |_| {
+            AdvisoryMountStateV1::Mounting
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Attempt {
-    Terminal,
+    /// `Mounted` or `Failed`: nothing retries this owner after it returns.
+    Settled(AdvisoryMountStateV1),
     AwaitNextPublication,
     RetryPartialPublication,
 }
@@ -169,7 +246,7 @@ async fn try_mount(
         )
         .await
         {
-            Ok(()) => Attempt::Terminal,
+            Ok(()) => Attempt::Settled(AdvisoryMountStateV1::Mounted),
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
@@ -242,7 +319,9 @@ async fn try_mount(
                 "deferred advisory LSP grant is unavailable"
             );
             log_deferred_attempt(project_root, "lsp_scope_grant_failed", &error.to_string());
-            return Attempt::Terminal;
+            return Attempt::Settled(AdvisoryMountStateV1::Failed(
+                AdvisoryMountFailureV1::LspScopeGrant,
+            ));
         }
     };
     let lsp_session_factory = match register_production_lsp_owner(
@@ -267,7 +346,9 @@ async fn try_mount(
                 "deferred advisory LSP owner could not mount"
             );
             log_deferred_attempt(project_root, "lsp_owner_failed", &error.to_string());
-            return Attempt::Terminal;
+            return Attempt::Settled(AdvisoryMountStateV1::Failed(
+                AdvisoryMountFailureV1::LspOwner,
+            ));
         }
     };
     state.lsp_session_factory = Some(Arc::clone(&lsp_session_factory));
@@ -301,7 +382,7 @@ async fn try_mount(
             return classify_failure(invocation, project_root, state).await;
         }
     }
-    Attempt::Terminal
+    Attempt::Settled(AdvisoryMountStateV1::Mounted)
 }
 
 async fn classify_failure(
@@ -332,159 +413,18 @@ async fn classify_failure(
         // the composition itself is missing rather than early. Nothing retries
         // this owner after it returns, so name that terminal state here rather
         // than leave a project serving without a cycle and no evidence why.
-        Attempt::Terminal
+        Attempt::Settled(AdvisoryMountStateV1::Failed(
+            AdvisoryMountFailureV1::FeedbackCycle,
+        ))
     };
     log_deferred_attempt(
         project_root,
         "classified_failure",
         match attempt {
-            Attempt::Terminal => "terminal",
+            Attempt::Settled(_) => "terminal",
             Attempt::AwaitNextPublication => "await_next_publication",
             Attempt::RetryPartialPublication => "retry_partial_publication",
         },
     );
     attempt
-}
-
-#[cfg(test)]
-mod tests {
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-
-    use tracedecay_domain::{CodeGenerationId, ContentDigest, RepositoryId};
-
-    use super::{CodeIndexGenerationPublishedV1, broadcast, wait_for_generation_change, watch};
-
-    #[tokio::test]
-    async fn serving_installation_wakes_after_sealed_publication_was_consumed() {
-        let root = tempfile::tempdir().expect("project root");
-        let foreign = tempfile::tempdir().expect("foreign project root");
-        let (publication_sender, mut publications) = broadcast::channel(4);
-        let (serving_sender, serving_receiver) = watch::channel(());
-        let mut serving_changes = Some(serving_receiver);
-        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
-        let (_root_sender, mut root_mounted) = watch::channel(0_u64);
-        let publication = CodeIndexGenerationPublishedV1 {
-            project_root: root.path().to_path_buf(),
-            repository_id: RepositoryId::new("repository.deferred").expect("repository"),
-            generation_id: CodeGenerationId::new("generation.deferred").expect("generation"),
-            snapshot_content_identity: ContentDigest::new(format!("sha256:{}", "a".repeat(64)))
-                .expect("content digest"),
-            observation_time_micros: 1,
-        };
-        publication_sender
-            .send(publication.clone())
-            .expect("sealed publication");
-        assert!(
-            wait_for_generation_change(
-                root.path(),
-                &mut publications,
-                &mut serving_changes,
-                &mut serving_seats,
-                &mut root_mounted,
-            )
-            .await
-        );
-
-        let mut waiting = Box::pin(wait_for_generation_change(
-            root.path(),
-            &mut publications,
-            &mut serving_changes,
-            &mut serving_seats,
-            &mut root_mounted,
-        ));
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-        publication_sender
-            .send(CodeIndexGenerationPublishedV1 {
-                project_root: foreign.path().to_path_buf(),
-                ..publication
-            })
-            .expect("foreign publication");
-        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-
-        serving_sender.send_replace(());
-        assert!(matches!(
-            waiting.as_mut().poll(&mut context),
-            Poll::Ready(true)
-        ));
-        drop(waiting);
-        drop(serving_sender);
-        assert!(
-            !wait_for_generation_change(
-                root.path(),
-                &mut publications,
-                &mut serving_changes,
-                &mut serving_seats,
-                &mut root_mounted,
-            )
-            .await
-        );
-    }
-
-    #[tokio::test]
-    async fn retained_seat_wakes_after_subscription_precedes_scheduler_enrollment() {
-        let root = tempfile::tempdir().expect("project root");
-        let (publication_sender, mut publications) = broadcast::channel(1);
-        let (seat_sender, mut serving_seats) = watch::channel(0_u64);
-        let (_root_sender, mut root_mounted) = watch::channel(0_u64);
-
-        // The deferred owner subscribes while no per-project scheduler exists.
-        // A retained generation then seats without a new-generation broadcast.
-        seat_sender.send_modify(|seats| *seats += 1);
-        assert!(
-            wait_for_generation_change(
-                root.path(),
-                &mut publications,
-                &mut None,
-                &mut serving_seats,
-                &mut root_mounted,
-            )
-            .await
-        );
-        drop(publication_sender);
-    }
-
-    #[tokio::test]
-    async fn root_mount_wakes_a_wait_before_per_worktree_subscribe() {
-        let root = tempfile::tempdir().expect("project root");
-        let (_publication_sender, mut publications) = broadcast::channel(1);
-        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
-        let (root_sender, mut root_mounted) = watch::channel(0_u64);
-        let mut serving_changes = None;
-
-        let mut waiting = Box::pin(wait_for_generation_change(
-            root.path(),
-            &mut publications,
-            &mut serving_changes,
-            &mut serving_seats,
-            &mut root_mounted,
-        ));
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-        root_sender.send_modify(|roots| *roots += 1);
-        assert!(matches!(
-            waiting.as_mut().poll(&mut context),
-            Poll::Ready(true)
-        ));
-    }
-
-    #[tokio::test]
-    async fn publication_channel_closure_stops_a_wait_before_scheduler_mount() {
-        let root = tempfile::tempdir().expect("project root");
-        let (sender, mut publications) = broadcast::channel(1);
-        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
-        let (_root_sender, mut root_mounted) = watch::channel(0_u64);
-        drop(sender);
-        assert!(
-            !wait_for_generation_change(
-                root.path(),
-                &mut publications,
-                &mut None,
-                &mut serving_seats,
-                &mut root_mounted,
-            )
-            .await
-        );
-    }
 }

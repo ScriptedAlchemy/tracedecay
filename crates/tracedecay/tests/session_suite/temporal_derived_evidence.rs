@@ -32,8 +32,16 @@ async fn derived_identity_rows(
         &format!(
             "SELECT evidence_kind || '|' || evidence_id || '|' || member_digest || '|' ||
                     configuration_digest || '|' || COALESCE(retrieval_anchor_id, '')
-             FROM session_derived_evidence
-             WHERE session_id = '{session_id}' AND generation = {generation}
+             FROM session_derived_evidence AS evidence
+             WHERE session_id = '{session_id}'
+               AND generation = (
+                   SELECT MAX(version.generation)
+                   FROM session_derived_evidence AS version
+                   WHERE version.session_id = evidence.session_id
+                     AND version.evidence_kind = evidence.evidence_kind
+                     AND version.first_occurrence_id = evidence.first_occurrence_id
+                     AND version.generation <= {generation}
+               )
              ORDER BY evidence_kind, evidence_id"
         ),
     )
@@ -163,65 +171,47 @@ where
     (session_id, derived, vec![first, second, copied])
 }
 
-#[tokio::test]
-async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let database_identity = runtime
-        .session_database_identity_for_test(HostAdmissionScope::Profile)
+/// Projects the identity fixture into candidate generation 2 of `runtime`,
+/// either as one batch or as two checkpointed batches, and returns the
+/// derived identities that generation reads before activation.
+async fn project_identity_fixture(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+    incremental: bool,
+) -> Vec<String> {
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let session_id = session("session.temporal.derived.identity");
-    let oneshot;
-    {
-        let observation_store = runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let store = runtime
-            .session_temporal_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let first = occurrence(
-            &session_id,
-            &persist_observation(&observation_store, &session_id, 0, "derived-alpha pipeline")
-                .await,
-        );
-        let second = occurrence(
-            &session_id,
-            &persist_observation_with_lineage(
-                &observation_store,
-                &session_id,
-                1,
-                "derived-beta pipeline",
-                AnchorProvenanceRelation::Supersedes,
-                first.retrieval_anchor_id.clone(),
-                None,
-            )
-            .await,
-        );
-        let edge = parent_message_copy(&second, &first);
-        let assertion = assertion(&second, &first);
-
-        // One-shot rebuild into generation 2.
-        begin_candidate(&store, &session_id, 2, 2).await;
-        // Parallel building generation for incremental parity.
-        begin_candidate(&store, &session_id, 3, 2).await;
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let first = occurrence(
+        session_id,
+        &persist_observation(&observation_store, session_id, 0, "derived-alpha pipeline").await,
+    );
+    let second = occurrence(
+        session_id,
+        &persist_observation_with_lineage(
+            &observation_store,
+            session_id,
+            1,
+            "derived-beta pipeline",
+            AnchorProvenanceRelation::Supersedes,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    let edge = parent_message_copy(&second, &first);
+    let assertion = assertion(&second, &first);
+    begin_candidate(&store, session_id, 2, 2).await;
+    if incremental {
         store
             .persist_session_temporal_projection_batch(batch(
-                &session_id,
+                session_id,
                 2,
                 2,
-                vec![first.clone(), second.clone()],
-                vec![edge.clone()],
-                vec![assertion.clone()],
-            ))
-            .await
-            .unwrap();
-        // Incremental rebuild into generation 3.
-        store
-            .persist_session_temporal_projection_batch(batch(
-                &session_id,
-                3,
-                2,
-                vec![first.clone()],
+                vec![first],
                 vec![],
                 vec![],
             ))
@@ -229,41 +219,70 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
             .unwrap();
         store
             .persist_session_temporal_projection_batch(
-                batch(
-                    &session_id,
-                    3,
-                    2,
-                    vec![second.clone()],
-                    vec![edge],
-                    vec![assertion],
-                )
-                .with_checkpoint(1, 2, 2)
-                .unwrap(),
+                batch(session_id, 2, 2, vec![second], vec![edge], vec![assertion])
+                    .with_checkpoint(1, 2, 2)
+                    .unwrap(),
             )
             .await
             .unwrap();
-
-        oneshot = derived_identity_rows(&runtime, session_id.as_str(), 2).await;
-        let incremental = derived_identity_rows(&runtime, session_id.as_str(), 3).await;
-        assert_eq!(
-            oneshot, incremental,
-            "one-shot and incremental rebuilds must mint identical derived identities"
-        );
-        assert!(!oneshot.is_empty());
-
+    } else {
         store
-            .activate_session_temporal_generation(
-                SessionGenerationActivationRequestV1::new(
-                    session_id.clone(),
-                    generation(3),
-                    snapshot(&session_id, 1, 2),
-                    ExecutionControl::default(),
-                )
-                .unwrap(),
-            )
+            .persist_session_temporal_projection_batch(batch(
+                session_id,
+                2,
+                2,
+                vec![first, second],
+                vec![edge],
+                vec![assertion],
+            ))
             .await
             .unwrap();
     }
+    derived_identity_rows(runtime, session_id.as_str(), 2).await
+}
+
+#[tokio::test]
+async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
+    let session_id = session("session.temporal.derived.identity");
+    let oneshot_profile = TempDir::new().unwrap();
+    let oneshot = {
+        let runtime = profile_runtime(&oneshot_profile).await;
+        project_identity_fixture(&runtime, &session_id, false).await
+    };
+    let kinds = oneshot
+        .iter()
+        .filter_map(|row| row.split('|').next())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        BTreeSet::from(["burst", "span"]),
+        "projection must materialize both derived evidence kinds"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let database_identity = runtime
+        .session_database_identity_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let incremental = project_identity_fixture(&runtime, &session_id, true).await;
+    assert_eq!(
+        oneshot, incremental,
+        "one-shot and incremental rebuilds must mint identical derived identities"
+    );
+    runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap()
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     drop(runtime);
 
     let reopened = profile_runtime(&tmp).await;
@@ -280,8 +299,8 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
         .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
         .await
         .unwrap();
-    assert_eq!(snapshot.watermarks().active_generation().value(), 3);
-    let restarted = derived_identity_rows(&reopened, session_id.as_str(), 3).await;
+    assert_eq!(snapshot.watermarks().active_generation().value(), 2);
+    let restarted = derived_identity_rows(&reopened, session_id.as_str(), 2).await;
     assert_eq!(oneshot, restarted);
 }
 

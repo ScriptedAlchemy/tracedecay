@@ -24,6 +24,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use super::SCOPE_RETENTION_QUARANTINE_DIRECTORY;
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
+    remove_journal_file,
 };
 use super::locking::{
     acquire_scope_retention_lock, try_acquire_code_generation_store_lock_during_scope_retention,
@@ -52,6 +53,12 @@ pub(super) const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: SCOPE_RETENTION_RECEIPTS_DIRECTORY,
     label: "scope reconciliation receipt",
 };
+
+/// A binding-cleanup intent promised to remove one binding of the retired
+/// dense-embedding authority after a scope collection. Nothing can replay
+/// it, so it is an inert marker that recovery deletes.
+pub(super) const RETIRED_BINDING_CLEANUP_INTENT_FILE: &str =
+    ".code-index-scope-binding-cleanup-intent-v1.json";
 
 /// The scope's canonical project root, recorded by the scheduler that opened
 /// it. The scope directory name is only the root's hash, so without this
@@ -381,20 +388,15 @@ impl ScopeRootLivenessProofV1 {
 
 /// Derive the liveness proof for the repository `project_root` belongs to.
 ///
-/// A mounted root that is gone from disk proves nothing: Git no longer lists
-/// it and nothing can publish into its scope again, so it is left out rather
-/// than pinning a removed worktree's index until the daemon restarts.
+/// Every mounted root is live even once it is gone from disk: its scheduler
+/// can still write into its scope until the owner is retired and joined.
 pub fn scope_root_liveness_proof(
     project_root: &Path,
     mounted_roots: &BTreeSet<PathBuf>,
 ) -> Result<ScopeRootLivenessProofV1, &'static str> {
     let (mut live_roots, git_worktrees) = git_worktree_scope_root_inventory(project_root)?;
     for root in mounted_roots {
-        match std::fs::symlink_metadata(root) {
-            Ok(_) => insert_live_root_variants(&mut live_roots, root),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("mounted_root_unreadable"),
-        }
+        insert_live_root_variants(&mut live_roots, root);
     }
     ScopeRootLivenessProofV1::new(
         live_roots
@@ -720,7 +722,8 @@ pub fn execute_scope_root_retention(
     })
 }
 
-/// Finish or undo an interrupted scope-reconciliation transaction.
+/// Finish or undo an interrupted scope-reconciliation transaction, and
+/// delete a retired binding-cleanup intent.
 #[hotpath::measure(label = "usecases.retention.recover_scope")]
 pub fn recover_scope_root_retention(
     store_root: &Path,
@@ -729,6 +732,7 @@ pub fn recover_scope_root_retention(
         return Ok(());
     }
     let _pass_lock = acquire_scope_retention_lock(store_root)?;
+    remove_journal_file(store_root, RETIRED_BINDING_CLEANUP_INTENT_FILE)?;
     recover_pending_scope_transaction_unlocked(store_root)
 }
 
@@ -1135,7 +1139,7 @@ mod worktree_inventory_tests {
     }
 
     #[test]
-    fn liveness_proof_drops_a_removed_worktree_and_a_vanished_mount() {
+    fn liveness_proof_drops_a_removed_worktree_only_once_nothing_mounts_it() {
         let temporary = tempfile::TempDir::new().expect("repository root");
         let base = std::fs::canonicalize(temporary.path()).expect("canonical root");
         let (primary, linked) = repository_with_linked_worktree(&base);
@@ -1143,19 +1147,23 @@ mod worktree_inventory_tests {
         let mounted_elsewhere = base.join("mounted-elsewhere");
         let vanished = base.join("vanished");
         std::fs::create_dir_all(&mounted_elsewhere).expect("create mounted root");
-        let mounted = BTreeSet::from([linked.clone(), mounted_elsewhere.clone(), vanished.clone()]);
+        let mounted = BTreeSet::from([mounted_elsewhere.clone(), vanished.clone()]);
+        let mut linked_mounted = mounted.clone();
+        linked_mounted.insert(linked.clone());
 
         let before = scope_root_liveness_proof(&primary, &mounted).expect("proof");
         run_git(&primary, &["worktree", "remove", "--force", linked_arg]);
         let after = scope_root_liveness_proof(&primary, &mounted).expect("proof");
+        let still_mounted = scope_root_liveness_proof(&primary, &linked_mounted).expect("proof");
 
         let hash = |root: &Path| code_index_scope_hash(root);
         assert!(before.live_scope_hashes.contains(&hash(&linked)));
         assert!(!after.live_scope_hashes.contains(&hash(&linked)));
-        for proof in [&before, &after] {
+        assert!(still_mounted.live_scope_hashes.contains(&hash(&linked)));
+        for proof in [&before, &after, &still_mounted] {
             assert!(proof.live_scope_hashes.contains(&hash(&primary)));
             assert!(proof.live_scope_hashes.contains(&hash(&mounted_elsewhere)));
-            assert!(!proof.live_scope_hashes.contains(&hash(&vanished)));
+            assert!(proof.live_scope_hashes.contains(&hash(&vanished)));
         }
         assert_ne!(before.git_worktrees, after.git_worktrees);
         assert_ne!(before.proof_digest, after.proof_digest);
@@ -1164,8 +1172,9 @@ mod worktree_inventory_tests {
     #[test]
     fn live_roots_fail_closed_outside_a_repository() {
         let temporary = tempfile::TempDir::new().expect("non-repository root");
-        assert!(
-            resolve_live_code_index_roots(temporary.path()).is_err(),
+        assert_eq!(
+            resolve_live_code_index_roots(temporary.path()).expect_err("non-repository"),
+            "git_repository_unavailable",
             "an unresolvable repository must never produce a smaller live set"
         );
     }

@@ -1,5 +1,6 @@
 //! Read-only retention diagnostics owned beside the retention kernels.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_contracts::doctor::{
@@ -95,6 +96,7 @@ pub struct ProfileStorageFindingsV1 {
 pub async fn collect_profile_storage_findings(
     global_db: &RegisteredGlobalDb,
     profile_root: &Path,
+    owner_roots: &BTreeSet<PathBuf>,
     retention_secs: i64,
     observed_at_secs: i64,
 ) -> ProfileStorageFindingsV1 {
@@ -126,7 +128,12 @@ pub async fn collect_profile_storage_findings(
         ),
         |census| {
             (
-                orphan_store_findings_from_census(census, retention_secs, observed_at_secs),
+                orphan_store_findings_from_census(
+                    census,
+                    owner_roots,
+                    retention_secs,
+                    observed_at_secs,
+                ),
                 incident_debris_findings_from_census(census, profile_root, observed_at_secs),
             )
         },
@@ -150,10 +157,11 @@ impl ProfileStorageFindingsV1 {
 
 fn orphan_store_findings_from_census(
     census: &[super::orphan_stores::StoreCensusEntry],
+    owner_roots: &BTreeSet<PathBuf>,
     retention_secs: i64,
     now: i64,
 ) -> DoctorStorageFamilyReadV1 {
-    let classified = super::orphan_stores::classify_stores(census, now);
+    let classified = super::orphan_stores::classify_stores(census, now, owner_roots);
     let plan = super::orphan_stores::plan_collection(classified, retention_secs);
     storage_family_read(
         plan.collect

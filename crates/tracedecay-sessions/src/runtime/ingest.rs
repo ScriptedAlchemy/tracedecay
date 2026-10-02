@@ -22,6 +22,7 @@ pub use project::{
 pub use startup::{
     TranscriptIngestOutcome, ingest_user_global_sources_for_startup_with_db,
     ingest_user_global_sources_for_startup_with_db_and_codex_state,
+    subscribe_history_capacity_release,
 };
 pub use user::{
     CodexHookIngestOutcome, ingest_user_global_sources_for_provider_with_authorities,
@@ -40,6 +41,7 @@ pub mod test_support {
     };
     pub use super::scheduler::{
         PROJECT_INGEST_PROVIDER_FRONTIER_KEY, USER_INGEST_PROVIDER_FRONTIER_KEY,
+        default_ingest_pass_bounds,
     };
     pub use super::startup::ingest_user_global_sources_for_startup_with_db_without_registered_authority;
     pub use super::user::{

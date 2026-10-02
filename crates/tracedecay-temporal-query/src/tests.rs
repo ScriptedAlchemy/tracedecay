@@ -1083,6 +1083,14 @@ fn unauthorized_assertion_metadata_never_enters_resolution_or_context() {
         .await
         .expect("unauthorized assertion is ignored");
 
+        assert_eq!(
+            result
+                .ranked
+                .iter()
+                .map(|row| row.anchor_id.clone())
+                .collect::<Vec<_>>(),
+            vec![anchor("left"), anchor("right")]
+        );
         assert!(result.lineage.is_empty());
         assert!(result.conflicts.is_empty());
         assert!(!result.context.rendered.contains("private-lineage"));

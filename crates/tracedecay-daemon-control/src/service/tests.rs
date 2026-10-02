@@ -3,8 +3,6 @@ use std::io::Write;
 use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::sync::Mutex;
 
 #[cfg(unix)]
 use std::io::BufRead;
@@ -15,8 +13,6 @@ use std::os::unix::net::UnixListener;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
-#[cfg(target_os = "linux")]
-use tracing_subscriber::fmt::MakeWriter;
 
 use super::runner::ServiceRunner;
 use super::{
@@ -158,64 +154,6 @@ fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
 
 // The tracing capture only backs the systemd fallback-restore tests below.
 #[cfg(target_os = "linux")]
-#[derive(Clone)]
-struct CapturedWriter {
-    bytes: Arc<Mutex<Vec<u8>>>,
-}
-
-#[cfg(target_os = "linux")]
-struct CapturedGuard {
-    bytes: Arc<Mutex<Vec<u8>>>,
-}
-
-#[cfg(target_os = "linux")]
-impl Write for CapturedGuard {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl<'a> MakeWriter<'a> for CapturedWriter {
-    type Writer = CapturedGuard;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        CapturedGuard {
-            bytes: Arc::clone(&self.bytes),
-        }
-    }
-}
-
-/// Runs `scope` under a capturing `tracing` subscriber and returns everything
-/// it logged.
-#[cfg(target_os = "linux")]
-fn captured_tracing(scope: impl FnOnce()) -> String {
-    let bytes = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .without_time()
-        .with_ansi(false)
-        .with_writer(CapturedWriter {
-            bytes: Arc::clone(&bytes),
-        })
-        .finish();
-    tracing::subscriber::with_default(subscriber, scope);
-    let bytes = bytes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    String::from_utf8(bytes).expect("captured tracing is UTF-8")
-}
-
-#[cfg(target_os = "linux")]
 const FALLBACK_RESTORE_FAILED: &str = "quiesced daemon lifecycle fallback restore failed";
 
 /// A quiesced `RunningEnabled` daemon whose systemd `start` always fails, so
@@ -306,7 +244,7 @@ fn unwinding_before_finish_reports_the_failed_fallback_restore_once() {
     let fixture = FailingRestoreFixture::new();
     let guard = fixture.quiesced_guard();
 
-    let output = captured_tracing(|| {
+    let ((), output) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _guard = guard;
             panic!("maintenance action unwound before finishing");
@@ -347,7 +285,7 @@ fn explicit_finish_returns_the_restore_failure_without_a_drop_report() {
     let fixture = FailingRestoreFixture::new();
     let guard = fixture.quiesced_guard();
 
-    let output = captured_tracing(|| {
+    let ((), output) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
         let error = guard
             .finish()
             .expect_err("a failed systemd start must fail the explicit finish");
@@ -1560,12 +1498,11 @@ fn explicitly_injected_launchd_programs_reject_non_executable_paths() {
     let dir = TempDir::new().expect("temp dir");
     let launchctl = dir.path().join("launchctl");
     let id = dir.path().join("id");
-    std::fs::write(&launchctl, "#!/bin/sh\nexit 0\n").expect("launchctl program");
-    std::fs::write(&id, "#!/bin/sh\nexit 0\n").expect("id program");
+    write_executable_script(&launchctl, "#!/bin/sh\nexit 0\n").expect("launchctl program");
+    write_executable_script(&id, "#!/bin/sh\nexit 0\n").expect("id program");
 
     std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o644))
         .expect("launchctl permissions");
-    std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o755)).expect("id permissions");
     let launchctl_error = ServiceRunner::launchd(&launchctl, &id)
         .expect_err("explicit launchctl path must remain strict");
     assert!(launchctl_error.to_string().contains("launchctl candidate"));
@@ -2521,12 +2458,23 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
     let home = TempDir::new().unwrap();
     let profile = ProfileRoot::under_home(home.path());
     let socket = profile.data_dir().join("daemon.sock");
+    let refusal = |profile: &ProfileRoot| {
+        let detail = super::unreachable_daemon_detail(profile, &socket);
+        (detail.clone(), detail.message())
+    };
 
     assert_eq!(
-        super::unavailable_daemon_socket_message(&profile, &socket),
-        format!(
-            "TraceDecay daemon socket '{}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon.",
-            socket.display()
+        refusal(&profile),
+        (
+            tracedecay_domain::ApplicationProblemDetailV1::DaemonUnreachable {
+                socket: socket.display().to_string(),
+                named_by: None,
+                service_unit: tracedecay_domain::DaemonServiceUnitObservationV1::NotInstalled,
+            },
+            format!(
+                "TraceDecay daemon socket '{}' is not available. No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon.",
+                socket.display()
+            )
         )
     );
 
@@ -2534,16 +2482,26 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
     std::fs::create_dir_all(&unit_dir).unwrap();
     std::fs::write(unit_dir.join(crate::SERVICE_NAME), "[Service]\n").unwrap();
     assert_eq!(
-        super::unavailable_daemon_socket_message(&profile, &socket),
-        format!(
-            "TraceDecay daemon socket '{}' is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
-            socket.display(),
-            unit_dir.join(crate::SERVICE_NAME).display()
+        refusal(&profile),
+        (
+            tracedecay_domain::ApplicationProblemDetailV1::DaemonUnreachable {
+                socket: socket.display().to_string(),
+                named_by: None,
+                service_unit: tracedecay_domain::DaemonServiceUnitObservationV1::Installed {
+                    path: unit_dir.join(crate::SERVICE_NAME).display().to_string(),
+                    serves: socket.display().to_string(),
+                },
+            },
+            format!(
+                "TraceDecay daemon socket '{}' is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+                socket.display(),
+                unit_dir.join(crate::SERVICE_NAME).display()
+            )
         )
     );
 
     assert_eq!(
-        super::unavailable_daemon_socket_message(&ProfileRoot::new(profile.data_dir()), &socket),
+        refusal(&ProfileRoot::new(profile.data_dir())).1,
         format!(
             "TraceDecay daemon socket '{}' is not available. This client cannot see whether a managed TraceDecay daemon service is installed (config error: could not determine XDG config directory). Check `tracedecay daemon status` before starting or installing a daemon.",
             socket.display()

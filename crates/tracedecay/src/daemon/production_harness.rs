@@ -1230,6 +1230,10 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
                 .session_temporal_refresh_schedulers()
                 .shutdown()
                 .await;
+            resources
+                .store_administration
+                .release_profile_session_refresh_services()
+                .await;
             resources.store_administration.shutdown_session_sync().await;
             resources
                 .store_administration
@@ -1252,43 +1256,46 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         label = "daemon.harness.shutdown_detached"
     )
     .await;
-    match resources
+    if let Err(error) = resources
         .store_administration
-        .prepare_memory_graph_reconciliation_shutdown()
+        .git_index_transaction_services()
+        .shutdown()
         .await
     {
-        Ok(owner) => {
-            owner.cancel();
-            hotpath::future!(
-                async {
-                    if let Err(error) = owner.shutdown().await {
-                        tracing::warn!(
-                            event = "production_harness_graph_shutdown_failed",
-                            error = %error,
-                            "production-composition graph reconciliation tasks did not stop cleanly"
-                        );
-                    }
-                    if let Err(error) = resources
-                        .store_administration
-                        .close_retained_graph_runtimes_for_shutdown()
-                        .await
-                    {
-                        tracing::warn!(
-                            event = "production_harness_graph_shutdown_failed",
-                            error = %error,
-                            "production-composition graph runtimes did not close cleanly"
-                        );
-                    }
-                },
-                label = "daemon.harness.shutdown_graph"
-            )
-            .await;
-        }
-        Err(error) => tracing::warn!(
+        tracing::warn!(
+            event = "production_harness_git_transactions_shutdown_failed",
+            error = ?error,
+            "production-composition Git transaction actors did not stop cleanly"
+        );
+    }
+    if let Err(error) = resources
+        .store_administration
+        .native_integration_services()
+        .shutdown()
+        .await
+    {
+        tracing::warn!(
+            event = "production_harness_native_integration_shutdown_failed",
+            error = ?error,
+            "production-composition native integration actors did not stop cleanly"
+        );
+    }
+    #[cfg(unix)]
+    resources
+        .store_administration
+        .shutdown_retirement_reapers()
+        .await;
+    if let Err(error) = hotpath::future!(
+        resources.store_administration.close_stores_for_shutdown(),
+        label = "daemon.harness.shutdown_graph"
+    )
+    .await
+    {
+        tracing::warn!(
             event = "production_harness_graph_shutdown_failed",
             error = %error,
-            "production-composition graph shutdown owner was unavailable"
-        ),
+            "production-composition stores did not close cleanly"
+        );
     }
     drop(resources);
 }
@@ -1652,3 +1659,6 @@ mod read_only_project_open_journey_test;
 
 #[cfg(test)]
 mod lcm_preserved_profile_journey_test;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod idle_history_reads_journey_test;

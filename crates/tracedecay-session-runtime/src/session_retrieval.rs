@@ -27,7 +27,9 @@ use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServin
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_global_db::{
+    ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, StoreInstanceRecord,
+};
 use tracedecay_session_temporal_store::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
     SessionPageReconstructionRequest,
@@ -280,16 +282,15 @@ impl DaemonSessionRetrievalRoot {
         let profile_root = registry.db_path().parent()?;
         let mut selected = None;
         for store in &context.stores {
+            if !store_serves_graph(profile_root, &store.store, &serving.serving_db) {
+                continue;
+            }
             for scope in &store.graph_scopes {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
                     && scope.store_id == serving.store_id.as_str()
                     && scope.graph_scope_id == serving.root_id.as_str()
-                    && tracedecay_runtime_core::path_safety::same_canonical_path(
-                        &profile_root.join(&scope.db_relpath),
-                        &serving.serving_db,
-                    )
                 {
                     if selected.is_some() {
                         return None;
@@ -404,20 +405,15 @@ async fn project_store_and_root(
     let profile_root = registry.db_path().parent()?;
     let mut selected = None;
     for store in &context.stores {
+        if !store_serves_graph(profile_root, &store.store, serving_db) {
+            continue;
+        }
         for scope in &store.graph_scopes {
             if scope.writable
                 && scope.project_id == context.project.project_id
                 && scope.store_id == store.store.store_id
                 // Branches share a physical graph; the serving branch owns the root.
                 && serving_branch.is_none_or(|branch| scope.branch_name == branch)
-                // The registry's profile root has been through `canonicalize`
-                // while the serving path is the one its caller built, so the
-                // two name one file in two spellings wherever an ancestor is
-                // an alias (macOS `/var` -> `/private/var`, Windows `\\?\`).
-                && tracedecay_runtime_core::path_safety::same_canonical_path(
-                    &profile_root.join(&scope.db_relpath),
-                    serving_db,
-                )
             {
                 if selected.is_some() {
                     return None;
@@ -430,6 +426,19 @@ async fn project_store_and_root(
         }
     }
     selected
+}
+
+fn store_serves_graph(profile_root: &Path, store: &StoreInstanceRecord, serving_db: &Path) -> bool {
+    // The registry's profile root has been through `canonicalize` while the
+    // serving path is the one its caller built, so the two name one file in
+    // two spellings wherever an ancestor is an alias (macOS `/var` ->
+    // `/private/var`, Windows `\\?\`).
+    tracedecay_runtime_core::path_safety::same_canonical_path(
+        &profile_root
+            .join(&store.store_relpath)
+            .join(tracedecay_runtime_core::config::DB_FILENAME),
+        serving_db,
+    )
 }
 
 #[derive(Clone, Copy)]

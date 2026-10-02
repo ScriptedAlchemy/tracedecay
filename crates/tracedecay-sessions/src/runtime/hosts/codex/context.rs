@@ -6,25 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::Value;
 
 use super::{CodexMeta, session_meta_from_record, turn_context_from_record};
-use crate::runtime::SessionMessageRecord;
-use crate::runtime::shared::{
-    ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata_cached,
-};
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
-
-const CODEX_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "codex_session_cwd",
-        "codex_session_worktree",
-        "codex_session_location_provenance",
-    );
-const CODEX_TURN_LOCATION_KEYS: TranscriptLocationMetadataKeys =
-    TranscriptLocationMetadataKeys::new(
-        "codex_turn_cwd",
-        "codex_turn_worktree",
-        "codex_turn_location_provenance",
-    );
 
 #[derive(Clone)]
 pub(super) struct CodexContextState {
@@ -54,6 +36,15 @@ impl CodexContextState {
         let Ok(mut file) = std::fs::File::open(path) else {
             return Self::from_meta(meta);
         };
+        #[cfg(test)]
+        {
+            *PRIOR_CONTEXT_SCANS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(path.to_path_buf())
+                .or_default() += 1;
+        }
         let generation = prior_context_generation(&file);
         let (mut state, mut offset) = match generation
             .and_then(|generation| cached_prior_context(path, generation, before_offset))
@@ -159,6 +150,34 @@ struct PriorContextCache {
 
 static PRIOR_CONTEXT_CACHE: OnceLock<Mutex<PriorContextCache>> = OnceLock::new();
 
+#[cfg(test)]
+static PRIOR_CONTEXT_SCANS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+
+/// Rollout opens that rebuilt `path`'s prior context.
+#[cfg(test)]
+pub(crate) fn prior_context_scan_count_for_test(path: &Path) -> usize {
+    PRIOR_CONTEXT_SCANS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Evicts `path`'s resumable context, as a full cache does for every rollout
+/// past its capacity.
+#[cfg(test)]
+pub(crate) fn evict_prior_context_for_test(path: &Path) {
+    if let Some(cache) = PRIOR_CONTEXT_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .remove(path);
+    }
+}
+
 fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let meta = file.metadata().ok()?;
@@ -220,94 +239,6 @@ fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexCo
             state,
         },
     );
-}
-
-pub(super) fn session_metadata_json(
-    meta: &CodexMeta,
-    summary: Option<&super::events::CodexSessionSummary>,
-    location_cache: &ProjectRootMatcherCache,
-) -> Option<String> {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("codex_rollout".to_string()),
-    );
-    if let Some(thread_source) = &meta.thread_source {
-        metadata.insert(
-            "thread_source".to_string(),
-            Value::String(thread_source.clone()),
-        );
-    }
-    if let Some(agent_role) = &meta.agent_role {
-        metadata.insert("agent_role".to_string(), Value::String(agent_role.clone()));
-    }
-    if let Some(agent_nickname) = &meta.agent_nickname {
-        metadata.insert(
-            "agent_nickname".to_string(),
-            Value::String(agent_nickname.clone()),
-        );
-    }
-    append_location_metadata_cached(
-        &mut metadata,
-        CODEX_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&meta.cwd), "session_meta"),
-        location_cache,
-    );
-    insert_git_metadata(&mut metadata, meta.git.as_ref());
-    if let Some(summary) = summary {
-        summary.apply(&mut metadata);
-    }
-    serde_json::to_string(&Value::Object(metadata)).ok()
-}
-
-pub(super) fn annotate_message(
-    message: &mut SessionMessageRecord,
-    cwd: Option<&Path>,
-    git: Option<&Value>,
-    location_cache: &ProjectRootMatcherCache,
-) {
-    let mut metadata = message
-        .metadata_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<Value>(json).ok())
-        .and_then(|value| match value {
-            Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    append_location_metadata_cached(
-        &mut metadata,
-        CODEX_TURN_LOCATION_KEYS,
-        TranscriptLocation::new(cwd, "codex_context"),
-        location_cache,
-    );
-    insert_git_metadata(&mut metadata, git);
-    message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
-}
-
-fn insert_git_metadata(metadata: &mut serde_json::Map<String, Value>, git: Option<&Value>) {
-    let Some(git) = git.and_then(Value::as_object) else {
-        return;
-    };
-    if let Some(branch) = git.get("branch").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_branch".to_string(),
-            Value::String(branch.to_string()),
-        );
-    }
-    if let Some(commit) = git.get("commit_hash").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_commit_hash".to_string(),
-            Value::String(commit.to_string()),
-        );
-    }
-    if let Some(remote) = git.get("repository_url").and_then(Value::as_str) {
-        metadata.insert(
-            "codex_git_repository_url".to_string(),
-            Value::String(remote.to_string()),
-        );
-    }
 }
 
 #[cfg(test)]

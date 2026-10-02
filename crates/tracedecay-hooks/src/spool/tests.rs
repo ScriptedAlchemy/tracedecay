@@ -851,7 +851,7 @@ fn compaction_copies_surviving_checkpointed_frames_byte_exactly() {
             UtcMicros(12),
         )
         .unwrap();
-    spool.compact_pending().unwrap();
+    spool.reclaim(UtcMicros(12)).unwrap();
     assert_eq!(fs::read(records_path(&root.0)).unwrap(), survivors);
     drop(spool);
 
@@ -1610,6 +1610,79 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
         1
     );
     assert_eq!(spool.pending.len(), 1);
+}
+
+/// A hook callback waits for the writer lease within its synchronous budget,
+/// so the drain's settlement and reclaim must not hold the lease across a
+/// durability barrier, however slow the disk.
+#[test]
+fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() {
+    let root = TestDir::new("lease-barrier-free");
+    let (mut writer, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let records = (1..=3)
+        .map(|event| {
+            writer
+                .append(envelope(event, 9), &binding(), UtcMicros(10))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    writer.commit().unwrap();
+    let (mut drain, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let acknowledgements = records
+        .iter()
+        .map(|record| HookSpoolAckV1 {
+            sequence: record.sequence,
+            receipt_id: [record.sequence as u8; 16],
+            disposition: HookSpoolAckDispositionV1::Committed,
+        })
+        .collect::<Vec<_>>();
+
+    // Each barrier outlasts a callback's whole lease-wait budget.
+    let slow_disk = tracedecay_private_fs::framed_log::sync_latency::inject(
+        &root.0,
+        2 * crate::HOOK_SYNCHRONOUS_BUDGET,
+    );
+    let settled = std::sync::atomic::AtomicBool::new(false);
+    let admissions = std::thread::scope(|scope| {
+        let callbacks = scope.spawn(|| {
+            let mut admissions = Vec::new();
+            while !settled.load(std::sync::atomic::Ordering::SeqCst) {
+                admissions.push(
+                    HookSpoolV1::open_within(
+                        &root.0,
+                        config(),
+                        UtcMicros(11),
+                        crate::HOOK_SYNCHRONOUS_BUDGET,
+                    )
+                    .map(drop),
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            admissions
+        });
+        let outcomes = drain.acknowledge_many(&acknowledgements, UtcMicros(11));
+        settled.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(outcomes.unwrap(), vec![Ok(true); 3]);
+        callbacks.join().unwrap()
+    });
+    assert!(
+        slow_disk.syncs() >= 2,
+        "settlement and reclaim ran barriers"
+    );
+    assert!(!admissions.is_empty());
+    assert_eq!(
+        admissions
+            .iter()
+            .filter(|admission| admission.is_err())
+            .count(),
+        0,
+        "{admissions:?}"
+    );
+    drop((drain, slow_disk));
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(report.pending_records, 0);
+    assert!(spool.pending.is_empty());
+    assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
 }
 
 #[test]

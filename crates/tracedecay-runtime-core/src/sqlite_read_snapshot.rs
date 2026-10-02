@@ -694,7 +694,10 @@ pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
 /// authority system. This boundary therefore never opens the source as the
 /// returned snapshot: it first reflinks or copies the database family into
 /// private scratch, verifies the source generation, and materializes any WAL
-/// frames into the private standalone database.
+/// frames into the private standalone database. Without reflink support the
+/// copy is `SQLite`'s online backup: a live reader that records its WAL read
+/// mark in the source `-shm` like any other, and never writes the durable
+/// main database or WAL.
 pub async fn open_foreign_in(
     path: &Path,
     root: &Path,
@@ -1514,10 +1517,24 @@ mod tests {
 
         assert!(checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap());
         assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
-        assert!(checkpointed_database_has_any_rows(&path, &["bad-name"]).is_err());
+        let rejected = checkpointed_database_has_any_rows(&path, &["bad-name"]).unwrap_err();
+        assert_eq!(rejected.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            rejected.to_string(),
+            "invalid SQLite table identifier 'bad-name'"
+        );
 
-        fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
-        assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+        let sidecar = with_suffix(&path, "-wal");
+        fs::write(&sidecar, b"live").unwrap();
+        let live = checkpointed_database_has_any_rows(&path, &["durable"]).unwrap_err();
+        assert_eq!(live.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            live.to_string(),
+            format!(
+                "checkpointed SQLite inspection refused live sidecar '{}'",
+                sidecar.display()
+            )
+        );
     }
 
     /// A snapshot owner removes its own `read-*` directory without the
@@ -1648,9 +1665,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreign_wal_snapshot_reads_wal_frames_and_leaves_live_source_untouched() {
+    async fn foreign_wal_snapshot_reads_wal_frames_and_leaves_live_durable_family_untouched() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("foreign.db");
+        let shm = with_suffix(&path, "-shm");
         let writer = Connection::open(&path).unwrap();
         writer
             .execute_batch(
@@ -1662,7 +1680,16 @@ mod tests {
             )
             .unwrap();
         assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
-        let before = family_state(&path).unwrap();
+        // A live WAL reader records its read mark in the mapped `-shm`. The
+        // store bumps the mtime only when the page is clean, which host
+        // writeback makes true at random; write it back so every run does.
+        OpenOptions::new()
+            .write(true)
+            .open(&shm)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        let before = durable_family_witness(&path).unwrap();
 
         let snapshot = open_foreign_in(
             &path,
@@ -1695,7 +1722,7 @@ mod tests {
                 .all(|suffix| !with_suffix(&identity_path, suffix).exists()),
             "the materialized snapshot must be one standalone file"
         );
-        assert_eq!(family_state(&path).unwrap(), before);
+        assert_eq!(durable_family_witness(&path).unwrap(), before);
         drop(writer);
     }
 

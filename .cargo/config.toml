@@ -25,8 +25,8 @@ LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_ME
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
 # write temp-project rows into the developer's real ~/.tracedecay/global.db.
-# Keep cargo-launched processes hermetic; tests that exercise the ledger opt
-# back in with TRACEDECAY_ENABLE_GLOBAL_DB=1.
+# Keep cargo-launched processes hermetic; tests that exercise the ledger
+# remove TRACEDECAY_DISABLE_GLOBAL_DB from the child they launch.
 # Installed binaries run outside cargo and are unaffected.
 TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 
@@ -134,9 +134,9 @@ directory = ".pnpm/crates/crates-io"
 [source.pnpm-git]
 directory = ".pnpm/crates/git"
 
-[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=2027d1093c19d9d631618b9b4d1e575120c12fb2"]
+[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa"]
 git = "https://github.com/ScriptedAlchemy/grafeo.git"
-rev = "2027d1093c19d9d631618b9b4d1e575120c12fb2"
+rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
 replace-with = "pnpm-git"
 
 [source."git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9"]

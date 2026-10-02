@@ -5,10 +5,10 @@
 #![cfg(feature = "test-transport")]
 
 use crate::support::{
-    TemporalLcmProjectionInput, activate_test_temporal_generation, extract_real_server_text,
-    handle_real_server_tool_call_raw, open_active_project_session_db,
-    persist_temporal_lcm_observation, real_mcp_server, retained_envelope_payload,
-    setup_empty_project,
+    TemporalLcmProjectionInput, activate_test_temporal_generation,
+    application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
+    open_active_project_session_db, persist_temporal_lcm_observation, real_mcp_server,
+    retained_envelope_payload, setup_empty_project,
 };
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
@@ -103,17 +103,7 @@ fn jsonrpc_error(response: &Value) -> Value {
 }
 
 fn argument_error(detail: &str) -> Value {
-    let message = format!(
-        "tool execution failed: config error: invalid retained application request for tracedecay_lcm_grep: {detail}"
-    );
-    json!({
-        "code": -32603,
-        "message": message,
-        "data": {
-            "tool": "tracedecay_lcm_grep",
-            "cli_fallback": "This tool is also available from the shell: `tracedecay tool lcm_grep ...` (`tracedecay tool lcm_grep --help` for parameters). If MCP calls keep failing or timing out, fall back to that CLI instead of querying .tracedecay databases directly.",
-        },
-    })
+    application_invalid_request_error("tracedecay_lcm_grep", detail)
 }
 
 fn stable_problem(envelope: &Value) -> Value {

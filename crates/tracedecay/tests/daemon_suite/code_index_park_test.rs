@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 
 use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, git, initialize_tracedecay, search, stop_daemon_gracefully, tool,
+    wait_for_open_phase,
 };
 use crate::common::{
     IsolatedHome, daemon_authority_path, daemon_socket_path, http_agent_with_timeout,
@@ -99,6 +100,11 @@ async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
         "search must carry the park as typed detail: {searched}"
     );
 
+    // The core route answers search while the full server still mounts the
+    // application runtime that serves the symbol-search surfaces below; until
+    // then they truthfully refuse as `application.runtime.mounting`.
+    wait_for_open_phase(&log_path, &project, "full_published").await;
+
     let request = json!({
         "query": "alpha",
         "scope": { "path_prefix": null },
@@ -151,7 +157,10 @@ async fn parked_worktree_queries_carry_the_park_and_are_not_retryable() {
 
     let cli = cli_symbol_search(environment.home(), &project, &request, true);
     assert_eq!(
-        (&cli["problem"]["detail"], &cli["problem"]["message"]),
+        (
+            &cli["structuredContent"]["problem"]["detail"],
+            &cli["structuredContent"]["problem"]["message"],
+        ),
         (&parked_detail, &problem["message"]),
         "CLI --json: {cli}"
     );
@@ -215,8 +224,8 @@ fn cli_symbol_search_output(home: &Path, project: &Path, request: &Value, json: 
 
 fn cli_symbol_search(home: &Path, project: &Path, request: &Value, json: bool) -> Value {
     let stdout = cli_symbol_search_output(home, project, request, json);
-    serde_json::from_str(stdout.lines().next().unwrap_or_default())
-        .unwrap_or_else(|error| panic!("CLI --json printed no envelope ({error}):\n{stdout}"))
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("CLI --json printed no refusal ({error}):\n{stdout}"))
 }
 
 fn cli_symbol_search_text(home: &Path, project: &Path, request: &Value) -> String {

@@ -1,6 +1,6 @@
 use std::path::Path;
 use tracedecay_contracts::retrieval::{AdminCliSessionSyncV1, AdminCliSurfaceRequestV1};
-use tracedecay_contracts::session_sync::SessionSyncSourceCoverageV1;
+use tracedecay_contracts::session_sync::{SessionSyncCoverageV1, SessionSyncSourceCoverageV1};
 use tracedecay_contracts::{IdempotencyKey, OperationTermination, RequestId};
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -108,6 +108,19 @@ pub(super) fn session_sync_poll_state(
                     ),
                 }
             })?;
+            if session_import_deferred_progress(
+                label,
+                termination,
+                &coverage,
+                &failure_codes,
+                remaining_work,
+            ) {
+                println!(
+                    "{label} scheduled ({}); historical catch-up has remaining work {remaining_work}",
+                    operation_id.as_str()
+                );
+                return Ok(SessionSyncPollState::Completed);
+            }
             if termination != OperationTermination::Completed || remaining_work > 0 {
                 let termination = termination_label(termination);
                 let detail = if failure_codes.is_empty() {
@@ -142,6 +155,25 @@ fn termination_label(termination: OperationTermination) -> String {
         Ok(serde_json::Value::String(label)) => label,
         _ => format!("{termination:?}"),
     }
+}
+
+fn session_import_deferred_progress(
+    label: &str,
+    termination: OperationTermination,
+    coverage: &[SessionSyncSourceCoverageV1],
+    failure_codes: &[String],
+    remaining_work: u64,
+) -> bool {
+    label == "session import"
+        && termination == OperationTermination::Partial
+        && failure_codes.is_empty()
+        && remaining_work > 0
+        && coverage.iter().all(|entry| {
+            matches!(
+                entry.coverage,
+                SessionSyncCoverageV1::Complete | SessionSyncCoverageV1::Partial { .. }
+            )
+        })
 }
 
 fn session_sync_remaining_work(coverage: &[SessionSyncSourceCoverageV1]) -> Option<u64> {
@@ -377,6 +409,35 @@ mod tests {
                 format!("config error: {expected}")
             );
         }
+    }
+
+    #[test]
+    fn session_import_accepts_deferred_catch_up_without_treating_it_as_failure() {
+        let outcome = complete(
+            OperationTermination::Partial,
+            vec![SessionSyncCoverageV1::Partial { deferred_units: 1 }],
+            &[],
+        );
+
+        assert!(matches!(
+            session_sync_poll_state("session import", outcome).unwrap(),
+            SessionSyncPollState::Completed
+        ));
+    }
+
+    #[test]
+    fn session_git_sync_still_rejects_unfinished_coverage() {
+        let error = session_sync_poll_state(
+            "session git sync",
+            complete(
+                OperationTermination::Partial,
+                vec![SessionSyncCoverageV1::Partial { deferred_units: 1 }],
+                &[],
+            ),
+        )
+        .expect_err("git sync still requires the bounded pass to finish");
+
+        assert!(error.to_string().contains("remaining work"));
     }
 
     #[test]

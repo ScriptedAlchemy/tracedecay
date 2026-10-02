@@ -695,11 +695,15 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
 
     let publication = open_cold(store.path(), fixture.path());
     let exclusive = acquire_code_generation_store_lock(store.path()).expect("exclusive hold");
-    let refusal = CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
-        publication
-            .load_active_shared()
-            .expect_err("an exclusive writer refuses the shared decode"),
-    ));
+    let refused = publication
+        .load_active_shared()
+        .expect_err("an exclusive writer refuses the shared decode");
+    assert_eq!(
+        refused,
+        CodeIndexPublicationStoreErrorV1::StoreLockContended
+    );
+    let refusal =
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(refused));
     assert!(
         refusal.is_transient_capacity_failure() && !refusal.reproduces_on_unchanged_input(),
         "a decode refused by a held store writer must be retried by the worker, not parked \
@@ -2402,54 +2406,6 @@ fn restart_rejects_pointer_generation_mismatch() {
     );
 }
 
-#[derive(Clone)]
-struct CapturedLogWriter {
-    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
-}
-
-impl std::io::Write for CapturedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogWriter {
-    type Writer = Self;
-
-    fn make_writer(&self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
-    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .without_time()
-        .with_ansi(false)
-        .with_writer(CapturedLogWriter {
-            bytes: Arc::clone(&bytes),
-        })
-        .finish();
-    let value = tracing::subscriber::with_default(subscriber, scope);
-    let bytes = bytes
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    (
-        value,
-        String::from_utf8(bytes).expect("captured tracing is UTF-8"),
-    )
-}
-
 fn rewrite_active_generation_as_previous_revision(
     store: &Path,
     keeps_census: bool,
@@ -2550,7 +2506,9 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .expect("foreground open defers sealed validation");
-        let (outcome, log) = captured_tracing(|| reopened.activate_or_reconcile());
+        let (outcome, log) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            reopened.activate_or_reconcile()
+        });
         published(outcome.expect("a retired revision must rebuild, not fail activation"));
         let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
         assert!(

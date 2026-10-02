@@ -7,24 +7,26 @@ use std::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
+use tracedecay_code_index::parallelism::collect_installed_worker_heaps_when_idle;
 use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexPublicationStoreErrorV1,
 };
+use tracedecay_code_index_retention::code_index_generations::wait_for_code_generation_store_release;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
 };
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 
 use super::super::{
-    CodeIndexCadenceTriggerV1, CodeIndexNoopEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
-    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, RetainedTextGenerationRestoreV1,
+    CodeIndexCadenceTriggerV1, CodeIndexHintPolicyV1, CodeIndexNoopEvidenceV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
+    RetainedTextGenerationRestoreV1,
     graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1},
     now_micros,
-    publication_store::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1,
     reconcile_panic_guard::{
         ReconcileCapacityRetryV1, ReconcilePanicDecisionV1, ReconcilePanicGuardV1,
     },
@@ -33,15 +35,15 @@ use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1,
-    CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+    CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
-    ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
-    PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingGenerationSlot, ServingSwapOutcomeV1,
-    TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1, clear_convergence_park,
-    clear_graph_resident_memory_park, convergence_park_retries_on_wake,
+    ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
+    MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
+    ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
+    clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
     is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
     retained_noop_requires_follow_up_wake,
 };
@@ -52,8 +54,8 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 enum PublicationAuthorityResetV1 {
     /// The derived store was deleted; the next pass rebuilds it from source.
     Rebuilding,
-    /// Another owner holds the store lock; the reset is retried like any
-    /// held shared capacity and does not spend the one-shot budget.
+    /// Another owner holds the store lock; the reset is retried when it is
+    /// released and does not spend the one-shot budget.
     StoreBusy,
     /// The mount is parked until the operator acts.
     Terminal {
@@ -88,6 +90,103 @@ impl CodeIndexSchedulerRegistryV1 {
             retry_wake.notify_one();
         });
         true
+    }
+
+    /// Wake the worker when the holder of this scope's generation-store lock
+    /// releases it. A refused pass has nothing to do until then, and the
+    /// holder may be another process, so the kernel lock wait is the signal.
+    /// One waiter serves the worktree; a wait that cannot complete parks it
+    /// typed.
+    fn wake_on_store_release(
+        store_root: &Path,
+        waiting: &Arc<AtomicBool>,
+        wake: &Arc<tokio::sync::Notify>,
+        convergence_park: &Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
+    ) {
+        if waiting.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let root = store_root.to_path_buf();
+        let thread_waiting = Arc::clone(waiting);
+        let thread_wake = Arc::downgrade(wake);
+        let thread_park = Arc::downgrade(convergence_park);
+        let spawned = std::thread::Builder::new()
+            .name("code-index-store-release".to_owned())
+            .spawn(move || {
+                let released = wait_for_code_generation_store_release(&root);
+                thread_waiting.store(false, Ordering::Release);
+                match released {
+                    Ok(()) => {
+                        if let Some(wake) = thread_wake.upgrade() {
+                            wake.notify_one();
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(park) = thread_park.upgrade() {
+                            Self::park_store_release_unavailable(&park, error.to_string());
+                        }
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            waiting.store(false, Ordering::Release);
+            Self::park_store_release_unavailable(convergence_park, error.to_string());
+        }
+    }
+
+    fn park_store_release_unavailable(
+        convergence_park: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+        reason: String,
+    ) {
+        tracing::warn!(
+            event = "code_index_store_release_wait_failed",
+            error = %reason,
+            "the worktree cannot wait for the code-generation store lock; parked until the next wake"
+        );
+        park_convergence(
+            convergence_park,
+            reason,
+            CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
+            Some(CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable),
+            true,
+        );
+    }
+
+    /// Wait until the holder of the store lock that refused a cold open lets
+    /// go of it. The holder may be another process, so the kernel lock wait
+    /// is the signal; shutdown or retirement of this reservation ends the wait.
+    async fn wait_for_cold_open_store_release(
+        store_root: &Path,
+        reservation: &ColdMountReservationV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let mut cancellation = reservation.slot.cancellation.subscribe();
+        let cancelled = || {
+            CodeIndexSchedulerErrorV1::Identity(if reservation.slot.is_retired() {
+                "code-index scheduler owner is still retiring".to_owned()
+            } else {
+                "code-index scheduler is shutting down".to_owned()
+            })
+        };
+        if reservation.slot.is_cancelled() {
+            return Err(cancelled());
+        }
+        let (released_tx, released) = tokio::sync::oneshot::channel();
+        let root = store_root.to_path_buf();
+        std::thread::Builder::new()
+            .name("code-index-store-release".to_owned())
+            .spawn(move || {
+                let _ = released_tx.send(wait_for_code_generation_store_release(&root));
+            })?;
+        tokio::select! {
+            released = released => match released {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(std::io::Error::other(error.to_string()).into()),
+                Err(_) => Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index store release wait ended without a result".to_owned(),
+                )),
+            },
+            _ = cancellation.changed() => Err(cancelled()),
+        }
     }
 
     /// Spend this mount's single automatic reset on a corrupt publication.
@@ -129,9 +228,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 );
                 PublicationAuthorityResetV1::Rebuilding
             }
-            Err(busy) if busy.is_transient_capacity_failure() => {
-                PublicationAuthorityResetV1::StoreBusy
-            }
+            Err(busy) if busy.is_store_lock_contended() => PublicationAuthorityResetV1::StoreBusy,
             Err(failure) => {
                 *reset_attempted = true;
                 tracing::warn!(
@@ -185,6 +282,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_runtime: Arc<dyn crate::code_graph_seat::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
@@ -194,7 +292,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 runtime: graph_runtime,
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
+                seated: Arc::default(),
             },
+            path_policy,
         )
         .await
     }
@@ -214,6 +314,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(true)),
             },
+            crate::config::registry_default_index_path_policy(),
         )
         .await
     }
@@ -233,6 +334,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(policy.is_enabled())),
             },
+            crate::config::registry_default_index_path_policy(),
         )
         .await
     }
@@ -366,6 +468,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         store_root: PathBuf,
         graph_activation: CodeGraphActivationAuthorityV1,
+        path_policy: IndexPathPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         #[cfg(test)]
@@ -407,37 +510,61 @@ impl CodeIndexSchedulerRegistryV1 {
         // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root =
             super::super::scoped_code_index_store_root(&store_root, &project_root);
-        let open_project_id = project_id.clone();
-        let open_project_root = project_root.clone();
-        let open_byte_pool = Arc::clone(&self.byte_pool);
-        let open_resident_memory = Arc::clone(&self.resident_memory);
-        let open_resident_owners = Arc::clone(&self.resident_owners);
+        let worker_scope_store_root = scoped_store_root.clone();
         let progress_daemon_incarnation = self.progress_daemon_incarnation;
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
-        let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            Self::pause_cold_mount_open_for_test(&open_project_root);
-            let opened = CodeIndexWorktreeSchedulerV1::open(
-                open_project_id,
-                &open_project_root,
-                scoped_store_root,
-                open_byte_pool,
-            );
-            #[cfg(test)]
-            Self::finish_cold_mount_open_for_test(&open_project_root);
-            let mut opened = opened?;
-            opened.bind_resident_memory(open_resident_memory);
-            opened.bind_resident_owners(open_resident_owners);
-            opened.bind_progress_incarnations(
-                progress_daemon_incarnation,
-                progress_producer_incarnation,
-            );
-            Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
-        })
-        .await
-        .map_err(|error| {
-            CodeIndexSchedulerErrorV1::Identity(format!("code-index mount task failed: {error}"))
-        })??;
+        let mounted_path_policy = path_policy.clone();
+        let mut cold_mount_reservation = cold_mount_reservation;
+        let opened = loop {
+            let open_project_id = project_id.clone();
+            let open_project_root = project_root.clone();
+            let open_store_root = scoped_store_root.clone();
+            let open_path_policy = path_policy.clone();
+            let open_byte_pool = Arc::clone(&self.byte_pool);
+            let open_resident_memory = Arc::clone(&self.resident_memory);
+            let open_resident_owners = Arc::clone(&self.resident_owners);
+            let (opened, reservation) = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                Self::pause_cold_mount_open_for_test(&open_project_root);
+                let opened = CodeIndexWorktreeSchedulerV1::open_with_policy(
+                    open_project_id,
+                    &open_project_root,
+                    open_store_root,
+                    open_byte_pool,
+                    CodeIndexHintPolicyV1::default(),
+                    open_path_policy,
+                );
+                #[cfg(test)]
+                Self::finish_cold_mount_open_for_test(&open_project_root);
+                let opened = opened.map(|mut opened| {
+                    opened.bind_resident_memory(open_resident_memory);
+                    opened.bind_resident_owners(open_resident_owners);
+                    opened.bind_progress_incarnations(
+                        progress_daemon_incarnation,
+                        progress_producer_incarnation,
+                    );
+                    opened
+                });
+                (opened, cold_mount_reservation)
+            })
+            .await
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::Identity(format!(
+                    "code-index mount task failed: {error}"
+                ))
+            })?;
+            cold_mount_reservation = reservation;
+            match opened {
+                Err(error) if error.is_store_lock_contended() => {
+                    Self::wait_for_cold_open_store_release(
+                        &scoped_store_root,
+                        &cold_mount_reservation,
+                    )
+                    .await?;
+                }
+                opened => break opened?,
+            }
+        };
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
@@ -473,6 +600,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let epoch = Arc::clone(&opened.epoch);
         let shutting_down = Arc::clone(&opened.shutting_down);
         let residency_publication = opened.publication.clone();
+        let residency_retained_parses = opened.owner.retained_parse_pool();
         let scheduler = Arc::new(Mutex::new(opened));
         let build_publication_lock = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
@@ -557,6 +685,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 entry
             }
         };
+        let residency = Arc::new(super::super::residency::WorktreeResidencyV1::new(
+            super::super::residency::WorktreeResidencyPartsV1 {
+                serving_generation: Arc::clone(&serving_generation),
+                serving_generation_epoch: Arc::clone(&serving_generation_epoch),
+                serving_generation_changed: Arc::clone(&serving_generation_changed),
+                complete_generation_requested: Arc::clone(&complete_generation_requested),
+                reconcile_in_progress: Arc::clone(&reconcile_in_progress),
+                publication: residency_publication,
+                retained_parses: residency_retained_parses,
+                text_generation: Arc::clone(&text_generation),
+            },
+        ));
+        let worker_residency = Arc::clone(&residency);
+        let worker_resident_owners = Arc::clone(&self.resident_owners);
+        let worker_byte_pool = Arc::clone(&self.byte_pool);
+        let mut worker_owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
         // activation + swap inline), and an unboxed `let` materializes the
@@ -601,11 +746,14 @@ impl CodeIndexSchedulerRegistryV1 {
             // reproduces on every pass over the same bytes. Without this the
             // loop re-dispatched the identical unit on every wake forever.
             let mut panic_guard = ReconcilePanicGuardV1::new();
-            // Bounded retry state for a reconcile refused because shared
-            // process capacity was momentarily held by a sibling worktree or
-            // artifact build. Releasing that capacity emits no wake, so this
-            // worker must schedule its own.
+            // Bounded retry state for a reconcile refused because a graph
+            // operation budget was momentarily held by a sibling worktree.
+            // Releasing that budget emits no wake, so this worker schedules
+            // its own. Memory refusals wait for the headroom wake instead.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            // Set while a thread waits for this scope's store lock to be
+            // released; that release is the only retry a refused pass needs.
+            let store_release_waiting = Arc::new(AtomicBool::new(false));
             // Whether this worker already deleted and rebuilt a corrupt derived
             // publication. One reset per mount bounds the work: a store that
             // is corrupt again after its own rebuild parks instead of looping
@@ -636,6 +784,23 @@ impl CodeIndexSchedulerRegistryV1 {
             // seat reads and owes the worker no successor pass.
             let mut retained_projection_successor_only = false;
             loop {
+                // Memory given back while the last pass was being refused
+                // reached the watcher before that refusal was visible.
+                let headroom_moved = worker_owner_headroom.has_changed().unwrap_or(false)
+                    || worker_admission_headroom.has_changed().unwrap_or(false);
+                if headroom_moved
+                    && worktree_waits_for_memory(
+                        &worker_text_generation,
+                        &worker_convergence_park,
+                        &worker_residency,
+                    )
+                {
+                    Self::note_wake(
+                        &worker_pending_wake,
+                        &worker_wake,
+                        CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                    );
+                }
                 let notified = worker_wake.notified();
                 tokio::pin!(notified);
                 // Parked only while registered with no banked permit: a
@@ -648,6 +813,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                worker_owner_headroom.mark_unchanged();
+                worker_admission_headroom.mark_unchanged();
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
@@ -714,6 +881,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     return;
                 };
+                // Retirement and daemon shutdown set the flag, then fire this
+                // watch, so the gate wait below wakes on them.
+                let mut shutdown_observed = worker_serving_generation_changed.subscribe();
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -735,8 +905,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _build_publication = loop {
                     tokio::select! {
                         guard = &mut build_publication => break guard,
-                        () = tokio::time::sleep(Duration::from_millis(5)) => {
-                            if worker_shutting_down.load(Ordering::Acquire) {
+                        changed = shutdown_observed.changed() => {
+                            if changed.is_err() || worker_shutting_down.load(Ordering::Acquire) {
                                 tracing::info!(
                                     event = "code_index_worker_shutdown_observed",
                                     phase = "build_publication_lock",
@@ -883,6 +1053,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         });
                         let projection_pending_wake = Arc::clone(&worker_pending_wake);
                         let projection_wake = Arc::clone(&worker_wake);
+                        let projection_serving_changed = worker_serving_generation_changed.clone();
                         retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             #[cfg(any(test, feature = "test-helpers"))]
@@ -897,11 +1068,21 @@ impl CodeIndexSchedulerRegistryV1 {
                                 gated_root,
                             )
                             .await;
-                            if matches!(outcome, PublishedTextProjectionOutcomeV1::Unfinished) {
-                                Self::note_worker_continuation(
-                                    &projection_pending_wake,
-                                    &projection_wake,
-                                );
+                            match outcome {
+                                // Exact and lexical serve from here on, while
+                                // this pass may still be recovering the graph:
+                                // search waiters must wake now, not at the seat.
+                                PublishedTextProjectionOutcomeV1::Finished => {
+                                    projection_serving_changed.send_replace(());
+                                }
+                                PublishedTextProjectionOutcomeV1::Unfinished => {
+                                    Self::note_worker_continuation(
+                                        &projection_pending_wake,
+                                        &projection_wake,
+                                    );
+                                }
+                                PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::Shutdown => {}
                             }
                             outcome
                         }));
@@ -1101,13 +1282,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                let memory_pass = matches!(
-                    trigger,
-                    CodeIndexCadenceTriggerV1::MemoryHeadroom
-                        | CodeIndexCadenceTriggerV1::MemoryRetry
-                );
+                let memory_pass = trigger == CodeIndexCadenceTriggerV1::MemoryHeadroom;
                 if memory_pass {
-                    worker_memory_retry.retrying();
+                    worker_memory_retry.reset();
                 }
                 // Memory given back is the retry for a graph refused at the
                 // watermark: its generation activates again on this pass.
@@ -1339,12 +1516,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // owned graph try_lock, which deadlocked tests that hold the
                 // scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
-                // A publication must first reopen its own lightweight text
-                // owner: publication moved the durable pointer, so the prior
-                // owner is no longer authoritative even while the new
-                // lightweight handle is opening. Withdraw it first - a failed
-                // or delayed reopen must report warming, never keep serving
-                // the superseded generation indefinitely.
+                // A publication reopens its own lightweight text owner and
+                // swaps it in for the prior one in a single write, so status
+                // always names a committed generation. A failed
+                // reopen withdraws the prior owner instead: the durable
+                // pointer has moved, and the next pass restores from it.
                 let published_pass = matches!(
                     &source_result,
                     Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
@@ -1361,9 +1537,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 let mut published_text_projection = None;
                 let mut published_text_opened = None;
                 if published_pass {
-                    *worker_text_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     let text_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let published_text = tokio::task::spawn_blocking(move || {
@@ -1389,21 +1562,26 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(published_text.clone());
-                            // The publication broadcast went out while this
-                            // slot was empty; the reopened owner must wake
-                            // waiters that probed it then.
+                            // The publication broadcast went out before the
+                            // successor's owner was installed; waiters that
+                            // probed in between must wake now.
                             worker_serving_generation_changed.send_replace(());
                             Some(published_text)
                         }
-                        Ok(Ok(Err(error))) => {
-                            tracing::error!(
-                                event = "code_index_published_text_reopen_failed",
-                                error = %error,
-                                "published text restore failed at decoded-cache release"
-                            );
+                        failed => {
+                            if let Ok(Ok(Err(error))) = &failed {
+                                tracing::error!(
+                                    event = "code_index_published_text_reopen_failed",
+                                    error = %error,
+                                    "published text restore failed at decoded-cache release"
+                                );
+                            }
+                            *worker_text_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                            worker_serving_generation_changed.send_replace(());
                             None
                         }
-                        Ok(Ok(Ok(None)) | Err(_)) | Err(_) => None,
                     };
                     // Drive the replacement text owner in this pass. Exact and
                     // lexical are the required fresh-index product; graph
@@ -1639,6 +1817,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         &worker_wake,
                     );
                     retained_graph_head_recovery_attempted = true;
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    Self::wait_for_retained_graph_recovery_gate(
+                        &worker_project_root,
+                        super::RetainedGraphRecoveryPauseV1::BeforeHeadRecovery,
+                    )
+                    .await;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1728,8 +1912,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // the rebuild past that observation window.
                     #[cfg(any(test, feature = "test-helpers"))]
                     if !worker_complete_generation_requested.load(Ordering::Acquire) {
-                        Self::wait_for_retained_graph_recovery_successor_gate(&worker_project_root)
-                            .await;
+                        Self::wait_for_retained_graph_recovery_gate(
+                            &worker_project_root,
+                            super::RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+                        )
+                        .await;
                     }
                     // The reserved pass deliberately did not capture the
                     // checkout, and it consumed whatever wake ran it. Schedule
@@ -1817,9 +2004,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 // projection still holds the build memory is sequencing, not
                 // a stall: it runs again as soon as that projection joins.
                 let mut graph_waits_for_text = false;
-                // A decode refused by a store-lock holder outside this pass is
-                // not progress, so the capacity retry keeps its bound.
-                let mut graph_store_busy = false;
                 let mut graph_publication_budget_spent = false;
                 let text_projection_running = published_text_projection.is_some();
                 let mut result = match source_result {
@@ -1878,6 +2062,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                      the graph after the serving decode"
                                 ),
                                 Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                                    );
                                     let published = worker_graph_activation
                                         .publish_sealed_graph(
                                             &worker_project_id,
@@ -1888,6 +2076,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
+                                    super::CodeIndexWorkerPhaseV1::enter(
+                                        &worker_phase_signal,
+                                        super::CodeIndexWorkerPhaseV1::Working,
+                                    );
                                     drop(reservation);
                                     match published {
                                         Ok(published) => graph_head_published = published,
@@ -2019,11 +2211,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                             CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
                                                 detail,
                                             ) => GraphPrepareStopV1::ResidentMemory(detail),
-                                            CodeIndexPublicationStoreErrorV1::Unavailable(detail)
-                                                if detail
-                                                    == CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1 =>
-                                            {
-                                                GraphPrepareStopV1::StoreBusy(detail)
+                                            error @ CodeIndexPublicationStoreErrorV1::StoreLockContended => {
+                                                GraphPrepareStopV1::StoreBusy(error.to_string())
                                             }
                                             error => {
                                                 tracing::warn!(
@@ -2124,8 +2313,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                                     true,
                                                 );
                                             }
-                                            worker_memory_retry
-                                                .schedule(&worker_pending_wake, &worker_wake);
+                                            worker_memory_retry.wait();
                                         }
                                         tracing::warn!(
                                             event = "code_index_graph_prepare_decode_refused",
@@ -2138,26 +2326,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                         );
                                     }
                                     GraphPrepareStopV1::StoreBusy(detail) => {
-                                        // Any other holder releases without
-                                        // waking this worktree.
-                                        let retry_armed = if graph_waits_for_text {
-                                            true
-                                        } else {
-                                            graph_store_busy = true;
-                                            Self::arm_capacity_retry(
-                                                &mut capacity_retry,
+                                        if !graph_waits_for_text {
+                                            Self::wake_on_store_release(
+                                                &worker_scope_store_root,
+                                                &store_release_waiting,
                                                 &worker_wake,
-                                            )
-                                        };
-                                        if !retry_armed && !converged {
-                                            park_convergence(
                                                 &worker_convergence_park,
-                                                detail.clone(),
-                                                CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1,
-                                                Some(
-                                                    CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
-                                                ),
-                                                true,
                                             );
                                         }
                                         tracing::warn!(
@@ -2165,7 +2339,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                             published_pass,
                                             converged,
                                             graph_waits_for_text,
-                                            retry_armed,
+                                            detail = %detail,
                                             "the sealed generation waits to decode until the \
                                              code-generation store lock is released"
                                         );
@@ -2246,6 +2420,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
                     graph_seat_attempted =
                         Some(latest.generation().manifest().generation_id.clone());
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::PublishingGraph,
+                    );
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2256,6 +2434,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             Arc::clone(&worker_shutting_down),
                         )
                         .await;
+                    super::CodeIndexWorkerPhaseV1::enter(
+                        &worker_phase_signal,
+                        super::CodeIndexWorkerPhaseV1::Working,
+                    );
                     match activation {
                         Ok(()) => {
                             next_seat_attempt_at = None;
@@ -2271,7 +2453,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // A configuration refusal never re-attempts, so an
                             // unparked refusal read as an indefinite `indexing`.
                             // A memory refusal parks typed until memory is
-                            // given back or its retry delay elapses.
+                            // given back.
                             if error.is_resident_memory_graph_refusal() {
                                 park_convergence(
                                     &worker_convergence_park,
@@ -2280,7 +2462,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
                                     true,
                                 );
-                                worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                                worker_memory_retry.wait();
                             }
                             tracing::warn!(
                                 event = "code_index_graph_activation_refused",
@@ -2536,7 +2718,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 *latest = None;
                                 *replay_binding = None;
                             }
-                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                            worker_memory_retry.wait();
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
                             if let Ok((_, latest, replay_binding)) = &mut result {
@@ -2802,14 +2984,22 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 drop(reconcile_pass.take());
+                worker_byte_pool.release_dead_entries();
+                collect_installed_worker_heaps_when_idle();
+                let refused_for_memory = matches!(
+                    &result,
+                    Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
+                );
+                worker_residency.set_refresh_waits_for_memory(refused_for_memory);
+                if refused_for_memory {
+                    worker_residency.yield_serving_graph_to_refresh(&worker_resident_owners);
+                }
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
                     // panicking input nor the capacity contention is still
                     // reproducing, so both bounded retry states restart.
                     panic_guard.record_progress();
-                    if !graph_store_busy {
-                        capacity_retry.record_progress();
-                    }
+                    capacity_retry.record_progress();
                     let _service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
@@ -2877,13 +3067,15 @@ impl CodeIndexSchedulerRegistryV1 {
                             panic_guard.record_progress();
                             let publication_corruption =
                                 error.is_publication_authority_corruption();
-                            let mut transient_capacity = error.is_transient_capacity_failure();
+                            let mut store_lock_held = error.is_store_lock_contended();
+                            let transient_capacity =
+                                !store_lock_held && error.is_transient_capacity_failure();
                             // A corrupt derived publication is deleted and
                             // rebuilt from source, once per mount. A store
                             // that is corrupt again after its own rebuild, or
                             // that cannot be deleted, is the terminal park;
-                            // a store another owner holds is retried like any
-                            // held capacity. `None` here means the failure was
+                            // a store another owner holds is retried when it
+                            // is released. `None` here means the failure was
                             // not corruption or the reset is being retried.
                             let publication_reset = if publication_corruption {
                                 match Self::reset_corrupt_publication_authority(
@@ -2898,7 +3090,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         None
                                     }
                                     PublicationAuthorityResetV1::StoreBusy => {
-                                        transient_capacity = true;
+                                        store_lock_held = true;
                                         None
                                     }
                                     PublicationAuthorityResetV1::Terminal {
@@ -2911,6 +3103,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     event = "code_index_reconcile_failed",
                                     path = "background_worker",
                                     transient_capacity,
+                                    store_lock_held,
                                     trigger = trigger.label(),
                                     error = %error,
                                     "code-index background reconcile failed; the served generation stays stale"
@@ -2938,13 +3131,22 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // serving-generation notifications. The next
                                 // wake reads that same slot; no local flag.
                                 worker_serving_generation_changed.send_replace(());
+                            } else if store_lock_held {
+                                capacity_retry.record_progress();
+                                Self::wake_on_store_release(
+                                    &worker_scope_store_root,
+                                    &store_release_waiting,
+                                    &worker_wake,
+                                    &worker_convergence_park,
+                                );
+                            } else if refused_for_memory {
+                                // The refusal registered with the resident-memory
+                                // authority; the headroom wake is its retry.
+                                capacity_retry.record_progress();
                             } else if transient_capacity {
-                                // Shared process capacity was held by another
-                                // holder when this pass asked for it. Releasing
-                                // it emits no wake, so without a self-scheduled
-                                // retry this worktree stayed stale until some
-                                // unrelated query or edit happened to wake it.
-                                // Permanent refusals deliberately never reach
+                                // A graph operation budget another holder
+                                // releases without waking this worktree gets a
+                                // bounded retry. Permanent refusals never reach
                                 // here: retrying those forever is the failure
                                 // this loop already had.
                                 if !Self::arm_capacity_retry(&mut capacity_retry, &worker_wake) {
@@ -3146,7 +3348,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                         PublishedTextProjectionOutcomeV1::WaitingForMemory => {
-                            worker_memory_retry.schedule(&worker_pending_wake, &worker_wake);
+                            worker_memory_retry.wait();
                         }
                     }
                     // The continuation is already in the slot. Dropping here
@@ -3173,17 +3375,6 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.code_index.scheduler_worker"
         ));
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
-        let residency = Arc::new(super::super::residency::WorktreeResidencyV1::new(
-            super::super::residency::WorktreeResidencyPartsV1 {
-                serving_generation: Arc::clone(&serving_generation),
-                serving_generation_epoch: Arc::clone(&serving_generation_epoch),
-                serving_generation_changed: Arc::clone(&serving_generation_changed),
-                complete_generation_requested: Arc::clone(&complete_generation_requested),
-                reconcile_in_progress: Arc::clone(&reconcile_in_progress),
-                publication: residency_publication,
-                text_generation: Arc::clone(&text_generation),
-            },
-        ));
         let residency_registration = Arc::clone(&residency).register(
             &self.resident_owners,
             tracedecay_runtime_core::resident_memory::ResidentOwnerScopeV1 {
@@ -3191,47 +3382,49 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
-        // A text-artifact build or a native graph refused for memory records
-        // no retry of its own; memory given back anywhere in the process is
-        // its retry. Only a missing or unfinished text owner or a graph parked
-        // on resident memory wakes: a pass on a finished worktree would
-        // re-seat the decode a release just gave back. The watcher holds no
-        // strong reference, so it ends with the worktree.
-        let mut headroom = self.resident_owners.subscribe_headroom();
+        // Memory given back anywhere in the process is the retry for work
+        // refused for it: an owner released, or the resident-memory authority
+        // finding a refused request would now fit. It wakes the worker even
+        // over an arrival a refused pass restored without a permit. The
+        // watcher holds no strong reference, so it ends with the worktree.
+        let mut owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
         let headroom_park = Arc::downgrade(&convergence_park);
+        let headroom_residency = Arc::downgrade(&residency);
         tokio::spawn(async move {
-            while headroom.changed().await.is_ok() {
-                let (Some(pending_wake), Some(wake), Some(text), Some(park)) = (
+            loop {
+                let changed = tokio::select! {
+                    changed = owner_headroom.changed() => changed,
+                    changed = admission_headroom.changed() => changed,
+                };
+                let (
+                    Ok(()),
+                    Some(pending_wake),
+                    Some(wake),
+                    Some(text),
+                    Some(park),
+                    Some(residency),
+                ) = (
+                    changed,
                     headroom_pending_wake.upgrade(),
                     headroom_wake.upgrade(),
                     headroom_text.upgrade(),
                     headroom_park.upgrade(),
-                ) else {
+                    headroom_residency.upgrade(),
+                )
+                else {
                     return;
                 };
-                let text_unfinished = text
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
-                let graph_refused_for_memory = park
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .is_some_and(|parked| {
-                        parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
-                    });
-                if !text_unfinished && !graph_refused_for_memory {
-                    continue;
+                if worktree_waits_for_memory(&text, &park, &residency) {
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                    );
                 }
-                Self::note_wake_if_idle(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::MemoryHeadroom,
-                );
             }
         });
         entry.insert(MountedCodeIndexWorktreeV1 {
@@ -3242,6 +3435,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             query_authority: None,
             scheduler,
+            path_policy: mounted_path_policy,
             build_publication_lock,
             historical_generation_owner,
             serving_generation,
@@ -3278,6 +3472,30 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
+}
+
+/// Whether memory given back can advance this worktree: its text owner is
+/// missing or unfinished, its graph is parked on resident memory, or its
+/// last refresh was refused for memory. A pass on a finished worktree would
+/// only re-seat the decode a release just gave back.
+fn worktree_waits_for_memory(
+    text: &RwLock<Option<LatestCodeTextGenerationV1>>,
+    park: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+    residency: &super::super::residency::WorktreeResidencyV1,
+) -> bool {
+    let text_unfinished = text
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_none_or(LatestCodeTextGenerationV1::text_projection_needs_work);
+    let graph_refused_for_memory = park
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|parked| {
+            parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+        });
+    text_unfinished || graph_refused_for_memory || residency.refresh_waits_for_memory()
 }
 
 /// Sole exact/lexical-ready bit for the published graph seat gate and the

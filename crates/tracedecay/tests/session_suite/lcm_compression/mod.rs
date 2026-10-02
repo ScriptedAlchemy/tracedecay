@@ -109,13 +109,7 @@ async fn insert_registered_raw_messages(
         })
         .collect::<Vec<_>>();
     runtime
-        .upsert_transcript_batch_for_test(
-            HostAdmissionScope::Profile,
-            &session,
-            &messages,
-            "lcm-compression-test-fixture",
-            tracedecay_global_db::ParseOffset::default(),
-        )
+        .seed_session_messages_for_test(HostAdmissionScope::Profile, &session, &messages)
         .await
         .expect("registered raw message fixture")
 }

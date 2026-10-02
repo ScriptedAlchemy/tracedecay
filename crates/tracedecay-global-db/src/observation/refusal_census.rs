@@ -5,71 +5,35 @@
 //! re-reporting the same records forever. Those refusals are terminal by
 //! design, re-admitting a deterministic refusal would deterministically fail
 //! again, so the plan-conformant recovery is truthful surfacing: this census
-//! counts the refused records per provider and reason for Doctor. Diagnosis is
-//! strictly read-only; it never re-admits, clears, or rewrites coverage.
+//! names each refused record's provider, session, covered range, and reason
+//! for Doctor. It reads only the live store, so a store that is reset takes
+//! its refusals with it. Diagnosis is strictly read-only; it never
+//! re-admits, clears, or rewrites coverage.
 
-use serde::{Deserialize, Serialize};
-
-use tracedecay_contracts::doctor::{IngestRefusalCensusReadV1, IngestRefusalCountV1};
+use tracedecay_contracts::doctor::{IngestRefusalCensusReadV1, IngestRefusalV1};
+use tracedecay_domain::ObservationSourceIdentityV1;
 use tracedecay_runtime_core::db::engine::QueryExecutor;
-use tracedecay_store::ObservationCoverageReason;
+use tracedecay_store::{ObservationCoverageReason, ObservationCoverageV1};
 
 use crate::RegisteredGlobalDb;
 
-/// Refused source records recorded under one provider/reason pair.
-///
-/// `reason` is either a known durable coverage code or the fixed-size opaque
-/// fingerprint of an unrecognized durable value.
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct ObservationRefusalCountV1 {
-    pub provider: String,
-    pub reason: String,
-    pub count: u64,
-}
-
-/// Census over the durable cursor-advance ledger.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum ObservationRefusalCensusV1 {
-    /// The ledger was consulted; only refusal-shaped reasons are counted
-    /// (expected dispositions such as blank or out-of-scope frames are not
-    /// refusals). An empty census means nothing was durably refused.
-    Observed {
-        refusals: Vec<ObservationRefusalCountV1>,
-    },
-    /// The ledger could not be consulted.
-    Unavailable,
-}
-
+/// Merge the censuses of every consulted store; one unreadable store makes
+/// the whole read unknown.
 #[must_use]
 pub fn ingest_refusal_read_from_censuses(
-    censuses: &[ObservationRefusalCensusV1],
+    censuses: &[IngestRefusalCensusReadV1],
 ) -> IngestRefusalCensusReadV1 {
-    let mut merged = std::collections::BTreeMap::new();
+    let mut merged = Vec::new();
     for census in censuses {
         match census {
-            ObservationRefusalCensusV1::Observed { refusals } => {
-                for refusal in refusals {
-                    let key = (refusal.provider.clone(), refusal.reason.clone());
-                    let entry = merged.entry(key).or_insert(0_u64);
-                    *entry = entry.saturating_add(refusal.count);
-                }
+            IngestRefusalCensusReadV1::Observed { refusals } => {
+                merged.extend(refusals.iter().cloned());
             }
-            ObservationRefusalCensusV1::Unavailable => {
-                return IngestRefusalCensusReadV1::Unknown;
-            }
+            IngestRefusalCensusReadV1::Unknown => return IngestRefusalCensusReadV1::Unknown,
         }
     }
-    IngestRefusalCensusReadV1::Observed {
-        refusals: merged
-            .into_iter()
-            .map(|((provider, reason), count)| IngestRefusalCountV1 {
-                provider,
-                reason,
-                count,
-            })
-            .collect(),
-    }
+    merged.sort();
+    IngestRefusalCensusReadV1::Observed { refusals: merged }
 }
 
 impl RegisteredGlobalDb {
@@ -77,81 +41,68 @@ impl RegisteredGlobalDb {
     ///
     /// A store without the observation authority schema truthfully has an
     /// empty census: coverage never advanced past anything there. A reason
-    /// string this binary does not recognize is counted conservatively under
-    /// a fixed-size fingerprint, so an unknown disposition stays visible
-    /// without letting corrupt durable text escape through Doctor.
+    /// string this binary does not recognize is kept conservatively as a
+    /// fixed-size fingerprint, so an unknown disposition stays visible
+    /// without letting corrupt durable text escape through Doctor. A row
+    /// whose source or coverage no longer decodes makes the census unknown.
     #[hotpath::skip]
-    pub async fn observation_refusal_census(&self) -> ObservationRefusalCensusV1 {
+    pub async fn observation_refusal_census(&self) -> IngestRefusalCensusReadV1 {
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
-            Err(_) => return ObservationRefusalCensusV1::Unavailable,
+            Err(_) => return IngestRefusalCensusReadV1::Unknown,
         };
-        census_from_snapshot(&snapshot).await
+        census_from_snapshot(&snapshot)
+            .await
+            .unwrap_or(IngestRefusalCensusReadV1::Unknown)
     }
 }
 
-async fn census_from_snapshot(conn: &impl QueryExecutor) -> ObservationRefusalCensusV1 {
-    let table_present = match table_exists(conn, "source_cursor_advances").await {
-        Ok(present) => present,
-        Err(()) => return ObservationRefusalCensusV1::Unavailable,
-    };
-    if !table_present {
-        return ObservationRefusalCensusV1::Observed {
+async fn census_from_snapshot(conn: &impl QueryExecutor) -> Option<IngestRefusalCensusReadV1> {
+    if !table_exists(conn, "source_cursor_advances").await? {
+        return Some(IngestRefusalCensusReadV1::Observed {
             refusals: Vec::new(),
-        };
+        });
     }
-    let mut rows = match conn
+    let mut rows = conn
         .query(
-            "SELECT COALESCE(json_extract(source_json, '$.provider'), 'unknown') AS provider,
-                    reason,
-                    COUNT(*)
-             FROM source_cursor_advances
-             GROUP BY provider, reason
-             ORDER BY provider, reason",
+            "SELECT source_json, coverage_json, reason FROM source_cursor_advances",
             (),
         )
         .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return ObservationRefusalCensusV1::Unavailable,
-    };
+        .ok()?;
     let mut refusals = Vec::new();
-    loop {
-        let row = match rows.next().await {
-            Ok(Some(row)) => row,
-            Ok(None) => break,
-            Err(_) => return ObservationRefusalCensusV1::Unavailable,
-        };
-        let (Ok(provider), Ok(reason), Ok(count)) = (
-            row.get::<String>(0),
-            row.get::<String>(1),
-            row.get::<i64>(2),
-        ) else {
-            return ObservationRefusalCensusV1::Unavailable;
-        };
+    while let Some(row) = rows.next().await.ok()? {
+        let reason = row.get::<String>(2).ok()?;
         let reason = match ObservationCoverageReason::try_from(reason.as_str()) {
             Ok(reason) if !reason.is_refusal() => continue,
             Ok(reason) => reason.as_str().to_owned(),
             Err(unknown) => unknown.fingerprint().as_str().to_owned(),
         };
-        refusals.push(ObservationRefusalCountV1 {
-            provider,
+        let source: ObservationSourceIdentityV1 =
+            serde_json::from_str(&row.get::<String>(0).ok()?).ok()?;
+        let coverage: ObservationCoverageV1 =
+            serde_json::from_str(&row.get::<String>(1).ok()?).ok()?;
+        refusals.push(IngestRefusalV1 {
+            provider: source.provider().as_str().to_owned(),
+            session_id: source.session_id().as_str().to_owned(),
             reason,
-            count: u64::try_from(count).unwrap_or(0),
+            start: coverage.range().start(),
+            end: coverage.range().end(),
         });
     }
-    ObservationRefusalCensusV1::Observed { refusals }
+    refusals.sort();
+    Some(IngestRefusalCensusReadV1::Observed { refusals })
 }
 
-async fn table_exists(conn: &impl QueryExecutor, table: &str) -> Result<bool, ()> {
+async fn table_exists(conn: &impl QueryExecutor, table: &str) -> Option<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
             [table],
         )
         .await
-        .map_err(|_| ())?;
-    Ok(rows.next().await.map_err(|_| ())?.is_some())
+        .ok()?;
+    Some(rows.next().await.ok()?.is_some())
 }
 
 #[cfg(test)]

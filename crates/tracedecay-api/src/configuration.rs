@@ -38,8 +38,6 @@ pub struct ProjectSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_call_sites: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_ignore: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncSettingsPatch>,

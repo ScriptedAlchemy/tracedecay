@@ -593,9 +593,10 @@ mod tests {
             }
         })
         .unwrap();
-        assert!(
-            pool_acquisitions_during_scan.load(Ordering::SeqCst) > 0,
-            "cleanup must be able to acquire the replay-pool lock during digest scan"
+        assert_eq!(
+            pool_acquisitions_during_scan.load(Ordering::SeqCst),
+            5,
+            "digest scan checks the replay-pool lock before each 64KiB read, at EOF, and once more"
         );
         drop(revalidate_stable_sealed_source(&proof, &replay_root, &|| Ok(())).unwrap());
     }

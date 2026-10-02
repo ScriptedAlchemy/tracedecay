@@ -30,8 +30,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexBuildProgressV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SanitizedCodeFileV1, WorktreeId,
-    host_cpu_target,
+    CodeGenerationId, IndexPathPolicyV1, ManifestDigest, ProjectId, RepositoryId,
+    SanitizedCodeFileV1, WorktreeId, forward_slash_path, host_cpu_target,
 };
 use tracedecay_lsp::LspRuntimeFailure;
 
@@ -389,9 +389,19 @@ fn cold_mount_final_commit_gate() -> &'static Mutex<BTreeMap<PathBuf, ColdMountF
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-struct RetainedGraphRecoverySuccessorGateV1 {
+struct RetainedGraphRecoveryGateV1 {
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Where a restart's retained graph recovery pauses for a fixture.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RetainedGraphRecoveryPauseV1 {
+    /// Before the verified head is opened: the graph is not seated yet.
+    BeforeHeadRecovery,
+    /// After the head is queryable, before its dirty-checkout successor.
+    BeforeSuccessor,
 }
 
 /// Armed gates, keyed by the exact worktree they fence. The slot is process
@@ -399,10 +409,10 @@ struct RetainedGraphRecoverySuccessorGateV1 {
 /// single slot made two unrelated restart fixtures collide by scheduling
 /// accident; the key is the isolation the fixtures already have.
 #[cfg(any(test, feature = "test-helpers"))]
-fn retained_graph_recovery_successor_gate()
--> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>> {
+fn retained_graph_recovery_gate()
+-> &'static Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>> {
     static GATE: std::sync::OnceLock<
-        Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>>,
+        Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>>,
     > = std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
@@ -458,7 +468,8 @@ mod resident_memory;
 mod test_gates;
 pub mod watch_ingress;
 pub use owner_signals::{
-    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedSeatWaitV1,
+    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexSeatParkV1,
+    CodeIndexSeatWaitV1,
 };
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile
@@ -620,6 +631,9 @@ pub struct CodeIndexServingScopeV1 {
     pub worktree_id: WorktreeId,
     pub shutting_down: Arc<AtomicBool>,
     pub serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
+    /// The generation whose durable graph the worktree last seated, which
+    /// the serving slots stop naming once a newer text generation seats.
+    pub graph_generation: Option<CodeGenerationId>,
 }
 
 /// Mounted scope identity without consulting either serving-generation seat.
@@ -706,6 +720,9 @@ pub struct MountedCodeIndexWorktreeV1 {
         Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
     )>,
     pub scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    /// The owner's path policy, readable without the scheduler mutex so hook
+    /// hints for excluded paths never wake it.
+    path_policy: IndexPathPolicyV1,
     /// Explicit same-store build/publication invariant shared by source
     /// reconcile, ignored-dependency publication, and historical generation
     /// minting. Async owners acquire this before entering blocking scheduler
@@ -878,12 +895,11 @@ const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native 
      search keep serving, and the graph retries on its own once retained memory is given \
      back or RSS falls (a source change that seals a new generation also retries it)";
 
-/// Remediation when another holder kept the code-generation store lock through
-/// every bounded seat retry of a sealed generation.
-const CONVERGENCE_PARK_GRAPH_STORE_BUSY_REMEDIATION_V1: &str = "the sealed code generation \
-     could not seat because another owner held the code-generation store lock through every \
-     retry; exact and lexical search keep serving, and `tracedecay sync` or the next source \
-     change retries the seat";
+/// Remediation when a worktree refused by a held code-generation store lock
+/// cannot wait for that lock's release.
+const CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1: &str = "the worktree could not wait \
+     for the code-generation store lock to be released; exact and lexical search keep serving, \
+     and `tracedecay sync` or the next source change retries";
 
 /// Remediation when the derived publication was already deleted and rebuilt
 /// once in this mount and is corrupt again. The daemon deletes and rebuilds a
@@ -1404,62 +1420,26 @@ struct PendingWakeStateV1 {
     attributable: bool,
 }
 
-/// Delayed retry for a text build the resident-memory authority refused.
+/// Work of one worktree the resident-memory authority refused.
 ///
-/// Memory given back through the resident owners wakes the worktree at once.
-/// RSS can also fall with no owner released (a build elsewhere finished), so
-/// a refusal also retries after a delay that doubles up to a ceiling instead
-/// of waiting for an unrelated wake.
+/// The refusal registered with the authority, so memory given back anywhere
+/// in the process (an owner released, a reservation dropped, a sample that
+/// fits it) is its retry through the headroom wake.
 #[derive(Default)]
 struct MemoryRefusalRetryV1 {
-    delay_secs: AtomicU64,
     /// Work is parked on resident memory. A reader's wake cannot help until
-    /// memory is given back or the delay elapses, so readers do not wake the
-    /// worker meanwhile.
+    /// memory is given back, so readers do not wake the worker meanwhile.
     waiting: AtomicBool,
 }
 
 impl MemoryRefusalRetryV1 {
-    const FIRST_DELAY_SECS: u64 = 5;
-    const MAX_DELAY_SECS: u64 = 300;
-
-    fn schedule(&self, pending_wake: &Arc<PendingWakeV1>, wake: &Arc<tokio::sync::Notify>) {
-        let previous = self
-            .delay_secs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |delay| {
-                Some(match delay {
-                    0 => Self::FIRST_DELAY_SECS.saturating_mul(2),
-                    delay => delay.saturating_mul(2).min(Self::MAX_DELAY_SECS),
-                })
-            })
-            .unwrap_or_else(|delay| delay);
-        let delay = Duration::from_secs(match previous {
-            0 => Self::FIRST_DELAY_SECS,
-            delay => delay,
-        });
+    fn wait(&self) {
         self.waiting.store(true, Ordering::Release);
-        let pending_wake = Arc::downgrade(pending_wake);
-        let wake = Arc::downgrade(wake);
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let (Some(pending_wake), Some(wake)) = (pending_wake.upgrade(), wake.upgrade()) {
-                CodeIndexSchedulerRegistryV1::note_wake_if_idle(
-                    &pending_wake,
-                    &wake,
-                    CodeIndexCadenceTriggerV1::MemoryRetry,
-                );
-            }
-        });
     }
 
+    /// The work landed, or a memory pass is re-checking; readers may wake the
+    /// worker again.
     fn reset(&self) {
-        self.delay_secs.store(0, Ordering::Release);
-        self.waiting.store(false, Ordering::Release);
-    }
-
-    /// A memory pass is re-checking; readers may wake the worker again once
-    /// it lands.
-    fn retrying(&self) {
         self.waiting.store(false, Ordering::Release);
     }
 
@@ -1510,6 +1490,9 @@ pub enum CodeIndexWorkerPhaseV1 {
     AwaitingAdmission,
     /// Holding a permit and waiting for the worktree's build/publication gate.
     AwaitingPublicationGate,
+    /// Building a sealed generation's code graph: corpus-sized work a read
+    /// that waits on the graph cannot shorten.
+    PublishingGraph,
 }
 
 impl CodeIndexWorkerPhaseV1 {
@@ -1535,7 +1518,11 @@ impl CodeIndexOwnerActivityV1 {
     /// No owner pass holds the worktree and the worker is back at a wait, so
     /// the last pass and its tail have finished.
     pub fn pass_finished(&self) -> bool {
-        !self.passes().running() && self.worker_phase() != CodeIndexWorkerPhaseV1::Working
+        !self.passes().running()
+            && !matches!(
+                self.worker_phase(),
+                CodeIndexWorkerPhaseV1::Working | CodeIndexWorkerPhaseV1::PublishingGraph
+            )
     }
 
     pub fn passes(&self) -> super::CodeIndexOwnerPassesV1 {
@@ -1960,34 +1947,53 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    /// Pause a revision-7 retained-head recovery after it is queryable and
-    /// before its dirty-checkout successor starts. This makes the recovery
-    /// boundary observable without admitting the successor's partition decode.
+    /// Pause the next retained graph recovery of `project_root` `at` one of
+    /// its boundaries. Before head recovery, reads observe a restart whose
+    /// graph is not seated yet, which a large store holds open by itself for
+    /// tens of seconds while it loads the graph container. Before the
+    /// successor, the recovered head is queryable and the dirty checkout's
+    /// successor has not started its partition decode.
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub async fn pause_next_retained_graph_recovery_before_successor(
+    pub async fn pause_next_retained_graph_recovery(
         &self,
         project_root: PathBuf,
+        at: RetainedGraphRecoveryPauseV1,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
         let (entered, entered_observed) = tokio::sync::oneshot::channel();
         let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = retained_graph_recovery_successor_gate()
+        let mut gates = retained_graph_recovery_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             gates
                 .insert(
-                    project_root.clone(),
-                    RetainedGraphRecoverySuccessorGateV1 { entered, release },
+                    (project_root.clone(), at),
+                    RetainedGraphRecoveryGateV1 { entered, release },
                 )
                 .is_none(),
-            "one retained graph recovery successor gate per worktree: {}",
+            "one retained graph recovery {at:?} gate per worktree: {}",
             project_root.display()
         );
         (entered_observed, released)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn wait_for_retained_graph_recovery_gate(
+        project_root: &Path,
+        at: RetainedGraphRecoveryPauseV1,
+    ) {
+        let gate = retained_graph_recovery_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(project_root.to_path_buf(), at));
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
     }
 
     /// Hold a restart's retained text projection at its first advance, so a
@@ -2032,19 +2038,6 @@ impl CodeIndexSchedulerRegistryV1 {
             let _ = gate.release.await;
         }
     }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn wait_for_retained_graph_recovery_successor_gate(project_root: &Path) {
-        let gate = retained_graph_recovery_successor_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
-    }
-
     /// Construct a registry with an explicit background-reconcile permit count so
     /// tests can deterministically exercise the bounded-admission behavior
     /// (parallelism across distinct stores vs. serialization at a bound of one)
@@ -2350,7 +2343,6 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
             CodeIndexCadenceTriggerV1::GitWatcher => 6,
             CodeIndexCadenceTriggerV1::MemoryHeadroom => 7,
-            CodeIndexCadenceTriggerV1::MemoryRetry => 8,
         }
     }
 
@@ -2362,7 +2354,6 @@ impl CodeIndexSchedulerRegistryV1 {
             5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
             6 => CodeIndexCadenceTriggerV1::GitWatcher,
             7 => CodeIndexCadenceTriggerV1::MemoryHeadroom,
-            8 => CodeIndexCadenceTriggerV1::MemoryRetry,
             _ => CodeIndexCadenceTriggerV1::Mount,
         }
     }
@@ -3160,8 +3151,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Primary hint path: deliver the exact touched paths carried by a host
     /// after-file-edit hook into the mounted worktree's incremental queue.
     /// `rel_paths` are repository-relative; they are resolved against the
-    /// project root. Returns typed admission so terminal publication corruption
-    /// keeps its exact reason instead of collapsing through a bool facade.
+    /// project root. Paths the index path policy excludes are dropped here, and
+    /// a batch of only excluded paths is `NotApplicable` without a wake.
+    /// Returns typed admission so terminal publication corruption keeps its
+    /// exact reason instead of collapsing through a bool facade.
     pub async fn notify_hook_paths(
         &self,
         project_root: &Path,
@@ -3172,7 +3165,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
         };
-        let (hints, wake, epoch, pending_wake) = {
+        let (hints, wake, epoch, pending_wake, path_policy) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return CodeIndexDemandAdmissionV1::Unavailable(
@@ -3187,12 +3180,22 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
                 Arc::clone(&worktree.pending_wake),
+                worktree.path_policy.clone(),
             )
         };
         let absolute = rel_paths
             .iter()
             .map(|rel| project_root.join(rel))
+            .filter(|absolute| {
+                absolute
+                    .strip_prefix(&project_root)
+                    .ok()
+                    .is_none_or(|relative| !path_policy.excludes(&forward_slash_path(relative)))
+            })
             .collect::<Vec<_>>();
+        if absolute.is_empty() && !rel_paths.is_empty() {
+            return CodeIndexDemandAdmissionV1::NotApplicable;
+        }
         {
             let mut hints = hints
                 .lock()
@@ -3917,22 +3920,20 @@ fn feedback_document_logical_path(
     project_root: &Path,
     document_uri: &str,
 ) -> Result<String, LspRuntimeFailure> {
-    let url = url::Url::parse(document_uri)
-        .map_err(|_| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
+    let invalid = || LspRuntimeFailure::invalid_request("feedback-document-uri-invalid");
+    let url = url::Url::parse(document_uri).map_err(|_| invalid())?;
     if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
-        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
+        return Err(invalid());
     }
-    let path = url
-        .to_file_path()
-        .map_err(|()| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
+    let path = url.to_file_path().map_err(|()| invalid())?;
     let relative = canonical_relative_document_path(project_root, &path)
-        .ok_or_else(|| LspRuntimeFailure::new("feedback-document-outside-root"))?;
+        .ok_or_else(|| LspRuntimeFailure::invalid_request("feedback-document-outside-root"))?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
-        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
+        return Err(invalid());
     }
     relative
         .to_str()

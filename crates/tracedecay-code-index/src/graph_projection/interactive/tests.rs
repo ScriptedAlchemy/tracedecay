@@ -1133,7 +1133,7 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
             .symbols,
     );
     let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(4_388));
+    assert_eq!(held, Some(6_187));
 
     assert_eq!(
         store.release_interactive_catalog(),

@@ -1,6 +1,6 @@
-//! The shipped (mimalloc) binary's allocator release.
+//! The shipped (mimalloc) binary's allocator release and owner heaps.
 //!
-//! The `mimalloc` crate keeps its FFI private, so the one call used here is
+//! The `mimalloc` crate keeps its FFI private, so the calls used here are
 //! declared against the statically linked library.
 
 #[cfg(all(
@@ -9,15 +9,157 @@
     not(feature = "hotpath-alloc")
 ))]
 mod mimalloc_v3 {
-    use tracedecay_code_index::parallelism::run_on_every_installed_worker;
-    use tracedecay_runtime_core::resident_memory::install_process_allocator_release_v1;
+    use std::ffi::{c_int, c_void};
+    use std::num::NonZeroUsize;
 
-    unsafe extern "C" {
-        fn mi_collect(force: bool);
+    use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
+    use tracedecay_code_index::parallelism::run_on_every_installed_worker;
+    use tracedecay_domain::process_heap::{
+        OwnerHeapCallsV1, ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
+    };
+    #[cfg(windows)]
+    use windows_sys::Win32::System::{
+        ProcessStatus::{PSAPI_WORKING_SET_EX_INFORMATION, QueryWorkingSetEx},
+        Threading::GetCurrentProcess,
+    };
+
+    /// `mi_heap_area_t` from the vendored v3 `mimalloc.h`.
+    #[repr(C)]
+    struct HeapArea {
+        blocks: *mut c_void,
+        reserved: usize,
+        committed: usize,
+        used: usize,
+        block_size: usize,
+        full_block_size: usize,
+        reserved1: *mut c_void,
     }
 
+    type BlockVisitor = unsafe extern "C" fn(
+        heap: *const c_void,
+        area: *const HeapArea,
+        block: *mut c_void,
+        block_size: usize,
+        arg: *mut c_void,
+    ) -> bool;
+
+    unsafe extern "C" {
+        fn mi_malloc(size: usize) -> *mut c_void;
+        fn mi_calloc(count: usize, size: usize) -> *mut c_void;
+        fn mi_realloc(block: *mut c_void, size: usize) -> *mut c_void;
+        fn mi_free(block: *mut c_void);
+        fn mi_usable_size(block: *const c_void) -> usize;
+        fn mi_good_size(size: usize) -> usize;
+        fn mi_collect(force: bool);
+        fn mi_heap_new() -> *mut c_void;
+        fn mi_heap_delete(heap: *mut c_void);
+        fn mi_heap_collect(heap: *mut c_void, force: bool);
+        fn mi_heap_theap(heap: *mut c_void) -> *mut c_void;
+        fn mi_theap_get_default() -> *mut c_void;
+        fn mi_theap_collect(theap: *mut c_void, force: bool);
+        // 3.3.2 declares `mi_theap_set_default` without defining it; this is
+        // the definition its allocation path reads the default theap from.
+        fn _mi_theap_default_set(theap: *mut c_void);
+        fn mi_heap_visit_blocks(
+            heap: *mut c_void,
+            visit_blocks: bool,
+            visitor: BlockVisitor,
+            arg: *mut c_void,
+        ) -> bool;
+    }
+
+    /// Point SQLite and tree-sitter at mimalloc, so the process has one heap:
+    /// their pages are collected, purged and measured with Rust's instead of
+    /// accumulating in glibc arenas no release reaches. Both libraries must
+    /// not have allocated yet, since neither frees a block through another
+    /// allocator.
+    pub(super) fn route_c_libraries() {
+        // SAFETY: called once at startup before any parser, tree, or query
+        // exists, so every tree-sitter block is allocated and freed by
+        // mimalloc; the functions are thread-safe and never unwind.
+        unsafe {
+            tree_sitter::set_allocator(
+                Some(mi_malloc),
+                Some(mi_calloc),
+                Some(mi_realloc),
+                Some(mi_free),
+            );
+        }
+        let methods = sqlite3_mem_methods {
+            xMalloc: Some(sqlite_malloc),
+            xFree: Some(sqlite_free),
+            xRealloc: Some(sqlite_realloc),
+            xSize: Some(sqlite_size),
+            xRoundup: Some(sqlite_roundup),
+            xInit: Some(sqlite_init),
+            xShutdown: Some(sqlite_shutdown),
+            pAppData: std::ptr::null_mut(),
+        };
+        // SAFETY: SQLite copies `methods` before returning. It accepts the
+        // configuration only before its first initialization and refuses it
+        // with `SQLITE_MISUSE` afterwards.
+        let status = unsafe { sqlite3_config(SQLITE_CONFIG_MALLOC, &raw const methods) };
+        if status != SQLITE_OK {
+            tracing::warn!(
+                event = "sqlite_allocator_route_refused",
+                status,
+                "SQLite was initialized before startup routed its allocator; it keeps glibc malloc"
+            );
+        }
+    }
+
+    unsafe extern "C" fn sqlite_malloc(bytes: c_int) -> *mut c_void {
+        usize::try_from(bytes).map_or(std::ptr::null_mut(), |bytes| {
+            // SAFETY: a plain allocation; null tells SQLite it failed.
+            unsafe { mi_malloc(bytes) }
+        })
+    }
+
+    unsafe extern "C" fn sqlite_free(block: *mut c_void) {
+        // SAFETY: SQLite frees only blocks `sqlite_malloc`/`sqlite_realloc`
+        // returned, or null.
+        unsafe { mi_free(block) }
+    }
+
+    unsafe extern "C" fn sqlite_realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
+        usize::try_from(bytes).map_or(std::ptr::null_mut(), |bytes| {
+            // SAFETY: `block` is a live mimalloc block from this table.
+            unsafe { mi_realloc(block, bytes) }
+        })
+    }
+
+    unsafe extern "C" fn sqlite_size(block: *mut c_void) -> c_int {
+        // SAFETY: `block` is a live mimalloc block from this table. SQLite
+        // needs a size at least its `c_int` request, which the clamp keeps.
+        c_int::try_from(unsafe { mi_usable_size(block) }).unwrap_or(c_int::MAX)
+    }
+
+    unsafe extern "C" fn sqlite_roundup(bytes: c_int) -> c_int {
+        usize::try_from(bytes)
+            .ok()
+            // SAFETY: a pure size-class lookup.
+            .and_then(|bytes| c_int::try_from(unsafe { mi_good_size(bytes) }).ok())
+            .unwrap_or(bytes)
+    }
+
+    unsafe extern "C" fn sqlite_init(_: *mut c_void) -> c_int {
+        SQLITE_OK
+    }
+
+    unsafe extern "C" fn sqlite_shutdown(_: *mut c_void) {}
+
     pub(super) fn install() {
-        if let Err(message) = install_process_allocator_release_v1(release) {
+        if let Err(message) = install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
+            release,
+            collect_calling_thread: collect,
+            owner_heaps: Some(OwnerHeapCallsV1 {
+                create: heap_new,
+                enter: heap_enter,
+                leave: heap_leave,
+                footprint: heap_footprint,
+                delete: heap_delete,
+            }),
+        }) {
             tracing::warn!(event = "process_allocator_release_install_failed", %message);
         }
     }
@@ -39,15 +181,372 @@ mod mimalloc_v3 {
         // for the whole process without touching live allocations.
         unsafe { mi_collect(true) };
     }
+
+    fn heap_new() -> Option<NonZeroUsize> {
+        // SAFETY: creates an empty first-class heap; null on failure.
+        NonZeroUsize::new(unsafe { mi_heap_new() } as usize)
+    }
+
+    fn heap_enter(heap: NonZeroUsize) -> usize {
+        // SAFETY: `heap` came from `mi_heap_new` and is not deleted while an
+        // owner heap scope runs. v3 heaps allocate from any thread through
+        // that thread's theap, which `mi_heap_theap` creates on first use.
+        unsafe {
+            let previous = mi_theap_get_default();
+            _mi_theap_default_set(mi_heap_theap(heap.get() as *mut c_void));
+            previous as usize
+        }
+    }
+
+    /// Collects the owner heap's theap of the calling thread before leaving
+    /// it. Each thread owns its own pages of a shared heap, and frees other
+    /// threads push onto them are folded in, and emptied pages returned, only
+    /// by that thread: a worker that never enters the heap again would keep
+    /// them, and the owner would be charged for them, indefinitely.
+    fn heap_leave(previous: usize) {
+        // SAFETY: the calling thread's default theap is the owner heap's
+        // theap that `heap_enter` installed on this thread, and `previous`
+        // is the theap it replaced.
+        unsafe {
+            mi_theap_collect(mi_theap_get_default(), false);
+            _mi_theap_default_set(previous as *mut c_void);
+        }
+    }
+
+    /// Granule both residency queries report in.
+    const OS_PAGE_BYTES: usize = 4096;
+    /// OS pages queried per call, sized for a stack buffer: the visitor runs
+    /// inside the heap walk and must not allocate.
+    const RESIDENCY_BATCH_PAGES: usize = 512;
+
+    /// Resident bytes of `[start, start + len)`, `start` OS-page aligned.
+    /// Counts a batch the kernel could not report as resident: the range is
+    /// a live page of this process, so the query fails only when the kernel
+    /// cannot allocate its own bookkeeping, and an owner must not read as
+    /// smaller than it is.
+    #[cfg(unix)]
+    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+        let mut resident = 0_u64;
+        let mut vector = [0_u8; RESIDENCY_BATCH_PAGES];
+        let mut offset = 0;
+        while offset < len {
+            let pages = (len - offset)
+                .div_ceil(OS_PAGE_BYTES)
+                .min(RESIDENCY_BATCH_PAGES);
+            // SAFETY: the range lies in a live mimalloc page mapping and
+            // `vector` holds one byte per OS page of it.
+            let status = unsafe {
+                libc::mincore(
+                    (start + offset) as *mut c_void,
+                    pages * OS_PAGE_BYTES,
+                    vector.as_mut_ptr().cast(),
+                )
+            };
+            let present = if status == 0 {
+                vector[..pages]
+                    .iter()
+                    .filter(|page| **page & 1 != 0)
+                    .count()
+            } else {
+                pages
+            };
+            resident += (present * OS_PAGE_BYTES) as u64;
+            offset += pages * OS_PAGE_BYTES;
+        }
+        resident
+    }
+
+    /// Resident bytes of `[start, start + len)`, `start` OS-page aligned.
+    /// Counts a batch the kernel could not report as resident: the range is
+    /// a live page of this process, so an owner must not read as smaller than
+    /// it is.
+    #[cfg(windows)]
+    fn resident_page_bytes(start: usize, len: usize) -> u64 {
+        let mut resident = 0_u64;
+        let mut entries = [PSAPI_WORKING_SET_EX_INFORMATION::default(); RESIDENCY_BATCH_PAGES];
+        let mut offset = 0;
+        while offset < len {
+            let pages = (len - offset)
+                .div_ceil(OS_PAGE_BYTES)
+                .min(RESIDENCY_BATCH_PAGES);
+            for (index, entry) in entries[..pages].iter_mut().enumerate() {
+                entry.VirtualAddress = (start + offset + index * OS_PAGE_BYTES) as *mut c_void;
+            }
+            // SAFETY: `entries` holds `pages` initialized requests for this
+            // process's own addresses.
+            let queried = unsafe {
+                QueryWorkingSetEx(
+                    GetCurrentProcess(),
+                    entries.as_mut_ptr().cast(),
+                    (pages * size_of::<PSAPI_WORKING_SET_EX_INFORMATION>()) as u32,
+                )
+            };
+            let present = if queried != 0 {
+                entries[..pages]
+                    .iter()
+                    // SAFETY: every bit pattern of the union is a valid `usize`.
+                    .filter(|entry| unsafe { entry.VirtualAttributes.Flags } & 1 != 0)
+                    .count()
+            } else {
+                pages
+            };
+            resident += (present * OS_PAGE_BYTES) as u64;
+            offset += pages * OS_PAGE_BYTES;
+        }
+        resident
+    }
+
+    /// Adds the resident bytes of one page's whole extent. A page reused
+    /// from freed, not yet purged arena memory keeps that memory resident
+    /// past the blocks it has extended to, so the page's block capacity
+    /// undercounts what the owner holds.
+    unsafe extern "C" fn add_resident(
+        _heap: *const c_void,
+        area: *const HeapArea,
+        _block: *mut c_void,
+        _block_size: usize,
+        total: *mut c_void,
+    ) -> bool {
+        // SAFETY: mimalloc passes a valid area per page, and `total` is the
+        // `u64` `heap_footprint` lends for the visit.
+        unsafe {
+            let area = &*area;
+            let blocks = area.blocks as usize;
+            let start = blocks & !(OS_PAGE_BYTES - 1);
+            let total = &mut *total.cast::<u64>();
+            *total =
+                total.saturating_add(resident_page_bytes(start, blocks + area.reserved - start));
+        }
+        true
+    }
+
+    fn heap_footprint(heap: NonZeroUsize) -> u64 {
+        let heap = heap.get() as *mut c_void;
+        let mut total = 0_u64;
+        // SAFETY: the owner calls this once every thread that allocated into
+        // `heap` stopped, which is the visit's no-allocator requirement: the
+        // visit walks the heap's pages in every arena, and other threads only
+        // push frees onto those pages atomically.
+        unsafe {
+            mi_heap_collect(heap, true);
+            mi_heap_visit_blocks(heap, false, add_resident, (&raw mut total).cast::<c_void>());
+        }
+        total
+    }
+
+    fn heap_delete(heap: NonZeroUsize) {
+        // SAFETY: the owner heap is deleted once, when its owner dropped;
+        // `mi_heap_delete` frees its empty pages and moves live blocks to the
+        // main heap, so anything that escaped the owner stays valid.
+        unsafe { mi_heap_delete(heap.get() as *mut c_void) };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use tracedecay_code_extraction::LanguageRegistry;
+        use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
+        use tracedecay_code_index::retained_parse::SharedRetainedParsePool;
+        use tracedecay_domain::RepositoryDirtyStateV1;
+        use tracedecay_domain::process_heap::OwnerHeapV1;
+        use tracedecay_domain::source_path_policy::IndexPathPolicyV1;
+        use tracedecay_domain::test_fixtures::id;
+
+        const BLOCKS: usize = 16 * 1024;
+        const BLOCK_BYTES: usize = 256;
+
+        fn blocks() -> Vec<Vec<u8>> {
+            (0..BLOCKS).map(|_| vec![7; BLOCK_BYTES]).collect()
+        }
+
+        /// An owner heap holds exactly what its scope allocated: its pages
+        /// cover the owner's blocks, nothing allocated outside the scope, and
+        /// none once the owner dropped. Blocks that outlive the heap stay
+        /// valid in the process heap.
+        #[test]
+        fn an_owner_heap_charges_its_own_pages_and_returns_them_whole() {
+            super::install();
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let outside = blocks();
+            assert_eq!(heap.resident_bytes(), 0);
+
+            let owned = heap.scope(blocks);
+            let charged = heap.resident_bytes();
+            assert!(
+                (BLOCKS * BLOCK_BYTES) as u64 <= charged
+                    && charged <= (2 * BLOCKS * BLOCK_BYTES) as u64,
+                "the heap charges its {BLOCKS} blocks of {BLOCK_BYTES} B: {charged}"
+            );
+
+            drop(owned);
+            assert_eq!(heap.resident_bytes(), 0);
+
+            let escaped = heap.scope(|| Box::new([9_u8; BLOCK_BYTES]));
+            drop(heap);
+            assert_eq!(escaped[BLOCK_BYTES - 1], 9);
+            assert_eq!(outside.len(), BLOCKS);
+        }
+
+        /// Pages of an owner heap whose blocks another thread freed stay
+        /// charged to the worker that allocated them until that worker
+        /// collects them, which it does whenever it leaves the heap.
+        #[test]
+        fn leaving_an_owner_heap_returns_the_pages_other_threads_emptied() {
+            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
+            super::install();
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let heap = &heap;
+            let (to_worker, work) = std::sync::mpsc::channel::<bool>();
+            let (to_main, built) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
+            std::thread::scope(|threads| {
+                threads.spawn(move || {
+                    for allocate in work {
+                        let blocks = heap.scope(|| if allocate { blocks() } else { Vec::new() });
+                        to_main.send(blocks).expect("the test receives");
+                    }
+                });
+                to_worker.send(true).expect("the worker runs");
+                drop(built.recv().expect("the worker's blocks"));
+                let stranded = heap.resident_bytes();
+                to_worker.send(false).expect("the worker runs");
+                assert!(built.recv().expect("an empty scope").is_empty());
+                let returned = heap.resident_bytes();
+                drop(to_worker);
+                assert!(
+                    stranded >= SMALL_PAGE_BYTES,
+                    "freed on another thread, blocks stay on the worker's pages: {stranded} B"
+                );
+                assert_eq!(
+                    returned, 0,
+                    "leaving the heap returns the pages they emptied"
+                );
+            });
+        }
+
+        /// A page built on freed, not yet purged memory holds that memory
+        /// resident past the blocks it has extended to, and its owner is
+        /// charged for it, never for more than its pages span.
+        #[test]
+        fn an_owner_heap_charges_the_freed_memory_its_pages_reuse() {
+            const SIZE_CLASSES: usize = 64;
+            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
+            super::install();
+            let freed = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            drop(freed.scope(|| {
+                (0..32 * 1024)
+                    .map(|_| vec![7_u8; 1_000])
+                    .collect::<Vec<_>>()
+            }));
+            drop(freed);
+
+            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let kept = heap.scope(|| {
+                (1..=SIZE_CLASSES)
+                    .map(|class| vec![1_u8; class * 16])
+                    .collect::<Vec<_>>()
+            });
+            let charged = heap.resident_bytes();
+            let live: u64 = kept.iter().map(|block| block.len() as u64).sum();
+            let spanned = SIZE_CLASSES as u64 * SMALL_PAGE_BYTES;
+            assert!(
+                16 * live <= charged && charged <= spanned,
+                "pages holding {live} B on reused memory charge it, within the \
+                 {spanned} B their pages can span: {charged} B"
+            );
+            assert_eq!(kept.len(), SIZE_CLASSES);
+        }
+
+        /// Path matching keeps nothing in the matching thread's heap: the
+        /// glob sets' per-thread match caches outlive any one capture, and
+        /// left among its transient blocks they pin its pages.
+        #[test]
+        fn path_matching_leaves_no_blocks_in_the_matching_threads_heap() {
+            super::install();
+            let policy = IndexPathPolicyV1::new(
+                vec!["**/fixtures/**".to_owned(), "*.min.js".to_owned()],
+                vec!["src/kept/**".to_owned()],
+            )
+            .expect("valid patterns");
+            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let excluded = probe.scope(|| {
+                (0..2_000)
+                    .filter(|index| {
+                        policy.excludes(&format!("src/m{index}/fixtures/case{index}/f{index}.rs"))
+                    })
+                    .count()
+            });
+            assert_eq!(excluded, 2_000);
+            assert_eq!(probe.resident_bytes(), 0);
+            assert!(!policy.excludes("src/kept/fixtures/case/f.rs"));
+        }
+
+        /// A retained parse charges the extraction it keeps. The retained
+        /// artifact shares its token streams with the extraction that built
+        /// it, so the extraction has to allocate in the pool's heap too.
+        #[test]
+        fn a_retained_parse_charges_the_extraction_it_keeps() {
+            super::install();
+            let source = (0..400)
+                .map(|index| {
+                    format!(
+                        "pub fn f{index}(a: u32, b: u32) -> u32 {{ let c = a * {index} + b; \
+                         if c > {index} {{ c - a }} else {{ b + c }} }}\n"
+                    )
+                })
+                .collect::<String>();
+            let registry = LanguageRegistry::new();
+            let extractor = registry
+                .extractor_for_file("src/lib.rs")
+                .expect("Rust extractor");
+            let identity = || ParseDocumentIdentity::Repository {
+                project_id: id("project.retained"),
+                repository_id: id("repository.retained"),
+                worktree_id: None,
+                reference: None,
+                commit: None,
+                tree: None,
+                dirty: RepositoryDirtyStateV1::Dirty,
+                logical_path: "src/lib.rs".to_owned(),
+            };
+            let held = |pool: &SharedRetainedParsePool| {
+                pool.holding()
+                    .and_then(|holding| holding.bytes)
+                    .expect("an owner-heap measurement")
+            };
+            let parsed = SharedRetainedParsePool::default();
+            parsed.parse(identity(), "rust", &source).expect("parse");
+            let extracted = SharedRetainedParsePool::default();
+            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let edited = format!("{source}pub fn edited() -> u32 {{ 3 }}\n");
+            for source in [&source, &edited] {
+                let (_, extraction) = probe.scope(|| {
+                    extracted
+                        .parse_and_extract_artifact(identity(), "rust", source, extractor)
+                        .expect("extraction")
+                });
+                assert!(!extraction.artifact.clone_bodies.is_empty());
+            }
+            let (parsed, extracted, outside) =
+                (held(&parsed), held(&extracted), probe.resident_bytes());
+            assert!(
+                extracted > parsed,
+                "the pool charges the artifact it keeps: {extracted} B vs {parsed} B parsed only"
+            );
+            assert_eq!(outside, 0, "the extracting thread keeps none of it");
+        }
+    }
 }
 
-/// Install the process allocator's release call as the runtime's allocator
-/// release. Runs once at startup, before any daemon work.
+/// Route the C libraries to the process allocator and install its release
+/// call as the runtime's allocator release. Runs once at startup, before any
+/// daemon work.
 pub(crate) fn configure_process_allocator() {
     #[cfg(all(
         feature = "alloc-mimalloc",
         not(feature = "alloc-jemalloc"),
         not(feature = "hotpath-alloc")
     ))]
-    mimalloc_v3::install();
+    {
+        mimalloc_v3::route_c_libraries();
+        mimalloc_v3::install();
+    }
 }

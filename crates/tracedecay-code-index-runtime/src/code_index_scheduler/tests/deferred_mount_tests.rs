@@ -10,7 +10,10 @@ use super::{ALPHA_LIB_V1, GitFixture, wait_for_initial_generation};
 use crate::code_index_scheduler::query_runtime::{
     DeferredMountAttemptV1, retry_deferred_query_authority_until_serving,
 };
-use crate::code_index_scheduler::{CodeIndexGenerationPublishedV1, CodeIndexSchedulerRegistryV1};
+use crate::code_index_scheduler::{
+    CodeIndexGenerationPublishedV1, CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1,
+};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
@@ -282,4 +285,28 @@ async fn deferred_query_authority_wakes_after_pre_mount_subscribe_on_partitioned
         "mount attempt must run after subscribe-after-mount"
     );
     restarted.shutdown().await;
+}
+
+/// A root's owner signals wake on that root's sealed publication and not on
+/// another root's, so a waiter re-reads only when its own root may have moved.
+#[tokio::test]
+async fn owner_signals_wake_on_their_own_roots_publication() {
+    let root = TempDir::new().expect("project root");
+    let foreign = TempDir::new().expect("foreign project root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(&registry, root.path()).await;
+
+    registry.push_generation_publication_for_test(synthetic_publication(foreign.path(), 1));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), signals.changed())
+            .await
+            .is_err(),
+        "a foreign root's publication must not wake this root's waiter"
+    );
+    let canonical = canonical_existing_identity(root.path()).expect("canonical project root");
+    registry.push_generation_publication_for_test(synthetic_publication(&canonical, 2));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), signals.changed()).await,
+        Ok(Ok(()))
+    );
 }

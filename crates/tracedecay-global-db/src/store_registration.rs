@@ -242,17 +242,12 @@ pub async fn register_project_store(
 
     if let Some(meta) = meta {
         for (branch_name, entry) in meta.branches {
-            let db_path = store_layout.data_root.join(&entry.db_file);
-            let db_relpath = profile_relative(&profile_root, &db_path).ok_or_else(|| {
-                registry_registration_error("branch database is outside its profile")
-            })?;
             global_db
                 .upsert_graph_scope(GraphScopeUpsert {
                     graph_scope_id: profile_graph_scope_id(&store.store_id, &branch_name),
                     project_id: store.project_id.clone(),
                     store_id: store.store_id.clone(),
                     branch_name: branch_name.clone(),
-                    db_relpath,
                     parent_scope_id: entry
                         .parent
                         .as_deref()

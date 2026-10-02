@@ -336,8 +336,9 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     }
 
     /// Converge a snapshot written by an earlier published registry onto the
-    /// current one: registry-added settings receive their typed defaults and
-    /// retired settings are dropped.
+    /// current one: registry-added settings receive their typed defaults,
+    /// retired settings are dropped, and a never-overridden setting follows a
+    /// default that changed.
     ///
     /// This is exact schema convergence, not a runtime fallback: only the
     /// closed sets of known additive keys and known retired keys are accepted.
@@ -415,7 +416,26 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .intersection(&retired_keys)
                 .cloned()
                 .collect::<Vec<_>>();
-            if missing_keys.is_empty() && removals.is_empty() {
+            // A setting nothing ever overrode still carries the default the
+            // registry shipped when the snapshot was written. It follows the
+            // current default, otherwise a default that changed between
+            // releases (`bin/**` leaving `index.exclude.v1`) would stay
+            // persisted in every existing store.
+            let default_provenance =
+                vec![registry_default_candidate().map_err(ConfigurationError::validation)?];
+            let stale_defaults = registry
+                .definitions()
+                .filter(|definition| {
+                    current.snapshot.provenance.get(&definition.key) == Some(&default_provenance)
+                        && current
+                            .snapshot
+                            .effective_values
+                            .get(&definition.key)
+                            .is_some_and(|value| *value != definition.default_value)
+                })
+                .map(|definition| definition.key.clone())
+                .collect::<Vec<_>>();
+            if missing_keys.is_empty() && removals.is_empty() && stale_defaults.is_empty() {
                 validate_snapshot_registry_completeness_with_registry(&current.snapshot, registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
@@ -434,6 +454,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             }
             let additions = missing_keys
                 .iter()
+                .chain(&stale_defaults)
                 .map(|key| {
                     registry
                         .definition(key)
@@ -466,10 +487,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             }
             for (key, default_value) in additions {
                 effective_values.insert(key.clone(), default_value);
-                provenance.insert(
-                    key,
-                    vec![registry_default_candidate().map_err(ConfigurationError::validation)?],
-                );
+                provenance.insert(key, default_provenance.clone());
             }
             let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
                 .map_err(ConfigurationError::validation)?;

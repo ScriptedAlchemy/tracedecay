@@ -1,5 +1,6 @@
 //! Retention over one registered session store.
 
+use tracedecay_domain::UtcMicros;
 use tracedecay_global_db::observation::retention::{
     ObservationRetentionConfig, ObservationRetentionReport, RetentionMode,
 };
@@ -78,7 +79,12 @@ pub async fn run_registered_store_retention(
     let observations = if observations.enabled {
         Some(
             database
-                .run_observation_retention(None, observations, RetentionMode::Apply, now)
+                .run_observation_retention(
+                    None,
+                    observations,
+                    RetentionMode::Apply,
+                    UtcMicros::from_unix_seconds(now),
+                )
                 .await,
         )
     } else {

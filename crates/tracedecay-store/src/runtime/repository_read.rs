@@ -10,6 +10,8 @@
 //! The concrete SQLite executors that answer these operations live in the
 //! concrete runtime crate; this module owns only the contract.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CanonicalObservationIdV1, CodeGenerationId, ConfigurationRevisionId, DurableObservationV1,
@@ -17,7 +19,7 @@ use tracedecay_domain::{
     GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, NativeAlias, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
     RetrievalAnchorId, RetrievalAnchorRecord, SourceBindingIdentityV1, SourceBindingOwnerV1,
-    UtcMicros,
+    SourceNativeObjectIdV1, UtcMicros,
 };
 
 use crate::{
@@ -114,6 +116,7 @@ fn observation_read_matches_shard(
 ) -> bool {
     match operation {
         ObservationReadOperationV1::SourceCursor { scope, .. }
+        | ObservationReadOperationV1::CommittedSourceCursors { scope, .. }
         | ObservationReadOperationV1::RetrievalAnchorByAlias { scope, .. } => {
             match (scope, &shard.scope) {
                 (ObservationScopeV1::Profile, StoreShardScopeV1::ProfileSessions) => true,
@@ -142,7 +145,7 @@ fn external_source_read_matches_shard(
     shard: &StoreShardIdV1,
 ) -> bool {
     let binding = match operation {
-        ExternalSourceReadOperationV1::State { binding }
+        ExternalSourceReadOperationV1::State { binding, .. }
         | ExternalSourceReadOperationV1::CommitReceipt { binding, .. }
         | ExternalSourceReadOperationV1::AcquisitionState { binding } => binding,
         ExternalSourceReadOperationV1::NextPendingProjection {
@@ -283,8 +286,11 @@ pub enum ProjectReadResultV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalSourceReadOperationV1 {
+    /// The binding's state holding only `objects`; see
+    /// [`crate::SourceObjectCoverageV1`].
     State {
         binding: SourceBindingIdentityV1,
+        objects: BTreeSet<SourceNativeObjectIdV1>,
     },
     CommitReceipt {
         binding: SourceBindingIdentityV1,
@@ -371,6 +377,11 @@ pub enum ObservationReadOperationV1 {
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
     },
+    /// Every cursor this source's observations committed, across generations.
+    CommittedSourceCursors {
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+    },
     Observation {
         observation_id: CanonicalObservationIdV1,
     },
@@ -426,6 +437,7 @@ pub struct ProjectionRebuildProgressV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ObservationReadResultV1 {
     SourceCursor(Option<ObservationSourceCursorV1>),
+    CommittedSourceCursors(Vec<ObservationSourceCursorV1>),
     Observation(Box<Option<StoredObservationRowV1>>),
     RetrievalAnchorByAlias(Option<RetrievalAnchorId>),
     Replay(Vec<StoredObservationRowV1>),

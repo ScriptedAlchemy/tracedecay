@@ -35,46 +35,46 @@ pub use results::{
     FactStoreProbeResultV1, FactStoreReasonResultV1, FactStoreRelatedResultV1,
     FactStoreRemoveResultV1, FactStoreSearchResultV1, FactStoreSupersedeResultV1,
     FactStoreUpdateResultV1, FactTelemetryV1, FactV1, GitScopeV1, HydrationStateResultV1,
-    LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1, LcmDagDepthStatusV1,
-    LcmDagStatusV1, LcmDescribeExternalPayloadV1, LcmDescribeResultV1, LcmDescribeSourceOverviewV1,
-    LcmDescribeSummaryNodeV1, LcmDescriptionV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1,
-    LcmDoctorHealthStatusV1, LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1,
-    LcmDoctorResultV1, LcmExpandQueryBudgetV1, LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1,
-    LcmExpandQueryPaginationV1, LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1,
-    LcmExpandResultV1, LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmGrepResultV1,
-    LcmLifecycleStatusV1, LcmLoadSessionResultV1, LcmMessageV1, LcmPayloadCoverageStateV1,
-    LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1,
-    LcmRawMessageOverviewV1, LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1,
-    LcmSourcePaginationV1, LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1,
-    LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1,
-    LcmSummaryConvergenceStateV1, LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1,
-    LcmSummaryNodeV1, LcmTemporalFieldsV1, MemoryAlgebraV1,
-    MemoryAutomationCurationAddDispositionV1, MemoryAutomationCurationLinkDispositionV1,
-    MemoryAutomationCurationMergeV1, MemoryAutomationCurationOperationEffectV1,
-    MemoryAutomationCurationReceiptV1, MemoryAutomationCurationRelationKindV1,
-    MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
-    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
-    MemoryAutomationFactConflictSourceV1, MemoryAutomationFactConflictValidationV1,
-    MemoryAutomationFactDedupeValidationV1, MemoryAutomationFactDispositionV1,
-    MemoryAutomationFactEffectV1, MemoryAutomationFactEvidenceItemV1,
-    MemoryAutomationFactEvidenceSourceSpanV1, MemoryAutomationFactEvidenceTrustBucketV1,
-    MemoryAutomationFactEvidenceTrustV1, MemoryAutomationFactEvidenceV1,
-    MemoryAutomationFactInputDigestError, MemoryAutomationFactInputDigestV1,
-    MemoryAutomationFactNearestMatchV1, MemoryAutomationFactReceiptV1,
-    MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
-    MemoryAutomationFactValidationStatusV1, MemoryAutomationFactValidationV1,
-    MemoryFeedbackFunnelV1, MemoryStatusResultV1, MemoryStatusV1, MessageSearchHitV1,
-    MessageSearchResultV1, RetainedErrorV1, RetainedNextActionV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceResultV1, RetrievalWorkerStatusV1, SessionCorrelationHitV1,
-    SessionCoverageIntervalV1, SessionCoverageReasonV1, SessionCoverageRequestV1,
-    SessionCoverageStateV1, SessionMessageV1, SessionRecordV1, SessionRefreshBeginResultV1,
-    SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
-    SessionRefreshReceiptV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
-    SessionSourceCoverageV1, SessionsForResultV1, TemporalCoverageOmissionV1, TemporalCoverageV1,
-    TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1,
-    TemporalPopulationCountV1, TemporalWatermarksV1, TrustHistoryEntryV1, ValidCoverageIntervalV1,
-    WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1,
-    WorkflowsResultV1,
+    LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1, LcmConvergenceStateV1,
+    LcmConvergenceV1, LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeExternalPayloadV1,
+    LcmDescribeResultV1, LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1, LcmDescriptionV1,
+    LcmDoctorFindingKindV1, LcmDoctorFindingV1, LcmDoctorHealthStatusV1, LcmDoctorHealthV1,
+    LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorResultV1, LcmExpandQueryBudgetV1,
+    LcmExpandQueryContextBlockV1, LcmExpandQueryMatchV1, LcmExpandQueryPaginationV1,
+    LcmExpandQueryResultV1, LcmExpandQuerySynthesisPromptV1, LcmExpandResultV1,
+    LcmExpandedSourceV1, LcmExpansionV1, LcmGrepHitV1, LcmGrepResultV1, LcmLifecycleStatusV1,
+    LcmLoadSessionResultV1, LcmMessageV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
+    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1, LcmRawMessageOverviewV1,
+    LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1, LcmSourcePaginationV1,
+    LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1, LcmStoreStatusV1,
+    LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1,
+    LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1, LcmTemporalFieldsV1,
+    MemoryAlgebraV1, MemoryAutomationCurationAddDispositionV1,
+    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
+    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
+    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
+    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
+    MemoryAutomationCurationResultV1, MemoryAutomationFactConflictSourceV1,
+    MemoryAutomationFactConflictValidationV1, MemoryAutomationFactDedupeValidationV1,
+    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
+    MemoryAutomationFactEvidenceItemV1, MemoryAutomationFactEvidenceSourceSpanV1,
+    MemoryAutomationFactEvidenceTrustBucketV1, MemoryAutomationFactEvidenceTrustV1,
+    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestError,
+    MemoryAutomationFactInputDigestV1, MemoryAutomationFactNearestMatchV1,
+    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
+    MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
+    MemoryAutomationFactValidationV1, MemoryFeedbackFunnelV1, MemoryStatusResultV1, MemoryStatusV1,
+    MessageSearchHitV1, MessageSearchResultV1, RetainedErrorV1, RetainedNextActionV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceResultV1, RetrievalWorkerStatusV1,
+    SessionCorrelationHitV1, SessionCoverageIntervalV1, SessionCoverageReasonV1,
+    SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
+    SessionRefreshBeginResultV1, SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1,
+    SessionRefreshProgressV1, SessionRefreshReceiptV1, SessionRefreshStatusResultV1,
+    SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1, SessionsForResultV1,
+    TemporalCoverageOmissionV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
+    TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1, TemporalWatermarksV1,
+    TrustHistoryEntryV1, ValidCoverageIntervalV1, WorkflowAgentV1, WorkflowCoverageV1,
+    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsResultV1,
 };
 
 use schemars::JsonSchema;
@@ -704,9 +704,19 @@ impl SessionRefreshRequestV1 {
 
 #[cfg(test)]
 mod session_refresh_request_tests {
+    use serde::de::DeserializeOwned;
     use serde_json::json;
 
     use super::{SessionRefreshActionRequestV1, SessionRefreshRequestV1, SessionRefreshScopeV1};
+
+    fn rejection<T: DeserializeOwned>(field: &str, value: serde_json::Value) -> String {
+        let mut body = route_body();
+        body[field] = value;
+        serde_json::from_value::<T>(body)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    }
 
     fn route_body() -> serde_json::Value {
         json!({
@@ -724,9 +734,11 @@ mod session_refresh_request_tests {
 
     #[test]
     fn route_selected_refresh_request_rejects_an_action_tag() {
-        let mut body = route_body();
-        body["action"] = json!("status");
-        assert!(serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err());
+        let error = rejection::<SessionRefreshActionRequestV1>("action", json!("status"));
+        assert!(
+            error.starts_with("unknown field `action`, expected one of"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -741,30 +753,48 @@ mod session_refresh_request_tests {
 
     #[test]
     fn scope_rejects_untyped_and_internal_owner_selectors() {
-        for scope in [
-            json!("profile"),
-            json!({ "kind": "profile", "profile_id": "profile.default" }),
-            json!({ "kind": "project", "project": {} }),
-            json!({ "kind": "user", "profile_id": "profile.default" }),
+        for (scope, expected) in [
+            (
+                json!("profile"),
+                "invalid type: string \"profile\", expected internally tagged enum SessionRefreshScopeV1",
+            ),
+            (
+                json!({ "kind": "profile", "profile_id": "profile.default" }),
+                "unknown field `profile_id`, there are no fields",
+            ),
+            (
+                json!({ "kind": "project", "project": {} }),
+                "unknown field `project`, there are no fields",
+            ),
+            (
+                json!({ "kind": "user", "profile_id": "profile.default" }),
+                "unknown variant `user`, expected `project` or `profile`",
+            ),
         ] {
-            let mut body = route_body();
-            body["scope"] = scope.clone();
-            assert!(
-                serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err(),
+            assert_eq!(
+                rejection::<SessionRefreshActionRequestV1>("scope", scope.clone()),
+                expected,
                 "scope {scope} must be refused"
             );
         }
-        let mut body = route_body();
-        body["profile"] = json!({ "id": "profile.default" });
-        assert!(serde_json::from_value::<SessionRefreshActionRequestV1>(body).is_err());
+        let error = rejection::<SessionRefreshActionRequestV1>(
+            "profile",
+            json!({ "id": "profile.default" }),
+        );
+        assert!(
+            error.starts_with("unknown field `profile`, expected one of"),
+            "{error}"
+        );
     }
 
     #[test]
     fn current_refresh_request_rejects_legacy_action_aliases() {
         for action in ["start", "join", "resume"] {
-            let mut body = route_body();
-            body["action"] = json!(action);
-            assert!(serde_json::from_value::<SessionRefreshRequestV1>(body).is_err());
+            let error = rejection::<SessionRefreshRequestV1>("action", json!(action));
+            assert!(
+                error.starts_with(&format!("unknown variant `{action}`, expected one of")),
+                "{error}"
+            );
         }
     }
 

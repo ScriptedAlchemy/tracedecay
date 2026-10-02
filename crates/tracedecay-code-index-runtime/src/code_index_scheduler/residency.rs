@@ -9,6 +9,11 @@
 //! exact and lexical reads keep serving from the text artifact, graph reads
 //! answer warming while the engine reopens from the durable graph, and the
 //! next read that needs the whole generation re-decodes it.
+//!
+//! Reads that only report on the seat (the status census, freshness) do not
+//! renew the lease, and a refresh of the worktree refused for memory takes
+//! the serving graph back between requests: that graph is what the refresh
+//! replaces, so protecting it until it idles would only hold the refresh.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +26,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
 };
+use tracedecay_code_index::retained_parse::{RetainedParsePoolReleaseV1, SharedRetainedParsePool};
 use tracedecay_runtime_core::resident_memory::{
     ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
     ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -31,6 +37,15 @@ use super::reconcile::ReconcilePassesV1;
 use super::registry::ServingGenerationSlot;
 use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
+/// Whether a serving read renews its worktree's residency lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServingReadLeaseV1 {
+    /// The read serves from the decoded generation or its graph.
+    Renew,
+    /// The read only reports on the seat, so it must not keep it resident.
+    Observe,
+}
+
 pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
     serving_generation_epoch: Arc<AtomicU64>,
@@ -39,7 +54,9 @@ pub(super) struct WorktreeResidencyV1 {
     reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
     text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    retained_parses: SharedRetainedParsePool,
     last_used: Mutex<Instant>,
+    refresh_waits_for_memory: AtomicBool,
 }
 
 pub(super) struct WorktreeResidencyPartsV1 {
@@ -50,6 +67,7 @@ pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
     pub(super) text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    pub(super) retained_parses: SharedRetainedParsePool,
 }
 
 impl WorktreeResidencyV1 {
@@ -62,7 +80,55 @@ impl WorktreeResidencyV1 {
             reconcile_in_progress: parts.reconcile_in_progress,
             publication: parts.publication,
             text_generation: parts.text_generation,
+            retained_parses: parts.retained_parses,
             last_used: Mutex::new(Instant::now()),
+            refresh_waits_for_memory: AtomicBool::new(false),
+        }
+    }
+
+    /// Record whether this worktree's last reconcile was refused for resident
+    /// memory. While it is, memory given back anywhere in the process is its
+    /// retry.
+    pub(super) fn set_refresh_waits_for_memory(&self, waits: bool) {
+        self.refresh_waits_for_memory
+            .store(waits, Ordering::Release);
+    }
+
+    pub(super) fn refresh_waits_for_memory(&self) -> bool {
+        self.refresh_waits_for_memory.load(Ordering::Acquire)
+    }
+
+    /// Give back the serving graph a refused refresh of this worktree is
+    /// waiting on. An engine a graph read holds answers busy and stays, so
+    /// only the gaps between requests are taken; graph reads meanwhile answer
+    /// warming, as after an idle release. A release is announced as headroom.
+    pub(super) fn yield_serving_graph_to_refresh(self: &Arc<Self>, owners: &ResidentOwnersV1) {
+        let released = [
+            (
+                ResidentOwnerKindV1::GraphCatalog,
+                GraphCatalogOwnerV1(Arc::clone(self)).release(),
+            ),
+            (
+                ResidentOwnerKindV1::GraphEngine,
+                GraphEngineOwnerV1(Arc::clone(self)).release(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, release)| match release {
+            ResidentOwnerReleaseV1::Released { bytes } => Some((kind, bytes)),
+            ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+        })
+        .inspect(|(kind, bytes)| {
+            tracing::info!(
+                event = "code_index_serving_graph_yielded_to_refresh",
+                kind = kind.as_str(),
+                bytes = bytes.measured(),
+                "a refresh refused for memory took back the serving graph it replaces"
+            );
+        })
+        .count();
+        if released > 0 {
+            owners.note_headroom();
         }
     }
 
@@ -105,8 +171,11 @@ impl WorktreeResidencyV1 {
             Arc::new(SupersededDecodesOwnerV1(Arc::clone(&self)));
         let graph_catalog: Arc<dyn ResidentOwnerV1> =
             Arc::new(GraphCatalogOwnerV1(Arc::clone(&self)));
+        let retained_parses: Arc<dyn ResidentOwnerV1> =
+            Arc::new(RetainedParsesOwnerV1(Arc::clone(&self)));
         let graph_engine: Arc<dyn ResidentOwnerV1> = Arc::new(GraphEngineOwnerV1(self));
         let registrations = [
+            (ResidentOwnerKindV1::RetainedParses, &retained_parses),
             (ResidentOwnerKindV1::DecodedGeneration, &serving),
             (ResidentOwnerKindV1::SupersededGeneration, &superseded),
             (ResidentOwnerKindV1::GraphCatalog, &graph_catalog),
@@ -128,7 +197,13 @@ impl WorktreeResidencyV1 {
         })
         .collect();
         WorktreeResidencyRegistrationV1 {
-            _owners: [serving, superseded, graph_catalog, graph_engine],
+            _owners: [
+                retained_parses,
+                serving,
+                superseded,
+                graph_catalog,
+                graph_engine,
+            ],
             _registrations: registrations,
         }
     }
@@ -136,7 +211,7 @@ impl WorktreeResidencyV1 {
 
 /// Keeps a mount's owners registered until the mount drops.
 pub(super) struct WorktreeResidencyRegistrationV1 {
-    _owners: [Arc<dyn ResidentOwnerV1>; 4],
+    _owners: [Arc<dyn ResidentOwnerV1>; 5],
     _registrations: Vec<ResidentOwnerRegistrationV1>,
 }
 
@@ -272,6 +347,39 @@ impl ResidentOwnerV1 for SupersededDecodesOwnerV1 {
 
     fn release(&self) -> ResidentOwnerReleaseV1 {
         HeldDecodesV1::release(self.0.publication.release_superseded_decodes())
+    }
+}
+
+/// The documents the worktree's increments retained for incremental reparse,
+/// charged by the pages of the pool's own heap.
+struct RetainedParsesOwnerV1(Arc<WorktreeResidencyV1>);
+
+impl ResidentOwnerV1 for RetainedParsesOwnerV1 {
+    fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        let held = self.0.retained_parses.holding()?;
+        Some(ResidentOwnerSampleV1 {
+            holding: ResidentHoldingV1::Worktree,
+            bytes: held.bytes.map_or(
+                ResidentOwnerBytesV1::Unmeasured,
+                ResidentOwnerBytesV1::Measured,
+            ),
+            last_used: held.last_retained,
+            serving: false,
+            shared: None,
+        })
+    }
+
+    fn release(&self) -> ResidentOwnerReleaseV1 {
+        match self.0.retained_parses.release() {
+            RetainedParsePoolReleaseV1::Released { bytes } => ResidentOwnerReleaseV1::Released {
+                bytes: bytes.map_or(
+                    ResidentOwnerBytesV1::Unmeasured,
+                    ResidentOwnerBytesV1::Measured,
+                ),
+            },
+            RetainedParsePoolReleaseV1::Busy => ResidentOwnerReleaseV1::Busy,
+            RetainedParsePoolReleaseV1::Empty => ResidentOwnerReleaseV1::Empty,
+        }
     }
 }
 

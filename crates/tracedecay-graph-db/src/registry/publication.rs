@@ -25,9 +25,7 @@ use super::publication_support::{
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_source, validate_supplied_rows_binding};
-use crate::generation_runtime::{
-    GenerationContentsDeletion, GenerationStageOutcome, SealedReleaseReceiptAuthority,
-};
+use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutcome};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
@@ -133,7 +131,11 @@ impl GraphDbRegistry {
 
         let locator = locator_from_key(&head.key)?;
         let database_path = canonical_graph_database_file(registration.canonical_path())?;
-        let (database, identity) = crate::sealed_store::open_direct_sealed_generation(
+        let crate::sealed_store::DirectSealedGenerationV1 {
+            lease: database,
+            identity,
+            layered,
+        } = crate::sealed_store::open_direct_sealed_generation(
             &database_path,
             locator.projection,
             locator.generation,
@@ -154,7 +156,9 @@ impl GraphDbRegistry {
         check_all(&registration, context, "generation.recover.direct_sealed")?;
         let lease = generation_lease(&identity, head, BTreeMap::new());
         self.track_direct_sealed_reader(&lease)?;
-        Ok(VerifiedGraphSnapshot::new_direct_sealed(database, lease))
+        Ok(VerifiedGraphSnapshot::new_direct_sealed(
+            database, lease, layered,
+        ))
     }
 
     pub fn release_sealed_generation_staging_rows(
@@ -223,8 +227,7 @@ impl GraphDbRegistry {
         }
         database.release_sealed_generation_staging_rows_with(
             &locator,
-            Some(relational_recovered_digest.as_str()),
-            SealedReleaseReceiptAuthority::Permitted,
+            relational_recovered_digest.as_str(),
             &|| check_all(&registration, context, "generation.release_sealed_staging"),
         )
     }
@@ -1269,6 +1272,35 @@ impl GraphDbRegistry {
     ) -> Result<GraphGenerationRowSpill, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         operation.database().generation_row_spill(projection)
+    }
+
+    /// The sealed cold base a refresh replacing `generation` may layer over:
+    /// that generation's proven sealed store, installed or on disk, when it
+    /// records its row sum, or a layered store's base; otherwise why not.
+    pub fn sealed_generation_base(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        generation: crate::GraphGenerationId,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Result<crate::GraphSealedBaseV1, crate::GraphSealedBaseAbsenceV1>, GraphDbError>
+    {
+        let operation = self.registered_operation(registration)?;
+        operation.database().sealed_generation_base(
+            &crate::lease::GenerationLocator::new(projection, generation),
+            check,
+        )
+    }
+
+    /// A row spill for a delta over `base`, which it pins until it seals.
+    pub fn layered_row_spill(
+        &self,
+        registration: GraphDbRegistration,
+        projection: GraphProjectionIdentity,
+        base: crate::GraphSealedBaseV1,
+    ) -> Result<crate::GraphLayeredRowSpill, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        operation.database().layered_row_spill(projection, base)
     }
 
     /// Publishes through an already-issued, registry-validated graph lease.

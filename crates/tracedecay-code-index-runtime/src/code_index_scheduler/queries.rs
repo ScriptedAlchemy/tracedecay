@@ -29,8 +29,8 @@ use tracedecay_contracts::{
     LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OpaqueCursor,
     OperationBudgetUsage, PageCursor, PageState, PhraseSearchRequest, QualifiedNameRequest,
     RequestAdmission, RequestContext, RequestCostReceiptV1, RetrievalEvidence,
-    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
-    TemporalState,
+    RetrievalPortContext, RetrievalPortOutcome, RetryDirective, SourceMetadataRecord,
+    SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
@@ -335,6 +335,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -353,17 +354,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 // longer held, so no later retry can serve it either.
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope(request.scope())
+                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope(), deadline)
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else {
                 self.generation_for(request.scope(), requested)
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
-        let latest = tokio::time::timeout(wait, resolution)
+        let latest = tokio::time::timeout_at(deadline, resolution)
             .await
             .map_err(|_| CallableCodeCursorError::Unavailable)??;
         if !matches!(
@@ -430,7 +431,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
                     .map(|latest| latest.text_generation_handle())
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
@@ -455,6 +456,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCodeTextGenerationV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -489,7 +491,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.current_text_owner_for_scope(request.scope())
+                self.current_text_owner_for_scope(request.scope(), deadline)
                     .await
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self
@@ -503,7 +505,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 self.retained_graph_generation_for_scope(request.scope(), requested)
                     .await
                     .map_err(|_| CallableCodeCursorError::Unavailable)?
-                    .ok_or(CallableCodeCursorError::Unavailable)
+                    .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
@@ -661,7 +663,11 @@ fn text_base_request(
 }
 
 fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOutcome<T> {
-    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+    RetrievalPortOutcome::Unavailable(unanswered_evidence(finished_at))
+}
+
+fn unanswered_evidence<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalEvidence<T> {
+    RetrievalEvidence {
         payload: None,
         temporal: TemporalState::current(finished_at),
         evidence_authorities: Vec::new(),
@@ -684,7 +690,7 @@ fn unavailable<T>(finished_at: tracedecay_domain::UtcMicros) -> RetrievalPortOut
         budget: OperationBudgetUsage::default(),
         cancellation: None,
         cost: None,
-    })
+    }
 }
 
 fn unavailable_for_generation<T>(
@@ -701,6 +707,13 @@ fn unavailable_for_generation<T>(
         reason: OmissionReason::Unavailable,
     });
     RetrievalPortOutcome::Unavailable(evidence)
+}
+
+/// A relation or navigation seed the caller named that this generation cannot
+/// start from: a malformed id or one absent from the graph. Retrying the same
+/// seed returns the same answer.
+fn refused_start_symbol<T>(problem: ApplicationProblem) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Refused(unanswered_evidence(query_finished_at()), Box::new(problem))
 }
 
 fn rejected_cursor<T>(
@@ -725,6 +738,14 @@ fn rejected_cursor<T>(
         CallableCodeCursorError::Unavailable => OmissionReason::Unavailable,
         CallableCodeCursorError::Invalid | CallableCodeCursorError::ParameterChanged { .. } => {
             return RetrievalPortOutcome::Refused(evidence, Box::new(cursor_refusal(&error)));
+        }
+        CallableCodeCursorError::GenerationNotHeld => {
+            return RetrievalPortOutcome::Refused(
+                evidence,
+                Box::new(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                )),
+            );
         }
     };
     evidence.omissions.push(Omission {
@@ -1834,13 +1855,21 @@ macro_rules! prepare_graph_callable_query_or_return {
 macro_rules! resolve_graph_start_symbol {
     ($prepared:expr, $node_id:expr, $cancellation:expr) => {{
         let Ok(start) = typed::<SymbolOccurrenceId>($node_id.clone()) else {
-            return unavailable(query_finished_at());
+            return refused_start_symbol(ApplicationProblem::invalid_request(
+                "callable_code.node_id_invalid",
+                "node_id is not a symbol occurrence id",
+            ));
         };
         match $prepared
             .reader
             .symbol_summary(&start, Arc::clone(&$cancellation))
         {
             Ok(Some(summary)) if summary.binding.is_some() && summary.metadata.is_some() => start,
+            Ok(None) => {
+                return refused_start_symbol(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                ));
+            }
             _ => {
                 return unavailable_for_generation(
                     query_finished_at(),
@@ -2421,7 +2450,9 @@ fn hydrate_graph_relation_records(
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
     match reason {
-        RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
+        RetrievalFailure::AuthorityUnavailable { .. } | RetrievalFailure::GraphWarming => {
+            OmissionReason::Unavailable
+        }
         RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
         RetrievalFailure::StaleSource => OmissionReason::Stale,
         RetrievalFailure::CandidateSourcesPruned { .. } => OmissionReason::Budget,
@@ -2566,6 +2597,7 @@ where
                     RetrievalPortOutcome::Failed(evidence)
                 }
                 RetrievalFailure::AuthorityUnavailable { .. }
+                | RetrievalFailure::GraphWarming
                 | RetrievalFailure::IncompatibleProjection { .. }
                 | RetrievalFailure::StaleSource => RetrievalPortOutcome::Unavailable(evidence),
             }

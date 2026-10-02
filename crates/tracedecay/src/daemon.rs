@@ -282,10 +282,7 @@ mod core_admission;
 mod engine;
 #[cfg(unix)]
 use engine::DaemonEngine;
-use engine::{
-    ensure_context_scout_owner_before_advertising,
-    ensure_git_index_transactions_for_mutation_owners,
-};
+use engine::ensure_context_scout_owner_before_advertising;
 mod core_client;
 mod core_doctor;
 mod core_handshake;
