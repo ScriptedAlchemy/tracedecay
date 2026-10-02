@@ -1,10 +1,11 @@
-//! Managed test-run projection over the daemon operation event stream.
+//! Managed test-run projection over the canonical managed test-run reader.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
-use tracedecay_contracts::{OperationTermination, PageRequest, now_micros};
+use tracedecay_contracts::{OperationTermination, now_micros};
 use tracedecay_domain::{ContentDigest, UtcMicros};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_lsp::{
     AdmittedRoot, ContextCoverage, ContextExpansionOutcome, ContextProjectionChange,
     ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
@@ -19,11 +20,11 @@ use super::{
     LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION, LSP_TEST_RUN_EXPANSION_TTL_MICROS,
     LspFeedbackProjectionScope, ProjectionChangeQueue, StoredLspTestRunExpansionV1,
 };
-use crate::operation_stream::{
+use crate::managed_test_runs::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunSnapshot, ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
-    operation_event_authority,
+    ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
 };
+use crate::operation_stream::{ManagedTestRunActivity, operation_event_authority};
 
 /// Real test execution result projection owner. Feedback impact owns affected
 /// test identities; execution results remain in their separate canonical
@@ -54,11 +55,16 @@ pub trait LspTestRunProjectionPort: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(crate) struct OperationEventTestRunProjection {
+pub(crate) struct ManagedTestRunProjection {
     reader: CanonicalManagedTestRunReader,
     project: Arc<RegisteredProjectLspAuthority>,
+    /// Polls are synchronous; the durable read-back they trigger runs here.
+    runtime: tokio::runtime::Handle,
     current_scopes: Arc<StdMutex<BTreeMap<String, CachedTestRunScope>>>,
     observed_revisions: Arc<StdMutex<BTreeMap<String, String>>>,
+    observed_activity: Arc<StdMutex<BTreeMap<String, Option<ManagedTestRunActivity>>>>,
+    /// Roots with a read-back in flight; each root runs at most one.
+    refreshing: Arc<StdMutex<BTreeSet<String>>>,
     changes: ProjectionChangeQueue,
 }
 
@@ -74,7 +80,6 @@ pub(super) struct CachedTestRunScope {
 #[derive(Clone)]
 pub(super) struct LspTestRunExpansionContext {
     operation_id: String,
-    operation_generation: u64,
     operation_completed: u64,
     operation_total: Option<u64>,
     operation_termination: Option<OperationTermination>,
@@ -83,16 +88,20 @@ pub(super) struct LspTestRunExpansionContext {
     page_size: u32,
 }
 
-impl OperationEventTestRunProjection {
+impl ManagedTestRunProjection {
     pub(crate) fn new(
         reader: CanonicalManagedTestRunReader,
         project: Arc<RegisteredProjectLspAuthority>,
+        runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
             reader,
             project,
+            runtime,
             current_scopes: Arc::new(StdMutex::new(BTreeMap::new())),
             observed_revisions: Arc::new(StdMutex::new(BTreeMap::new())),
+            observed_activity: Arc::new(StdMutex::new(BTreeMap::new())),
+            refreshing: Arc::new(StdMutex::new(BTreeSet::new())),
             changes: ProjectionChangeQueue::default(),
         }
     }
@@ -108,7 +117,6 @@ impl OperationEventTestRunProjection {
     ) -> Result<String, LspRuntimeFailure> {
         let LspTestRunExpansionContext {
             operation_id,
-            operation_generation,
             operation_completed,
             operation_total,
             operation_termination,
@@ -133,7 +141,6 @@ impl OperationEventTestRunProjection {
             identity: scope.projection_identity(),
             generation: scope.generation,
             operation_id,
-            operation_generation,
             operation_completed,
             operation_total,
             operation_termination,
@@ -159,16 +166,20 @@ impl OperationEventTestRunProjection {
     }
 }
 
+/// `store` is the project sessions store managed runs are recorded in.
 pub(crate) fn lsp_test_result_port(
     project: Arc<RegisteredProjectLspAuthority>,
+    store: RegisteredGlobalDbLeaseV1,
+    runtime: tokio::runtime::Handle,
 ) -> Arc<dyn LspTestRunProjectionPort> {
-    Arc::new(OperationEventTestRunProjection::new(
-        CanonicalManagedTestRunReader::new(operation_event_authority()),
+    Arc::new(ManagedTestRunProjection::new(
+        CanonicalManagedTestRunReader::new(store, operation_event_authority()),
         project,
+        runtime,
     ))
 }
 
-impl LspTestRunProjectionPort for OperationEventTestRunProjection {
+impl LspTestRunProjectionPort for ManagedTestRunProjection {
     fn snapshot(
         &self,
         root: AdmittedRoot,
@@ -216,7 +227,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                 projection
                     .current_scopes
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .unwrap_or_else(PoisonError::into_inner)
                     .insert(
                         scope_key.clone(),
                         CachedTestRunScope {
@@ -225,32 +236,22 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                             projection: scope.clone(),
                         },
                     );
-                let page = match PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32) {
-                    Ok(page) => page,
-                    Err(_) => {
-                        return ContextProjectionOutcome::Deferred {
-                            reason: "managed-test-run-page-invalid".to_owned(),
-                        };
-                    }
-                };
-                match projection.reader.latest_current_page(&current, &page).await {
+                match projection.reader.latest_current(&current).await {
                     ManagedTestRunReadOutcome::Current(snapshot) => {
                         projection
                             .observed_revisions
                             .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .insert(scope_key, test_run_source_revision(&snapshot));
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(scope_key, snapshot.revision());
                         let expansion_context = LspTestRunExpansionContext {
-                            operation_id: snapshot.operation_id.to_string(),
-                            operation_generation: snapshot.generation,
+                            operation_id: snapshot.operation_id.clone(),
                             operation_completed: snapshot.completed,
                             operation_total: snapshot.total,
                             operation_termination: snapshot.termination,
-                            available_results: snapshot.available_results,
-                            result_offset: snapshot.result_offset,
+                            available_results: snapshot.results.len(),
+                            result_offset: 0,
                             page_size: 1,
                         };
-                        let has_bounded_results = snapshot.next_cursor.is_some();
                         let mut outcome = test_run_projection(
                             root.clone(),
                             document_uri.clone(),
@@ -280,7 +281,9 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                                     }
                                 };
                             }
-                            if has_bounded_results && !envelope.items.is_empty() {
+                            if expansion_context.available_results > envelope.items.len()
+                                && !envelope.items.is_empty()
+                            {
                                 envelope.retrieval_handle = match projection.store_expansion(
                                     &root,
                                     document_uri.as_deref(),
@@ -306,9 +309,14 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                         outcome
                     }
                     ManagedTestRunReadOutcome::Unavailable(
-                        ManagedTestRunUnavailableReason::FrontierExpired,
+                        ManagedTestRunUnavailableReason::Unrecorded,
                     ) => ContextProjectionOutcome::Deferred {
-                        reason: "managed-test-run-frontier-expired".to_owned(),
+                        reason: "managed-test-run-unrecorded".to_owned(),
+                    },
+                    ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::Abandoned,
+                    ) => ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-abandoned".to_owned(),
                     },
                     ManagedTestRunReadOutcome::Unavailable(
                         ManagedTestRunUnavailableReason::RetainedHeadUnbound,
@@ -374,71 +382,13 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         if !subscriptions.contains(&registration) {
             return Vec::new();
         }
-        let scopes = self
-            .current_scopes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .filter(|scope| scope.current.root_uri == root.uri())
-            .cloned()
-            .collect::<Vec<_>>();
-        for cached in scopes {
-            let current = cached.current;
-            let Some(ManagedTestRunReadOutcome::Current(snapshot)) =
-                self.reader.try_latest_current(&current)
-            else {
-                continue;
-            };
-            let key = current_scope_key(root.uri(), cached.document_uri.as_deref());
-            let source_revision = test_run_source_revision(&snapshot);
-            let changed = {
-                let mut observed = self
-                    .observed_revisions
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match observed.insert(key, source_revision.clone()) {
-                    Some(previous) => previous != source_revision,
-                    None => false,
-                }
-            };
-            if !changed {
-                continue;
-            }
-            let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
-                root.clone(),
-                cached.document_uri,
-                current.document_uri.as_deref(),
-                cached.projection,
-                snapshot,
-            ) else {
-                continue;
-            };
-            self.changes.offer(
-                source_revision,
-                ContextProjectionChange {
-                    root_uri: envelope.root_uri,
-                    document_uri: envelope.document_uri,
-                    kind: envelope.kind,
-                    generation: envelope.generation,
-                    identity: envelope.identity,
-                    freshness: envelope.freshness,
-                    producer_state: envelope.producer_state,
-                    coverage: envelope.coverage,
-                    revision: envelope.revision,
-                    retrieval_handle: envelope.retrieval_handle,
-                },
-            );
-        }
+        self.refresh_on_activity(root);
         self.changes.snapshot(root, subscriptions)
     }
 }
 
 pub(super) fn current_scope_key(root_uri: &str, document_uri: Option<&str>) -> String {
     format!("{root_uri}\u{0}{}", document_uri.unwrap_or_default())
-}
-
-pub(super) fn test_run_source_revision(snapshot: &ManagedTestRunSnapshot) -> String {
-    format!("{}:{}", snapshot.operation_id, snapshot.source_revision)
 }
 
 /// A retained managed test run is evidence about saved source. An LSP overlay
@@ -460,7 +410,100 @@ pub(super) fn bind_test_run_document_content(
     Ok(())
 }
 
-impl OperationEventTestRunProjection {
+impl ManagedTestRunProjection {
+    /// Starts one background read-back of `root`'s projected scopes when the
+    /// live stream's activity for it moved since the last poll. A recorded
+    /// run changes only while its live stream publishes; the read-back's
+    /// changes reach a later poll.
+    fn refresh_on_activity(&self, root: &AdmittedRoot) {
+        let mut refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if refreshing.contains(root.uri()) {
+            return;
+        }
+        let Ok(activity) = self.reader.try_activity(root.uri()) else {
+            return;
+        };
+        let previous = self
+            .observed_activity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(root.uri().to_owned(), activity.clone());
+        if previous.as_ref() == Some(&activity) {
+            return;
+        }
+        refreshing.insert(root.uri().to_owned());
+        drop(refreshing);
+        let projection = self.clone();
+        let root = root.clone();
+        self.runtime.spawn(hotpath::future!(
+            async move {
+                projection.refresh(&root).await;
+                projection
+                    .refreshing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(root.uri());
+            },
+            label = "usecases.lsp.test_run.refresh"
+        ));
+    }
+
+    async fn refresh(&self, root: &AdmittedRoot) {
+        let scopes = self
+            .current_scopes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|scope| scope.current.root_uri == root.uri())
+            .cloned()
+            .collect::<Vec<_>>();
+        for cached in scopes {
+            let current = cached.current;
+            let ManagedTestRunReadOutcome::Current(snapshot) =
+                self.reader.latest_current(&current).await
+            else {
+                continue;
+            };
+            let key = current_scope_key(root.uri(), cached.document_uri.as_deref());
+            let revision = snapshot.revision();
+            let previous = self
+                .observed_revisions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, revision.clone());
+            if previous.as_ref() == Some(&revision) {
+                continue;
+            }
+            let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+                root.clone(),
+                cached.document_uri,
+                current.document_uri.as_deref(),
+                cached.projection,
+                snapshot,
+            ) else {
+                continue;
+            };
+            self.changes.offer(
+                revision,
+                ContextProjectionChange {
+                    root_uri: envelope.root_uri,
+                    document_uri: envelope.document_uri,
+                    kind: envelope.kind,
+                    generation: envelope.generation,
+                    identity: envelope.identity,
+                    freshness: envelope.freshness,
+                    producer_state: envelope.producer_state,
+                    coverage: envelope.coverage,
+                    revision: envelope.revision,
+                    retrieval_handle: envelope.retrieval_handle,
+                },
+            );
+        }
+    }
+
     pub(super) fn expand_stored(
         &self,
         root: AdmittedRoot,
@@ -527,8 +570,7 @@ impl OperationEventTestRunProjection {
                 else {
                     return ContextExpansionOutcome::Denied;
                 };
-                if snapshot.operation_id.to_string() != record.operation_id
-                    || snapshot.generation != record.operation_generation
+                if snapshot.operation_id != record.operation_id
                     || snapshot.completed != record.operation_completed
                     || snapshot.total != record.operation_total
                     || snapshot.termination != record.operation_termination
@@ -569,7 +611,6 @@ impl OperationEventTestRunProjection {
                         record.stable_id.clone(),
                         LspTestRunExpansionContext {
                             operation_id: record.operation_id.clone(),
-                            operation_generation: record.operation_generation,
                             operation_completed: record.operation_completed,
                             operation_total: record.operation_total,
                             operation_termination: record.operation_termination,

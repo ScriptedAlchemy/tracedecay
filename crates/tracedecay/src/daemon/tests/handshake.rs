@@ -270,26 +270,23 @@ async fn socket_client_requires_authentication_before_routing() {
         .expect("an auth refusal is a served connection");
 }
 
+/// First-touch bootstrap keys on the typed missing-index kind its producers
+/// raise; a message that merely reads like one is some other failure.
 #[test]
-fn missing_index_classifier_covers_every_auto_init_store_miss() {
-    let missing_messages = [
-        "no TraceDecay index found at '/repo'",
-        "no TraceDecay database found at '/repo/store.db'",
-    ];
-    for message in missing_messages {
-        let error = tracedecay_domain::errors::TraceDecayError::Config {
-            message: message.to_string(),
-        };
-        assert!(
-            super::super::is_missing_index_error(&error),
-            "intentional missing-store state should permit config-gated auto-init: {message}"
-        );
-    }
+fn missing_index_classifier_matches_the_kind_not_the_message() {
+    let missing = tracedecay_domain::errors::TraceDecayError::project_open(
+        tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing,
+        "no TraceDecay database found at '/repo/store.db'; run 'tracedecay init' first",
+    );
+    assert!(super::super::is_missing_index_error(&missing));
 
-    let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
-        message: "repository identity conflict".to_string(),
+    let lookalike = tracedecay_domain::errors::TraceDecayError::Config {
+        message: "no TraceDecay index found at '/repo'".to_string(),
     };
-    assert!(!super::super::is_missing_index_error(&unrelated));
+    assert!(
+        !super::super::is_missing_index_error(&lookalike),
+        "a config error whose text names a missing index must not auto-initialize"
+    );
 }
 
 #[cfg(unix)]

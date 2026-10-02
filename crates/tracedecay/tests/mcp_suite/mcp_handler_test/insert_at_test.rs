@@ -469,7 +469,7 @@ async fn insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths() {
     assert_eq!(absent["replayed"], false);
     assert_eq!(
         absent["message"],
-        "source edit failed before the effect: config error: failed to read src/missing.rs: file was not found"
+        "source edit failed before the effect: failed to read src/missing.rs: file was not found"
     );
     assert_eq!(absent["effect"]["receipt"]["outcome"], "failed");
     assert!(absent["effect"]["receipt"]["committed_state"].is_null());

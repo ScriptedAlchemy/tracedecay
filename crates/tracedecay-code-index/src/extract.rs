@@ -704,6 +704,7 @@ mod tests {
                 content_identity: crate::chunks::content_digest(bytes),
                 captured_at: UtcMicros(1_000_000),
                 files: vec![file.clone()],
+                omitted_sources: Vec::new(),
             })
             .expect("snapshot capability");
         intake
