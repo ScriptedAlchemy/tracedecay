@@ -3957,6 +3957,32 @@ fn assert_reused_segment_descriptors_stable(parent_manifest: &[u8], child_manife
     }
 }
 
+fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(manifest).expect("partitioned manifest JSON");
+    let files = manifest["generation"]["snapshot"]["files"]
+        .as_array()
+        .expect("snapshot files");
+    manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .iter()
+        .map(|segment| {
+            let file_key = usize::try_from(segment["file_key"].as_u64().expect("file segment key"))
+                .expect("file segment key fits usize");
+            let path = files[file_key]["logical_path"]
+                .as_str()
+                .expect("snapshot logical path")
+                .to_owned();
+            let digest = segment["segment_digest"]
+                .as_str()
+                .expect("file segment digest")
+                .to_owned();
+            (path, digest)
+        })
+        .collect()
+}
+
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
@@ -3997,36 +4023,42 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         child.snapshot().files.len() > published_files.len(),
         "the fixture must carry unchanged files beside the edited one"
     );
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
     assert_eq!(
-        published_files.len(),
-        1,
-        "only the edited file may be re-encoded: {published_files:?}"
+        child_file_digests.get("src/alpha.rs"),
+        parent_file_digests.get("src/alpha.rs"),
+        "the unchanged caller must reuse its file segment"
+    );
+    assert_eq!(
+        child_file_digests.get("src/unresolved.rs"),
+        parent_file_digests.get("src/unresolved.rs"),
+        "the unchanged unresolved fixture must reuse its file segment"
+    );
+    assert_ne!(
+        child_file_digests.get("src/beta.rs"),
+        parent_file_digests.get("src/beta.rs"),
+        "the edited file must replace its file segment"
+    );
+    let replaced_file_digests = child_file_digests
+        .iter()
+        .filter_map(|(path, digest)| {
+            (parent_file_digests.get(path) != Some(digest)).then_some(digest.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        published_files
+            .iter()
+            .map(|(digest, _)| digest.clone())
+            .collect::<BTreeSet<_>>(),
+        replaced_file_digests,
+        "the encoder must publish exactly the replaced file segments"
     );
     assert_eq!(
         published_evidence_pages, 1,
         "the small fixture fits one generation-evidence page"
     );
     assert_eq!(evidence_commits, 1, "all evidence pages commit as one pack");
-
-    let parent_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
-            .expect("parent identities parse");
-    let child_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
-            .expect("child identities parse");
-    let carried = child_identities
-        .iter()
-        .filter(|identity| {
-            parent_identities
-                .iter()
-                .any(|parent| parent.digest == identity.digest)
-        })
-        .count();
-    assert_eq!(
-        carried,
-        child.snapshot().files.len() - 1,
-        "every unchanged file must keep the parent generation's content address"
-    );
 
     assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
 }
@@ -4142,27 +4174,25 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     // carried file hashes to its parent's digest (the encoder writes the
     // generation as a marker), so only the publication itself proves the
     // carried file took the `Reused(descriptor)` path this test exercises.
-    assert_eq!(
-        child_file_segments, 1,
-        "only the edited file is re-encoded; the carried file reuses its parent segment"
-    );
-    let parent_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
-            .expect("parent identities parse");
-    let child_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
-            .expect("child identities parse");
-    let carried_from_parent = child_identities
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
+    let replaced_file_segments = child_file_digests
         .iter()
-        .filter(|identity| {
-            parent_identities
-                .iter()
-                .any(|parent| parent.digest == identity.digest)
-        })
+        .filter(|(path, digest)| parent_file_digests.get(*path) != Some(*digest))
         .count();
     assert_eq!(
-        carried_from_parent, 1,
-        "the carried file's segment is the parent's content address"
+        child_file_segments, replaced_file_segments,
+        "only replaced file segments may be published"
+    );
+    assert_eq!(
+        child_file_digests.get("src/carried.rs"),
+        parent_file_digests.get("src/carried.rs"),
+        "the carried file must keep its parent's content address"
+    );
+    assert_ne!(
+        child_file_digests.get("src/edited.rs"),
+        parent_file_digests.get("src/edited.rs"),
+        "the edited file must replace its parent's content address"
     );
 
     let expected = sealed_clone_bindings(&child);
