@@ -4371,7 +4371,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         "same generation and request produce byte-stable production query payload"
     );
     match exact {
-        RetrievalPortOutcome::Completed(evidence) => {
+        RetrievalPortOutcome::Partial(evidence) => {
             let page = evidence.payload.expect("exact page");
             assert_eq!(page.generation, generation);
             assert!(
@@ -4379,7 +4379,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
                 "exact operation must return production lane evidence"
             );
         }
-        outcome => panic!("expected completed exact operation, got {outcome:?}"),
+        outcome => panic!("expected definition-only exact operation, got {outcome:?}"),
     }
 
     let lexical_operation =
@@ -5638,12 +5638,12 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         )
         .await;
     let served = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => {
+        RetrievalPortOutcome::Partial(evidence) => {
             let page = evidence.payload.expect("exact page");
             assert!(!page.items.is_empty(), "target-only symbol is returned");
             page.generation
         }
-        other => panic!("expected completed scoped query, got {other:?}"),
+        other => panic!("expected definition-only scoped query, got {other:?}"),
     };
     assert_eq!(served, target_generation);
     registry.shutdown().await;
@@ -5813,7 +5813,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         )
         .await;
     let first_page = match first {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("first page"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("first page"),
         other => panic!("expected first page, got {other:?}"),
     };
     let cursor = first_page.next_cursor.clone().expect("continuation cursor");
@@ -5912,7 +5912,7 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         )
         .await;
     let continuation_page = match continuation {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("continuation page"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("continuation page"),
         other => panic!("expected continuation page, got {other:?}"),
     };
     assert_eq!(continuation_page.generation, original_generation);
@@ -6127,10 +6127,8 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
         .await;
 
     let served = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => {
-            evidence.payload.expect("exact page").generation
-        }
-        other => panic!("expected a completed unpinned query, got {other:?}"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("exact page").generation,
+        other => panic!("expected a definition-only unpinned query, got {other:?}"),
     };
     assert_ne!(
         served, initial,
@@ -6201,10 +6199,8 @@ async fn pinned_query_bypasses_freshness_resolution() {
         .await;
 
     let served = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => {
-            evidence.payload.expect("exact page").generation
-        }
-        other => panic!("expected a completed pinned query, got {other:?}"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("exact page").generation,
+        other => panic!("expected a definition-only pinned query, got {other:?}"),
     };
     assert_eq!(
         served, initial,
@@ -6727,7 +6723,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         )
         .await;
     let exact_page = match exact {
-        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("exact payload"),
+        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("exact payload"),
         outcome => panic!("ready graph-off exact owner was unavailable: {outcome:?}"),
     };
     assert_eq!(exact_page.generation, executed.generation);

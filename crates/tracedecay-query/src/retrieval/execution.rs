@@ -353,11 +353,15 @@ where
     }
 
     fn page<E, T>(&self, batch: &RetrieverBatch<E>, items: Vec<T>) -> NativeLanePageV1<T> {
+        let excluded = (batch.candidates.len() as u64).saturating_sub(items.len() as u64);
+        let mut coverage = batch.coverage;
+        coverage.eligible = coverage.eligible.saturating_sub(excluded);
+        coverage.excluded = coverage.excluded.saturating_add(excluded);
         NativeLanePageV1 {
             generation: self.generation.clone(),
             items,
-            total_eligible: batch.coverage.eligible,
-            coverage: batch.coverage,
+            total_eligible: coverage.eligible,
+            coverage,
         }
     }
 }

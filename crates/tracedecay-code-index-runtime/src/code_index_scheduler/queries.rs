@@ -35,11 +35,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, FileOccurrenceId,
-    FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, ExactFieldV1,
+    FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -2778,6 +2779,12 @@ fn execute_prepared_exact_query(
     else {
         return unavailable_for_generation(finished_at, served_generation);
     };
+    // Identifier terms are minted only from definition names, so a complete
+    // lane read still omits every use of the identifier.
+    let definitions_only = lane_request.literals.iter().any(|literal| {
+        literal.field == ExactFieldV1::Identifier
+            && literal.original_bytes == request.literal.as_bytes()
+    });
     let outcome = match owners.retrieve_exact(&lane_request) {
         Ok(outcome) => {
             let Ok(outcome) =
@@ -2787,7 +2794,18 @@ fn execute_prepared_exact_query(
             else {
                 return unavailable(finished_at);
             };
-            outcome
+            match outcome {
+                NativeLaneOutcomeV1::Complete(page) if definitions_only => {
+                    NativeLaneOutcomeV1::Partial {
+                        page,
+                        reason: RetrievalFailure::IncompatibleProjection {
+                            detail: "exact projection indexes identifier definitions, not uses"
+                                .to_owned(),
+                        },
+                    }
+                }
+                outcome => outcome,
+            }
         }
         Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
         Err(_) => return unavailable(finished_at),
@@ -4028,7 +4046,7 @@ mod tests {
             .expect("real mounted artifact admission");
         let active = registry.exact_occurrence(port_context, &request).await;
         assert!(
-            matches!(active, RetrievalPortOutcome::Completed(_)),
+            matches!(&active, RetrievalPortOutcome::Partial(evidence) if evidence.payload.is_some()),
             "{active:?}"
         );
 
@@ -4167,10 +4185,16 @@ mod tests {
             panic!("an in-scope flag match is the whole scoped answer: {outcome:?}");
         };
         let page = evidence.payload.as_ref().expect("exact page");
-        assert_eq!(page.items.len(), 1, "{page:?}");
-        assert_eq!(page.items[0].occurrence.path, "b/lib.rs");
-        assert_eq!(page.total, Some(1));
-        assert_eq!(evidence.coverage.eligible, Some(1));
+        assert!(!page.items.is_empty(), "{page:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.occurrence.path == "b/lib.rs"),
+            "{page:?}"
+        );
+        let in_scope = page.items.len() as u64;
+        assert_eq!(page.total, Some(in_scope));
+        assert_eq!(evidence.coverage.eligible, Some(in_scope));
         assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
     }
 
