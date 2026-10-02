@@ -1133,7 +1133,14 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
             .symbols,
     );
     let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(6_187));
+    // Three SwissTables each carry one trailing control group: 16 bytes on
+    // x86 SSE2, 8 on aarch64 NEON.
+    let expected = if cfg!(target_arch = "aarch64") {
+        6_163
+    } else {
+        6_187
+    };
+    assert_eq!(held, Some(expected));
 
     assert_eq!(
         store.release_interactive_catalog(),
