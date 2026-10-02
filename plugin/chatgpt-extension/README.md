@@ -61,7 +61,7 @@ workspace's generated operation contracts, never hand-edited):
 
 - `tracedecay_workspace` (global UI entrypoint): daemon state + project list.
 - `tracedecay_thread_panel` (thread/conversation UI entrypoint).
-- `tracedecay_list_projects`: registered projects (app-only).
+- `tracedecay_list_projects`: up to 10 recent registered projects (app-only).
 - `tracedecay_search_code`: symbol search, returns node ids, generation, and
   freshness.
 - `tracedecay_inspect_symbol`: symbol detail with callers/callees/impact,

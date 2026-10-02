@@ -291,7 +291,7 @@ function renderProjects(view: Extract<ViewState, { page: "projects" }>): Node[] 
       ),
     ),
   );
-  return [daemon, panel("Authorized projects", "projects-panel", [list, el("p", { class: "notice" }, ["Only projects registered in this TraceDecay profile (via `tracedecay init`) can be explored. Nothing here writes to your code."])])];
+  return [daemon, panel("Recent registered projects", "projects-panel", [list, el("p", { class: "notice" }, ["Showing up to 10 recently used projects. Only projects registered in this TraceDecay profile (via `tracedecay init`) can be explored. Nothing here writes to your code."])])];
 }
 
 function renderSearchForm(project: ProjectRef, query: string): HTMLFormElement {

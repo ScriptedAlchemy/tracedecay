@@ -427,7 +427,7 @@ export function viewText(view: ViewState): string {
   switch (view.page) {
     case "projects":
       return view.projects.state === "ready"
-        ? `TraceDecay projects available: ${view.projects.data.map((project) => `${project.label} (${project.project_id})`).join(", ")}`
+        ? `Recent TraceDecay projects: ${view.projects.data.map((project) => `${project.label} (${project.project_id})`).join(", ")}`
         : view.projects.state === "empty"
           ? view.projects.message
           : `TraceDecay projects unavailable (${view.projects.failure.kind}): ${view.projects.failure.message}`;

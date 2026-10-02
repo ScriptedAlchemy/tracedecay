@@ -90,9 +90,8 @@ export class DaemonBridge {
     return this.#registry;
   }
 
-  async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
-    await this.#requireAuthority();
-    const client = createClient({
+  #registryClient(): TraceDecayClient {
+    return createClient({
       baseUrl: "http://127.0.0.1",
       projectId: "registry",
       token: "unused-registry-reads-use-mcp",
@@ -101,14 +100,20 @@ export class DaemonBridge {
           this.#registrySession().callJson(toolName, asRecord(request), options.signal),
       },
     });
-    const listed = await runSdk(() => client.operations.project_list({}, { ...(signal === undefined ? {} : { signal }) }));
+  }
+
+  async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
+    await this.#requireAuthority();
+    const client = this.#registryClient();
+    const listed = await runSdk(() => client.operations.project_list({ limit: 10 }, optional(signal)));
     return listed.projects.map(projectRef);
   }
 
   async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
-    const projects = await this.listProjects(signal);
-    const match = projects.find((project) => project.project_id === projectId);
-    if (match === undefined) {
+    await this.#requireAuthority();
+    const client = this.#registryClient();
+    const context = await runSdk(() => client.operations.project_context({ project_selector: { project_id: projectId } }, optional(signal)));
+    if (context.status === "not_found") {
       const cached = this.#projects.get(projectId);
       this.#projects.delete(projectId);
       await cached?.session.close();
@@ -118,7 +123,7 @@ export class DaemonBridge {
         message: `Project ${projectId} is not registered in this TraceDecay profile; only registered projects can be explored.`,
       });
     }
-    return match;
+    return projectRef(context.project);
   }
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {

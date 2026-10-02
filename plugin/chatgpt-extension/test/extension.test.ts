@@ -433,6 +433,16 @@ export function taxTotal(invoices: Invoice[]): number {
     await expect(bridge.search(project.project_id, "computeTotal", 20)).rejects.toMatchObject({ failure: { kind: "denied", code: "project_not_registered" } });
   });
 
+  it("resolves registered projects beyond the registry's bounded listing", async () => {
+    for (let index = 0; index < 26; index += 1) {
+      const repo = await fixture.createRepo(`listing-${index}`, { "src/shipping.ts": SECOND_PROJECT_SOURCE });
+      fixture.initProject(repo.root);
+    }
+    expect((await bridge.listProjects()).some((entry) => entry.project_id === billingProjectId)).toBe(false);
+    expect(await bridge.resolveProject(billingProjectId)).toMatchObject({ project_id: billingProjectId, project_root: billing.root });
+    expect((await bridge.search(billingProjectId, "computeTotal", 20)).results.length).toBeGreaterThan(0);
+  });
+
   it("reports disconnected states truthfully: absent profile, unstartable serve binary, dead daemon", async () => {
     const emptyProfile = new DaemonBridge({ binary: fixture.binary, profileRoot: path.join(fixture.root, "no-such-profile"), env: fixture.env, cwd: fixture.home });
     const absent = await call("tracedecay_workspace", {}, await newClient(emptyProfile));
