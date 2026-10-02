@@ -381,10 +381,16 @@ pub(super) fn deactivate_deployed_plugin_profile(
     }
     if plugin_dir == deployed_plugin_dir {
         remove_managed_skill_overlay(plugin_dir)?;
-        dashboard_wrapper::uninstall(plugin_dir)
+        dashboard_wrapper::uninstall(plugin_dir)?;
+        purge_generated_python_bytecode(
+            plugin_dir,
+            &["__init__", "schemas", "tools", "cli"],
+            true,
+        )?;
     } else {
-        remove_generated_plugin_files(plugin_dir)
+        remove_generated_plugin_files(plugin_dir)?;
     }
+    Ok(())
 }
 
 pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
@@ -397,11 +403,8 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     }
 
     remove_generated_file(&plugin_dir.join("plugin.yaml"))?;
-    remove_generated_file(&plugin_dir.join("schemas.py"))?;
     remove_generated_file(&plugin_dir.join("schemas.json"))?;
-    remove_generated_file(&plugin_dir.join("tools.py"))?;
-    remove_generated_file(&plugin_dir.join("__init__.py"))?;
-    remove_generated_file(&plugin_dir.join("cli.py"))?;
+    remove_generated_python_modules(plugin_dir, &["__init__", "schemas", "tools", "cli"], true)?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
     remove_managed_skill_overlay(plugin_dir)?;
@@ -641,6 +644,69 @@ pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
             message: format!("failed to remove {}: {e}", path.display()),
         }),
     }
+}
+
+/// Removes generated `<stem>.py` modules from `dir` together with the bytecode
+/// Python caches for exactly those modules (`__pycache__/<stem>.<tag>.pyc`,
+/// PEP 3147), so a host that imported them can still be cleaned up. Other
+/// cache entries are left in place, and so is `__pycache__` while it holds any.
+pub(super) fn remove_generated_python_modules(
+    dir: &Path,
+    stems: &[&str],
+    purge_remaining_bytecode: bool,
+) -> Result<()> {
+    for stem in stems {
+        remove_generated_file(&dir.join(format!("{stem}.py")))?;
+    }
+    purge_generated_python_bytecode(dir, stems, purge_remaining_bytecode)?;
+    Ok(())
+}
+
+/// Drops PEP 3147 bytecode for the given module stems without touching `.py`
+/// sources. Used when catalog-owned plugin bytes must stay on disk.
+pub(super) fn purge_generated_python_bytecode(
+    dir: &Path,
+    stems: &[&str],
+    purge_remaining_bytecode: bool,
+) -> Result<()> {
+    let cache_dir = dir.join("__pycache__");
+    let read_error = |e: std::io::Error| TraceDecayError::Config {
+        message: format!("failed to read {}: {e}", cache_dir.display()),
+    };
+    let entries = match std::fs::read_dir(&cache_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(read_error(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(read_error)?;
+        let name = entry.file_name();
+        let is_generated_bytecode = name.to_str().is_some_and(|name| {
+            let module = name.split('.').next().unwrap_or_default();
+            let recognized = stems.contains(&module)
+                || (module == "tracedecay_plugin" && stems.contains(&"__init__"));
+            recognized && name.ends_with(".pyc") && name.len() > module.len() + ".pyc".len()
+        });
+        if is_generated_bytecode
+            || (purge_remaining_bytecode
+                && name.to_str().is_some_and(|name| name.ends_with(".pyc")))
+        {
+            remove_generated_file(&entry.path())?;
+        }
+    }
+    if purge_remaining_bytecode {
+        match std::fs::remove_dir_all(&cache_dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {e}", cache_dir.display()),
+                });
+            }
+        }
+    }
+    remove_empty_dir(&cache_dir)?;
+    Ok(())
 }
 
 pub(super) fn remove_empty_dir(path: &Path) -> Result<bool> {
