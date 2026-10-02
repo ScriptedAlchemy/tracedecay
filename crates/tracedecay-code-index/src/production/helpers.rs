@@ -581,15 +581,17 @@ where
         {
             continue;
         }
-        if typescript_import_call_outcome(
+        // A member call no import names is a receiver call: nothing binds it.
+        match typescript_import_call_outcome(
             files,
             &by_simple_name,
             &typescript_modules,
             file,
             reference,
-        ) == Some(ImportBindingOutcomeV1::Unresolved)
-        {
-            unresolved.push(reference.clone());
+        ) {
+            Some(ImportBindingOutcomeV1::Unresolved) => unresolved.push(reference.clone()),
+            None if reference.reference_name.contains('.') => unresolved.push(reference.clone()),
+            _ => {}
         }
     }
     unresolved

@@ -20,6 +20,7 @@ mod language_registry;
 mod lineage;
 mod production_orchestration;
 mod projection_receipts;
+mod relation_coverage;
 mod retained_parse;
 mod retained_parse_canonical_identity;
 mod sanitized_intake;

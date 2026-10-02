@@ -1876,7 +1876,13 @@ impl RustExtractor {
                             // node owns the member identity and exact token site,
                             // independently of comments or whitespace after `.`.
                             let (callee_name, position) = receiver.map_or_else(
-                                || (state.node_text(callee).to_owned(), child.start_position()),
+                                || {
+                                    (
+                                        Self::self_path_callee(state, member_callee)
+                                            .unwrap_or_else(|| state.node_text(callee).to_owned()),
+                                        child.start_position(),
+                                    )
+                                },
                                 |(value, field)| {
                                     (
                                         format!(
@@ -1960,6 +1966,24 @@ impl RustExtractor {
                 }
             }
         }
+    }
+
+    /// `Type::function` for a `Self::function(..)` callee inside an impl or
+    /// trait, the only spelling of that path the resolver can bind.
+    fn self_path_callee(state: &ExtractionState<'_>, callee: TsNode<'_>) -> Option<String> {
+        if callee.kind() != "scoped_identifier" {
+            return None;
+        }
+        let path = callee.child_by_field_name("path")?;
+        let name = callee.child_by_field_name("name")?;
+        if state.node_text(path) != "Self" {
+            return None;
+        }
+        Some(format!(
+            "{}::{}",
+            Self::enclosing_receiver_type(state)?,
+            state.node_text(name)
+        ))
     }
 
     /// `Type::method` for a `binding.method(..)` callee whose binding has one

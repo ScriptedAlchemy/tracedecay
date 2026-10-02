@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
+    UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -2324,6 +2325,62 @@ fn graph_summary_symbol_record(
         .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
+/// The start symbol plus every relation neighbor the walk expanded, the
+/// symbols whose call sites the answer had to account for. `None` when a
+/// walked key no longer names a symbol.
+fn traversed_relation_symbols(
+    reader: &CodeGraphInteractiveReader,
+    start: SymbolOccurrenceId,
+    keys: &[RelationKeyV1],
+    maximum_depth: u32,
+    cancellation: &Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Option<Vec<SymbolOccurrenceId>> {
+    let mut traversed = vec![start];
+    for key in keys.iter().filter(|key| key.depth < maximum_depth) {
+        traversed.push(
+            reader
+                .symbol_summary_for(&key.symbol, Arc::clone(cancellation))
+                .ok()??
+                .occurrence,
+        );
+    }
+    Some(traversed)
+}
+
+/// A relation answer that unresolved call sites could extend is partial,
+/// with an omission naming why those sites have no edge.
+fn disclose_unresolved_calls<T>(
+    outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
+    unresolved: &UnresolvedCallerGapsV1,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    match outcome {
+        RetrievalPortOutcome::Completed(mut evidence)
+        | RetrievalPortOutcome::Partial(mut evidence)
+            if !unresolved.is_empty() =>
+        {
+            evidence.coverage.completeness = CoverageCompleteness::Partial;
+            for domain in &mut evidence.coverage.domains {
+                domain.completeness = CoverageCompleteness::Partial;
+            }
+            let reasons = unresolved
+                .exact_target_unavailable
+                .then_some(OmissionReason::Unsupported)
+                .into_iter()
+                .chain(
+                    (!unresolved.unmodeled_imports.is_empty())
+                        .then_some(OmissionReason::ImportUnmodeled),
+                );
+            evidence.omissions.extend(reasons.map(|reason| Omission {
+                domain: EvidenceDomain::Symbol,
+                count: 1,
+                reason,
+            }));
+            RetrievalPortOutcome::Partial(evidence)
+        }
+        outcome => outcome,
+    }
+}
+
 #[hotpath::measure(label = "query.graph.relation_keys")]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
@@ -2894,6 +2951,27 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
+            let Some(traversed) = traversed_relation_symbols(
+                &prepared.reader,
+                start,
+                &found.keys,
+                request.maximum_depth,
+                &cancellation,
+            ) else {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
+            };
+            let Ok(unresolved) = prepared
+                .reader
+                .unresolved_callee_gaps(&traversed, Arc::clone(&cancellation))
+            else {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
+            };
             if request.resolve_trait_dispatch
                 && let Err(stop) = augment_callee_dispatch_keys(
                     &prepared.reader,
@@ -2905,16 +2983,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             {
                 return relation_read_stop(&prepared, stop, &graph_control);
             }
-            finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_callees",
-                binding,
-                found.keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "callees",
-                found.complete,
+            disclose_unresolved_calls(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_callees",
+                    binding,
+                    found.keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "callees",
+                    found.complete,
+                ),
+                &unresolved,
             )
         })
     }
@@ -3315,75 +3396,42 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
-            let mut traversed = vec![start];
-            for key in found
-                .keys
-                .iter()
-                .filter(|key| key.depth < request.maximum_depth)
-            {
-                match prepared
-                    .reader
-                    .symbol_summary_for(&key.symbol, Arc::clone(&cancellation))
-                {
-                    Ok(Some(summary)) => traversed.push(summary.occurrence),
-                    _ => {
-                        return unavailable_for_generation(
-                            query_finished_at(),
-                            prepared.generation().clone(),
-                        );
-                    }
-                }
-            }
-            let unresolved = match prepared.reader.unresolved_caller_gaps(
+            let Some(traversed) = traversed_relation_symbols(
+                &prepared.reader,
+                start,
+                &found.keys,
+                request.maximum_depth,
+                &cancellation,
+            ) else {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
+            };
+            let Ok(unresolved) = prepared.reader.unresolved_caller_gaps(
                 &traversed,
                 request.scope.path_prefix.as_deref(),
                 Arc::clone(&cancellation),
-            ) {
-                Ok(unresolved) => unresolved,
-                Err(_) => {
-                    return unavailable_for_generation(
-                        query_finished_at(),
-                        prepared.generation().clone(),
-                    );
-                }
+            ) else {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
             };
-            let outcome = finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_callers",
-                binding,
-                found.keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "callers",
-                found.complete,
-            );
-            match outcome {
-                RetrievalPortOutcome::Completed(mut evidence)
-                | RetrievalPortOutcome::Partial(mut evidence)
-                    if !unresolved.is_empty() =>
-                {
-                    evidence.coverage.completeness = CoverageCompleteness::Partial;
-                    for domain in &mut evidence.coverage.domains {
-                        domain.completeness = CoverageCompleteness::Partial;
-                    }
-                    let reasons = unresolved
-                        .exact_target_unavailable
-                        .then_some(OmissionReason::Unsupported)
-                        .into_iter()
-                        .chain(
-                            (!unresolved.unmodeled_imports.is_empty())
-                                .then_some(OmissionReason::ImportUnmodeled),
-                        );
-                    evidence.omissions.extend(reasons.map(|reason| Omission {
-                        domain: EvidenceDomain::Symbol,
-                        count: 1,
-                        reason,
-                    }));
-                    RetrievalPortOutcome::Partial(evidence)
-                }
-                outcome => outcome,
-            }
+            disclose_unresolved_calls(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_callers",
+                    binding,
+                    found.keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "callers",
+                    found.complete,
+                ),
+                &unresolved,
+            )
         })
     }
 
@@ -3784,16 +3832,29 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
-            finish_generation_candidate_page(
-                &prepared,
-                &context,
-                "code_references",
-                binding,
-                found.keys,
-                |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
-                &request.meta.page,
-                "references",
-                found.complete,
+            let Ok(unresolved) = prepared.reader.unresolved_caller_gaps(
+                std::slice::from_ref(&start),
+                request.scope.path_prefix.as_deref(),
+                Arc::clone(&cancellation),
+            ) else {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
+            };
+            disclose_unresolved_calls(
+                finish_generation_candidate_page(
+                    &prepared,
+                    &context,
+                    "code_references",
+                    binding,
+                    found.keys,
+                    |slice| hydrate_graph_relation_records(&prepared.reader, slice, cancellation),
+                    &request.meta.page,
+                    "references",
+                    found.complete,
+                ),
+                &unresolved,
             )
         })
     }

@@ -461,6 +461,36 @@ impl CodeGraphInteractiveReader {
         Ok(gaps)
     }
 
+    /// The kinds of unresolved call site the queried symbols themselves make:
+    /// calls whose target the seal could not bind are callees the graph
+    /// cannot list.
+    pub fn unresolved_callee_gaps(
+        &self,
+        sources: &[SymbolOccurrenceId],
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<UnresolvedCallerGapsV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut gaps = UnresolvedCallerGapsV1::default();
+        for source in sources {
+            catalog::check_cancelled(cancellation.as_ref())?;
+            for call in catalog
+                .symbols
+                .get(source)
+                .into_iter()
+                .flat_map(|symbol| &symbol.unresolved_calls)
+            {
+                match call.unmodeled_import {
+                    Some(shape) => {
+                        gaps.unmodeled_imports.insert(shape);
+                    }
+                    None => gaps.exact_target_unavailable = true,
+                }
+            }
+        }
+        Ok(gaps)
+    }
+
     /// Lists the symbols bound to one file occurrence.
     pub fn symbols_in_file(
         &self,
