@@ -324,6 +324,21 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_temporal_observation_effects_session
         ON session_temporal_observation_effects(session_id, observation_sequence);
 
+    -- A session whose materialized occurrences lost their canonical
+    -- observation (a source rewrite retired it, or a newer observation took
+    -- over its message) cannot be extended: `requested_at` asks the next
+    -- refresh to rebuild it from the first effect. `reset_generation` is the
+    -- empty generation that rebuild started from; receipts at or below it
+    -- describe rows the reset deleted.
+    CREATE TABLE IF NOT EXISTS session_temporal_resets (
+        session_id TEXT NOT NULL PRIMARY KEY,
+        requested_at INTEGER,
+        reset_generation INTEGER CHECK(reset_generation IS NULL OR reset_generation > 0),
+        CHECK(requested_at IS NOT NULL OR reset_generation IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_temporal_resets_requested
+        ON session_temporal_resets(requested_at);
+
     -- Generation-shared projection tables. A row's `generation` is the
     -- generation that introduced it; generation G reads every row with
     -- `generation <= G`. A candidate extends the active generation by adding

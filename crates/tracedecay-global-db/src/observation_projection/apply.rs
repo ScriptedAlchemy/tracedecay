@@ -18,14 +18,15 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, read_message, read_output_state, read_session,
-    reconcile_session_rows_detailed, storage, storage_message, stored_output_digest,
-    verify_output_state,
+    canonicalize_session_project_paths, read_message, read_observation, read_output_state,
+    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed, storage,
+    storage_message, stored_output_digest, verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
+use tracedecay_session_temporal_store::request_session_temporal_reset;
 
 fn decode_canonical_envelope(
     payload: &serde_json::Value,
@@ -222,6 +223,7 @@ async fn derive_projection_with_alias_from_generation(
             ProjectionSkipReason::OutputCollision
                 | ProjectionSkipReason::InvalidContract
                 | ProjectionSkipReason::SanitizationRefused
+                | ProjectionSkipReason::SourceRecordRetired
         )
     {
         return Ok(ObservationProjection::Skipped(reason));
@@ -1474,8 +1476,161 @@ async fn apply_message_effect(
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
+    let message = projection.message();
+    let previous_owner = read_canonical_owner(conn, &message.provider, &message.message_id).await?;
     let message_created = apply_rows(conn, sequence, observation, projection).await?;
-    apply_provenance(conn, sequence, projection, message_created).await
+    apply_provenance(conn, sequence, projection, message_created).await?;
+    // The session-temporal store materialized the previous owner's
+    // occurrence; once another observation owns the message, that occurrence
+    // is stale and the session must rebuild.
+    if let Some(previous_owner) = previous_owner
+        && read_canonical_owner(conn, &message.provider, &message.message_id)
+            .await?
+            .as_deref()
+            != Some(previous_owner.as_str())
+    {
+        request_session_temporal_reset(conn, &previous_owner).await?;
+    }
+    Ok(())
+}
+
+/// The observation whose rendering an output's row holds, per the ownership
+/// cache this writer keeps current.
+async fn read_canonical_owner(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<Option<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT canonical_observation_id FROM temp.observation_projection_output_state
+             WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
+        )
+        .await
+        .map_err(|error| storage("read projection output owner", error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage("read projection output owner", error))?
+        .map(|row| {
+            row.get::<String>(0)
+                .map_err(|error| storage("read projection output owner", error))
+        })
+        .transpose()
+}
+
+/// Retires one observation its rewritten source no longer offers: its
+/// provenance and workflow facts are removed and a `source_record_retired`
+/// disposition takes their place, so replays and rebuilds skip it. Each
+/// output it shared falls back to its remaining canonical owner's rendering,
+/// and an output only it owned is removed. Returns whether the observation
+/// was retired; an observation the store never held, or one already settled
+/// by another disposition, has no projection to retire.
+pub(in super::super) async fn retire_source_record(
+    conn: &impl Executor,
+    observation_id: &str,
+) -> ProjectionStoreResult<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT observation.receipt_id,
+                    EXISTS (
+                        SELECT 1 FROM observation_projection_dispositions AS disposition
+                        WHERE disposition.projector_version = ?1
+                          AND disposition.observation_id = observation.observation_id
+                    )
+             FROM observations AS observation WHERE observation.observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read retired source record", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retired source record", error))?
+    else {
+        return Ok(false);
+    };
+    let receipt_id = row
+        .get::<String>(0)
+        .map_err(|error| storage("read retired source record", error))?;
+    let settled = row
+        .get::<i64>(1)
+        .map_err(|error| storage("read retired source record", error))?
+        != 0;
+    drop(rows);
+    if settled {
+        return Ok(false);
+    }
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT output_provider, output_message_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read retired source record outputs", error))?;
+    let mut outputs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retired source record outputs", error))?
+    {
+        outputs.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read retired source record outputs", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read retired source record outputs", error))?,
+        ));
+    }
+    drop(rows);
+    for sql in [
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND observation_id = ?2",
+        "DELETE FROM observation_workflow_facts
+         WHERE projector_version = ?1 AND observation_id = ?2",
+    ] {
+        conn.execute(
+            sql,
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("remove retired source record projection", error))?;
+    }
+    apply_skip_disposition_for_receipt(
+        conn,
+        observation_id,
+        &receipt_id,
+        ProjectionSkipReason::SourceRecordRetired,
+    )
+    .await?;
+    for (provider, message_id) in outputs {
+        reaggregate_output_state_for_output(conn, &provider, &message_id).await?;
+        let Some(owner_id) = read_canonical_owner(conn, &provider, &message_id).await? else {
+            delete_projected_output(conn, &provider, &message_id).await?;
+            continue;
+        };
+        let owner_id = CanonicalObservationIdV1::new(owner_id)
+            .map_err(|_| storage_message("read retired output owner", "invalid owner id"))?;
+        let (_, owner) = read_observation(conn, &owner_id)
+            .await?
+            .ok_or(ProjectionStoreError::ObservationNotFound)?;
+        let message = match derive_projection_with_alias(conn, &owner).await? {
+            ObservationProjection::Message(projection)
+            | ObservationProjection::Composite {
+                message: Some(projection),
+                ..
+            } if projection.message().provider == provider
+                && projection.message().message_id == message_id =>
+            {
+                projection.message().clone()
+            }
+            _ => return Err(ProjectionStoreError::ProvenanceCollision),
+        };
+        supersede_projected_message(conn, &message).await?;
+    }
+    request_session_temporal_reset(conn, observation_id).await?;
+    Ok(true)
 }
 
 struct ProviderUsageRow {

@@ -42,7 +42,7 @@ async fn assert_session_temporal_version_refused(db_path: &Path, found_version: 
             refusal.map(|error| error.to_string()),
             Some(format!(
                 "session temporal profile schema {found_version} is incompatible with required \
-                 schema 7; reset the profile"
+                 schema 8; reset the profile"
             ))
         );
     }

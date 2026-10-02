@@ -11,7 +11,7 @@ mod transition;
 pub(crate) use apply::apply_provider_usage_effects;
 pub(super) use apply::{
     ConvergedRendering, converge_released_output_rendering, derive_projection,
-    derive_projection_with_alias, verify_workflow_effects,
+    derive_projection_with_alias, retire_source_record, verify_workflow_effects,
 };
 pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
@@ -24,6 +24,7 @@ pub(super) use schema::{
 pub(crate) use source_transition::verify_native_source_supersession;
 #[cfg(test)]
 pub(crate) use state::RearmedProjectionRetries;
+pub(super) use state::ensure_projection_output_state_cache;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{

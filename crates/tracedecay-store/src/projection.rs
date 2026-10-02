@@ -83,6 +83,10 @@ pub enum ProjectionSkipReason {
     /// succeed, so the observation converges as a durable, auditable skip
     /// instead of wedging the projection queue behind an endless retry.
     SanitizationRefused,
+    /// A rewrite of the observation's source file reached its end without
+    /// offering this record again; the file no longer holds it, so it
+    /// projects nothing.
+    SourceRecordRetired,
 }
 
 /// Retry deadline that parks one projection queue row permanently.
@@ -100,6 +104,7 @@ impl ProjectionSkipReason {
             Self::OutputCollision => "output_collision",
             Self::InvalidContract => "invalid_contract",
             Self::SanitizationRefused => "sanitization_refused",
+            Self::SourceRecordRetired => "source_record_retired",
         }
     }
 
@@ -110,6 +115,7 @@ impl ProjectionSkipReason {
             "output_collision" => Some(Self::OutputCollision),
             "invalid_contract" => Some(Self::InvalidContract),
             "sanitization_refused" => Some(Self::SanitizationRefused),
+            "source_record_retired" => Some(Self::SourceRecordRetired),
             _ => None,
         }
     }
