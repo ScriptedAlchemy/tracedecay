@@ -2369,8 +2369,11 @@ fn resolve_file_references(
                     &imported_locals,
                     &rust_root_modules,
                 ) && !(typescript
-                    && typescript_member_call_path(&candidate.reference_name)
-                        .is_some_and(|(head, _)| !imported_locals.contains(head))
+                    && (candidate
+                        .reference_name
+                        .starts_with(TYPESCRIPT_COMPUTED_RECEIVER)
+                        || typescript_member_call_path(&candidate.reference_name)
+                            .is_some_and(|(head, _)| !imported_locals.contains(head)))
                     && !typescript_receiver_calls.insert((
                         candidate.from_occurrence.clone(),
                         candidate.reference_name.clone(),
@@ -2428,11 +2431,15 @@ fn cross_file_reference_candidate(
         && reference.reference_kind == EdgeKind::Calls
         && typescript_member_call_path(&reference.reference_name)
             .is_some_and(|(head, _)| imported_locals.contains(head));
-    // A call on a local, `this`, or global receiver binds nothing by name,
-    // so it stays as limitation evidence.
+    let computed_member_call = (typescript && reference.reference_kind == EdgeKind::Calls)
+        .then(|| typescript_computed_member_call(&reference.reference_name))
+        .flatten();
+    // A call on a local, `this`, global, or computed receiver binds nothing
+    // by name, so it stays as limitation evidence.
     let receiver_call = reference.reference_kind == EdgeKind::Calls
         && reference.reference_name.contains('.')
         && (rust
+            || computed_member_call.is_some()
             || (typescript
                 && typescript_member_call_path(&reference.reference_name)
                     .is_some_and(|(head, _)| !imported_locals.contains(head))));
@@ -2461,7 +2468,7 @@ fn cross_file_reference_candidate(
     let from = (*by_node_id.get(reference.from_node_id.as_str())?)?;
     Some(CodeIndexUnresolvedReferenceV1 {
         from_occurrence: from.occurrence.clone(),
-        reference_name: reference.reference_name.clone(),
+        reference_name: computed_member_call.unwrap_or_else(|| reference.reference_name.clone()),
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
             .unwrap_or(from.span),
@@ -2475,14 +2482,29 @@ fn cross_file_reference_candidate(
 /// callee expression (calls, indexing, optional chaining).
 pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str, &str)> {
     let (head, members) = reference_name.split_once('.')?;
-    let identifier = |segment: &str| {
-        !segment.is_empty()
-            && !segment.starts_with(|c: char| c.is_ascii_digit())
-            && segment
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    };
-    (identifier(head) && members.split('.').all(identifier)).then_some((head, members))
+    (typescript_identifier(head) && members.split('.').all(typescript_identifier))
+        .then_some((head, members))
+}
+
+const TYPESCRIPT_COMPUTED_RECEIVER: &str = "<computed>.";
+
+/// `<computed>.member` for a TypeScript call whose receiver is an expression
+/// rather than an identifier path (`[1, 2].map`, `make().run`, `rows[0].save`,
+/// `x?.y`), so the call stays a bounded gap record; `None` otherwise.
+fn typescript_computed_member_call(reference_name: &str) -> Option<String> {
+    if typescript_member_call_path(reference_name).is_some() {
+        return None;
+    }
+    let (_, member) = reference_name.rsplit_once('.')?;
+    typescript_identifier(member).then(|| format!("{TYPESCRIPT_COMPUTED_RECEIVER}{member}"))
+}
+
+fn typescript_identifier(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.starts_with(|c: char| c.is_ascii_digit())
+        && segment
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Whether a path is a TypeScript-family source the TypeScript extractor
