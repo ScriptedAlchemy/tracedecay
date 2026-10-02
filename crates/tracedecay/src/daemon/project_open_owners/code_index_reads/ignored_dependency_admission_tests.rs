@@ -316,7 +316,7 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         "admission returns only after graph activation completes for the generation it minted: \
          {readiness:?}"
     );
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(Duration::from_mins(2), async {
         while matches!(
             serving.code_graph_serving_readiness(),
             CodeGraphServingReadinessV1::Warming { .. }
