@@ -21,6 +21,7 @@ mod codex_response_items;
 mod codex_usage;
 mod cursor;
 mod cursor_composer;
+mod git_correlation;
 mod hermes;
 mod kiro;
 mod pi;
