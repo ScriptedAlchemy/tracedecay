@@ -81,6 +81,7 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
             content_identity: identity,
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files: captured,
         changed_files: BTreeSet::new(),

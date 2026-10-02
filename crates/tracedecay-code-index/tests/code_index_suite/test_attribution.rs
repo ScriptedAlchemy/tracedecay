@@ -50,6 +50,7 @@ fn generation() -> (ValidatedCodeSnapshotV1, CodeGenerationManifestV1) {
                 disposition: SnapshotFileDispositionV1::Present,
             },
         ],
+        omitted_sources: Vec::new(),
     };
     let intake = SanitizedCodeIntake::new(registry(), id("sanitizer.v1"), UtcMicros(20));
     let validated = intake

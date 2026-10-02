@@ -1190,9 +1190,7 @@ fn indexed_delivery_head(
         branch_ref: freshness.source_reference?,
         head_commit_id: CommitId::new(freshness.source_revision?).ok()?,
         generation: CodeGenerationId::new(freshness.latest_generation_id?).ok()?,
-        coverage: if freshness.coverage
-            != tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
-        {
+        coverage: if !freshness.coverage.covers_indexable_sources() {
             ProjectDeliveryInboxCoverageV1::Partial
         } else if freshness.staleness_state
             == Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh)
@@ -2387,6 +2385,9 @@ fn generation_projection(
 #[cfg(test)]
 mod tests {
     use crate::read_model::{DashboardCoverageCompletenessV1, DashboardFreshnessStateV1};
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+    };
     use tracedecay_domain::feedback::FeedbackScopeV1;
     use tracedecay_domain::feedback::github_review::GitHubPullRequestIdV1;
     use tracedecay_domain::{ProjectId, ProviderId, RepositoryId, WorktreeId};
@@ -2571,6 +2572,36 @@ mod tests {
             panic!("a refused credential must project as typed unavailable");
         };
         assert!(refused_reason.contains("refused"));
+    }
+
+    /// Sources no generation can index are a property of the tree, so a fresh
+    /// head that omits them still covers the delivery inbox completely.
+    #[test]
+    fn indexed_head_with_omitted_sources_is_complete_while_partial_reads_are_not() {
+        let head = |coverage| {
+            indexed_delivery_head(CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                repository_id: Some("repository.delivery-api".to_owned()),
+                worktree_id: Some("worktree.delivery-api".to_owned()),
+                source_reference: Some("refs/heads/main".to_owned()),
+                source_revision: Some("a".repeat(40)),
+                latest_generation_id: Some("generation.alpha.1".to_owned()),
+                sealed_at_micros: Some(1),
+                staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                coverage,
+                ..Default::default()
+            })
+            .expect("indexed head")
+            .coverage
+        };
+        assert_eq!(
+            head(CodeIndexFreshnessCoverageV1::PartialOmittedSources),
+            ProjectDeliveryInboxCoverageV1::Complete
+        );
+        assert_eq!(
+            head(CodeIndexFreshnessCoverageV1::PartialHookHintOverflow),
+            ProjectDeliveryInboxCoverageV1::Partial
+        );
     }
 
     #[tokio::test]
