@@ -35,7 +35,9 @@ not-found-or-not-authorized problem rather than an empty success.
   (`127.0.0.1`, `localhost`, `::1`; rejected otherwise), with the allowed
   Host header pinned to the bound address. Every request must carry
   `Authorization: Bearer <token>`; pass `--token <value>` or read the
-  generated token the server prints to stderr at startup. Intended for
+  generated token the server writes to
+  `<profile-root>/chatgpt-loopback-bearer-token` (mode 0600) at startup —
+  its path is printed to stderr, never the secret. Intended for
   `tunnel-client --mcp-server-url` and browser testing.
 
 Inside the server a `DaemonBridge` reads through `@tracedecay/sdk` (the

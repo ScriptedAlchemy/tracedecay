@@ -120,18 +120,25 @@ export class DaemonBridge {
   }
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
-    const pending = this.#pending.get(projectId);
-    if (pending !== undefined) return pending;
-    // One acquisition at a time per project: two concurrent callers must not
-    // each spawn a serve child and orphan the loser's process.
-    const acquire = this.#acquire(projectId, signal).finally(() => {
-      if (this.#pending.get(projectId) === acquire) this.#pending.delete(projectId);
-    });
-    this.#pending.set(projectId, acquire);
-    return acquire;
+    let pending = this.#pending.get(projectId);
+    if (pending === undefined) {
+      // One acquisition at a time per project: two concurrent callers must not
+      // each spawn a serve child and orphan the loser's process. The shared
+      // work takes no caller's signal — one cancelled request must not abort
+      // an acquisition its other waiters still need.
+      const acquire = this.#acquire(projectId).finally(() => {
+        if (this.#pending.get(projectId) === acquire) this.#pending.delete(projectId);
+      });
+      // Every waiter races its own signal, so the stored promise can settle
+      // with no one left awaiting it.
+      void acquire.catch(() => undefined);
+      this.#pending.set(projectId, acquire);
+      pending = acquire;
+    }
+    return await withSignal(pending, signal);
   }
 
-  async #acquire(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
+  async #acquire(projectId: string): Promise<ProjectHandle> {
     const record = await this.#requireAuthority();
     const cached = this.#projects.get(projectId);
     if (cached !== undefined) {
@@ -139,7 +146,7 @@ export class DaemonBridge {
       this.#projects.delete(projectId);
       await cached.session.close();
     }
-    const project = await this.resolveProject(projectId, signal);
+    const project = await this.resolveProject(projectId);
     const baseUrl = httpBaseUrl(record);
     if (baseUrl === null) {
       throw new DaemonFailure({
@@ -244,6 +251,20 @@ export class DaemonBridge {
 
 function optional(signal: AbortSignal | undefined): { signal?: AbortSignal } {
   return signal === undefined ? {} : { signal };
+}
+
+// Shared work outlives any single request: a caller that cancels gets its own
+// abort while the promise it shared keeps running for the remaining waiters.
+async function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return await promise;
+  const abortError = () =>
+    signal.reason instanceof Error ? signal.reason : new DOMException("This operation was aborted", "AbortError");
+  if (signal.aborted) throw abortError();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function asRecord(request: unknown): Record<string, unknown> {

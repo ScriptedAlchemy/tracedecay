@@ -3,7 +3,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -332,6 +334,44 @@ export function taxTotal(invoices: Invoice[]): number {
       await expect(serveLoopbackHttp(createServer, "0.0.0.0", 0, token)).rejects.toThrow(/loopback/u);
     } finally {
       await http.close();
+    }
+  });
+
+  it("issues a generated loopback token through a 0600 file, never through stderr", async () => {
+    const packageRoot = path.resolve(import.meta.dirname, "..");
+    const child = spawn(
+      process.execPath,
+      [path.join(packageRoot, "embedded", "server.mjs"), "--http", "127.0.0.1:0"],
+      {
+        env: Object.fromEntries(
+          Object.entries(fixture.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        ),
+        cwd: fixture.home,
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    try {
+      await waitFor("loopback token path on stderr", async () =>
+        /bearer token written to .+ \(send as Authorization/u.test(stderr) ? stderr : null,
+      );
+      const url = /listening on (http:\/\/\S+)/u.exec(stderr)?.[1];
+      const tokenPath = /bearer token written to (.+?) \(send/u.exec(stderr)?.[1];
+      if (url === undefined || tokenPath === undefined) throw new Error(`unparsable server output: ${stderr}`);
+      const token = (await readFile(tokenPath, "utf8")).trim();
+      expect(token.length).toBeGreaterThan(0);
+      expect(stderr).not.toContain(token);
+      if (process.platform !== "win32") {
+        expect((await stat(tokenPath)).mode & 0o777).toBe(0o600);
+      }
+      const ping = await rawPost(url, new URL(url).host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), `Bearer ${token}`);
+      expect(ping.status).toBe(200);
+    } finally {
+      child.kill("SIGTERM");
+      await once(child, "exit");
     }
   });
 

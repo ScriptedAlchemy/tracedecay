@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -51,7 +52,7 @@ export type LoopbackHttpServer = {
 
 /**
  * Streamable HTTP on a loopback address only. Every request must carry the
- * bearer `token` the operator was shown at startup: loopback still lets any
+ * bearer `token` issued at startup: loopback still lets any
  * local process — and, without the Host check, any origin the browser visits —
  * reach the endpoint, so possession of the token is the authorization. Each
  * request gets its own stateless transport and McpServer over the shared
@@ -142,10 +143,25 @@ async function main(): Promise<void> {
     const [host, portText] = splitHostPort(values.http);
     const port = Number.parseInt(portText, 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --http port: ${portText}`);
-    const token = values.token ?? randomBytes(24).toString("base64url");
+    let token = values.token;
+    let tokenPath: string | null = null;
+    if (token === undefined) {
+      // The generated credential goes to an operator-readable file, never to
+      // stderr: supervisors that capture logs must not retain a reusable
+      // bearer token. Beside the daemon authority record keeps it in the same
+      // trust domain with the same 0600 posture.
+      token = randomBytes(24).toString("base64url");
+      const profileRoot = resolveProfileRoot(process.env);
+      tokenPath = join(profileRoot, "chatgpt-loopback-bearer-token");
+      await mkdir(profileRoot, { recursive: true });
+      await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
+      await chmod(tokenPath, 0o600);
+    }
     const listening = await serveLoopbackHttp(createServer, host, port, token);
     process.stderr.write(`tracedecay-chatgpt-extension listening on ${listening.url}\n`);
-    process.stderr.write(`MCP bearer token (Authorization: Bearer): ${token}\n`);
+    if (tokenPath !== null) {
+      process.stderr.write(`MCP bearer token written to ${tokenPath} (send as Authorization: Bearer)\n`);
+    }
     return;
   }
   const server = createServer();
