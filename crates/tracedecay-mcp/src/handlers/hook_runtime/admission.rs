@@ -257,7 +257,6 @@ fn refuse_pre_ledger_pending_work(
     let present = root
         .try_exists()
         .map_err(|_| tracedecay_hooks::HookAdmissionLedgerError::Io)?;
-    tracedecay_hooks::record_hook_admission_reset(&root, present);
     if present {
         return Err(tracedecay_hooks::HookAdmissionLedgerError::ResetRequired);
     }
