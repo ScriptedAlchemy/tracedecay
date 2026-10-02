@@ -20,7 +20,8 @@ use tracedecay_store::{
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
 };
 
 use crate::claude_records;
@@ -476,6 +477,92 @@ fn seed_v4_predecessor(tmp: &TempDir, observation_id: &CanonicalObservationIdV1)
             rusqlite::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+}
+
+fn seed_v5_predecessor_with_stale_split_output(
+    tmp: &TempDir,
+    observation_id: &CanonicalObservationIdV1,
+) {
+    const STALE_MESSAGE_ID: &str = "message-v5-stale-split";
+
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET projector_version = ?1
+             WHERE projector_version = ?2 AND observation_id = ?3",
+            rusqlite::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+    if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V5 {
+        raw_conn
+            .execute(
+                "INSERT OR REPLACE INTO observation_projection_checkpoints (
+                    projector_version, last_sequence
+                 )
+                 SELECT ?1, last_sequence
+                 FROM observation_projection_checkpoints
+                 WHERE projector_version = ?2",
+                rusqlite::params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                ],
+            )
+            .unwrap();
+        raw_conn
+            .execute(
+                "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
+                [SESSION_MESSAGE_PROJECTOR_VERSION],
+            )
+            .unwrap();
+    }
+    raw_conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp, content,
+                content_hash, storage_kind, payload_ref, placeholder_text, metadata_json,
+                kind, model, tool_names, source_path, source_offset
+             )
+             SELECT message.provider, ?1, message.session_id, message.role, message.ordinal + 1,
+                    message.timestamp, 'obsolete split projection output', ?1, 'inline', NULL,
+                    NULL, message.metadata_json, message.kind, message.model, message.tool_names,
+                    message.source_path, message.source_offset
+             FROM observation_projection_provenance AS provenance
+             JOIN lcm_raw_messages AS message
+               ON message.provider = provenance.output_provider
+              AND message.message_id = provenance.output_message_id
+             WHERE provenance.projector_version = ?2
+               AND provenance.observation_id = ?3
+               AND provenance.output_ordinal = 0",
+            rusqlite::params![
+                STALE_MESSAGE_ID,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_provenance (
+                projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+                receipt_id, output_provider, output_message_id, output_digest, message_created
+             )
+             SELECT projector_version, observation_id, 1, retrieval_anchor_id, receipt_id,
+                    output_provider, ?1, ?2, 1
+             FROM observation_projection_provenance
+             WHERE projector_version = ?3 AND observation_id = ?4 AND output_ordinal = 0",
+            rusqlite::params![
+                STALE_MESSAGE_ID,
+                format!("sha256:{}", "0".repeat(64)),
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 observation_id.as_str(),
             ],
         )

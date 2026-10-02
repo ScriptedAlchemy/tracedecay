@@ -11,8 +11,9 @@ use tracedecay_store::{
     ProjectedObservation, ProjectionBatchItem, ProjectionDrainBatch, ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
+    workflow_semantic_kind,
 };
 
 use super::apply::{
@@ -377,7 +378,7 @@ pub async fn rebuild_projection(
     rebuild_projection_until_cancelled(database, frontier_sequence, &NEVER_CANCELLED).await
 }
 
-/// Converges retained v4 output ownership before an ordinary v5 queue drain.
+/// Converges retained v5 (or unretired v4) ownership before an ordinary v6 queue drain.
 ///
 /// The predecessor probe and first rebuild generation are bound in one write
 /// transaction. Once a generation exists, later calls resume its frozen
@@ -435,8 +436,11 @@ async fn prepare_predecessor_projection_rebuild(
     let mut predecessor_rows = transaction
         .query(
             "SELECT 1 FROM observation_projection_provenance
-             WHERE projector_version = ?1 LIMIT 1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+             WHERE projector_version IN (?1, ?2) LIMIT 1",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+            ],
         )
         .await
         .map_err(|error| storage("read predecessor projection ownership", error))?;
@@ -709,28 +713,35 @@ async fn stage_projection_alias_batch_transaction(
             "observation sequence gap before alias frontier",
         ));
     }
-    transaction
-        .execute(
-            "INSERT OR IGNORE INTO observation_projection_rebuild_aliases (
-                projector_version, generation, observation_id,
-                output_provider, output_message_id
-             )
-             SELECT alias.projector_version, ?2, alias.observation_id,
-                    alias.output_provider, alias.output_message_id
-             FROM observation_projection_aliases AS alias
-             JOIN observations AS observation
-               ON observation.observation_id = alias.observation_id
-             WHERE alias.projector_version = ?1
-               AND observation.sequence > ?3 AND observation.sequence <= ?4",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                job.generation.as_str(),
-                job.aliases_staged_through,
-                aliases_staged_through,
-            ],
-        )
-        .await
-        .map_err(|error| storage("capture projection alias batch", error))?;
+    for source_version in [
+        SESSION_MESSAGE_PROJECTOR_VERSION,
+        SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+        SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    ] {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO observation_projection_rebuild_aliases (
+                    projector_version, generation, observation_id,
+                    output_provider, output_message_id
+                 )
+                 SELECT ?1, ?2, alias.observation_id,
+                        alias.output_provider, alias.output_message_id
+                 FROM observation_projection_aliases AS alias
+                 JOIN observations AS observation
+                   ON observation.observation_id = alias.observation_id
+                 WHERE alias.projector_version = ?3
+                   AND observation.sequence > ?4 AND observation.sequence <= ?5",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    job.generation.as_str(),
+                    source_version,
+                    job.aliases_staged_through,
+                    aliases_staged_through,
+                ],
+            )
+            .await
+            .map_err(|error| storage("capture projection alias batch", error))?;
+    }
     let state = if aliases_staged_through == job.frontier {
         RebuildState::Building
     } else {
@@ -1496,12 +1507,16 @@ async fn ensure_staged_output_baseline(
             "SELECT
                 COALESCE(MAX(CASE WHEN projector_version = ?1 THEN message_created ELSE 0 END), 0),
                 COALESCE(MAX(CASE
-                    WHEN projector_version <> ?1 AND projector_version <> ?2 THEN 1 ELSE 0
+                    WHEN projector_version <> ?1
+                     AND projector_version <> ?2
+                     AND projector_version <> ?3
+                    THEN 1 ELSE 0
                 END), 0)
              FROM observation_projection_provenance
-             WHERE output_provider = ?3 AND output_message_id = ?4",
+             WHERE output_provider = ?4 AND output_message_id = ?5",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 message.provider.as_str(),
                 message.message_id.as_str(),
@@ -1880,7 +1895,7 @@ async fn clear_active_projection(
     generation: &str,
 ) -> ProjectionStoreResult<()> {
     ensure_projection_output_state_cache(conn).await?;
-    retire_projection_predecessor_output_ownership(conn).await?;
+    retire_projection_predecessor_state(conn, generation).await?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
             output_provider TEXT NOT NULL,
@@ -1985,16 +2000,120 @@ async fn clear_active_projection(
     Ok(())
 }
 
-async fn retire_projection_predecessor_output_ownership(
+async fn retire_projection_predecessor_state(
     conn: &impl Executor,
+    generation: &str,
 ) -> ProjectionStoreResult<()> {
-    conn.execute(
-        "DELETE FROM observation_projection_provenance WHERE projector_version = ?1",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS observation_projection_predecessor_cleared_outputs (
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            PRIMARY KEY(output_provider, output_message_id)
+         ) WITHOUT ROWID;
+         DELETE FROM temp.observation_projection_predecessor_cleared_outputs;",
     )
     .await
-    .map(|_| ())
-    .map_err(|error| storage("retire predecessor projection provenance", error))
+    .map_err(|error| storage("prepare predecessor projection retirement", error))?;
+    conn.execute(
+        "INSERT INTO temp.observation_projection_predecessor_cleared_outputs (
+            output_provider, output_message_id
+         )
+         SELECT DISTINCT predecessor.output_provider, predecessor.output_message_id
+         FROM observation_projection_provenance AS predecessor
+         WHERE predecessor.projector_version IN (?1, ?2)
+           AND predecessor.message_created = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_provenance AS retained
+             WHERE retained.output_provider = predecessor.output_provider
+               AND retained.output_message_id = predecessor.output_message_id
+               AND retained.projector_version NOT IN (?1, ?2)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_rebuild_messages AS staged
+             WHERE staged.projector_version = ?3 AND staged.generation = ?4
+               AND staged.output_provider = predecessor.output_provider
+               AND staged.output_message_id = predecessor.output_message_id
+           )",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            generation,
+        ],
+    )
+    .await
+    .map_err(|error| storage("materialize retired predecessor outputs", error))?;
+    conn.execute(
+        "DELETE FROM lcm_raw_messages
+         WHERE EXISTS (
+           SELECT 1 FROM temp.observation_projection_predecessor_cleared_outputs AS cleared
+           WHERE cleared.output_provider = lcm_raw_messages.provider
+             AND cleared.output_message_id = lcm_raw_messages.message_id
+         )",
+        (),
+    )
+    .await
+    .map_err(|error| storage("remove retired predecessor outputs", error))?;
+
+    for predecessor_version in [
+        SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+        SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    ] {
+        conn.execute(
+            "INSERT OR IGNORE INTO observation_projection_aliases (
+                projector_version, observation_id, output_provider, output_message_id
+             )
+             SELECT ?1, observation_id, output_provider, output_message_id
+             FROM observation_projection_aliases
+             WHERE projector_version = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, predecessor_version],
+        )
+        .await
+        .map_err(|error| storage("migrate predecessor projection aliases", error))?;
+    }
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version IN (?1, ?2)",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+        ],
+    )
+    .await
+    .map_err(|error| storage("retire predecessor projection provenance", error))?;
+    for (table, operation) in [
+        (
+            "observation_projection_dispositions",
+            "retire predecessor projection dispositions",
+        ),
+        (
+            "observation_workflow_facts",
+            "retire predecessor workflow facts",
+        ),
+        (
+            "observation_projection_checkpoints",
+            "retire predecessor projection checkpoints",
+        ),
+        (
+            "observation_projection_aliases",
+            "retire predecessor projection aliases",
+        ),
+        (
+            "observation_projection_rebuilds",
+            "retire predecessor projection rebuilds",
+        ),
+    ] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE projector_version IN (?1, ?2)"),
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+            ],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    }
+    Ok(())
 }
 
 fn decode_overlapping_session(row: &Row) -> ProjectionStoreResult<SessionRecord> {

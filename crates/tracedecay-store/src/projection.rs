@@ -16,7 +16,8 @@ mod tests;
 
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V5: &str = "claude-session-message-v5";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V5;
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V6: &str = "claude-session-message-v6";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V6;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
 /// Immutable provider-usage row contract. Usage shares the canonical
 /// observation projection's checkpoint and rebuild transaction, but carries

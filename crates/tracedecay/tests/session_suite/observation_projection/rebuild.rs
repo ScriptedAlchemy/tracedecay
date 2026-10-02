@@ -476,14 +476,14 @@ async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelate
     persist(&store, predecessor.clone(), None).await;
     persist(&store, unrelated.clone(), None).await;
     drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
     add_other_projector_owner(&tmp, unrelated.observation_id()).await;
 
     let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.projected_rows(), 2);
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
         0
     );
     assert_eq!(
@@ -492,6 +492,13 @@ async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelate
     );
     assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
     assert_eq!(projected_message_texts(&tmp).await.len(), 2);
+    assert!(
+        projected_message_texts(&tmp)
+            .await
+            .iter()
+            .all(|text| text != "obsolete split projection output"),
+        "v5 outputs retired by the one-row projector must not remain searchable"
+    );
 
     let provenance = projection_provenance_rows(&tmp).await;
     let repeated = rebuild_projection_to_completion(&store, 2).await;
@@ -579,7 +586,7 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
     persist(&store, predecessor.clone(), None).await;
     persist(&store, unrelated.clone(), None).await;
     drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
     add_other_projector_owner(&tmp, unrelated.observation_id()).await;
 
     let scope = ObservationScopeV1::Profile;
@@ -592,7 +599,7 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
     assert!(!drained.deferred);
     assert_eq!(drained.projected, 0);
     assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
         0
     );
     assert_eq!(
@@ -600,6 +607,13 @@ async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idem
         2
     );
     assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
+    assert!(
+        projected_message_texts(&tmp)
+            .await
+            .iter()
+            .all(|text| text != "obsolete split projection output"),
+        "v5 outputs retired by the one-row projector must not remain searchable"
+    );
 
     let provenance = projection_provenance_rows(&tmp).await;
     let repeated = runtime
