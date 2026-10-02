@@ -468,6 +468,74 @@ async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_s
 }
 
 #[tokio::test]
+async fn a_rollout_starting_after_lcm_compression_keeps_its_own_start_time() {
+    const ROLLOUT_STARTED_AT: i64 = 4_102_444_800;
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let cwd = project_root.to_string_lossy().into_owned();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &profile,
+        &project_root,
+        ProjectId::new("project.start").unwrap(),
+    )
+    .await
+    .unwrap();
+    lcm_compress(
+        runtime
+            .registered_database(HostAdmissionScope::Project)
+            .unwrap(),
+        "codex",
+        CODEX_SESSION,
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .session_for_test(HostAdmissionScope::Project, "codex", CODEX_SESSION)
+            .await
+            .unwrap()
+            .expect("LCM compression stores the session it ingested")
+            .started_at,
+        None,
+        "LCM did not observe the session start"
+    );
+
+    let store = runtime
+        .observation_store(HostAdmissionScope::Project)
+        .unwrap();
+    let mut rollout_session = session_fact(&cwd);
+    let CanonicalObservationFactV1::Session { started_at, .. } = &mut rollout_session else {
+        unreachable!("session_fact builds a session fact")
+    };
+    *started_at = Some(ROLLOUT_STARTED_AT);
+    persist(
+        &store,
+        observation(
+            "codex",
+            CODEX_SESSION,
+            project_scope("project.start"),
+            "record.codex.late-start",
+            ORIGINAL_TEXT,
+            "receipt.codex.late-start",
+            Some(rollout_session),
+        ),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    assert_eq!(
+        runtime
+            .session_for_test(HostAdmissionScope::Project, "codex", CODEX_SESSION)
+            .await
+            .unwrap()
+            .expect("the rollout projects onto the LCM session")
+            .started_at,
+        Some(ROLLOUT_STARTED_AT)
+    );
+}
+
+#[tokio::test]
 async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");

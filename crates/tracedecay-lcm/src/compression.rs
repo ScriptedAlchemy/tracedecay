@@ -2403,6 +2403,8 @@ async fn update_active_replay_metadata(
 /// `scope` is the session store's own scope, so the row carries the same
 /// project fields the rollout projection writes for that store; the
 /// projection's working directory later refines `project_path`.
+/// `started_at` stays unset: LCM never observes the session start, and the
+/// rollout's start must not lose to the time of this insert.
 /// `INSERT OR IGNORE` leaves a row the rollout projection already created.
 async fn ensure_session(
     conn: &impl Executor,
@@ -2413,9 +2415,9 @@ async fn ensure_session(
     let (project_key, project_path) = session_project_fields(scope);
     conn.execute(
         "INSERT OR IGNORE INTO sessions (
-            provider, session_id, project_key, project_path, started_at
+            provider, session_id, project_key, project_path
          )
-         VALUES (?1, ?2, ?3, ?4, unixepoch())",
+         VALUES (?1, ?2, ?3, ?4)",
         params![provider, session_id, project_key, project_path],
     )
     .await?;
