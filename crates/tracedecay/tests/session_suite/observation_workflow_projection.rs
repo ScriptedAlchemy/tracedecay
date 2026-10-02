@@ -867,6 +867,19 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
             "release summary repeats release task alpha\n\nrelease task beta".to_owned(),
         )]
     );
+
+    let workflow_only = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "beta", 2)
+        .await
+        .expect("search a later workflow fact in one observation");
+    let [workflow_only] = workflow_only.as_slice() else {
+        panic!("the matching observation must produce exactly one search row");
+    };
+    let metadata: Value =
+        serde_json::from_str(workflow_only.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["provider_reference"], "task.native.beta");
 }
 
 #[tokio::test]

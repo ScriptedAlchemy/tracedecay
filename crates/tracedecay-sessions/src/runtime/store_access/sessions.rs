@@ -983,7 +983,9 @@ async fn search_workflow_facts(
         JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
         ORDER BY matched.item_order_missing, matched.first_item_order,
                  (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
-                 matched.latest_sequence DESC, matched.first_fact_ordinal, w.fact_ordinal",
+                 matched.latest_sequence DESC, matched.first_fact_ordinal,
+                 CASE WHEN w.fact_ordinal = matched.first_fact_ordinal THEN 0 ELSE 1 END,
+                 w.fact_ordinal",
         query_params.len()
     );
 
