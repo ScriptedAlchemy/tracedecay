@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use thiserror::Error;
 
@@ -82,8 +82,8 @@ pub enum TraceDecayError {
     )]
     ServiceUnitNotOwned {
         unit: String,
-        owned: PathBuf,
-        loaded: Option<PathBuf>,
+        owned: Box<Path>,
+        loaded: Option<Box<Path>>,
     },
 
     #[error(

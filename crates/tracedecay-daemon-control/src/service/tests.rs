@@ -1014,7 +1014,7 @@ fn an_isolated_home_never_controls_the_unit_the_manager_loads_from_elsewhere() {
             panic!("expected a typed ownership refusal, got: {error}");
         };
         assert_eq!(unit, "tracedecay.service");
-        assert_eq!(owned, isolated_unit);
+        assert_eq!(&*owned, isolated_unit.as_path());
         assert_eq!(loaded.as_deref(), Some(operator_unit.as_path()));
     }
     let commands = std::fs::read_to_string(&log).expect("systemctl log");

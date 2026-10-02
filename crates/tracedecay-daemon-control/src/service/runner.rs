@@ -52,8 +52,8 @@ impl SystemdUnit {
         Err(ServiceStateError::Failed(
             TraceDecayError::ServiceUnitNotOwned {
                 unit: self.name.clone(),
-                owned: self.path.clone(),
-                loaded,
+                owned: self.path.clone().into_boxed_path(),
+                loaded: loaded.map(PathBuf::into_boxed_path),
             },
         ))
     }
