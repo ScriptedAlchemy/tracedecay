@@ -366,7 +366,6 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
             } => Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
             ProjectOpenFailureKind::IdentityUnregistered
             | ProjectOpenFailureKind::IndexMissing
-            | ProjectOpenFailureKind::StoreReadOnly
             | ProjectOpenFailureKind::BackedOff { .. } => None,
         },
         TraceDecayError::ProfileResetRequired { .. } | TraceDecayError::ResetRequired { .. } => {

@@ -492,14 +492,6 @@ impl TraceDecay {
         Ok(())
     }
 
-    /// Refuses a read-only store that is not at the one schema shape this
-    /// binary creates. There is no upgrade path to name: the store was written
-    /// by an incompatible binary, so the only remedy is a fresh one.
-    #[hotpath::measure(label = "lifecycle.ensure_schema", future = true)]
-    pub async fn ensure_schema_current(&self) -> Result<()> {
-        Self::ensure_database_schema_current(&self.db).await
-    }
-
     /// Opens an existing `TraceDecay` project at the given root.
     ///
     /// If branch metadata exists, resolves the current git branch's published

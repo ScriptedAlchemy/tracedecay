@@ -1,8 +1,8 @@
 //! Opening a project for one handshake, and how open failures are reported.
 //!
 //! Classifies the failure modes that first-touch bootstrap may repair -
-//! never-enrolled identity, a missing index, a read-only store - apart from
-//! genuine conflicts, and renders the client-visible refusal.
+//! never-enrolled identity and a missing index - apart from genuine
+//! conflicts, and renders the client-visible refusal.
 
 use super::*;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -117,26 +117,6 @@ pub(super) async fn open_project_for_handshake(
     .await;
     match open_result {
         Ok(cg) => Ok(cg),
-        Err(open_err) if is_readonly_database_error(&open_err) => {
-            match Box::pin(
-                tracedecay_project::project::TraceDecay::open_read_only_with_registered_configuration(
-                    project_path,
-                    open_options,
-                    store_layout,
-                    configuration_database,
-                    registry_database,
-                    runtime_registry,
-                ),
-            )
-            .await
-            {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
-                }
-                Err(_) => Err(open_err),
-            }
-        }
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             // First-touch bootstrap creates the final registered store and
             // exact configuration authority only. The bounded code-index
@@ -192,10 +172,6 @@ fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
 
 pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
     err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IndexMissing)
-}
-
-fn is_readonly_database_error(err: &TraceDecayError) -> bool {
-    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::StoreReadOnly)
 }
 
 pub(super) async fn write_project_open_error(

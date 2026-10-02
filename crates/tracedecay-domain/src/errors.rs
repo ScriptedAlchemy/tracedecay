@@ -93,8 +93,7 @@ pub enum TraceDecayError {
     },
 
     /// A project open failed for a reason its admission acts on: first-touch
-    /// bootstrap, the read-only fallback, and the reopen backoff all match
-    /// `kind`, never `detail`.
+    /// bootstrap and the reopen backoff both match `kind`, never `detail`.
     #[error("{detail}")]
     ProjectOpen {
         kind: ProjectOpenFailureKind,
@@ -147,8 +146,6 @@ pub enum ProjectOpenFailureKind {
     IdentityUnregistered,
     /// The project has no index database yet; first-touch init creates it.
     IndexMissing,
-    /// The project store refused a write; it can still be served read-only.
-    StoreReadOnly,
     /// Every code-runtime seat is taken; one frees when another project
     /// retires.
     CodeRuntimeBudgetExhausted { limit: usize },
