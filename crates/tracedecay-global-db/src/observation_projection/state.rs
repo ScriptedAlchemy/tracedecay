@@ -1280,11 +1280,6 @@ pub(super) fn reconcile_session_rows_detailed(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return Err(SessionReconcileConflict("identity"));
     }
-    // Shipped LCM v13 stores still hold shell rows with an invented project.
-    // That row is not a second root: the observation replaces it.
-    if session_is_legacy_lcm_placeholder(actual) {
-        return Ok(expected.clone());
-    }
     // `expected` is the projection being applied now. A typed project id that
     // changed (re-enroll/reset, or a cwd that now resolves to another
     // registered project) moves this host session onto that current id.
@@ -1371,19 +1366,6 @@ pub(super) fn reconcile_session_rows_detailed(
 
 fn project_key_is_directory(session: &SessionRecord) -> bool {
     session.project_key == session.project_path
-}
-
-/// A shell row LCM wrote before it carried its store's scope: an invented
-/// project (`unknown`, or the older `lcm-active-context`), no transcript, no
-/// metadata. LCM now writes `session_project_fields(scope)` instead.
-fn session_is_legacy_lcm_placeholder(session: &SessionRecord) -> bool {
-    session.transcript_path.is_none()
-        && session.metadata_json.is_none()
-        && project_key_is_directory(session)
-        && matches!(
-            session.project_key.as_str(),
-            "unknown" | "lcm-active-context" | ""
-        )
 }
 
 fn reconcile_optional<T: Clone + Eq>(
@@ -1813,28 +1795,6 @@ mod reconcile_tests {
             from_verbatim.project_path, normalized.project_path,
             "both spellings of one directory must converge on the plain form"
         );
-    }
-
-    #[test]
-    fn shipped_lcm_placeholder_projects_are_replaced_by_the_rollout_session() {
-        for placeholder in ["lcm-active-context", "unknown"] {
-            let mut stored = record(placeholder);
-            stored.title = Some("LCM active context".to_owned());
-            let mut rollout = record("/work/repo");
-            rollout.title = Some("rollout".to_owned());
-            rollout.transcript_path = Some("/work/repo/session.jsonl".to_owned());
-
-            let merged = reconcile_session_rows_detailed(&stored, &rollout)
-                .expect("a shipped LCM placeholder must take the rollout project");
-
-            assert_eq!(merged.project_key, "/work/repo");
-            assert_eq!(merged.project_path, "/work/repo");
-            assert_eq!(merged.title.as_deref(), Some("rollout"));
-            assert_eq!(
-                merged.transcript_path.as_deref(),
-                Some("/work/repo/session.jsonl")
-            );
-        }
     }
 
     #[test]
