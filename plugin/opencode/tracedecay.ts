@@ -35,7 +35,6 @@ export function sessionOf(event: { readonly data?: unknown }): string | undefine
 // owns the session.
 export class SessionLocations {
   private readonly owned = new Set<string>()
-  private readonly foreign = new Set<string>()
 
   constructor(private readonly directory: string) {}
 
@@ -44,14 +43,13 @@ export class SessionLocations {
     if (!sessionID) return
     if (event.type === "session.deleted") {
       this.owned.delete(sessionID)
-      this.foreign.delete(sessionID)
       return
     }
     if (!event.location) return
     if (event.location.directory === this.directory) {
       this.owned.add(sessionID)
     } else {
-      this.foreign.add(sessionID)
+      this.owned.delete(sessionID)
     }
   }
 

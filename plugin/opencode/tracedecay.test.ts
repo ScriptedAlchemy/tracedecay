@@ -57,6 +57,18 @@ test("guidance waits for its own session's next model request and is delivered o
   expect(pending.drain("ses_b")).toEqual(["other"])
 })
 
+test("session moves transfer execution boundaries to the new location only", () => {
+  const here = new SessionLocations(HERE)
+  const elsewhere = new SessionLocations(ELSEWHERE)
+  for (const directory of [HERE, ELSEWHERE, HERE]) {
+    const event = located("session.step.started", "ses_moving", directory)
+    here.observe(event)
+    elsewhere.observe(event)
+    expect(here.isSessionBoundary(boundary("ses_moving"))).toBe(directory === HERE)
+    expect(elsewhere.isSessionBoundary(boundary("ses_moving"))).toBe(directory === ELSEWHERE)
+  }
+})
+
 test("session deletion discards queued guidance and invalidates in-flight delivery", () => {
   const pending = new PendingGuidance()
   pending.deliveryFor("ses_deleted")("queued before deletion")
