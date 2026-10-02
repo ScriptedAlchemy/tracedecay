@@ -298,6 +298,12 @@ mod tests {
                 None,
                 Some(ApplicationExecutionFailureClassV1::Permanent),
             ),
+            (
+                AgentTaskFailureClass::InputTooLarge,
+                ApplicationProblemKind::ExecutionFailed,
+                None,
+                Some(ApplicationExecutionFailureClassV1::Permanent),
+            ),
         ];
         for (class, kind, unavailable, execution) in cases {
             let problem = failure_class_problem(Some(class)).expect("typed backend problem");

@@ -446,6 +446,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oversized_input_is_a_token_budget_and_a_retry_stays_unavailable() {
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::InputTooLarge {
+                reason: "context window exceeded".to_string(),
+            }),
+            ContextScoutModelErrorV1::TokenBudgetExceeded
+        );
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::Retryable {
+                reason: "rate limit exceeded".to_string(),
+            }),
+            ContextScoutModelErrorV1::Unavailable
+        );
+        assert_eq!(
+            scout_model_error_from_agent_task(AgentTaskError::Failed {
+                reason: "model rejected the prompt".to_string(),
+            }),
+            ContextScoutModelErrorV1::Unavailable
+        );
+    }
+
     #[cfg(feature = "token-counting")]
     struct TypedFailureBackend {
         error: AgentTaskError,
