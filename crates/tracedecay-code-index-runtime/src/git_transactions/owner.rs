@@ -695,6 +695,6 @@ impl DaemonGitIndexTransactionServiceRegistry {
                 .quarantine_preview_for_test(&preview, observed_at)
         })
         .await
-        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
+        .unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()))
     }
 }

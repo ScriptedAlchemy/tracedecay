@@ -316,12 +316,16 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         "admission returns only after graph activation completes for the generation it minted: \
          {readiness:?}"
     );
-    while matches!(
-        serving.code_graph_serving_readiness(),
-        CodeGraphServingReadinessV1::Warming { .. }
-    ) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while matches!(
+            serving.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background graph catalog warm settles");
     assert_eq!(
         serving.code_graph_serving_readiness(),
         CodeGraphServingReadinessV1::Ready,
