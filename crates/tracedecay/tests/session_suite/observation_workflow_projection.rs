@@ -777,6 +777,83 @@ async fn latest_goal_state_filters_provider_session_and_status() {
     );
 }
 
+/// Session search returns every matching workflow fact its observation's
+/// transcript row does not already carry. A message beside two tasks surfaces
+/// all three, while a goal fact whose objective is its row's text surfaces once.
+#[tokio::test]
+async fn search_keeps_workflow_facts_their_transcript_row_does_not_carry() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let task = |reference, item_order, text| {
+        lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference,
+            item_id: None,
+            list_reference: None,
+            status: Some("pending"),
+            item_order: Some(item_order),
+            event_sequence: None,
+            text,
+        })
+    };
+    let summary = observation(
+        FIXTURE_SESSION,
+        "record.release-summary",
+        1,
+        vec![
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "release summary names the owner"}),
+                model: None,
+                timestamp: Some(1_750_000_001),
+            },
+            task("task.native.alpha", 0, "release task alpha"),
+            task("task.native.beta", 1, "release task beta"),
+        ],
+    );
+    let cursor = persist_and_project(&store, summary, None).await;
+    let goal = observation(
+        FIXTURE_SESSION,
+        "record.release-goal",
+        2,
+        vec![lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+            reference: "goal.native.release",
+            item_id: None,
+            list_reference: None,
+            status: Some("active"),
+            item_order: None,
+            event_sequence: None,
+            text: "release goal ships",
+        })],
+    );
+    persist_and_project(&store, goal, Some(cursor)).await;
+
+    let mut hits = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "release", 10)
+        .await
+        .expect("search release observations")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    hits.sort();
+    assert_eq!(
+        hits,
+        [
+            ("goal", "release goal ships"),
+            ("message", "release summary names the owner"),
+            ("task", "release task alpha"),
+            ("task", "release task beta"),
+        ]
+        .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
+    );
+}
+
 #[tokio::test]
 async fn todo_item_search_uses_native_list_order_without_inventing_absent_fields() {
     let tmp = TempDir::new().unwrap();
