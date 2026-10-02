@@ -45,6 +45,7 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
     assert_eq!(journal.to_ascii_lowercase(), "wal");
     assert_eq!(pragma_i64(&connection, "wal_autocheckpoint"), 0);
     assert_eq!(pragma_i64(&connection, "synchronous"), 1);
+    assert_eq!(pragma_i64(&connection, "cache_size"), -16 * 1024);
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
     assert!(

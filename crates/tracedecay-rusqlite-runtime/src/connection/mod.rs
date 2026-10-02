@@ -20,6 +20,12 @@ use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 
+/// A writer commit needs its dirty pages plus the root and interior pages of
+/// every updated tree. SQLite's default ~2 MiB cache cannot hold both once
+/// trees deepen, so interior pages are reread on every commit. The 16 MiB cap
+/// is allocated lazily and applies only to writers; readers keep the default.
+const WRITER_PAGE_CACHE_KIB: i64 = 16 * 1024;
+
 /// Writer and reader connections are single-threaded actors, so rusqlite's
 /// per-connection statement cache is the reuse path for exact-SQL execute
 /// and query. Sixteen (the rusqlite default) is too small for the distinct
@@ -711,6 +717,9 @@ fn apply_pragmas(
         connection
             .pragma_update(None, "synchronous", "NORMAL")
             .map_err(|source| policy("synchronous mode", source))?;
+        connection
+            .pragma_update(None, "cache_size", -WRITER_PAGE_CACHE_KIB)
+            .map_err(|source| policy("writer page cache", source))?;
     }
     // Applied after the journal mode is settled, on every lane that can reset
     // the log: the writer owns scheduled checkpoints, maintenance owns the
@@ -746,6 +755,7 @@ fn apply_pragmas(
             verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
             verify_pragma_i64(connection, "synchronous", 1)?;
             verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+            verify_pragma_i64(connection, "cache_size", -WRITER_PAGE_CACHE_KIB)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,
         ConnectionMode::Maintenance => {
