@@ -2379,6 +2379,9 @@ export const CodeGraphServingReadinessV1Schema: z.ZodType<CodeGraphServingReadin
 }), z.object({
   reason: z.string(),
   state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  state: z.literal("warming"),
 })]);
 
 /** A typed reason an otherwise active generation cannot make durable progress. */

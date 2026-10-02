@@ -200,8 +200,22 @@ pub enum CodeGraphServingReadinessV1 {
     Pending,
     /// Graph activation completed without a serving projection.
     Refused { reason: String },
+    /// The verified graph projection is installed, but the engine or catalog
+    /// its reads need is not resident: it is still being built, or it was
+    /// released for memory. Graph reads answer the retryable warming state
+    /// and restore it.
+    Warming { reason: String },
     /// The verified graph projection is installed for interactive reads.
     Ready,
+}
+
+impl CodeGraphServingReadinessV1 {
+    /// The generation's graph activated: it is ready, or warming back to
+    /// ready on the next graph read.
+    #[must_use]
+    pub const fn is_activated(&self) -> bool {
+        matches!(self, Self::Ready | Self::Warming { .. })
+    }
 }
 
 /// Coverage retained by one clone-index artifact or in-progress successor.
@@ -780,7 +794,10 @@ impl CodeIndexWorktreeFreshnessV1 {
                 _ => {}
             }
         }
-        let graph_serving = self.code_graph_serving == Some(CodeGraphServingReadinessV1::Ready);
+        let graph_serving = self
+            .code_graph_serving
+            .as_ref()
+            .is_some_and(CodeGraphServingReadinessV1::is_activated);
         let reached = match target {
             CodeIndexReadinessTargetV1::Fresh => self.is_authoritative(),
             CodeIndexReadinessTargetV1::Ready => self.is_authoritative() && graph_serving,
