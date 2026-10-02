@@ -172,7 +172,6 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
         application_invalid_request_error(UNKNOWN_FIELD_DETAIL),
         "{forbidden}"
     );
-    assert!(forbidden["result"].is_null(), "{forbidden}");
 
     assert_eq!(
         application_run_ids(&dashboard_root),

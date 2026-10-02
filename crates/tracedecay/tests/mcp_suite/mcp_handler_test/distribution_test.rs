@@ -231,14 +231,12 @@ async fn distribution_reports_the_kind_census_of_the_indexed_tree() {
         })
     );
 
-    let rejected = fixture
-        .call(json!([]))
-        .await
-        .expect_err("non-object arguments");
-    assert!(
-        rejected
-            .to_string()
-            .contains("invalid arguments: tracedecay_distribution expects a JSON object"),
+    let rejected = crate::support::expect_tool_refusal(fixture.call(json!([])).await);
+    assert_eq!(
+        crate::support::refusal_summary(&rejected),
+        crate::support::application_invalid_request_error(
+            "invalid arguments: tracedecay_distribution expects a JSON object"
+        ),
         "{rejected}"
     );
 

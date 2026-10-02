@@ -198,10 +198,6 @@ fn assert_empty_miss(payload: &Value, project_id: &str) {
 fn assert_schema_rejection(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
-    assert!(
-        response.get("result").is_none() || response["result"].is_null(),
-        "{response}"
-    );
     assert_eq!(
         route_refusal(&response),
         application_invalid_request_error(detail),

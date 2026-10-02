@@ -757,10 +757,16 @@ where
     let payload = match retained_envelope_payload(text) {
         Some(payload) => payload,
         None => {
-            let envelope: Value =
-                serde_json::from_str(text).map_err(|error| TraceDecayError::Config {
-                    message: format!("{tool_name} returned no retained envelope: {error}"),
-                })?;
+            let problem = &result["structuredContent"]["problem"];
+            let envelope: Value = match serde_json::from_str(text) {
+                Ok(envelope) => envelope,
+                Err(_) if problem.is_object() => problem.clone(),
+                Err(error) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!("{tool_name} returned no retained envelope: {error}"),
+                    });
+                }
+            };
             return Err(TraceDecayError::Config {
                 message: format!("{tool_name} answered with a retained refusal: {envelope}"),
             });

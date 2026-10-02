@@ -344,7 +344,6 @@ async fn memory_status_reports_the_seeded_project_and_keeps_user_memory_separate
         ),
         "invalid scope response: {invalid}"
     );
-    assert_eq!(invalid.get("result"), None);
 
     invoke_production_tool(
         &fixture,
