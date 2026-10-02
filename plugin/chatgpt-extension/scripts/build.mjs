@@ -40,6 +40,7 @@ try {
     config: {
       root: packageRoot,
       logLevel: "warn",
+      performance: { buildCache: false },
       lib: [
         {
           format: "esm",
