@@ -317,7 +317,7 @@ async fn move_symbol_refuses_unsafe_or_stale_requests() {
         json!({
             "success": false,
             "failed": true,
-            "message": "source edit failed before the effect: config error: symbol 'not_a_symbol' not found",
+            "message": "source edit failed before the effect: symbol 'not_a_symbol' not found",
             "replayed": false
         }),
         "missing symbol: {missing_text}"

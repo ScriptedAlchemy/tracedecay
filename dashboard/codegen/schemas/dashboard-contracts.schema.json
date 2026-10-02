@@ -3911,6 +3911,23 @@
           "type": "object"
         },
         {
+          "description": "The verified graph projection is installed, but the engine or catalog\nits reads need is not resident: it is still being built, or it was\nreleased for memory. Graph reads answer the retryable warming state\nand restore it.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "warming",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
           "description": "The verified graph projection is installed for interactive reads.",
           "properties": {
             "state": {
@@ -21959,6 +21976,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "catalog_symbols": {
+          "description": "Symbol summaries served from the generation's in-memory catalog.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "point_reads": {
           "$ref": "#/$defs/StorePointReadsV1",
           "description": "Entity and relation point reads, by the store that served them."
@@ -21975,7 +21998,8 @@
         "point_reads",
         "adjacency_queries",
         "adjacency_rows",
-        "bytes_hydrated"
+        "bytes_hydrated",
+        "catalog_symbols"
       ],
       "type": "object"
     },
