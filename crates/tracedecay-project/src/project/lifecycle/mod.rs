@@ -1125,6 +1125,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_open_accepts_a_normalized_alias_of_the_profile_authority() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        std::fs::create_dir_all(profile.join("nested")).expect("create profile alias component");
+        let profile_alias = profile.join("nested").join("..");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile_alias.clone()),
+            global_db_path: Some(profile_alias.join("global.db")),
+        };
+
+        let opened = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("normalized alias opens the exact registered profile shard");
+
+        assert_eq!(
+            opened.profile_root().expect("opened profile root"),
+            profile.canonicalize().expect("canonical profile root")
+        );
+        opened.close();
+    }
+
+    #[tokio::test]
     async fn nonempty_wrong_schema_read_only_open_returns_reset_required() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");

@@ -47,7 +47,7 @@ pub enum ResidentOwnerKindV1 {
     SupersededGeneration,
     /// The interactive catalog (name, file and import indices) built over a
     /// worktree's graph. Released, the next catalog read rebuilds it from the
-    /// durable projection.
+    /// durable projection in the background.
     GraphCatalog,
     /// The decoded generation a worktree serves, with the derivations built
     /// from it (record index, test attribution). Released, the worktree keeps
@@ -85,6 +85,15 @@ impl ResidentOwnerKindV1 {
             Self::GraphEngine => "graph_engine",
             Self::Session => "session",
         }
+    }
+
+    /// Whether the idle window alone releases this kind. The graph catalog
+    /// stays until pressure needs it: rebuilding it is a full projection
+    /// scan that every name lookup waits on, while the engine beside it only
+    /// reopens from disk.
+    #[must_use]
+    pub const fn released_when_idle(self) -> bool {
+        !matches!(self, Self::GraphCatalog)
     }
 }
 
@@ -344,12 +353,14 @@ impl ResidentOwnersV1 {
         })
     }
 
-    /// Release every owner whose last use is older than the idle window.
+    /// Release every owner of a kind [released when
+    /// idle](ResidentOwnerKindV1::released_when_idle) whose last use is older
+    /// than the idle window.
     pub fn release_idle(&self, now: Instant) -> Vec<ResidentOwnerReleasedV1> {
         let released = self
             .live_owners()
             .into_iter()
-            .filter(|live| self.idle(&live.sample, now))
+            .filter(|live| live.kind.released_when_idle() && self.idle(&live.sample, now))
             .filter_map(|live| Self::release_one(live, ResidentOwnerReleaseCauseV1::Idle))
             .collect();
         self.note_released(released)
@@ -877,6 +888,40 @@ mod tests {
         assert_eq!(released_generations(&released), ["generation.idle"]);
         assert_eq!(released[0].cause, ResidentOwnerReleaseCauseV1::Idle);
         assert_eq!(owners.report(now).measured_bytes, 4_000);
+    }
+
+    #[test]
+    fn the_idle_window_keeps_a_graph_catalog_that_pressure_still_sheds() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(301);
+        let owners = Arc::new(ResidentOwnersV1::new(Duration::from_mins(5)));
+        let catalog = FixtureOwner::new("generation.catalog", 1_000, start, true);
+        let engine = FixtureOwner::new("generation.engine", 5_000, start, true);
+        let _registrations = [
+            register(
+                &owners,
+                "worktree.a",
+                ResidentOwnerKindV1::GraphCatalog,
+                &catalog,
+            ),
+            register(
+                &owners,
+                "worktree.a",
+                ResidentOwnerKindV1::GraphEngine,
+                &engine,
+            ),
+        ];
+
+        assert_eq!(
+            released_generations(&owners.release_idle(now)),
+            ["generation.engine"]
+        );
+        assert_eq!(owners.report(now).measured_bytes, 1_000);
+        assert_eq!(
+            released_generations(&owners.shed(1, now)),
+            ["generation.catalog"]
+        );
+        assert_eq!(owners.report(now).measured_bytes, 0);
     }
 
     #[test]

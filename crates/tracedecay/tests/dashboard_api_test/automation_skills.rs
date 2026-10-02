@@ -196,6 +196,34 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
 }
 
 #[test]
+fn managed_skill_view_maps_typed_read_failures_to_http_status() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+        let skills_url = format!("{}/api/automation/skills", fixture.base_url);
+
+        let (unsafe_status, unsafe_id) = get_json(&agent, &format!("{skills_url}/Bad_Skill"));
+        let (missing_status, missing) = get_json(&agent, &format!("{skills_url}/missing-skill"));
+
+        assert_eq!(
+            (unsafe_status, unsafe_id["detail"].clone()),
+            (
+                400,
+                serde_json::json!("config error: unsafe managed skill id 'Bad_Skill'")
+            ),
+        );
+        assert_eq!(
+            (missing_status, missing["detail"].clone()),
+            (
+                404,
+                serde_json::json!("managed skill 'missing-skill' not found")
+            ),
+        );
+    });
+}
+
+#[test]
 fn managed_skills_are_dashboard_controllable_with_direct_activation() {
     let runtime = create_runtime();
     runtime.block_on(async {

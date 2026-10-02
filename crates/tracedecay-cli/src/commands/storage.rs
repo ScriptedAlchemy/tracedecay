@@ -24,7 +24,7 @@ use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
 const PROFILE_OFFLINE_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PROFILE_SQLITE_DATABASES: [&str; 3] = ["global.db", "user-sessions.db", "user-memory.db"];
-const PROFILE_DATABASE_PATHS: [&str; 9] = [
+const PROFILE_DATABASE_PATHS: [&str; 15] = [
     "projects",
     "stores",
     "remote",
@@ -34,6 +34,12 @@ const PROFILE_DATABASE_PATHS: [&str; 9] = [
     "user-memory.grafeo",
     "user-memory.grafeo.wal",
     ".user-sessions.db.host-admission",
+    tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR,
+    tracedecay_runtime_core::storage::RESPONSE_HANDLES_DIRECTORY,
+    "lcm-payloads",
+    "hook_analytics.jsonl",
+    "hook_analytics.jsonl.lock",
+    "maintenance",
 ];
 
 fn sqlite_family_member(database: &Path, suffix: &str) -> PathBuf {

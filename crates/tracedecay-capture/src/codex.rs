@@ -265,7 +265,7 @@ fn normalize_codex_record(
         }),
         "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
         "response_item" => {
-            append_codex_response_item_facts(payload, timestamp, &stable_record_id, &mut facts);
+            append_codex_response_item_facts(payload, timestamp, &mut facts);
         }
         "compacted" => {
             facts.push(CanonicalObservationFactV1::Compaction {
@@ -816,7 +816,6 @@ fn append_codex_update_plan_lifecycle_fact(
 fn append_codex_response_item_facts(
     payload: &Value,
     timestamp: Option<i64>,
-    stable_record_id: &ObservationId,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let Some(item_kind) = payload.get("type").and_then(Value::as_str) else {
@@ -828,30 +827,25 @@ fn append_codex_response_item_facts(
     };
     match item_kind {
         "message" => {
-            if let Some(content) = payload.get("content").cloned() {
+            if payload.get("content").is_some() {
                 let role = payload.get("role").and_then(Value::as_str);
-                if role == Some("user") {
-                    let Some(goal_context) = codex_response_goal_context(payload) else {
-                        facts.push(CanonicalObservationFactV1::Unknown {
-                            native_kind: "response_item.message.user".to_string(),
-                            state: CanonicalUnknownStateV1::Unsupported,
-                        });
-                        return;
-                    };
-                    facts.push(CanonicalObservationFactV1::Message {
-                        role: CanonicalMessageRoleV1::User,
-                        content: goal_context.content.clone(),
-                        model: payload
-                            .get("model")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        timestamp,
+                if role != Some("user") {
+                    facts.push(CanonicalObservationFactV1::Unknown {
+                        native_kind: format!("response_item.message.{}", role.unwrap_or("unknown")),
+                        state: CanonicalUnknownStateV1::Unsupported,
                     });
                     return;
                 }
+                let Some(goal_context) = codex_response_goal_context(payload) else {
+                    facts.push(CanonicalObservationFactV1::Unknown {
+                        native_kind: "response_item.message.user".to_string(),
+                        state: CanonicalUnknownStateV1::Unsupported,
+                    });
+                    return;
+                };
                 facts.push(CanonicalObservationFactV1::Message {
-                    role: crate::content::canonical_message_role(role),
-                    content,
+                    role: CanonicalMessageRoleV1::User,
+                    content: goal_context.content.clone(),
                     model: payload
                         .get("model")
                         .and_then(Value::as_str)
@@ -866,7 +860,6 @@ fn append_codex_response_item_facts(
                     .get("call_id")
                     .or_else(|| payload.get("id"))
                     .and_then(Value::as_str),
-                stable_record_id,
             );
             let name = response_item_tool_name(payload, item_kind)
                 .unwrap_or_else(|| item_kind.to_string());
@@ -881,10 +874,9 @@ fn append_codex_response_item_facts(
         }
         "function_call_output" | "custom_tool_call_output" => {
             facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(canonical_native_observation_id(
+                invocation_id: canonical_native_observation_id(
                     payload.get("call_id").and_then(Value::as_str),
-                    stable_record_id,
-                )),
+                ),
                 content: Value::Null,
                 success: payload
                     .get("status")
@@ -1001,13 +993,8 @@ fn timestamp_from_record(record: &Value) -> Option<i64> {
         .and_then(parse_rfc3339_timestamp)
 }
 
-fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
+fn canonical_native_observation_id(native_id: Option<&str>) -> Option<ObservationId> {
+    native_id.and_then(|native_id| ObservationId::new(native_id).ok())
 }
 
 fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {

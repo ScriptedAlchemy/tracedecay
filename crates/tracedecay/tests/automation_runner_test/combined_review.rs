@@ -969,3 +969,106 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
         "pre-interrupted validation must not admit an automatic fact write"
     );
 }
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn combined_review_falls_back_when_skill_deployment_is_pending() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let host_home = fixture_host_home(cg.project_root());
+    let profile_root = host_home.join(".tracedecay");
+    seed_session_evidence(&cg).await;
+    let skill_backend = SkillJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [{
+            "id": "combined-review",
+            "title": "Combined review",
+            "summary": "Review combined automation runs before enabling automation.",
+            "routing_description": "Review combined automation runs before enabling automation.",
+            "routing_validation": skill_routing_validation("combined-review"),
+            "category": "workflow",
+            "body_markdown": "Check run ledgers and deployment receipts before rerunning automation.",
+            "reason": "Session evidence repeats combined review."
+        }]
+    }));
+    let config = scheduler_config(Some(3600), Some(0));
+    let scheduled_skill_options = || SkillWriterAutomationOptions {
+        trigger: AutomationTrigger::Scheduler,
+        provider: "cursor".to_string(),
+        query: "automation".to_string(),
+        evidence_limit: 5,
+        profile_root: Some(profile_root.clone()),
+        ..SkillWriterAutomationOptions::default()
+    };
+
+    let homeless_context = cg.automation_project_context(None).unwrap();
+    let failed = match run_skill_writer_with_backend_and_retrieval(
+        &homeless_context,
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_skill_options(),
+    )
+    .await
+    {
+        Err(AutomationRunError::PartialEffect {
+            ledger_record: Some(record),
+            ..
+        }) => *record,
+        other => panic!("expected a recorded partial effect, got {other:?}"),
+    };
+    assert_eq!(failed.error_retryable, Some(true));
+    assert_eq!(
+        failed.applied_ops.as_ref().unwrap()["deployment"]["retry_required"],
+        json!(true)
+    );
+
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
+    let dispatch = run_combined_review_with_backend_and_retrieval(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+
+    // The owed skill deployment wins over combining: the dispatcher falls back
+    // to per-task runs so the standalone writer reconciles instead of the
+    // combined run replaying the already-committed mutation.
+    assert_eq!(
+        backend.calls(),
+        0,
+        "a pending skill deployment must defer the combined backend call"
+    );
+    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
+        panic!("expected a deferred combined dispatch, got {dispatch:?}");
+    };
+    assert_eq!(reason, "skill_deployment_pending");
+
+    std::fs::create_dir_all(host_home.join(".claude")).unwrap();
+    let deployed_skill = host_home.join(".claude/skills/combined-review/SKILL.md");
+    let retry = run_skill_writer_with_backend_and_retrieval(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        scheduled_skill_options(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(skill_backend.calls(), 1);
+    assert_eq!(retry.report["status"], json!("deployment_reconciled"));
+    assert!(
+        deployed_skill.is_file(),
+        "the standalone fallback must deploy the committed skill to {}",
+        deployed_skill.display()
+    );
+}

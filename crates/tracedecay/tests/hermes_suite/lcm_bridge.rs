@@ -1245,7 +1245,7 @@ messages = [
 ]
 
 provider = plugin.TracedecayMemoryProvider()
-provider.initialize(session_id="telegram-dm")
+provider.initialize(session_id="telegram-dm", cwd=plugin.tools.hermes_home_dir())
 provider.sync_turn(
     "compare both repositories",
     "done",

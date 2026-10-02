@@ -1923,7 +1923,8 @@ pub enum CanonicalObservationFactV1 {
         timestamp: Option<i64>,
     },
     ToolInvocation {
-        invocation_id: ObservationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<ObservationId>,
         name: String,
         arguments: Value,
     },
@@ -2072,9 +2073,11 @@ impl CanonicalObservationFactV1 {
                 name,
                 ..
             } => {
-                invocation_id
-                    .validate()
-                    .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                if let Some(invocation_id) = invocation_id {
+                    invocation_id
+                        .validate()
+                        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                }
                 validate_canonical_label(name)?;
             }
             Self::ToolResult {

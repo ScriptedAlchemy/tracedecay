@@ -30,10 +30,16 @@ use crate::generation::{GraphRowDigestSum, RowLanes};
 
 /// Name of a generation's row index beside its container.
 pub(crate) const ROW_INDEX_FILE: &str = "rows.index";
+/// Identity-order offsets of the canonical entity rows a layerable base
+/// retains for exact endpoint point reads.
+pub(crate) const ENTITY_ROW_OFFSETS_FILE: &str = "entity-rows.offsets";
 
 const MAGIC: &[u8; 8] = b"TDROWIX1";
 const HEADER_BYTES: u64 = 24;
 const RECORD_BYTES: u64 = 56;
+const ENTITY_ROW_OFFSETS_MAGIC: &[u8; 8] = b"TDENTRW1";
+const ENTITY_ROW_OFFSETS_HEADER_BYTES: u64 = 16;
+const ENTITY_ROW_OFFSET_BYTES: u64 = 16;
 
 type RowKey = [u8; 16];
 
@@ -341,5 +347,145 @@ impl RowIndex {
             sum.add_row_lanes(record_parts(&record).1);
         }
         Ok(sum)
+    }
+}
+
+/// Writes canonical entity-row byte ranges in identity order without
+/// retaining one offset per corpus entity in memory.
+pub(crate) struct EntityRowOffsetsWriter {
+    writer: BufWriter<File>,
+    expected: u64,
+    written: u64,
+}
+
+impl EntityRowOffsetsWriter {
+    pub(crate) fn create(path: &Path, expected: usize) -> Result<Self, GraphDbError> {
+        let expected =
+            u64::try_from(expected).map_err(|_| corrupt("entity row offset count exceeds u64"))?;
+        let file = File::create(path).map_err(|error| index_io("entity offsets create", error))?;
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(ENTITY_ROW_OFFSETS_MAGIC)
+            .and_then(|()| writer.write_all(&expected.to_be_bytes()))
+            .map_err(|error| index_io("entity offsets header write", error))?;
+        Ok(Self {
+            writer,
+            expected,
+            written: 0,
+        })
+    }
+
+    pub(crate) fn push(&mut self, offset: u64, length: u64) -> Result<(), GraphDbError> {
+        if self.written >= self.expected || length == 0 {
+            return Err(corrupt("entity row offsets exceed their declared bounds"));
+        }
+        self.writer
+            .write_all(&offset.to_be_bytes())
+            .and_then(|()| self.writer.write_all(&length.to_be_bytes()))
+            .map_err(|error| index_io("entity offsets write", error))?;
+        self.written += 1;
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Result<(), GraphDbError> {
+        if self.written != self.expected {
+            return Err(corrupt(
+                "entity row offsets do not cover every declared entity",
+            ));
+        }
+        self.writer
+            .into_inner()
+            .map_err(|error| index_io("entity offsets flush", error.into_error()))?
+            .sync_all()
+            .map_err(|error| index_io("entity offsets sync", error))
+    }
+}
+
+/// Point-readable identity-order ranges into a cold base's canonical entity
+/// row file.
+pub(crate) struct EntityRowOffsets {
+    path: PathBuf,
+    file: Mutex<File>,
+    entities: u64,
+    rows_bytes: u64,
+}
+
+impl EntityRowOffsets {
+    pub(crate) fn open(path: &Path, rows: &Path) -> Result<Self, GraphDbError> {
+        let mut file = File::open(path).map_err(|error| index_io("entity offsets open", error))?;
+        let mut header = [0_u8; ENTITY_ROW_OFFSETS_HEADER_BYTES as usize];
+        file.read_exact(&mut header)
+            .map_err(|error| index_io("entity offsets header read", error))?;
+        if &header[..8] != ENTITY_ROW_OFFSETS_MAGIC {
+            return Err(corrupt("entity row offsets have a foreign header"));
+        }
+        let entities = u64::from_be_bytes(
+            header[8..]
+                .try_into()
+                .map_err(|_| corrupt("entity row offset count is malformed"))?,
+        );
+        let expected = entities
+            .checked_mul(ENTITY_ROW_OFFSET_BYTES)
+            .and_then(|bytes| bytes.checked_add(ENTITY_ROW_OFFSETS_HEADER_BYTES))
+            .ok_or_else(|| corrupt("entity row offset count overflows its file length"))?;
+        let length = file
+            .metadata()
+            .map_err(|error| index_io("entity offsets metadata", error))?
+            .len();
+        if length != expected {
+            return Err(corrupt("entity row offset length does not match its count"));
+        }
+        let rows_bytes = rows
+            .metadata()
+            .map_err(|error| index_io("entity rows metadata", error))?
+            .len();
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: Mutex::new(file),
+            entities,
+            rows_bytes,
+        })
+    }
+
+    pub(crate) fn entities(&self) -> u64 {
+        self.entities
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn row(&self, ordinal: u32) -> Result<(u64, u64), GraphDbError> {
+        let ordinal = u64::from(ordinal);
+        if ordinal >= self.entities {
+            return Err(corrupt("entity row ordinal exceeds its offset index"));
+        }
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| GraphDbError::unavailable("graph entity offset lock is poisoned"))?;
+        file.seek(SeekFrom::Start(
+            ENTITY_ROW_OFFSETS_HEADER_BYTES + ordinal * ENTITY_ROW_OFFSET_BYTES,
+        ))
+        .map_err(|error| index_io("entity offsets seek", error))?;
+        let mut record = [0_u8; ENTITY_ROW_OFFSET_BYTES as usize];
+        file.read_exact(&mut record)
+            .map_err(|error| index_io("entity offsets read", error))?;
+        let word = |range: std::ops::Range<usize>| {
+            let mut bytes = [0_u8; 8];
+            bytes.copy_from_slice(&record[range]);
+            u64::from_be_bytes(bytes)
+        };
+        let (offset, length) = (word(0..8), word(8..16));
+        if length == 0 {
+            return Err(corrupt("entity row offset records an empty row"));
+        }
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.rows_bytes)
+        {
+            return Err(corrupt("entity row offset exceeds its row file"));
+        }
+        Ok((offset, length))
     }
 }

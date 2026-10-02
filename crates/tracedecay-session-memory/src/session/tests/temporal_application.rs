@@ -37,8 +37,8 @@ use crate::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalBudgetStageV1,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalQuery,
+    SessionRetrievalService, SessionRetrievalUnavailableCause, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalQuery,
 };
 
 const DIGEST: [u8; 32] = [0x5a; 32];
@@ -1410,5 +1410,11 @@ async fn external_payload_rewritten_between_reads_is_a_typed_refusal() {
     }
     .build();
     let outcome = retrieve(&service, &second_read, external()).await;
-    assert_eq!(outcome, SessionRetrievalOutcome::Unavailable, "{outcome:?}");
+    assert_eq!(
+        outcome,
+        SessionRetrievalOutcome::Unavailable(
+            SessionRetrievalUnavailableCause::HydrationUnavailable
+        ),
+        "{outcome:?}"
+    );
 }
