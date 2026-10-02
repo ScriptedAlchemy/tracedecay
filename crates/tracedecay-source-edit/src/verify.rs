@@ -131,7 +131,7 @@ pub(super) fn application_contract_error(
 pub(super) fn application_problem(
     _error: tracedecay_contracts::ApplicationProblem,
 ) -> TraceDecayError {
-    config_error("source edit was not found or not authorized")
+    TraceDecayError::not_found("source edit was not found or not authorized")
 }
 
 pub(super) fn domain_error(error: tracedecay_domain::DomainError) -> TraceDecayError {

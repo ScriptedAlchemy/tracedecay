@@ -1,19 +1,145 @@
-import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode/plugin"
 
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 const MAX_GUIDANCE_BYTES = 8 * 1024
+const HOOK_TIMEOUT_MS = 10_000
+const MAX_PENDING_GUIDANCE_PER_SESSION = 16
+const MAX_IDLE_GUIDANCE_SESSIONS = 128
+
+// Durable session boundaries on OpenCode's public event stream. The
+// deprecated `session.idle` / `session.status` pair is not emitted for V2
+// executions, and no stream event reports a tool edit; edits arrive only
+// through the `execute.after` tool hook.
+export const SESSION_BOUNDARY_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+])
+
+export interface StreamEvent {
+  readonly type: string
+  readonly location?: { readonly directory: string }
+  readonly data?: unknown
+}
+
+export function sessionOf(event: { readonly data?: unknown }): string | undefined {
+  const data = event.data as { sessionID?: unknown } | undefined
+  return typeof data?.sessionID === "string" ? data.sessionID : undefined
+}
+
+// A shared OpenCode server loads one plugin instance per location but
+// publishes every location's events to each of them, and the execution
+// boundary events carry no `location`. Sessions are attributed from the
+// located events that precede a boundary (`session.created`, tool and step
+// events) so a boundary is dispatched once, by the instance whose location
+// owns the session.
+export class SessionLocations {
+  private readonly owned = new Set<string>()
+
+  constructor(private readonly directory: string) {}
+
+  observe(event: StreamEvent): void {
+    const sessionID = sessionOf(event)
+    if (!sessionID) return
+    if (event.type === "session.deleted") {
+      this.owned.delete(sessionID)
+      return
+    }
+    if (!event.location) return
+    if (event.location.directory === this.directory) {
+      this.owned.add(sessionID)
+    } else {
+      this.owned.delete(sessionID)
+    }
+  }
+
+  isSessionBoundary(event: StreamEvent): boolean {
+    const sessionID = sessionOf(event)
+    return (
+      SESSION_BOUNDARY_EVENT_TYPES.has(event.type) &&
+      sessionID !== undefined &&
+      this.owned.has(sessionID)
+    )
+  }
+}
+
+// Daemon guidance is model-facing context. V2 server plugins have no client
+// UI channel, so guidance waits for the owning session's next model request
+// and is injected there as system context.
+export class PendingGuidance {
+  private readonly bySession = new Map<string, { guidance: string[]; inFlight: number }>()
+  private readonly idle = new Set<string>()
+
+  deliveryFor(sessionID: string): (guidance: string | undefined) => void {
+    let session = this.bySession.get(sessionID)
+    if (!session) {
+      session = { guidance: [], inFlight: 0 }
+      this.bySession.set(sessionID, session)
+    }
+    this.idle.delete(sessionID)
+    session.inFlight++
+    const captured = session
+    let settled = false
+    return (guidance) => {
+      if (settled) return
+      settled = true
+      captured.inFlight--
+      if (this.bySession.get(sessionID) !== captured) return
+      if (guidance) {
+        if (captured.guidance.length >= MAX_PENDING_GUIDANCE_PER_SESSION) captured.guidance.shift()
+        captured.guidance.push(guidance)
+      }
+      if (captured.inFlight !== 0) return
+      if (captured.guidance.length === 0) {
+        this.delete(sessionID)
+        return
+      }
+      // Active hooks retain their delivery tokens. Only completed, undrained
+      // sessions count toward the idle retention limit; the oldest expires first.
+      this.idle.add(sessionID)
+      if (this.idle.size > MAX_IDLE_GUIDANCE_SESSIONS) {
+        const oldest = this.idle.values().next()
+        if (!oldest.done) this.delete(oldest.value)
+      }
+    }
+  }
+
+  delete(sessionID: string): void {
+    this.bySession.delete(sessionID)
+    this.idle.delete(sessionID)
+  }
+
+  clear(): void {
+    this.bySession.clear()
+    this.idle.clear()
+  }
+
+  drain(sessionID: string): string[] {
+    const session = this.bySession.get(sessionID)
+    if (!session) return []
+    const guidance = session.guidance.splice(0)
+    if (session.inFlight === 0) this.delete(sessionID)
+    return guidance
+  }
+}
 
 export async function dispatch(
   command: string,
   payload: unknown,
   executable = TRACEDECAY_BIN,
+  cwd?: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
-  let process: Bun.Subprocess
+  let process: Bun.Subprocess<Blob, "pipe", "ignore">
   try {
     process = Bun.spawn([executable, command], {
+      cwd,
       stdin: new Blob([JSON.stringify(payload)]),
       stdout: "pipe",
       stderr: "ignore",
+      timeout: HOOK_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      signal,
     })
   } catch {
     return undefined
@@ -28,14 +154,16 @@ export async function dispatch(
 export function dispatchAfterAck(
   command: string,
   payload: unknown,
-  deliver: (guidance: string | undefined) => Promise<void>,
+  deliver: (guidance: string | undefined) => void,
   executable = TRACEDECAY_BIN,
+  cwd?: string,
+  signal?: AbortSignal,
 ): void {
   // `dispatch` spawns synchronously before its first await, so the native
   // hook process owns the event before OpenCode receives this callback's ack.
-  void dispatch(command, payload, executable)
+  void dispatch(command, payload, executable, cwd, signal)
     .then(deliver)
-    .catch(() => undefined)
+    .catch(() => deliver(undefined))
 }
 
 async function readBoundedGuidance(
@@ -71,35 +199,59 @@ async function readBoundedGuidance(
   return guidance.length > 0 ? guidance : undefined
 }
 
-export const TraceDecayPlugin: Plugin = async ({ client }) => {
-  const deliver = async (guidance: string | undefined): Promise<void> => {
-    if (!guidance) return
-    await client.tui.showToast({
-      body: { message: guidance, variant: "info" },
-    })
-  }
+export const TraceDecayPlugin: Plugin.Plugin = {
+  id: "tracedecay-hooks",
+  async setup(ctx) {
+    const cwd = ctx.location.directory
+    const sessions = new SessionLocations(cwd)
+    const pending = new PendingGuidance()
+    const controller = new AbortController()
 
-  return {
-    event: ({ event }) => {
-      if (
-        event.type === "file.edited" ||
-        event.type === "lsp.updated" ||
-        event.type === "session.idle" ||
-        (event.type === "session.status" && event.properties.status.type === "idle")
-      ) {
-        dispatchAfterAck("hook-opencode-event", event, deliver)
+    await ctx.session.hook("context", (event) => {
+      for (const text of pending.drain(event.sessionID)) {
+        event.system.push({ type: "text", text })
       }
-    },
-    "tool.execute.after": (
-      input: Parameters<NonNullable<Hooks["tool.execute.after"]>>[0],
-      output: Parameters<NonNullable<Hooks["tool.execute.after"]>>[1],
-    ) => {
-      dispatchAfterAck("hook-opencode-tool-after", { input, output }, deliver)
-    },
-  }
+    })
+
+    await ctx.tool.hook("execute.after", (event) => {
+      dispatchAfterAck(
+        "hook-opencode-tool-after",
+        event,
+        pending.deliveryFor(event.sessionID),
+        TRACEDECAY_BIN,
+        cwd,
+        controller.signal,
+      )
+    })
+
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          sessions.observe(event)
+          const sessionID = sessionOf(event)
+          if (event.type === "session.deleted" && sessionID) pending.delete(sessionID)
+          if (!sessions.isSessionBoundary(event)) continue
+          if (!sessionID) continue
+          dispatchAfterAck(
+            "hook-opencode-event",
+            event,
+            pending.deliveryFor(sessionID),
+            TRACEDECAY_BIN,
+            cwd,
+            controller.signal,
+          )
+        }
+      } catch {
+        // The subscription ends with the plugin scope; the abort below is the
+        // only expected termination.
+      }
+    })()
+
+    return () => {
+      controller.abort()
+      pending.clear()
+    }
+  },
 }
 
-export default {
-  id: "tracedecay-hooks",
-  server: TraceDecayPlugin,
-} satisfies PluginModule
+export default TraceDecayPlugin

@@ -15,6 +15,7 @@
 //! batch.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use gix::bstr::ByteSlice;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
@@ -66,6 +67,17 @@ pub struct ClassifiedChangeV1 {
     pub class: WorktreeChangeClassV1,
 }
 
+/// One classified change whose Git path bytes are not UTF-8. No `String`
+/// names it, so it lives outside `changes`: a lossy decode could equal a
+/// real UTF-8 path and make the string-keyed candidate and changed sets
+/// treat this change as that file's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonUtf8ClassifiedChangeV1 {
+    /// The exact Git path bytes.
+    pub git_path: Vec<u8>,
+    pub class: WorktreeChangeClassV1,
+}
+
 /// A complete, truthful classification of one worktree snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeChangeClassificationV1 {
@@ -73,6 +85,12 @@ pub struct WorktreeChangeClassificationV1 {
     /// baseline present in the checkout).
     committed_baseline: BTreeSet<String>,
     changes: Vec<ClassifiedChangeV1>,
+    /// Changes whose Git path bytes are not UTF-8, kept byte-exact so the
+    /// worktree is still dirty on a non-UTF-8-only transition.
+    non_utf8_changes: Vec<NonUtf8ClassifiedChangeV1>,
+    /// Present paths whose Git bytes are not UTF-8, so no `String` above
+    /// names them.
+    non_utf8_paths: BTreeSet<Vec<u8>>,
 }
 
 impl WorktreeChangeClassificationV1 {
@@ -82,17 +100,22 @@ impl WorktreeChangeClassificationV1 {
         let index = repository
             .index_or_empty()
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-        let committed_baseline = index
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                std::str::from_utf8(entry.path(&index).as_ref())
-                    .ok()
-                    .map(str::to_owned)
-            })
-            .collect::<BTreeSet<_>>();
+        let mut committed_baseline = BTreeSet::new();
+        let mut non_utf8_paths = BTreeSet::new();
+        for entry in index.entries() {
+            let path: &[u8] = entry.path(&index).as_ref();
+            match std::str::from_utf8(path) {
+                Ok(path) => {
+                    committed_baseline.insert(path.to_owned());
+                }
+                Err(_) => {
+                    non_utf8_paths.insert(path.to_vec());
+                }
+            }
+        }
 
         let mut changes = Vec::new();
+        let mut non_utf8_changes = Vec::new();
         let status = repository
             .status(gix::progress::Discard)
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
@@ -115,16 +138,53 @@ impl WorktreeChangeClassificationV1 {
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-            let path = item.location().to_str_lossy().into_owned();
+            let location: &[u8] = item.location().as_ref();
             if let Some(class) = classify_item(&item) {
-                changes.push(ClassifiedChangeV1 { path, class });
+                match location.to_str() {
+                    Ok(path) => changes.push(ClassifiedChangeV1 {
+                        path: path.to_owned(),
+                        class,
+                    }),
+                    Err(_) => {
+                        if class.presents_content() {
+                            non_utf8_paths.insert(location.to_vec());
+                        } else {
+                            non_utf8_paths.remove(location);
+                        }
+                        non_utf8_changes.push(NonUtf8ClassifiedChangeV1 {
+                            git_path: location.to_vec(),
+                            class,
+                        });
+                    }
+                }
             }
         }
 
         Ok(Self {
             committed_baseline,
             changes,
+            non_utf8_changes,
+            non_utf8_paths,
         })
+    }
+
+    /// Paths whose Git bytes are not UTF-8, present or not.
+    pub fn non_utf8_paths(&self) -> &BTreeSet<Vec<u8>> {
+        &self.non_utf8_paths
+    }
+
+    /// Paths no logical path can name because their Git bytes are not UTF-8,
+    /// limited to those naming a regular file (through links) under
+    /// `project_root`, the files capture would read.
+    pub fn non_utf8_files(&self, project_root: &Path) -> Vec<Vec<u8>> {
+        self.non_utf8_paths
+            .iter()
+            .filter(|path| {
+                gix::path::try_from_byte_slice(path)
+                    .is_ok_and(|relative| project_root.join(relative).is_file())
+            })
+            .cloned()
+            .collect()
     }
 
     /// Present files worth hashing and considering for (re)indexing: the
@@ -140,6 +200,21 @@ impl WorktreeChangeClassificationV1 {
             }
         }
         candidates
+    }
+
+    /// Whether the worktree carries any change relative to the committed
+    /// baseline, UTF-8-named or not.
+    pub fn has_changes(&self) -> bool {
+        !(self.changes().is_empty() && self.non_utf8_changes().is_empty())
+    }
+
+    /// Whether any classified change is a merge conflict.
+    pub fn has_conflicted(&self) -> bool {
+        self.changes()
+            .iter()
+            .map(|change| change.class)
+            .chain(self.non_utf8_changes().iter().map(|change| change.class))
+            .any(|class| class == WorktreeChangeClassV1::Conflicted)
     }
 
     /// Paths whose indexing evidence changed relative to the last generation:
@@ -163,9 +238,16 @@ impl WorktreeChangeClassificationV1 {
             .collect()
     }
 
-    /// All classified changes (for reporting and tests).
+    /// All classified changes a `String` can name (for reporting and tests).
+    /// Non-UTF-8 changes live under [`Self::non_utf8_changes`].
     pub fn changes(&self) -> &[ClassifiedChangeV1] {
         &self.changes
+    }
+
+    /// All classified changes whose Git path bytes are not UTF-8, kept
+    /// byte-exact (for reporting and tests).
+    pub fn non_utf8_changes(&self) -> &[NonUtf8ClassifiedChangeV1] {
+        &self.non_utf8_changes
     }
 
     /// The class recorded for `path`, if any change touched it.

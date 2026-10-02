@@ -533,7 +533,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     assert_eq!(
         missing_json["message"],
         json!(
-            "source edit failed before the effect: config error: failed to read src/missing.rs: file was not found"
+            "source edit failed before the effect: failed to read src/missing.rs: file was not found"
         ),
         "{missing_json}"
     );

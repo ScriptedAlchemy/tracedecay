@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use tracedecay_domain::{
-    ContentDigest, FileOccurrenceId, ManifestDigest, ProjectionKeyV1, ProjectionKindV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
-    canonical_text::sha256_hex,
+    CodeSourceOmissionReasonV1, ContentDigest, FileOccurrenceId, ManifestDigest,
+    OmittedCodeSourceV1, ProjectionKeyV1, ProjectionKindV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SnapshotFileDispositionV1, canonical_text::sha256_hex,
 };
 
 use crate::code_index::chunks::content_digest;
@@ -134,6 +134,7 @@ fn projection_key() -> Result<ProjectionKeyV1, CodeIndexSchedulerErrorV1> {
 fn snapshot_content_identity(
     files: &[SanitizedCodeFileV1],
     sanitization_receipts: &[SanitizationReceiptId],
+    omitted_sources: &[OmittedCodeSourceV1],
 ) -> ContentDigest {
     let mut bytes = Vec::new();
     for file in files {
@@ -145,6 +146,19 @@ fn snapshot_content_identity(
     for receipt in sanitization_receipts {
         bytes.extend_from_slice(receipt.as_str().as_bytes());
         bytes.push(0xfe);
+    }
+    // Length-prefixed: raw Git path bytes may contain any separator byte.
+    for source in omitted_sources {
+        bytes.extend_from_slice(&(source.git_path.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&source.git_path);
+        match &source.reason {
+            CodeSourceOmissionReasonV1::UnrepresentablePath => bytes.push(0xfd),
+            CodeSourceOmissionReasonV1::PrivacyWithheld { detail } => {
+                bytes.push(0xfc);
+                bytes.extend_from_slice(&(detail.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(detail.as_bytes());
+            }
+        }
     }
     content_digest(&bytes)
 }

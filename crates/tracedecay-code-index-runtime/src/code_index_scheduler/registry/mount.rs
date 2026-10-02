@@ -1862,8 +1862,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 if prepare_graph && graph_already_serves {
                     // A retained native graph serves without a full decode.
                     // Explicit complete-generation demand still admits binding
-                    // and seating, independently of redundant activation.
-                    prepare_graph = serving_empty
+                    // and seating, independently of redundant activation. A
+                    // predecessor in the serving slot does not satisfy that
+                    // demand for the text owner's generation.
+                    let text_generation_is_unseated = graph_text.as_ref().is_some_and(|text| {
+                        let generation_id = &text.metadata().manifest().generation_id;
+                        worker_serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                            .is_none_or(|seat| {
+                                &seat.generation().manifest().generation_id != generation_id
+                            })
+                    });
+                    prepare_graph = text_generation_is_unseated
                         && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
                 let retained_generation = graph_text

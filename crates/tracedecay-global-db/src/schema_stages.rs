@@ -866,10 +866,7 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(TRANSCRIPT_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
-    transaction
-        .execute_batch(managed_test_runs::MANAGED_TEST_RUN_SCHEMA)
-        .await
-        .map_err(|error| global_db_operation_error("initialize managed test-run schema", error))?;
+    managed_test_runs::ensure_managed_test_run_schema(transaction).await?;
     transaction
         .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
         .await

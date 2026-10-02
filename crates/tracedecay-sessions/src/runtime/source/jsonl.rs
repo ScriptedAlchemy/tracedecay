@@ -62,7 +62,9 @@ pub(in crate::runtime) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
 const UNCHANGED_GENERATION_CACHE_CAP: usize = 4096;
 
-/// Process-local proof that one exact durable checkpoint already reached EOF.
+/// Process-local proof that one exact durable checkpoint is still the prefix of
+/// an unchanged file: at EOF it settles a repoll, short of it the next batch
+/// resumes from its digest instead of rehashing the prefix.
 ///
 /// Entries are minted only after revalidation succeeds. A miss or any native
 /// identity, size, high-resolution token, or checkpoint mismatch falls back to
@@ -229,7 +231,7 @@ struct BoundedLatestProofCache<N, P> {
     admissions: BinaryHeap<CacheAdmission<N>>,
 }
 
-impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
+impl<N: Copy + Eq + Ord + Hash, P> BoundedLatestProofCache<N, P> {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -238,8 +240,16 @@ impl<N: Copy + Eq + Ord + Hash, P: Copy + Eq> BoundedLatestProofCache<N, P> {
         }
     }
 
-    fn contains(&self, native_identity: &N, proof: &P) -> bool {
-        self.entries.get(native_identity) == Some(proof)
+    fn get(&self, native_identity: &N) -> Option<&P> {
+        self.entries.get(native_identity)
+    }
+
+    #[cfg(test)]
+    fn contains(&self, native_identity: &N, proof: &P) -> bool
+    where
+        P: PartialEq,
+    {
+        self.get(native_identity) == Some(proof)
     }
 
     #[cfg(test)]
@@ -290,65 +300,82 @@ fn stable_cache_priority(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// An [`UnchangedGenerationCacheKey`] with what resuming at its position needs
+/// and the key cannot carry.
+#[derive(Clone)]
+struct UnchangedGenerationProof {
+    key: UnchangedGenerationCacheKey,
+    /// Identity window hash of the file the proving scan read, which differs
+    /// from `key.stable_file_identity` once a replaced file resumed its
+    /// recorded generation.
+    physical_identity: u64,
+    /// Digest of `[0, key.position)`.
+    digest: ResumeDigest,
+    /// More than one cursor resumed this exact checkpoint. One of them can
+    /// advance without taking the proof from the cursor that is still here.
+    shared: bool,
+}
+
+impl UnchangedGenerationProof {
+    fn same_cached_file(&self, other: &Self) -> bool {
+        other.key.size == self.key.size
+            && other.key.change == self.key.change
+            && other.key.generation == self.key.generation
+            && other.key.stable_file_identity == self.key.stable_file_identity
+    }
+}
+
+/// Cursors that can resume one file without rehashing its prefix. A project
+/// scope and the profile scope each catch the same rollout up under their own
+/// cursor. A batch moves the proof it alone resumed from; a checkpoint two
+/// cursors share stays until the last of them advances.
+///
+/// ponytail: a file read under more cursors than this rehashes on eviction;
+/// key proofs by scope if that shows up.
+const UNCHANGED_GENERATION_PROOFS_PER_FILE: usize = 2;
+
 type UnchangedGenerationCache =
-    BoundedLatestProofCache<JsonlNativeFileIdentity, UnchangedGenerationCacheKey>;
+    BoundedLatestProofCache<JsonlNativeFileIdentity, Vec<UnchangedGenerationProof>>;
 
 fn unchanged_generation_cache() -> &'static Mutex<UnchangedGenerationCache> {
     static CACHE: std::sync::OnceLock<Mutex<UnchangedGenerationCache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP)))
 }
 
+/// Tests keep the process-global cache off except under the directories a
+/// [`HoldUnchangedGenerationCache`] names, so one test's proof never settles
+/// another test's scan. Keyed by path rather than by thread: admission scans
+/// run on blocking-pool threads, not on the test thread holding the cache.
 #[cfg(test)]
-fn reset_unchanged_generation_cache_for_test() {
-    let Ok(mut cache) = unchanged_generation_cache().lock() else {
-        return;
-    };
-    *cache = BoundedLatestProofCache::new(UNCHANGED_GENERATION_CACHE_CAP);
+fn held_unchanged_generation_roots() -> std::sync::MutexGuard<'static, Vec<std::path::PathBuf>> {
+    static HELD: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
-thread_local! {
-    static HOLD_UNCHANGED_GENERATION_CACHE: Cell<bool> = const { Cell::new(false) };
+fn unchanged_generation_cache_serves(path: &Path) -> bool {
+    held_unchanged_generation_roots()
+        .iter()
+        .any(|root| path.starts_with(root))
 }
 
-/// Serializes the process-global cache against the tests that need it warm.
-///
-/// The reset below is process-global but the hold flag is thread-local, so a
-/// concurrent scan on another test thread used to wipe a holder's warm entry
-/// between its two polls. Every non-holding scan takes this lock for the
-/// duration of its reset, and a holder keeps it for the whole test.
-#[cfg(test)]
-fn unchanged_generation_cache_isolation() -> &'static Mutex<()> {
-    static ISOLATION: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    ISOLATION.get_or_init(|| Mutex::new(()))
+#[cfg(not(test))]
+fn unchanged_generation_cache_serves(_path: &Path) -> bool {
+    true
 }
 
 #[cfg(test)]
-fn isolate_unchanged_generation_cache_unless_held() {
-    if HOLD_UNCHANGED_GENERATION_CACHE.with(Cell::get) {
-        return;
-    }
-    let _serialized = unchanged_generation_cache_isolation()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    reset_unchanged_generation_cache_for_test();
-}
-
-#[cfg(test)]
-pub(super) struct HoldUnchangedGenerationCache {
-    _serialized: std::sync::MutexGuard<'static, ()>,
+pub(in crate::runtime) struct HoldUnchangedGenerationCache {
+    root: std::path::PathBuf,
 }
 
 #[cfg(test)]
 impl HoldUnchangedGenerationCache {
-    pub(super) fn enter() -> Self {
-        let serialized = unchanged_generation_cache_isolation()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_unchanged_generation_cache_for_test();
-        HOLD_UNCHANGED_GENERATION_CACHE.with(|held| held.set(true));
+    pub(in crate::runtime) fn enter(root: &Path) -> Self {
+        held_unchanged_generation_roots().push(root.to_path_buf());
         Self {
-            _serialized: serialized,
+            root: root.to_path_buf(),
         }
     }
 }
@@ -380,33 +407,84 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
 #[cfg(test)]
 impl Drop for HoldUnchangedGenerationCache {
     fn drop(&mut self) {
-        HOLD_UNCHANGED_GENERATION_CACHE.with(|held| held.set(false));
-        reset_unchanged_generation_cache_for_test();
+        held_unchanged_generation_roots().retain(|root| root != &self.root);
     }
 }
 
-fn unchanged_generation_cache_hit(key: UnchangedGenerationCacheKey) -> bool {
-    unchanged_generation_cache()
-        .lock()
-        .map(|cache| cache.contains(&key.native_identity, &key))
-        .unwrap_or(false)
+fn cached_unchanged_generation(
+    path: &Path,
+    key: UnchangedGenerationCacheKey,
+) -> Option<UnchangedGenerationProof> {
+    if !unchanged_generation_cache_serves(path) {
+        return None;
+    }
+    let cache = unchanged_generation_cache().lock().ok()?;
+    cache
+        .get(&key.native_identity)?
+        .iter()
+        .find(|proof| proof.key == key)
+        .cloned()
 }
 
-fn remember_unchanged_generation(key: UnchangedGenerationCacheKey) {
-    let Ok(mut cache) = unchanged_generation_cache().lock() else {
+fn remember_unchanged_generation_if_settled(
+    path: &Path,
+    proof: UnchangedGenerationProof,
+    resumed_position: u64,
+) {
+    if !unchanged_generation_cache_serves(path) {
         return;
-    };
-    cache.insert(key.native_identity, key);
-}
-
-fn remember_unchanged_generation_if_settled(key: UnchangedGenerationCacheKey) {
+    }
     // A proof taken while the change time is still inside the coarse quantum
     // can share that token with a later same-length rewrite. Remembering it
     // would let the settled repoll skip the bytes. Record the cache only once
     // the token can no longer be shared.
-    if jsonl_change_token_settled(key.change) {
-        remember_unchanged_generation(key);
+    if !jsonl_change_token_settled(proof.key.change) {
+        return;
     }
+    let Ok(mut cache) = unchanged_generation_cache().lock() else {
+        return;
+    };
+    let native_identity = proof.key.native_identity;
+    let mut proofs = cache.get(&native_identity).cloned().unwrap_or_default();
+    proofs.retain(|kept| proof.same_cached_file(kept));
+    // A cursor that was the only one at `resumed_position` takes that slot
+    // with it. A shared checkpoint stays for the cursor that has not moved.
+    if resumed_position != proof.key.position {
+        let source_shared = proofs
+            .iter()
+            .find(|kept| kept.key.position == resumed_position)
+            .is_some_and(|kept| kept.shared);
+        if source_shared {
+            if let Some(source) = proofs
+                .iter_mut()
+                .find(|kept| kept.key.position == resumed_position)
+            {
+                source.shared = false;
+            }
+        } else {
+            proofs.retain(|kept| kept.key.position != resumed_position);
+        }
+    }
+    if let Some(index) = proofs.iter().position(|kept| kept.key == proof.key) {
+        let mut existing = proofs.remove(index);
+        existing.digest = proof.digest;
+        existing.physical_identity = proof.physical_identity;
+        // Arriving from a different cursor, not refreshing this same one.
+        if resumed_position != proof.key.position {
+            existing.shared = true;
+        }
+        proofs.insert(0, existing);
+    } else {
+        proofs.insert(
+            0,
+            UnchangedGenerationProof {
+                shared: false,
+                ..proof
+            },
+        );
+    }
+    proofs.truncate(UNCHANGED_GENERATION_PROOFS_PER_FILE);
+    cache.insert(native_identity, proofs);
 }
 
 /// A cache entry needs a change token whose equality proves the bytes
@@ -419,7 +497,7 @@ fn unchanged_generation_cache_key(
     resume: JsonlResumeState,
 ) -> Option<UnchangedGenerationCacheKey> {
     if previous.position == 0
-        || previous.position != metadata.len()
+        || previous.position > metadata.len()
         || previous.file_id != resume.generation
     {
         return None;
@@ -1149,8 +1227,6 @@ fn try_stream_new_jsonl_raw_with_frame_limit(
     prefix_recovery: JsonlPrefixRecovery,
     max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
-    #[cfg(test)]
-    isolate_unchanged_generation_cache_unless_held();
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) => return Err(TranscriptIngestError::scan_io("open", path, error)),
@@ -1236,15 +1312,15 @@ impl<'a> PreparedJsonlScan<'a> {
         let file_size = metadata.len();
         let mtime = file_mtime_secs(&metadata);
         let change = jsonl_file_change_token_under(&metadata, witness);
-        let cached_unchanged = resume_state
+        let cached_proof = resume_state
             .and_then(|resume| {
                 unchanged_generation_cache_key(file.inner(), &metadata, change, previous, resume)
             })
-            .filter(|key| {
-                unchanged_generation_cache_hit(*key) && jsonl_change_token_settled(key.change)
-            });
-        let (physical_identity, identity_window_bytes) = if let Some(key) = cached_unchanged {
-            (key.stable_file_identity, 0)
+            .filter(|key| jsonl_change_token_settled(key.change))
+            .and_then(|key| cached_unchanged_generation(path, key));
+        let cached_unchanged = cached_proof.as_ref().map(|proof| proof.key);
+        let (physical_identity, identity_window_bytes) = if let Some(proof) = &cached_proof {
+            (proof.physical_identity, 0)
         } else {
             let (identity, read) = stable_jsonl_file_id(file.inner_mut(), &metadata)
                 .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
@@ -1276,24 +1352,26 @@ impl<'a> PreparedJsonlScan<'a> {
             // Under `Checkpoints` the recorded cursor is one more candidate of
             // a single forward walk that stops past the first changed record,
             // rather than a whole-prefix hash that can only say "changed".
-            let (resume_matches, recovered) = if recorded.is_some() && cached_unchanged.is_some() {
-                (true, None)
-            } else {
-                match match_recorded_prefix(
-                    &mut file,
-                    path,
-                    recorded,
-                    prefix_recovery,
-                    file_size,
-                    io,
-                )? {
-                    RecordedPrefix::Resumes(digest) => {
-                        validated_prefix = digest.map(|digest| (previous.position, digest));
-                        (true, None)
+            let (resume_matches, recovered) =
+                if let Some(proof) = cached_proof.filter(|_| recorded.is_some()) {
+                    validated_prefix = Some((previous.position, proof.digest));
+                    (true, None)
+                } else {
+                    match match_recorded_prefix(
+                        &mut file,
+                        path,
+                        recorded,
+                        prefix_recovery,
+                        file_size,
+                        io,
+                    )? {
+                        RecordedPrefix::Resumes(digest) => {
+                            validated_prefix = digest.map(|digest| (previous.position, digest));
+                            (true, None)
+                        }
+                        RecordedPrefix::Diverged(recovered) => (false, recovered),
                     }
-                    RecordedPrefix::Diverged(recovered) => (false, recovered),
-                }
-            };
+                };
             if resume_matches {
                 file_identity = resume_state.file_identity;
                 (previous.position, resume_state.generation)
@@ -1504,7 +1582,16 @@ impl<'a> PreparedJsonlScan<'a> {
                     cursor,
                     resume,
                 ) {
-                    remember_unchanged_generation_if_settled(key);
+                    remember_unchanged_generation_if_settled(
+                        path,
+                        UnchangedGenerationProof {
+                            key,
+                            physical_identity: self.generation.physical_identity,
+                            digest,
+                            shared: false,
+                        },
+                        self.generation.seek_to,
+                    );
                 }
             }
         }
@@ -1544,6 +1631,9 @@ struct RawJsonlBatchScanner<'a> {
     frames: Vec<RawJsonlRecord>,
     skipped: Vec<RawJsonlSkippedRange>,
     offset: u64,
+    /// Digest of `[0, offset)` before the reader hashed a frame this batch
+    /// then left for the next one.
+    offset_digest: ResumeDigest,
     read_through: u64,
     continuing_oversized: bool,
     frame_count: usize,
@@ -1585,9 +1675,10 @@ impl<'a> RawJsonlBatchScanner<'a> {
             max_record_bytes
         };
         let mut reader = RawJsonlFrameReader::new(reader, frame_limit);
-        reader.seed_resume_digest(resume_digest);
+        reader.seed_resume_digest(resume_digest.clone());
         Ok(Self {
             reader,
+            offset_digest: resume_digest,
             generation,
             max_new_bytes,
             max_frames,
@@ -1635,6 +1726,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 self.apply_step(&step);
                 return Ok(self);
             }
+            self.offset_digest = self.reader.resume_digest();
             let read_budget = self.read_budget();
             let frame = self
                 .reader
@@ -1817,6 +1909,13 @@ impl<'a> RawJsonlBatchScanner<'a> {
         io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<RawNewJsonl> {
         let scan_fingerprint = self.reader.resume_fingerprint(self.read_through);
+        // The reader hashed through `read_through`; a frame read past
+        // `offset` and left for the next batch sits beyond the cursor.
+        let offset_digest = if self.read_through == self.offset {
+            self.reader.resume_digest()
+        } else {
+            self.offset_digest
+        };
         let mut file = self.reader.into_inner().into_inner();
         let final_metadata = file
             .inner()
@@ -1886,26 +1985,33 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 path: path.to_path_buf(),
             });
         }
-        if self.offset == final_metadata.len() && self.deferred.is_none() {
-            let resume = JsonlResumeState {
-                generation: self.generation.file_id,
-                file_identity: self.generation.file_identity,
-                fingerprint: scan_fingerprint,
-            };
-            let cursor = StoredCursor {
-                position: self.offset,
-                mtime: file_mtime_secs(&final_metadata),
-                file_id: self.generation.file_id,
-            };
-            if let Some(key) = unchanged_generation_cache_key(
-                file.inner(),
-                &final_metadata,
-                final_change,
-                cursor,
-                resume,
-            ) {
-                remember_unchanged_generation_if_settled(key);
-            }
+        let resume = JsonlResumeState {
+            generation: self.generation.file_id,
+            file_identity: self.generation.file_identity,
+            fingerprint: offset_digest.fingerprint(self.offset),
+        };
+        let cursor = StoredCursor {
+            position: self.offset,
+            mtime: file_mtime_secs(&final_metadata),
+            file_id: self.generation.file_id,
+        };
+        if let Some(key) = unchanged_generation_cache_key(
+            file.inner(),
+            &final_metadata,
+            final_change,
+            cursor,
+            resume,
+        ) {
+            remember_unchanged_generation_if_settled(
+                path,
+                UnchangedGenerationProof {
+                    key,
+                    physical_identity: self.generation.physical_identity,
+                    digest: offset_digest,
+                    shared: false,
+                },
+                self.generation.seek_to,
+            );
         }
         Ok(RawNewJsonl {
             frames: self.frames,
@@ -2212,10 +2318,83 @@ mod tests {
         assert!(second.io.scan_payload_read_bytes >= first.new_cursor.position);
     }
 
+    fn resume_next_batch(
+        path: &Path,
+        previous: Option<&RawNewJsonl>,
+        max_new_bytes: u64,
+    ) -> RawNewJsonl {
+        try_stream_new_jsonl_raw_strict_with_resume(
+            path,
+            previous.map_or_else(StoredCursor::default, |scan| scan.new_cursor),
+            Some(max_new_bytes),
+            MAX_JSONL_RECORD_BYTES,
+            previous.map(|scan| JsonlResumeState {
+                generation: scan.new_cursor.file_id,
+                file_identity: scan.file_identity,
+                fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+            }),
+        )
+        .unwrap()
+    }
+
+    /// Two scopes catch one file up batch by batch under their own cursors.
+    /// However their batches interleave, each resumes from the digest its own
+    /// previous batch proved instead of rehashing the prefix.
+    #[test]
+    fn interleaved_cursors_each_resume_without_rehashing_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("two-scopes.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let mut scopes = [
+            (resume_next_batch(&path, None, 1_024), 1_024),
+            (resume_next_batch(&path, None, 1_536), 1_536),
+        ];
+        for _ in 0..8 {
+            for (scope, max_new_bytes) in &mut scopes {
+                let next = resume_next_batch(&path, Some(scope), *max_new_bytes);
+                assert_eq!(next.start_offset, scope.new_cursor.position);
+                assert_eq!(
+                    next.io.prefix_validation_bytes, 0,
+                    "the batch at {} rehashed its prefix",
+                    next.start_offset
+                );
+                *scope = next;
+            }
+        }
+    }
+
+    /// One scope can catch up many batches before the other resumes. Advancing
+    /// replaces the proof that scope resumed from, so the idle scope still
+    /// continues from its own digest.
+    #[test]
+    fn a_cursor_running_ahead_does_not_evict_the_other_scopes_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("ahead.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let mut ahead = resume_next_batch(&path, None, 1_024);
+        let behind = resume_next_batch(&path, None, 1_536);
+        for _ in 0..6 {
+            let next = resume_next_batch(&path, Some(&ahead), 1_024);
+            assert_eq!(next.start_offset, ahead.new_cursor.position);
+            assert_eq!(next.io.prefix_validation_bytes, 0);
+            ahead = next;
+        }
+        let resumed = resume_next_batch(&path, Some(&behind), 1_536);
+        assert_eq!(resumed.start_offset, behind.new_cursor.position);
+        assert_eq!(
+            resumed.io.prefix_validation_bytes, 0,
+            "the idle cursor rehashed its prefix after the other ran ahead"
+        );
+    }
+
     #[test]
     fn cached_unchanged_generation_revalidates_an_in_place_tail_rewrite() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
         let path = dir.path().join("memo-rewrite.jsonl");
         let original = b"{\"v\":0}\n".repeat(3_000);
         std::fs::write(&path, &original).unwrap();
@@ -2265,8 +2444,8 @@ mod tests {
 
     #[test]
     fn same_quantum_rewrite_is_visible_after_the_change_time_settles() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
         let path = dir.path().join("quantum.jsonl");
         let original = b"{\"v\":0}\n";
         let replacement = b"{\"v\":1}\n";
@@ -2304,8 +2483,8 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn cached_unchanged_generation_rejects_inode_replacement() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
         let path = dir.path().join("active.jsonl");
         let old = dir.path().join("old.jsonl");
         let replacement = dir.path().join("replacement.jsonl");
@@ -2344,8 +2523,8 @@ mod tests {
 
     #[test]
     fn cached_unchanged_generation_rejects_concurrent_same_handle_mutation() {
-        let _hold = HoldUnchangedGenerationCache::enter();
         let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
         let path = dir.path().join("concurrent.jsonl");
         let original = b"{\"v\":0}\n";
         let replacement = b"{\"v\":1}\n";

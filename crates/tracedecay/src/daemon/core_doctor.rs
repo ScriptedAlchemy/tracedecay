@@ -121,9 +121,27 @@ fn project_open_status_value(
     })
 }
 
-fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
+/// A store authority the read-only doctor snapshot could not observe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRuntimeUnavailableReason {
+    ProjectPathMissing,
+    ProjectStoreSchemaUnsupported,
+    ProjectStoreAuthorityUnavailable,
+    ProjectStoreMissing,
+    ProjectStoreUnavailable,
+    ProjectSchemaUnavailable,
+    SessionHealthSerializationFailed,
+    SessionHealthTimedOut,
+    SessionStoreUnavailable,
+    SessionStoreMissing,
+}
+
+fn doctor_runtime_temporal_unavailable(
+    reason: DoctorRuntimeUnavailableReason,
+) -> serde_json::Value {
     json!({
-        "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+        "status": "unavailable",
         "reason": reason,
     })
 }
@@ -132,14 +150,16 @@ fn doctor_runtime_temporal_report(
     report: tracedecay_session_temporal_store::SessionTemporalHealthReport,
 ) -> serde_json::Value {
     serde_json::to_value(report).unwrap_or_else(|_| {
-        doctor_runtime_temporal_unavailable("session_health_serialization_failed")
+        doctor_runtime_temporal_unavailable(
+            DoctorRuntimeUnavailableReason::SessionHealthSerializationFailed,
+        )
     })
 }
 
 fn doctor_runtime_unavailable(
     build_version: &str,
     project_path: Option<&Path>,
-    reason: &'static str,
+    reason: DoctorRuntimeUnavailableReason,
 ) -> serde_json::Value {
     json!({
         "tracedecay_version": build_version,
@@ -152,7 +172,7 @@ fn doctor_runtime_unavailable(
             "authority_audit_error": "authority_audit_not_run",
         },
         "doctor_runtime": {
-            "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+            "status": "unavailable",
             "reason": reason,
             "read_only": true,
         },
@@ -184,9 +204,9 @@ pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json
 fn doctor_runtime_store_layout(
     project_path: &Path,
     profile_root: &Path,
-) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
+) -> std::result::Result<(PathBuf, PathBuf), DoctorRuntimeUnavailableReason> {
     let layout = tracedecay_runtime_core::storage::resolve_layout(project_path, profile_root)
-        .map_err(|_| "project_store_schema_unsupported")?;
+        .map_err(|_| DoctorRuntimeUnavailableReason::ProjectStoreSchemaUnsupported)?;
     Ok((layout.graph_db_path, layout.sessions_db_path))
 }
 
@@ -272,7 +292,11 @@ async fn doctor_runtime_value_inner(
     build_version: &str,
 ) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
-        return doctor_runtime_unavailable(build_version, None, "project_path_missing");
+        return doctor_runtime_unavailable(
+            build_version,
+            None,
+            DoctorRuntimeUnavailableReason::ProjectPathMissing,
+        );
     };
     let (expected_graph_path, session_path) =
         match doctor_runtime_store_layout(project_path, &handshake.client_identity.profile_root) {
@@ -283,9 +307,9 @@ async fn doctor_runtime_value_inner(
         };
     let Some(store_administration) = store_administration else {
         let reason = if expected_graph_path.is_file() {
-            "project_store_authority_unavailable"
+            DoctorRuntimeUnavailableReason::ProjectStoreAuthorityUnavailable
         } else {
-            "project_store_missing"
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing
         };
         return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
@@ -304,9 +328,9 @@ async fn doctor_runtime_value_inner(
         });
     let Some(graph) = graph else {
         let reason = if expected_graph_path.is_file() {
-            "project_store_authority_unavailable"
+            DoctorRuntimeUnavailableReason::ProjectStoreAuthorityUnavailable
         } else {
-            "project_store_missing"
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing
         };
         return doctor_runtime_unavailable(build_version, Some(project_path), reason);
     };
@@ -327,7 +351,7 @@ async fn doctor_runtime_value_inner(
         return doctor_runtime_unavailable(
             build_version,
             Some(project_path),
-            "project_store_missing",
+            DoctorRuntimeUnavailableReason::ProjectStoreMissing,
         );
     }
     // Skip the SQLite integrity probes on a retained route, but do not call
@@ -344,7 +368,7 @@ async fn doctor_runtime_value_inner(
                 return doctor_runtime_unavailable(
                     build_version,
                     Some(project_path),
-                    "project_store_unavailable",
+                    DoctorRuntimeUnavailableReason::ProjectStoreUnavailable,
                 );
             }
         }
@@ -380,7 +404,7 @@ async fn doctor_runtime_value_inner(
                 return doctor_runtime_unavailable(
                     build_version,
                     Some(project_path),
-                    "project_schema_unavailable",
+                    DoctorRuntimeUnavailableReason::ProjectSchemaUnavailable,
                 );
             }
         }
@@ -492,7 +516,9 @@ async fn doctor_runtime_value_inner(
         );
         value["session_temporal_health"] = match temporal {
             Ok(report) => doctor_runtime_temporal_report(report),
-            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+            Err(_) => doctor_runtime_temporal_unavailable(
+                DoctorRuntimeUnavailableReason::SessionHealthTimedOut,
+            ),
         };
         value["cursor_session_ingest"] = match cursor_ingest {
             Ok(Ok(health)) => serde_json::to_value(health).unwrap_or_else(|error| {
@@ -518,9 +544,11 @@ async fn doctor_runtime_value_inner(
         };
     } else {
         value["session_temporal_health"] = if session_path.is_file() {
-            doctor_runtime_temporal_unavailable("session_store_unavailable")
+            doctor_runtime_temporal_unavailable(
+                DoctorRuntimeUnavailableReason::SessionStoreUnavailable,
+            )
         } else {
-            doctor_runtime_temporal_unavailable("session_store_missing")
+            doctor_runtime_temporal_unavailable(DoctorRuntimeUnavailableReason::SessionStoreMissing)
         };
         value["cursor_session_ingest"] = json!({
             "status": "unavailable",
