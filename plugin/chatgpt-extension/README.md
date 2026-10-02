@@ -33,7 +33,9 @@ not-found-or-not-authorized problem rather than an empty success.
   and Codex plugin loading, and what `tunnel-client --mcp-command` can wrap.
 - **`--http [host:]port`**: Streamable HTTP bound to a loopback address only
   (`127.0.0.1`, `localhost`, `::1`; rejected otherwise), with the allowed
-  Host header pinned to the bound address. Intended for
+  Host header pinned to the bound address. Every request must carry
+  `Authorization: Bearer <token>`; pass `--token <value>` or read the
+  generated token the server prints to stderr at startup. Intended for
   `tunnel-client --mcp-server-url` and browser testing.
 
 Inside the server a `DaemonBridge` reads through `@tracedecay/sdk` (the

@@ -75,6 +75,51 @@ export type ServeSessionOptions = {
   readonly cwd: string;
 };
 
+// The serve child needs home/config resolution, locale, temp dirs, and any
+// `TRACEDECAY_*` overrides — nothing else. The host process env can carry
+// unrelated credentials, so the child inherits an allowlist, not the whole
+// environment.
+const CHILD_ENV_EXACT = new Set([
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SystemRoot",
+  "SystemDrive",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "RUST_LOG",
+  "RUST_BACKTRACE",
+  "RUST_LIB_BACKTRACE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+]);
+const CHILD_ENV_PREFIX = "TRACEDECAY_";
+
+export function childEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const child: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (CHILD_ENV_EXACT.has(key) || key.startsWith(CHILD_ENV_PREFIX)) child[key] = value;
+  }
+  return child;
+}
+
 export class ServeSession {
   readonly #client: Client;
   readonly #transport: StdioClientTransport;
@@ -84,12 +129,10 @@ export class ServeSession {
   constructor(private readonly options: ServeSessionOptions) {
     const args = ["serve"];
     if (options.projectRoot !== null) args.push("--path", options.projectRoot);
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(options.env)) if (value !== undefined) env[key] = value;
     this.#transport = new StdioClientTransport({
       command: options.binary,
       args,
-      env,
+      env: childEnv(options.env),
       cwd: options.cwd,
       stderr: "pipe",
     });

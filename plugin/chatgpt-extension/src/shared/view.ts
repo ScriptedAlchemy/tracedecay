@@ -54,7 +54,14 @@ export type Failure = {
 };
 
 export type Section<T> =
-  | { readonly state: "ready"; readonly data: T }
+  | {
+      readonly state: "ready";
+      readonly data: T;
+      /** Set when the daemon reported more rows than the returned page. */
+      readonly truncated?: boolean;
+      /** The code generation the daemon reported serving this read from. */
+      readonly generation?: string;
+    }
   | { readonly state: "empty"; readonly message: string }
   | { readonly state: "failed"; readonly failure: Failure };
 
@@ -77,6 +84,8 @@ export type SearchHit = SymbolSummary & {
 export type SearchResults = {
   readonly hits: readonly SearchHit[];
   readonly truncated: boolean;
+  /** `display_unavailable` reason of each returned row that cannot be shown. */
+  readonly undisplayable: readonly string[];
   readonly recall: "full" | "partial";
 };
 

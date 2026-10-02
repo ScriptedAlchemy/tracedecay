@@ -42,7 +42,7 @@ async function call(name: string, args: Record<string, unknown> = {}, via: Clien
   return view((await via.callTool({ name, arguments: args })) as CallToolResult);
 }
 
-function rawPost(url: string, hostHeader: string, body: string): Promise<{ status: number; body: string }> {
+function rawPost(url: string, hostHeader: string, body: string, authorization?: string): Promise<{ status: number; body: string }> {
   const target = new URL(url);
   return new Promise((resolve, reject) => {
     const request = httpRequest(
@@ -56,6 +56,7 @@ function rawPost(url: string, hostHeader: string, body: string): Promise<{ statu
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
           "content-length": Buffer.byteLength(body),
+          ...(authorization === undefined ? {} : { authorization }),
         },
       },
       (response) => {
@@ -306,9 +307,12 @@ export function taxTotal(invoices: Invoice[]): number {
 
   it("serves the same server over loopback Streamable HTTP and rejects foreign Host headers", async () => {
     const createServer = () => createExtensionServer({ bridge, assets: ASSETS });
-    const http = await serveLoopbackHttp(createServer, "127.0.0.1", 0);
+    const token = "test-loopback-token";
+    const http = await serveLoopbackHttp(createServer, "127.0.0.1", 0, token);
     try {
-      const transport = new StreamableHTTPClientTransport(new URL(http.url));
+      const transport = new StreamableHTTPClientTransport(new URL(http.url), {
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+      });
       const httpClient = new Client({ name: "http-host-sim", version: "0.0.0" });
       await httpClient.connect(transport);
       const tools = await httpClient.listTools();
@@ -316,11 +320,16 @@ export function taxTotal(invoices: Invoice[]): number {
       const state = view((await httpClient.callTool({ name: "tracedecay_list_projects", arguments: {} })) as CallToolResult);
       expect(state.page).toBe("projects");
       await httpClient.close();
-      const rebinding = await rawPost(http.url, "evil.example", JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+      const host = new URL(http.url).host;
+      const missingAuth = await rawPost(http.url, host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }));
+      expect(missingAuth.status).toBe(401);
+      const wrongAuth = await rawPost(http.url, host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), "Bearer wrong");
+      expect(wrongAuth.status).toBe(401);
+      const rebinding = await rawPost(http.url, "evil.example", JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }), `Bearer ${token}`);
       expect(rebinding.status).toBe(403);
-      const sameOrigin = await rawPost(http.url, new URL(http.url).host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }));
+      const sameOrigin = await rawPost(http.url, host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), `Bearer ${token}`);
       expect(sameOrigin.status).toBe(200);
-      await expect(serveLoopbackHttp(createServer, "0.0.0.0", 0)).rejects.toThrow(/loopback/u);
+      await expect(serveLoopbackHttp(createServer, "0.0.0.0", 0, token)).rejects.toThrow(/loopback/u);
     } finally {
       await http.close();
     }

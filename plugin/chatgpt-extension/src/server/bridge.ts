@@ -48,6 +48,7 @@ export class DaemonBridge {
   readonly #options: BridgeOptions;
   #registry: ServeSession | null = null;
   readonly #projects = new Map<string, ProjectHandle>();
+  readonly #pending = new Map<string, Promise<ProjectHandle>>();
 
   constructor(options: BridgeOptions) {
     this.#options = options;
@@ -119,6 +120,18 @@ export class DaemonBridge {
   }
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
+    const pending = this.#pending.get(projectId);
+    if (pending !== undefined) return pending;
+    // One acquisition at a time per project: two concurrent callers must not
+    // each spawn a serve child and orphan the loser's process.
+    const acquire = this.#acquire(projectId, signal).finally(() => {
+      if (this.#pending.get(projectId) === acquire) this.#pending.delete(projectId);
+    });
+    this.#pending.set(projectId, acquire);
+    return acquire;
+  }
+
+  async #acquire(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
     const record = await this.#requireAuthority();
     const cached = this.#projects.get(projectId);
     if (cached !== undefined) {

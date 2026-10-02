@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { parseArgs } from "node:util";
@@ -49,17 +50,22 @@ export type LoopbackHttpServer = {
 };
 
 /**
- * Streamable HTTP on a loopback address only. Each request gets its own
- * stateless transport and McpServer over the shared bridge; DNS-rebinding
- * protection pins the accepted Host header to the bound address.
+ * Streamable HTTP on a loopback address only. Every request must carry the
+ * bearer `token` the operator was shown at startup: loopback still lets any
+ * local process — and, without the Host check, any origin the browser visits —
+ * reach the endpoint, so possession of the token is the authorization. Each
+ * request gets its own stateless transport and McpServer over the shared
+ * bridge; DNS-rebinding protection pins the accepted Host header to the bound
+ * address.
  */
-export async function serveLoopbackHttp(createServer: () => McpServer, host: string, port: number): Promise<LoopbackHttpServer> {
+export async function serveLoopbackHttp(createServer: () => McpServer, host: string, port: number, token: string): Promise<LoopbackHttpServer> {
   if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
     throw new Error(`--http must bind a loopback address, got ${host}`);
   }
+  if (token.length === 0) throw new Error("--http requires a bearer token");
   let boundPort = port;
   const http = createHttpServer((request, response) => {
-    void handleHttp(createServer, request, response, host, boundPort).catch((error: unknown) => {
+    void handleHttp(createServer, request, response, host, boundPort, token).catch((error: unknown) => {
       if (!response.headersSent) {
         response.writeHead(500, { "content-type": "application/json" });
       }
@@ -83,11 +89,16 @@ export async function serveLoopbackHttp(createServer: () => McpServer, host: str
   };
 }
 
-async function handleHttp(createServer: () => McpServer, request: IncomingMessage, response: ServerResponse, host: string, port: number): Promise<void> {
+async function handleHttp(createServer: () => McpServer, request: IncomingMessage, response: ServerResponse, host: string, port: number, token: string): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
   if (url.pathname !== "/mcp") {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "not_found" }));
+    return;
+  }
+  if (!bearerMatches(request.headers.authorization, token)) {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized: a Bearer token is required" }, id: null }));
     return;
   }
   const transport = new StreamableHTTPServerTransport({
@@ -104,11 +115,19 @@ async function handleHttp(createServer: () => McpServer, request: IncomingMessag
   await transport.handleRequest(request, response);
 }
 
+function bearerMatches(header: string | undefined, token: string): boolean {
+  if (header === undefined || !header.startsWith("Bearer ")) return false;
+  const presented = Buffer.from(header.slice("Bearer ".length), "utf8");
+  const expected = Buffer.from(token, "utf8");
+  return presented.length === expected.length && timingSafeEqual(presented, expected);
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       http: { type: "string" },
       binary: { type: "string" },
+      token: { type: "string" },
     },
   });
   const bridge = bridgeFromEnvironment(process.env, values.binary);
@@ -123,8 +142,10 @@ async function main(): Promise<void> {
     const [host, portText] = splitHostPort(values.http);
     const port = Number.parseInt(portText, 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --http port: ${portText}`);
-    const listening = await serveLoopbackHttp(createServer, host, port);
+    const token = values.token ?? randomBytes(24).toString("base64url");
+    const listening = await serveLoopbackHttp(createServer, host, port, token);
     process.stderr.write(`tracedecay-chatgpt-extension listening on ${listening.url}\n`);
+    process.stderr.write(`MCP bearer token (Authorization: Bearer): ${token}\n`);
     return;
   }
   const server = createServer();

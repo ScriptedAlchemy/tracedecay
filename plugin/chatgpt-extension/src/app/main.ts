@@ -93,7 +93,7 @@ function modelContextFor(view: ViewState): { content: { type: "text"; text: stri
       return null;
     case "search":
       return {
-        content: [{ type: "text", text: `TraceDecay search in ${view.project.label} for "${view.query}": ${describeSection(view.results, (results) => `${results.hits.length} hit(s), recall ${results.recall}`)}${provenanceLine(view.provenance)}` }],
+        content: [{ type: "text", text: `TraceDecay search in ${view.project.label} for "${view.query}": ${describeSection(view.results, (results) => `${results.hits.length} hit(s), recall ${results.recall}${results.undisplayable.length > 0 ? `, ${results.undisplayable.length} undisplayable` : ""}`)}${provenanceLine(view.provenance)}` }],
         structuredContent: { page: "search", project_id: view.project.project_id, query: view.query, deep_link: deepLinkPath({ kind: "search", project_id: view.project.project_id, query: view.query }), provenance: view.provenance },
       };
     case "symbol":
@@ -345,6 +345,13 @@ function renderSearch(view: Extract<ViewState, { page: "search" }>): Node[] {
     const extras: Node[] = [list];
     if (data.recall === "partial") extras.push(notice("Partial recall: the index is still converging, so some matches may be missing.", "warn", "results-partial"));
     if (data.truncated) extras.push(notice("Results were truncated to the first page.", "neutral", "results-truncated"));
+    if (data.undisplayable.length > 0) {
+      const reasons = [...new Set(data.undisplayable)].join(", ");
+      extras.push(notice(`${data.undisplayable.length} candidate(s) could not be displayed (${reasons}).`, "warn", "results-undisplayable"));
+    }
+    if (view.results.state === "ready" && view.results.generation !== undefined && view.provenance?.generation !== undefined && view.results.generation !== view.provenance.generation) {
+      extras.push(notice(`Results were served from generation ${view.results.generation}, which differs from the reported project generation ${view.provenance.generation}.`, "warn", "results-generation"));
+    }
     return el("div", {}, extras);
   });
   return [
@@ -424,13 +431,22 @@ function renderSymbol(view: Extract<ViewState, { page: "symbol" }>): Node[] {
     return el("div", {}, children);
   });
   const relations = (section: Extract<ViewState, { page: "symbol" }>["callers"], testid: string): Node =>
-    sectionBody(section, testid, (items) =>
-      el(
-        "ul",
-        { class: "list" },
-        items.map((relation) => el("li", { "data-testid": `${testid}-row` }, [badge(relation.edge_kind), symbolLink(project_id, relation.symbol), location(relation.symbol), relation.dispatch_via_trait ? badge("via trait") : ""])),
-      ),
-    );
+    sectionBody(section, testid, (items) => {
+      const children: Node[] = [
+        el(
+          "ul",
+          { class: "list" },
+          items.map((relation) => el("li", { "data-testid": `${testid}-row` }, [badge(relation.edge_kind), symbolLink(project_id, relation.symbol), location(relation.symbol), relation.dispatch_via_trait ? badge("via trait") : ""])),
+        ),
+      ];
+      if (section.state === "ready" && section.truncated === true) {
+        children.push(notice("Only the first page of relations is shown.", "neutral", `${testid}-truncated`));
+      }
+      if (section.state === "ready" && section.generation !== undefined && view.provenance?.generation !== undefined && section.generation !== view.provenance.generation) {
+        children.push(notice(`Served from generation ${section.generation}, which differs from the reported project generation ${view.provenance.generation}.`, "warn", `${testid}-generation`));
+      }
+      return el("div", {}, children);
+    });
   const impact = sectionBody(view.impact, "impact", (report) => {
     const list = el(
       "ul",

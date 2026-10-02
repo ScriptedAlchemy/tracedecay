@@ -218,14 +218,21 @@ function searchSection(result: OperationApplicationSearchResult): Section<Search
       },
     };
   }
-  const hits = result.results.flatMap(searchHit);
+  const hits: SearchHit[] = [];
+  const undisplayable: string[] = [];
+  for (const row of result.results) {
+    const hit = searchHit(row);
+    if (hit === null) undisplayable.push(row.display_unavailable ?? "undisplayable");
+    else hits.push(hit);
+  }
   const nextCursor = "next_cursor" in result ? result.next_cursor : null;
-  if (hits.length === 0) {
+  if (hits.length === 0 && undisplayable.length === 0) {
     return { state: "empty", message: recall === "partial" ? "No results in the indexed portion of this project yet." : "No symbols match this query." };
   }
   return {
     state: "ready",
-    data: { hits, truncated: nextCursor !== null && nextCursor !== undefined, recall },
+    data: { hits, truncated: nextCursor !== null && nextCursor !== undefined, undisplayable, recall },
+    generation: typeof result.code_generation === "string" ? result.code_generation : undefined,
   };
 }
 
@@ -236,24 +243,22 @@ function unavailableDetail(detail: SearchUnavailableV1["detail"]): string | null
   return detail.kind;
 }
 
-function searchHit(row: SearchResultRowV1): SearchHit[] {
+function searchHit(row: SearchResultRowV1): SearchHit | null {
   const display = row.display;
-  if (row.node_id === null || row.node_id === undefined || display === null || display === undefined) return [];
+  if (row.node_id === null || row.node_id === undefined || display === null || display === undefined) return null;
   const lanes = (row.lexical_routes ?? []).map((route) => (typeof route === "object" && route !== null && "lane" in route ? String(route.lane) : "lexical"));
-  return [
-    {
-      node_id: row.node_id,
-      name: display.name,
-      qualified_name: display.qualified_name,
-      kind: display.kind,
-      file: display.path,
-      start_line: null,
-      end_line: null,
-      signature: null,
-      score: row.candidate.utility_micros / 1_000_000,
-      lanes,
-    },
-  ];
+  return {
+    node_id: row.node_id,
+    name: display.name,
+    qualified_name: display.qualified_name,
+    kind: display.kind,
+    file: display.path,
+    start_line: null,
+    end_line: null,
+    signature: null,
+    score: row.candidate.utility_micros / 1_000_000,
+    lanes,
+  };
 }
 
 function symbolSummary(record: SymbolPrimitiveRecord): SymbolSummary {
@@ -299,7 +304,13 @@ function relationSection(
 ): Section<readonly Relation[]> {
   const items = result.items.map(relation);
   if (items.length === 0) return { state: "empty", message: `No ${direction} recorded in the served graph.` };
-  return { state: "ready", data: items };
+  // `truncated` exists on callers results only; callees reports a cursor and
+  // `total` instead. Any of them means more rows than the returned page.
+  const truncated =
+    ("truncated" in result && result.truncated) ||
+    (result.next_cursor !== null && result.next_cursor !== undefined) ||
+    (typeof result.total === "number" && result.total > items.length);
+  return { state: "ready", data: items, truncated, generation: result.generation };
 }
 
 function impactNode(node: ImpactNodeV1) {
@@ -335,7 +346,22 @@ function graphSection(
   if (callers.state === "ready") add(callers.data, "caller");
   if (callees.state === "ready") add(callees.data, "callee");
   if (nodes.length === 1) return { state: "empty", message: "This symbol has no recorded callers or callees." };
-  return { state: "ready", data: { nodes, edges, max_depth: GRAPH_DEPTH, truncated: callers.state === "failed" || callees.state === "failed" } };
+  // The graph is bounded when a side failed, when a side kept rows to a page,
+  // or when the two sides were served from different generations and cannot
+  // describe one consistent snapshot.
+  const mixedGeneration =
+    callers.state === "ready" &&
+    callees.state === "ready" &&
+    callers.generation !== undefined &&
+    callees.generation !== undefined &&
+    callers.generation !== callees.generation;
+  const truncated =
+    callers.state === "failed" ||
+    callees.state === "failed" ||
+    (callers.state === "ready" && callers.truncated === true) ||
+    (callees.state === "ready" && callees.truncated === true) ||
+    mixedGeneration;
+  return { state: "ready", data: { nodes, edges, max_depth: GRAPH_DEPTH, truncated } };
 }
 
 function sectionLines<T>(title: string, value: Section<readonly T[]>, line: (item: T) => string): string[] {
@@ -343,6 +369,7 @@ function sectionLines<T>(title: string, value: Section<readonly T[]>, line: (ite
   switch (value.state) {
     case "ready":
       out.push(...value.data.map((item) => `- ${line(item)}`));
+      if (value.truncated === true) out.push("_First page only; more rows exist than shown._");
       break;
     case "empty":
       out.push(`_${value.message}_`);
@@ -352,6 +379,14 @@ function sectionLines<T>(title: string, value: Section<readonly T[]>, line: (ite
       break;
   }
   return out;
+}
+
+function relationLines(value: Section<readonly Relation[]>, title: string, generation: string | null): string[] {
+  const lines = sectionLines(title, value, (item) => `${item.symbol.qualified_name} (${item.symbol.file}:${item.symbol.start_line ?? "?"}, ${item.edge_kind})`);
+  if (value.state === "ready" && generation !== null && value.generation !== undefined && value.generation !== generation) {
+    lines.push(`_Served from generation ${value.generation}, which differs from the reported project generation ${generation}._`);
+  }
+  return lines;
 }
 
 export function buildEvidence(
@@ -369,8 +404,8 @@ export function buildEvidence(
     `- Location: ${location}`,
     ...(symbol.signature === null ? [] : [`- Signature: \`${symbol.signature}\``]),
     `- Node id: \`${symbol.node_id}\``,
-    ...sectionLines("Callers", callers, (item) => `${item.symbol.qualified_name} (${item.symbol.file}:${item.symbol.start_line ?? "?"}, ${item.edge_kind})`),
-    ...sectionLines("Callees", callees, (item) => `${item.symbol.qualified_name} (${item.symbol.file}:${item.symbol.start_line ?? "?"}, ${item.edge_kind})`),
+    ...relationLines(callers, "Callers", provenance?.generation ?? null),
+    ...relationLines(callees, "Callees", provenance?.generation ?? null),
     ...sectionLines(
       "Impact",
       impact.state === "ready" ? { state: "ready", data: impact.data.nodes } : impact,
@@ -418,7 +453,8 @@ export function viewText(view: ViewState): string {
         const hits = view.results.data.hits
           .map((hit) => `- ${hit.kind} ${hit.qualified_name} (${hit.file}) node_id=${hit.node_id}`)
           .join("\n");
-        return `Search "${view.query}" in ${view.project.label}${view.results.data.recall === "partial" ? " (partial recall)" : ""}:\n${hits}`;
+        const hidden = view.results.data.undisplayable.length;
+        return `Search "${view.query}" in ${view.project.label}${view.results.data.recall === "partial" ? " (partial recall)" : ""}${hidden > 0 ? ` (${hidden} candidate(s) could not be displayed)` : ""}:\n${hits}`;
       }
       return view.results.state === "empty"
         ? `Search "${view.query}" in ${view.project.label}: ${view.results.message}`

@@ -10,12 +10,13 @@ daemon-admission adapter; capture, sync, compaction, and advisory work stay in
 the daemon.
 
 The plugin root also carries the portable Agent Plugins manifest pair
-(`plugin.json` + `mcp.json`) that ChatGPT and Codex read directly. Its
-`extensions.com.openai` block supplies the OpenAI presentation and hook
-mapping, and `mcp.json` launches both the `graph` server (`tracedecay serve`)
-and the `tracedecay-explorer` MCP App server from `chatgpt-extension/`. The
-`.codex-plugin/plugin.json` overlay stays as the compatibility fallback for
-hosts that do not read the portable manifest.
+(`plugin.json` + `mcp.json`) that the ChatGPT lifecycle stages into
+`~/.tracedecay/host-bundle-stage/chatgpt/` for ChatGPT's own plugin or
+connector flow. Its `extensions.com.openai` block supplies the OpenAI
+presentation and hook mapping, and `mcp.json` launches both the `graph`
+server (`tracedecay serve`) and the `tracedecay-explorer` MCP App server
+from `chatgpt-extension/`. Codex still reads the `.codex-plugin/plugin.json`
+overlay its own lifecycle deploys; it does not read the portable pair.
 
 The manifest-driven package inventory also exposes an MCP-free core and
 independently installable MCP companions. See `README-host-bundles.md` for the

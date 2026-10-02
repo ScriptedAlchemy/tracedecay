@@ -6,10 +6,14 @@ import type { Failure } from "../shared/view.js";
 
 // Mirrors `ProfileRoot::from_env` in crates/tracedecay-runtime-core: the data
 // directory is `TRACEDECAY_DATA_DIR`, otherwise `.tracedecay` under the home.
+// `HOME_ENV` there is `USERPROFILE` on Windows and `HOME` elsewhere, so this
+// must read the same platform variable the daemon does rather than preferring
+// `HOME` (which Git-Bash-style shells also export on Windows).
 export function resolveProfileRoot(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.TRACEDECAY_DATA_DIR;
   if (explicit !== undefined && explicit.length > 0) return path.resolve(explicit);
-  const home = env.HOME ?? env.USERPROFILE ?? os.homedir();
+  const homeEnv = process.platform === "win32" ? env.USERPROFILE : env.HOME;
+  const home = homeEnv !== undefined && homeEnv.length > 0 ? homeEnv : os.homedir();
   return path.join(home, ".tracedecay");
 }
 
