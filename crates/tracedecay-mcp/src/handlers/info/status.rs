@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CODE_INDEX_MOUNT_FAILED, CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CODE_INDEX_MOUNT_FAILED, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
