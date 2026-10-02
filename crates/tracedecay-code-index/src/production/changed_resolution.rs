@@ -106,7 +106,7 @@ impl<'f> ChangedSitesV1<'f> {
     }
 
     /// References re-decided at the moved sites.
-    #[cfg(any(test, feature = "hotpath"))]
+    #[cfg(feature = "hotpath")]
     pub(super) fn resolved_references(&self) -> usize {
         self.selection.iter().map(|(_, picks)| picks.len()).sum()
     }
