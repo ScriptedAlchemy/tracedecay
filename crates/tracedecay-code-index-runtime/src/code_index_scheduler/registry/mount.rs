@@ -44,8 +44,8 @@ use super::{
     MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
     ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
     clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
-    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
-    retained_noop_requires_follow_up_wake,
+    graph_head_belongs_to_another_generation, is_repeated_conflict_verdict, park_convergence,
+    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -62,6 +62,14 @@ enum PublicationAuthorityResetV1 {
         reason: String,
         remediation: &'static str,
     },
+}
+
+/// Why a wait for the code-generation store lock ended without a release.
+enum StoreReleaseWaitStopV1 {
+    /// Shutdown or retirement of this worker ended the wait.
+    Shutdown,
+    /// The kernel wait itself failed. The worktree parks until the next wake.
+    Unavailable(String),
 }
 
 /// Why graph prepare produced no generation to seat.
@@ -92,45 +100,53 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
-    /// Wake the worker when the holder of this scope's generation-store lock
-    /// releases it. A refused pass has nothing to do until then, and the
-    /// holder may be another process, so the kernel lock wait is the signal.
-    /// One waiter serves the worktree; a wait that cannot complete parks it
-    /// typed.
-    fn wake_on_store_release(
+    /// Block this worker until the holder of the store lock that refused the
+    /// previous pass releases it. A follow-up wake banked during the wait must
+    /// not start another failing pass: the worker does not sit on `Notify`
+    /// here. The holder may be another process, so the kernel lock is the
+    /// signal. Shutdown ends the wait; a wait that cannot complete parks the
+    /// worktree typed.
+    async fn wait_for_worker_store_release(
         store_root: &Path,
-        waiting: &Arc<AtomicBool>,
-        wake: &Arc<tokio::sync::Notify>,
-        convergence_park: &Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
-    ) {
-        if waiting.swap(true, Ordering::AcqRel) {
-            return;
+        shutting_down: &AtomicBool,
+        serving_generation_changed: &tokio::sync::watch::Sender<()>,
+    ) -> Result<(), StoreReleaseWaitStopV1> {
+        if shutting_down.load(Ordering::Acquire) {
+            return Err(StoreReleaseWaitStopV1::Shutdown);
         }
+        let mut shutdown_observed = serving_generation_changed.subscribe();
+        let (released_tx, mut released) = tokio::sync::oneshot::channel();
         let root = store_root.to_path_buf();
-        let thread_waiting = Arc::clone(waiting);
-        let thread_wake = Arc::downgrade(wake);
-        let thread_park = Arc::downgrade(convergence_park);
-        let spawned = std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("code-index-store-release".to_owned())
             .spawn(move || {
-                let released = wait_for_code_generation_store_release(&root);
-                thread_waiting.store(false, Ordering::Release);
-                match released {
-                    Ok(()) => {
-                        if let Some(wake) = thread_wake.upgrade() {
-                            wake.notify_one();
+                let _ = released_tx.send(wait_for_code_generation_store_release(&root));
+            })
+        {
+            return Err(StoreReleaseWaitStopV1::Unavailable(error.to_string()));
+        }
+        loop {
+            if shutting_down.load(Ordering::Acquire) {
+                return Err(StoreReleaseWaitStopV1::Shutdown);
+            }
+            tokio::select! {
+                released = &mut released => {
+                    return match released {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => {
+                            Err(StoreReleaseWaitStopV1::Unavailable(error.to_string()))
                         }
-                    }
-                    Err(error) => {
-                        if let Some(park) = thread_park.upgrade() {
-                            Self::park_store_release_unavailable(&park, error.to_string());
-                        }
+                        Err(_) => Err(StoreReleaseWaitStopV1::Unavailable(
+                            "code-index store release wait ended without a result".to_owned(),
+                        )),
+                    };
+                }
+                changed = shutdown_observed.changed() => {
+                    if changed.is_err() || shutting_down.load(Ordering::Acquire) {
+                        return Err(StoreReleaseWaitStopV1::Shutdown);
                     }
                 }
-            });
-        if let Err(error) = spawned {
-            waiting.store(false, Ordering::Release);
-            Self::park_store_release_unavailable(convergence_park, error.to_string());
+            }
         }
     }
 
@@ -727,6 +743,12 @@ impl CodeIndexSchedulerRegistryV1 {
             // verification falls through to one canonical replay of the same
             // sealed generation rather than repeating the head read forever.
             let mut retained_graph_head_recovery_attempted = false;
+            // A retained manifest whose verified head belonged to another
+            // generation. Replaying it would discard the generation that owns
+            // the head. Later retained passes of this same generation skip
+            // that replay; a different generation clears the memory.
+            let mut graph_head_conflict_generation: Option<tracedecay_domain::CodeGenerationId> =
+                None;
             // The conflict verdict of the previous failed seat attempt. A
             // Conflict can be a race (a concurrent publisher advanced the
             // head) and is retried once like any transient failure, but the
@@ -751,9 +773,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // Releasing that budget emits no wake, so this worker schedules
             // its own. Memory refusals wait for the headroom wake instead.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
-            // Set while a thread waits for this scope's store lock to be
-            // released; that release is the only retry a refused pass needs.
-            let store_release_waiting = Arc::new(AtomicBool::new(false));
+            // The previous pass was refused because another owner holds this
+            // scope's store lock. The next iteration waits for that release
+            // before it runs, so a follow-up wake cannot start another
+            // failing pass while the holder is still inside the lock.
+            let mut pass_waits_for_store_release = false;
             // Whether this worker already deleted and rebuilt a corrupt derived
             // publication. One reset per mount bounds the work: a store that
             // is corrupt again after its own rebuild parks instead of looping
@@ -801,18 +825,55 @@ impl CodeIndexSchedulerRegistryV1 {
                         CodeIndexCadenceTriggerV1::MemoryHeadroom,
                     );
                 }
-                let notified = worker_wake.notified();
-                tokio::pin!(notified);
-                // Parked only while registered with no banked permit: a
-                // banked permit resolves the wait at once, so the worker was
-                // never idle.
-                if !notified.as_mut().enable() {
+                // A banked follow-up permit must not skip this wait. The
+                // previous pass already restored its arrival; this iteration
+                // runs that pass once the holder lets go.
+                let mut entered_after_store_release = false;
+                if pass_waits_for_store_release {
+                    pass_waits_for_store_release = false;
                     super::CodeIndexWorkerPhaseV1::enter(
                         &worker_phase_signal,
-                        super::CodeIndexWorkerPhaseV1::Parked,
+                        super::CodeIndexWorkerPhaseV1::Working,
                     );
+                    match Self::wait_for_worker_store_release(
+                        &worker_scope_store_root,
+                        &worker_shutting_down,
+                        &worker_serving_generation_changed,
+                    )
+                    .await
+                    {
+                        Ok(()) => entered_after_store_release = true,
+                        Err(StoreReleaseWaitStopV1::Shutdown) => {
+                            tracing::info!(
+                                event = "code_index_worker_shutdown_observed",
+                                phase = "store_release_wait",
+                                "code-index worker observed shutdown and stopped its pass"
+                            );
+                            Self::join_retained_text_projection_on_worker_exit(
+                                &mut retained_text_projection,
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(StoreReleaseWaitStopV1::Unavailable(reason)) => {
+                            Self::park_store_release_unavailable(&worker_convergence_park, reason);
+                        }
+                    }
                 }
-                hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                if !entered_after_store_release {
+                    let notified = worker_wake.notified();
+                    tokio::pin!(notified);
+                    // Parked only while registered with no banked permit: a
+                    // banked permit resolves the wait at once, so the worker was
+                    // never idle.
+                    if !notified.as_mut().enable() {
+                        super::CodeIndexWorkerPhaseV1::enter(
+                            &worker_phase_signal,
+                            super::CodeIndexWorkerPhaseV1::Parked,
+                        );
+                    }
+                    hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                }
                 worker_owner_headroom.mark_unchanged();
                 worker_admission_headroom.mark_unchanged();
                 super::CodeIndexWorkerPhaseV1::enter(
@@ -1082,6 +1143,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     );
                                 }
                                 PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::WaitingForStore
                                 | PublishedTextProjectionOutcomeV1::Shutdown => {}
                             }
                             outcome
@@ -1145,6 +1207,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "code-index text projection parked on a deterministic \
                                      contract violation; status reports it typed and every \
                                      wake re-checks"
+                                );
+                            } else if error.is_generation_store_lock_contended() {
+                                pass_waits_for_store_release = true;
+                                tracing::info!(
+                                    event = "code_index_text_projection_waiting_for_store",
+                                    "code-index background text projection waits for the \
+                                     code-generation store lock"
                                 );
                             } else {
                                 tracing::warn!(
@@ -1637,6 +1706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 }
                                 PublishedTextProjectionOutcomeV1::Unfinished => true,
                                 PublishedTextProjectionOutcomeV1::WaitingForMemory
+                                | PublishedTextProjectionOutcomeV1::WaitingForStore
                                 | PublishedTextProjectionOutcomeV1::Shutdown => false,
                             };
                             if schedule_continuation {
@@ -1796,6 +1866,31 @@ impl CodeIndexSchedulerRegistryV1 {
                     prepare_graph = serving_empty
                         && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
+                let retained_generation = graph_text
+                    .as_ref()
+                    .map(|text| text.metadata().manifest().generation_id.clone());
+                if graph_head_conflict_generation
+                    .as_ref()
+                    .is_some_and(|conflicted| {
+                        retained_generation
+                            .as_ref()
+                            .is_some_and(|current| current != conflicted)
+                    })
+                {
+                    graph_head_conflict_generation = None;
+                } else if !published_pass
+                    && prepare_graph
+                    && graph_head_conflict_generation.is_some()
+                    && retained_generation.is_some()
+                {
+                    prepare_graph = false;
+                    tracing::debug!(
+                        event = "code_index_graph_seat_skipped",
+                        reason = "graph_head_belongs_to_another_generation",
+                        "this retained manifest already lost the verified graph head to another \
+                         generation; it is not replayed"
+                    );
+                }
                 // Recovery installs a fresh graph store on the owner; an owner
                 // that already serves one (a publication seated it) keeps it
                 // and its warm catalog.
@@ -1824,6 +1919,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
+                    let recovered_generation = generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let replay_passes = Arc::clone(&worker_reconcile_in_progress);
@@ -1875,6 +1971,22 @@ impl CodeIndexSchedulerRegistryV1 {
                                     );
                                 }
                                 Ok(false) => {}
+                                Err(error) if graph_head_belongs_to_another_generation(&error) => {
+                                    // The head is a different generation. Falling
+                                    // through into a cold replay discards the
+                                    // in-flight successor that owns it. Leave
+                                    // that generation's own publish to seat its
+                                    // graph, and do not retry this manifest.
+                                    prepare_graph = false;
+                                    graph_head_conflict_generation = Some(recovered_generation);
+                                    pass_waits_for_store_release = true;
+                                    tracing::warn!(
+                                        event = "code_index_graph_head_recovery_generation_conflict",
+                                        error = %error,
+                                        "verified graph head belongs to another generation; this \
+                                         retained manifest is not replayed"
+                                    );
+                                }
                                 Err(error) => {
                                     tracing::warn!(
                                         event = "code_index_graph_head_recovery_degraded",
@@ -2327,12 +2439,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     }
                                     GraphPrepareStopV1::StoreBusy(detail) => {
                                         if !graph_waits_for_text {
-                                            Self::wake_on_store_release(
-                                                &worker_scope_store_root,
-                                                &store_release_waiting,
-                                                &worker_wake,
-                                                &worker_convergence_park,
-                                            );
+                                            pass_waits_for_store_release = true;
                                         }
                                         tracing::warn!(
                                             event = "code_index_graph_prepare_store_busy",
@@ -2719,6 +2826,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                 *replay_binding = None;
                             }
                             worker_memory_retry.wait();
+                        }
+                        PublishedTextProjectionOutcomeV1::WaitingForStore => {
+                            if let Ok((_, latest, replay_binding)) = &mut result {
+                                *latest = None;
+                                *replay_binding = None;
+                            }
+                            pass_waits_for_store_release = true;
                         }
                         PublishedTextProjectionOutcomeV1::Unfinished => {
                             if let Ok((_, latest, replay_binding)) = &mut result {
@@ -3133,12 +3247,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 worker_serving_generation_changed.send_replace(());
                             } else if store_lock_held {
                                 capacity_retry.record_progress();
-                                Self::wake_on_store_release(
-                                    &worker_scope_store_root,
-                                    &store_release_waiting,
-                                    &worker_wake,
-                                    &worker_convergence_park,
-                                );
+                                pass_waits_for_store_release = true;
                             } else if refused_for_memory {
                                 // The refusal registered with the resident-memory
                                 // authority; the headroom wake is its retry.
@@ -3346,6 +3455,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             // arrival, exactly as the inline slice's own
                             // follow-up notify prevented.
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                        }
+                        PublishedTextProjectionOutcomeV1::WaitingForStore => {
+                            pass_waits_for_store_release = true;
                         }
                         PublishedTextProjectionOutcomeV1::WaitingForMemory => {
                             worker_memory_retry.wait();

@@ -40,7 +40,8 @@ pub use self::observation::{
     observe_composition, observe_context_outcome,
 };
 pub use self::ports::{
-    ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
+    CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1, ExactTermPostingReadPort, GraphEvidenceReadPort,
+    LexicalPostingReadPort, RetrievalPortError,
 };
 pub use self::prepared_query::{
     PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1, PreparedQueryErrorV1,

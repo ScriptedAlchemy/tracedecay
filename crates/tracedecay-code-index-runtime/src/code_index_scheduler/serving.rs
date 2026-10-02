@@ -1299,7 +1299,8 @@ impl DaemonCodeTextArtifactStoreV1 {
             .map_err(text_artifact_unavailable)?
             .ok_or_else(|| {
                 RetrievalPortError::AuthorityUnavailable(
-                    "code-generation store has an active owner".to_owned(),
+                    tracedecay_query::retrieval::CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1
+                        .to_owned(),
                 )
             })
     }

@@ -203,6 +203,19 @@ impl Fixture {
         );
     }
 
+    /// The follow-up a busy worker stamps for itself: no new source, the same
+    /// trigger the production storm logged while the store lock was held.
+    async fn wake_busy_follow_up(&self) {
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            CodeIndexCadenceTriggerV1::BusyFollowUp,
+        );
+    }
+
     async fn pending_wake_micros(&self) -> u64 {
         let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
@@ -586,6 +599,95 @@ async fn a_held_generation_store_lock_retries_on_its_release() {
         passes.attempts(),
         1,
         "a held lock must not be polled by repeated passes"
+    );
+    let parked = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness")
+        .parked;
+    assert_eq!(parked, None, "a held lock is a wait, not a park");
+    drop(holder);
+
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    let freshness = loop {
+        let freshness = fixture
+            .registry
+            .dashboard_freshness(&fixture.project)
+            .await
+            .expect("mounted freshness");
+        let converged = freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
+        if converged || tokio::time::Instant::now() >= deadline {
+            break freshness;
+        }
+        signals.changed_before(deadline.into_std()).await;
+    };
+    assert_eq!(freshness.parked, None, "{freshness:?}");
+    assert_eq!(
+        freshness.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "{freshness:?}"
+    );
+    assert!(
+        freshness
+            .latest_generation_id
+            .as_ref()
+            .is_some_and(|generation| *generation != sealed_before),
+        "the edit must seal a new generation once the lock is released: {freshness:?}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+/// Follow-up wakes that arrive while another owner holds the store lock must
+/// not each run a failing reconcile. The refused pass waits for the holder to
+/// release the lock; those wakes stay pending until then, and the edit seals
+/// once the holder is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn follow_up_wakes_wait_out_a_held_store_lock() {
+    let fixture = Fixture::mount("project.reconcile-store-lock-follow-up").await;
+    let sealed_before = wait_for_latest_generation(&fixture).await;
+    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    let passes = fixture
+        .install_fault(ReconcileFaultKindV1::Permanent, 0)
+        .await;
+    let holder = acquire_code_generation_store_lock(&fixture.scope_store_root())
+        .expect("hold the scope store lock");
+
+    fs::write(
+        fixture.project.join("src/main.rs"),
+        "fn main() { edited(); }\nfn edited() {}\n",
+    )
+    .expect("edit source");
+    run_git_in(&fixture.project, &["commit", "-qam", "edit"]);
+    assert!(
+        matches!(
+            fixture
+                .registry
+                .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+                .await,
+            CodeIndexDemandAdmissionV1::Queued
+        ),
+        "the hint must reach the mounted scheduler"
+    );
+    assert_eq!(wait_for_attempts(&passes, 1).await, 1);
+    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "the refused pass must settle before follow-up wakes are driven"
+    );
+
+    for _ in 0..EXTERNAL_WAKE_ROUNDS {
+        fixture.wake_busy_follow_up().await;
+        tokio::time::sleep(WAKE_ROUND_SPACING).await;
+    }
+    assert_eq!(
+        passes.attempts(),
+        1,
+        "follow-up wakes must wait for the store-lock holder instead of retrying the refusal"
     );
     let parked = fixture
         .registry
