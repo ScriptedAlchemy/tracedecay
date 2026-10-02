@@ -205,6 +205,9 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
     )
     .await;
     assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
+    // Admission is the commit; `messages_upserted` counts only the projections
+    // this request drained, which the catch-up worker may take first.
+    assert_eq!(ingest["observations_committed"], 2, "ingest: {ingest}");
     let envelope = answer_tool(
         &fixture,
         "tracedecay_message_search",
