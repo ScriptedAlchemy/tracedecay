@@ -377,6 +377,7 @@ mod tests {
             content_identity: digest('b'),
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         }
     }
 

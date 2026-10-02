@@ -193,6 +193,34 @@ class StrictReadinessOutputTests(unittest.TestCase):
                         strict=True,
                     )
 
+    def test_strict_status_accepts_omitted_sources_but_not_other_partial_coverage(
+        self,
+    ) -> None:
+        def status(coverage: str) -> dict[str, object]:
+            return {
+                "code_index_freshness": {
+                    "status": "current",
+                    "worktree": {
+                        "coverage": coverage,
+                        "staleness_state": "fresh",
+                        "latest_generation_id": "generation.ready",
+                        "code_graph_serving": {"state": "ready"},
+                    },
+                },
+                "graph_statistics": {
+                    "state": "observed",
+                    "generation_id": "generation.ready",
+                    "symbol_count": 12,
+                    "edge_count": 9,
+                },
+            }
+
+        self.checker.validate_status(status("partial_omitted_sources"), strict=True)
+        with self.assertRaisesRegex(ValueError, "complete text-index coverage"):
+            self.checker.validate_status(
+                status("partial_hook_hint_overflow"), strict=True
+            )
+
     def test_strict_status_rejects_live_exact_scope_graph_degradation(self) -> None:
         with self.assertRaisesRegex(ValueError, "exact_scope_generation_not_ready"):
             self.checker.validate_status(

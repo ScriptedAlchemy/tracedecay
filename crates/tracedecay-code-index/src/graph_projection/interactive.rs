@@ -29,15 +29,15 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphProjectionIdentity, GraphReadMeter, GraphRelation,
-    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
+    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, NeverCancelled, RelationFanoutOverflow,
     VerifiedGraphSnapshot,
 };
 
 use super::{
     CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
-    CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1, code_edge_kind,
-    code_edge_kind_edge, compare_edges, edge_record, load_symbol_entity_record, load_symbol_record,
-    symbol_entity_id,
+    CodeGraphServingWarmthV1, CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1,
+    code_edge_kind, code_edge_kind_edge, compare_edges, edge_record, load_symbol_entity_record,
+    load_symbol_record, symbol_entity_id,
 };
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -69,10 +69,25 @@ enum InteractiveCatalogState {
         owner: Option<Arc<InteractiveCatalogBuildLease>>,
     },
     Ready(Arc<InteractiveCatalog>),
+    /// Given back for memory. The next catalog read starts a background
+    /// rebuild; no request thread pays for the scan.
+    Released,
     Failed(CodeGraphProjectionError),
 }
 
+const CATALOG_WARMING: &str = "code graph interactive catalog is warming in the background";
+const CATALOG_RELEASED: &str =
+    "code graph interactive catalog was released and is re-warming in the background";
+
 struct InteractiveCatalogBuildLease;
+
+/// The state a catalog build took over, restored when the build is cancelled.
+#[derive(Clone, Copy)]
+enum TakenOverCatalog {
+    Cold,
+    Released,
+    Background,
+}
 
 pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
@@ -133,12 +148,30 @@ impl InteractiveCatalogCache {
         if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
             return CodeGraphCatalogReleaseV1::NotReady;
         }
-        *state = InteractiveCatalogState::Cold;
+        *state = InteractiveCatalogState::Released;
         CodeGraphCatalogReleaseV1::Released {
             bytes: self
                 .ready_bytes
                 .swap(0, std::sync::atomic::Ordering::AcqRel),
         }
+    }
+
+    pub(super) fn warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {
+        let state = self.state.read().map_err(|_| catalog_lock_poisoned())?;
+        Ok(match &*state {
+            InteractiveCatalogState::Ready(_) => CodeGraphServingWarmthV1::Warm,
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { .. } => {
+                CodeGraphServingWarmthV1::Warming(CATALOG_WARMING.to_owned())
+            }
+            InteractiveCatalogState::Released => CodeGraphServingWarmthV1::Warming(
+                "code graph interactive catalog was released for memory; the next graph read \
+                 re-warms it"
+                    .to_owned(),
+            ),
+            InteractiveCatalogState::Failed(error) => {
+                CodeGraphServingWarmthV1::Failed(error.to_string())
+            }
+        })
     }
 }
 
@@ -157,6 +190,7 @@ pub struct CodeGraphInteractiveReader {
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
     catalog: Arc<InteractiveCatalogCache>,
+    meter: Option<Arc<GraphReadMeter>>,
 }
 
 impl fmt::Debug for CodeGraphInteractiveReader {
@@ -199,6 +233,7 @@ impl CodeGraphReadCostMeter {
             adjacency_queries: cost.adjacency_queries,
             adjacency_rows: cost.adjacency_rows,
             bytes_hydrated: cost.bytes_hydrated,
+            catalog_symbols: cost.catalog_symbols,
         }
     }
 }
@@ -229,7 +264,7 @@ impl CodeGraphProjectionStore {
             .write()
             .map_err(|_| catalog_lock_poisoned())?;
         match &*state {
-            InteractiveCatalogState::Cold => {
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Released => {
                 *state = InteractiveCatalogState::Warming { owner: None };
                 Ok(())
             }
@@ -276,6 +311,7 @@ impl CodeGraphInteractiveReader {
             projection_node_count,
             cancellation,
             catalog,
+            meter: None,
         }
     }
 
@@ -289,8 +325,16 @@ impl CodeGraphInteractiveReader {
     pub fn metered(&self, cost: &CodeGraphReadCostMeter) -> Self {
         Self {
             snapshot: Arc::new(self.snapshot.metered(Arc::clone(&cost.meter))),
+            meter: Some(Arc::clone(&cost.meter)),
             ..self.clone()
         }
+    }
+
+    fn served_from_catalog<T>(&self, served: Vec<T>) -> Vec<T> {
+        if let Some(meter) = &self.meter {
+            meter.record_catalog_symbols(served.len() as u64);
+        }
+        served
     }
 
     /// Resolves symbols by exact qualified name, optionally narrowed to one
@@ -305,7 +349,7 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(limit, "code graph name resolution limit")?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog
                 .by_qualified_name
@@ -313,7 +357,7 @@ impl CodeGraphInteractiveReader {
                 .map(|ids| &ids[..]),
             kind,
             limit,
-        ))
+        )))
     }
 
     /// Resolves symbols by case-insensitive simple name (the trailing
@@ -328,7 +372,7 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(limit, "code graph name resolution limit")?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog
                 .by_simple_name
@@ -336,7 +380,7 @@ impl CodeGraphInteractiveReader {
                 .map(|ids| &ids[..]),
             kind,
             limit,
-        ))
+        )))
     }
 
     /// Whether unresolved call sites can name one of the queried methods.
@@ -417,6 +461,37 @@ impl CodeGraphInteractiveReader {
         Ok(gaps)
     }
 
+    /// The kinds of unresolved call site the queried symbols themselves make:
+    /// calls whose target the seal could not bind are callees the graph
+    /// cannot list.
+    pub fn unresolved_callee_gaps(
+        &self,
+        sources: &[CodeGraphSymbolRefV1],
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<UnresolvedCallerGapsV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut gaps = UnresolvedCallerGapsV1::default();
+        for source in sources {
+            catalog::check_cancelled(cancellation.as_ref())?;
+            for call in catalog
+                .unresolved_sources_by_entity
+                .get(&source.0)
+                .and_then(|occurrence| catalog.symbols.get(occurrence))
+                .into_iter()
+                .flat_map(|symbol| &symbol.unresolved_calls)
+            {
+                match call.unmodeled_import {
+                    Some(shape) => {
+                        gaps.unmodeled_imports.insert(shape);
+                    }
+                    None => gaps.exact_target_unavailable = true,
+                }
+            }
+        }
+        Ok(gaps)
+    }
+
     /// Lists the symbols bound to one file occurrence.
     pub fn symbols_in_file(
         &self,
@@ -429,12 +504,12 @@ impl CodeGraphInteractiveReader {
         file.validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         let catalog = self.catalog(cancellation)?;
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
-        ))
+        )))
     }
 
     /// Lists the symbols bound to the file published under logical path
@@ -457,12 +532,12 @@ impl CodeGraphInteractiveReader {
         let Some(file) = catalog.by_logical_path.get(path) else {
             return Ok(Vec::new());
         };
-        Ok(resolve_from_index(
+        Ok(self.served_from_catalog(resolve_from_index(
             &catalog,
             catalog.by_file.get(file).map(|ids| &ids[..]),
             None,
             limit,
-        ))
+        )))
     }
 
     pub fn file_by_logical_path(
@@ -625,7 +700,10 @@ impl CodeGraphInteractiveReader {
                 metadata: record.metadata.clone(),
             });
         }
-        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+        Ok(CodeGraphSymbolPageV1 {
+            symbols: self.served_from_catalog(symbols),
+            has_more,
+        })
     }
 
     /// Finds symbols in canonical occurrence order without hydrating
@@ -661,7 +739,7 @@ impl CodeGraphInteractiveReader {
                 }
             }
         }
-        Ok(symbols)
+        Ok(self.served_from_catalog(symbols))
     }
 
     /// Per-seed outgoing semantic edges (callees when filtered to call
@@ -870,14 +948,16 @@ impl CodeGraphInteractiveReader {
         }
         ranked.sort_unstable_by(order);
         Ok(CodeGraphDegreeRankingV1 {
-            ranked: ranked
-                .into_iter()
-                .map(|(_, _, occurrence, record)| CodeGraphRankedSymbolV1 {
-                    summary: InteractiveCatalog::symbol_summary(occurrence, record),
-                    outgoing: record.outgoing,
-                    incoming: record.incoming,
-                })
-                .collect(),
+            ranked: self.served_from_catalog(
+                ranked
+                    .into_iter()
+                    .map(|(_, _, occurrence, record)| CodeGraphRankedSymbolV1 {
+                        summary: InteractiveCatalog::symbol_summary(occurrence, record),
+                        outgoing: record.outgoing,
+                        incoming: record.incoming,
+                    })
+                    .collect(),
+            ),
             symbol_count: catalog.symbols.len(),
         })
     }
@@ -989,12 +1069,14 @@ impl CodeGraphInteractiveReader {
         }
         ranked.sort_unstable_by(order);
         Ok(CodeGraphRankedNeighborsV1 {
-            neighbors: ranked
-                .into_iter()
-                .map(|(_, _, _, occurrence, record)| {
-                    InteractiveCatalog::symbol_summary(occurrence, record)
-                })
-                .collect(),
+            neighbors: self.served_from_catalog(
+                ranked
+                    .into_iter()
+                    .map(|(_, _, _, occurrence, record)| {
+                        InteractiveCatalog::symbol_summary(occurrence, record)
+                    })
+                    .collect(),
+            ),
             total,
             walk_truncated,
         })
@@ -1151,7 +1233,7 @@ impl CodeGraphInteractiveReader {
             (!has_more).then_some(matched as u64)
         };
         Ok(CodeGraphSymbolSearchPageV1 {
-            symbols,
+            symbols: self.served_from_catalog(symbols),
             has_more,
             total,
         })
@@ -1384,14 +1466,25 @@ impl CodeGraphInteractiveReader {
                 }
                 InteractiveCatalogState::Warming { .. } => {
                     return Err(CodeGraphProjectionError::Unavailable(
-                        "code graph interactive catalog is warming in the background".to_owned(),
+                        CATALOG_WARMING.to_owned(),
                     ));
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold => {}
+                InteractiveCatalogState::Released => {}
+                InteractiveCatalogState::Cold => {
+                    drop(state);
+                    return self.build_cold_catalog(cancellation);
+                }
             }
         }
-        self.warm_catalog(Arc::clone(&cancellation))?;
+        Err(self.rewarm_released_catalog())
+    }
+
+    fn build_cold_catalog(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Arc<InteractiveCatalog>, CodeGraphProjectionError> {
+        self.warm_catalog(cancellation)?;
         let state = self
             .catalog
             .state
@@ -1400,9 +1493,47 @@ impl CodeGraphInteractiveReader {
         match &*state {
             InteractiveCatalogState::Ready(catalog) => Ok(Arc::clone(catalog)),
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
-            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { .. } => {
-                Err(CodeGraphProjectionError::Unavailable(
-                    "code graph interactive catalog is warming in the background".to_owned(),
+            InteractiveCatalogState::Cold
+            | InteractiveCatalogState::Released
+            | InteractiveCatalogState::Warming { .. } => Err(
+                CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned()),
+            ),
+        }
+    }
+
+    /// Start rebuilding a released catalog on a thread of its own and answer
+    /// the typed warming state. The rebuild answers to no request's
+    /// cancellation, so a short read cannot abandon it half-scanned.
+    pub(super) fn rewarm_released_catalog(&self) -> CodeGraphProjectionError {
+        let released = CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned());
+        {
+            let Ok(mut state) = self.catalog.state.write() else {
+                return catalog_lock_poisoned();
+            };
+            if !matches!(&*state, InteractiveCatalogState::Released) {
+                return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+            }
+            *state = InteractiveCatalogState::Warming { owner: None };
+        }
+        let background = Self {
+            cancellation: Arc::new(NeverCancelled),
+            ..self.clone()
+        };
+        let spawned = std::thread::Builder::new()
+            .name("code-graph-catalog-rewarm".to_owned())
+            .spawn(move || {
+                // A failed build is recorded as the catalog's `Failed` state,
+                // which every later read and the serving status answer.
+                let _ = background.warm_catalog(Arc::new(NeverCancelled));
+            });
+        match spawned {
+            Ok(_) => released,
+            Err(error) => {
+                if let Ok(mut state) = self.catalog.state.write() {
+                    *state = InteractiveCatalogState::Released;
+                }
+                CodeGraphProjectionError::Unavailable(format!(
+                    "code graph interactive catalog re-warm could not start: {error}"
                 ))
             }
         }
@@ -1424,13 +1555,13 @@ impl CodeGraphInteractiveReader {
             return Err(CodeGraphProjectionError::Cancelled);
         }
         let build_lease = Arc::new(InteractiveCatalogBuildLease);
-        let background_owned = {
+        let taken_over = {
             let mut state = self
                 .catalog
                 .state
                 .write()
                 .map_err(|_| catalog_lock_poisoned())?;
-            match &*state {
+            let taken_over = match &*state {
                 InteractiveCatalogState::Ready(_) => {
                     if cancellation.is_cancelled() {
                         return Err(CodeGraphProjectionError::Cancelled);
@@ -1438,24 +1569,19 @@ impl CodeGraphInteractiveReader {
                     return Ok(());
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold => {
-                    *state = InteractiveCatalogState::Warming {
-                        owner: Some(Arc::clone(&build_lease)),
-                    };
-                    false
-                }
-                InteractiveCatalogState::Warming { owner: None } => {
-                    *state = InteractiveCatalogState::Warming {
-                        owner: Some(Arc::clone(&build_lease)),
-                    };
-                    true
-                }
+                InteractiveCatalogState::Cold => TakenOverCatalog::Cold,
+                InteractiveCatalogState::Released => TakenOverCatalog::Released,
+                InteractiveCatalogState::Warming { owner: None } => TakenOverCatalog::Background,
                 InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         "code graph interactive catalog warm already has an owner".to_owned(),
                     ));
                 }
-            }
+            };
+            *state = InteractiveCatalogState::Warming {
+                owner: Some(Arc::clone(&build_lease)),
+            };
+            taken_over
         };
         self.catalog
             .scan_builds
@@ -1507,10 +1633,12 @@ impl CodeGraphInteractiveReader {
             Err(CodeGraphProjectionError::Cancelled) => {
                 // A background-marked build remains background-owned after
                 // cancellation, so a request cannot take over its full scan.
-                *state = if background_owned {
-                    InteractiveCatalogState::Warming { owner: None }
-                } else {
-                    InteractiveCatalogState::Cold
+                *state = match taken_over {
+                    TakenOverCatalog::Cold => InteractiveCatalogState::Cold,
+                    TakenOverCatalog::Released => InteractiveCatalogState::Released,
+                    TakenOverCatalog::Background => {
+                        InteractiveCatalogState::Warming { owner: None }
+                    }
                 };
                 Err(CodeGraphProjectionError::Cancelled)
             }

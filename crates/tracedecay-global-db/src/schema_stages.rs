@@ -866,10 +866,7 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(TRANSCRIPT_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
-    transaction
-        .execute_batch(managed_test_runs::MANAGED_TEST_RUN_SCHEMA)
-        .await
-        .map_err(|error| global_db_operation_error("initialize managed test-run schema", error))?;
+    managed_test_runs::ensure_managed_test_run_schema(transaction).await?;
     transaction
         .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
         .await
@@ -1177,6 +1174,56 @@ pub(crate) async fn ensure_attached_registered_schema(
             lcm_status_performance_indexes: true,
         }),
     })
+}
+
+/// The typed reset [`ensure_attached_registered_schema`] would refuse this
+/// existing store with, `None` when it admits. The same classification and
+/// install stages run inside a transaction that is always rolled back, so the
+/// store keeps exactly its prior schema. The post-commit index builds and the
+/// composed authority-schema validation are left to the store's own attach:
+/// an older admissible store would otherwise build its historical indexes
+/// only to discard them.
+pub(crate) async fn attached_registered_schema_reset_refusal(
+    database: &Database,
+) -> tracedecay_domain::errors::Result<Option<tracedecay_domain::errors::TraceDecayError>> {
+    const OPERATION: &str = "inspect attached registered global database schema";
+    let reset_or_error = |error: tracedecay_domain::errors::TraceDecayError| {
+        if error.is_store_reset_required() {
+            Ok(Some(error))
+        } else {
+            Err(error)
+        }
+    };
+    let read_connection = database.read_connection();
+    let RegisteredSchemaAdmissionClassification {
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+    } = match classify_registered_schema_admission(&read_connection).await {
+        Ok(RegisteredSchemaAdmission::Admissible(classification)) => classification,
+        Ok(RegisteredSchemaAdmission::SessionAuthorityRefused(refused)) => {
+            return Ok(Some(refused.error()));
+        }
+        Err(error) => return reset_or_error(error),
+    };
+    let force_exhaustive = !authority_invariant_triggers_intact(&read_connection).await?;
+    let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
+    let admission = install_registered_schema_stages(
+        &transaction,
+        configuration_fresh.as_ref(),
+        temporal_admission,
+        workflow_admission,
+        force_exhaustive,
+    )
+    .await;
+    transaction
+        .rollback()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    match admission {
+        Ok(refused) => Ok(refused.map(RefusedAuthorityV1::error)),
+        Err(error) => reset_or_error(error),
+    }
 }
 
 /// An attached store's admission outcome.

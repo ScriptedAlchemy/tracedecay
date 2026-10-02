@@ -207,12 +207,15 @@ ecosystem bundle correctly.
 
 ## Changing the Rust-to-Dashboard Wire Contract
 
-`dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
+`dashboard/src/contracts/types.ts`, `dashboard/src/contracts/decoders.ts`,
+`dashboard/src/contracts/generated.ts`, and
 `dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
 hand-written. The Rust `schemars` output is authoritative: the codegen CLI
 exports the schema through the `tracedecay-dashboard-api` library's ignored
-`contract_schema::tests::writes_dashboard_contract_schema` test, regenerates all
-three files, and compares them byte-for-byte with what is committed.
+`contract_schema::tests::writes_dashboard_contract_schema` test. In
+`contracts:check` mode, it generates all four dashboard files and the
+TypeScript SDK sources, then compares every generated output byte-for-byte
+with the committed files.
 
 After changing any Rust type that crosses the dashboard API boundary:
 

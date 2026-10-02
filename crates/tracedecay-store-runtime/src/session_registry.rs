@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 use tracedecay_domain::BrainNodeId;
-use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
-use tracedecay_domain::errors::{Result, StoreResetRequiredV1, TraceDecayError};
+use tracedecay_domain::errors::{
+    ProjectOpenFailureKind, Result, StoreResetRequiredV1, TraceDecayError,
+};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
 use tracedecay_graph_db::{GraphDbOwnerAttachmentV1, GraphDbRetirementCommit};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
@@ -2580,15 +2581,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) -> Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>> {
         Arc::clone(&self.remote_recovery_project_lifecycle)
     }
-
-    pub fn retain_hook_task<F, Fut>(&self, provider: &str, session_id: &str, operation: F) -> bool
-    where
-        F: FnOnce(ObservationCancellation) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.retained_hook_tasks
-            .retain(provider, session_id, operation)
-    }
 }
 
 #[hotpath::measure(label = "daemon.session_registry.runtime_incarnation")]
@@ -2774,6 +2766,12 @@ pub fn registry_open_error(
         }
         StoreRuntimeRegistryFailure::OpenCancelled { .. } => {
             TraceDecayError::store_open_cancelled(operation)
+        }
+        StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted { limit } => {
+            TraceDecayError::project_open(
+                ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { limit },
+                format!("{operation} refused: all {limit} project code-runtime seats are taken"),
+            )
         }
         failure => session_registry_error(operation, format!("{failure:?}")),
     }

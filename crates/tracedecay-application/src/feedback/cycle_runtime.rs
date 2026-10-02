@@ -805,7 +805,8 @@ fn graph_read_failure(error: CodeGraphReadError) -> FeedbackImpactPortOutcome {
         | CodeGraphReadError::BudgetExhausted { .. }
         | CodeGraphReadError::Denied
         | CodeGraphReadError::InvalidRequest { .. }
-        | CodeGraphReadError::Corrupt { .. } => FeedbackImpactPortOutcome::Unavailable,
+        | CodeGraphReadError::Corrupt { .. }
+        | CodeGraphReadError::Parked { .. } => FeedbackImpactPortOutcome::Unavailable,
     }
 }
 

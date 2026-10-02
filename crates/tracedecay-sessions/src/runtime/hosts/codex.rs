@@ -91,7 +91,7 @@ use crate::runtime::source::{
 };
 
 #[cfg(test)]
-pub(crate) use context::{evict_prior_context_for_test, prior_context_scan_count_for_test};
+pub(crate) use context::evict_prior_context_for_test;
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
@@ -290,6 +290,42 @@ impl<'a> PendingTranscript<'a> {
             Some((hub, consumer, witness)) => hub.record_file_converged(consumer, path, witness),
             None => Ok(()),
         }
+    }
+
+    /// Whether admission consumed the whole settled file and left no tail.
+    /// An unsettled change time cannot prove that, so a later pass reads the
+    /// file again.
+    pub(crate) fn admission_settles(&self, source_deferred: bool, covered_through: u64) -> bool {
+        self.convergence
+            .is_some_and(|(_, _, witness)| !source_deferred && covered_through == witness.len)
+    }
+
+    /// Owned copy of the settled identity, so a caller can finish the file
+    /// after asynchronous admission without observing it again.
+    pub(crate) fn settled(&self) -> Option<SettledTranscript> {
+        self.convergence
+            .map(|(hub, consumer, witness)| SettledTranscript {
+                hub: hub.clone(),
+                consumer: consumer.to_owned(),
+                witness,
+            })
+    }
+}
+
+/// A file whose change time was already settled when this pass observed it.
+///
+/// Held across admission so the parent file can be finished once every
+/// source it names is covered, without a later pass opening it to decide.
+pub(crate) struct SettledTranscript {
+    hub: CodexDiscoveryHub,
+    consumer: String,
+    witness: SettledFileWitness,
+}
+
+impl SettledTranscript {
+    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
+        self.hub
+            .record_file_converged(&self.consumer, path, self.witness)
     }
 }
 

@@ -202,9 +202,9 @@ pub use grep_analysis::{DependencyDepthChainV1, DependencyDepthResultV1};
 pub use hook_runtime_surface::{
     ContextScoutStoreStatusV1, HermesReceiptStatusV1, HookCompactionResultV1,
     HookIngestAdmissionV1, HookIngestTranscriptRequestV1, HookIngestTranscriptResultV1,
-    HookRuntimeAcceptedV1, HookRuntimeDispositionV1, HookRuntimeResultV1,
-    HookRuntimeSurfaceRequestV1, HookV2AdmissionResultV1, HookV2AdmitRequestV1,
-    HookV2NoticeDeliveryResultV1, HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
+    HookRuntimeDispositionV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+    HookV2AdmissionResultV1, HookV2AdmitRequestV1, HookV2NoticeDeliveryResultV1,
+    HookV2ProfileAdmissionResultV1, HookV2RejectionReasonV1,
 };
 pub use owner_effect_surface::{
     AdminSyncAdmissionV1, AdminSyncReconcileScopeV1, AdminSyncResultV1, AdminSyncSurfaceRequestV1,
@@ -251,11 +251,11 @@ pub use project_info_surface::{
     ProjectSearchSurfaceRequestV1, ProjectStatusV1, RegisteredProjectIdSelectorV1,
     RemoteStatusSurfaceRequestV1, RuntimeDoctorReportV1, RuntimeResultV1, RuntimeSurfaceRequestV1,
     StatusAdmissionV1, StatusBranchMismatchV1, StatusCodeIndexFreshnessV1,
-    StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusMemoryOwnerV1,
-    StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1,
-    StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1, StatusServingConditionV1,
-    StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1,
-    StatusSurfaceRequestV1,
+    StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusHookReplayFailureV1,
+    StatusHookReplaySpoolV1, StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1,
+    StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

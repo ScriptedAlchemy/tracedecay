@@ -247,13 +247,16 @@ tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokens
 # or the finished columnar store. Since ScriptedAlchemy/grafeo#6 every
 # compact structure reports the heap it owns from its own capacity, and
 # `memory_usage` includes the compact base with a mapped section reported
-# apart, which is what the graph engine's resident owner charges. Its
+# apart, which is what the graph engine's resident owner charges. Since
+# ScriptedAlchemy/grafeo#7 a string value over 64 KiB is stored whole with
+# its zone-map bound written absent, and an over-long table or property name
+# is a typed error, where the section writer used to panic. Its
 # workspace resolves sibling crates by path, so every grafeo crate must
 # come from the same revision. A mixed
 # registry/git graph would build type-incompatible instances of the patched
 # crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }

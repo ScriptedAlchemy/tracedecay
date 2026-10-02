@@ -77,7 +77,7 @@ export type AdmitWorkSynthesisCommand = {
 
 export type AgentInstanceId = string;
 
-export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable";
+export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large";
 
 export type AgentTaskKind = "combined_review" | "memory_curator" | "session_reflector" | "skill_writer" | "user_job";
 
@@ -870,6 +870,10 @@ export type CodeGraphServingReadinessV1 =
   | {
     reason: string;
     state: "unavailable";
+  }
+  | {
+    reason: string;
+    state: "warming";
   };
 
 export type CodeIndexBuildBlockedReasonV1 = "artifact_store_unavailable" | "publication_authority_corrupt" | "resident_memory" | "retry_backoff" | "source_unavailable";
@@ -911,9 +915,10 @@ export type CodeIndexConvergenceParkedV1 = {
   retries_on_wake: boolean;
 };
 
-export type CodeIndexFreshnessCoverageV1 = "complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved";
+export type CodeIndexFreshnessCoverageV1 = "complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources";
 
 export type CodeIndexFreshnessPayloadV1 = {
+  mount_failure?: CodeIndexMountFailureV1 | null | undefined;
   note: string;
   worktrees: Array<CodeIndexWorktreeFreshnessV1>;
 };
@@ -926,6 +931,22 @@ export type CodeIndexGenerationRecoveryV1 = {
   serving: CodeIndexGenerationRecoveryServingV1;
 };
 
+export type CodeIndexMountFailureV1 = {
+  message: string;
+  remediation: string;
+};
+
+export type CodeIndexOmittedSourcesV1 = {
+  count: number;
+  sources: Array<CodeIndexOmittedSourceV1>;
+};
+
+export type CodeIndexOmittedSourceV1 = {
+  display_path: string;
+  git_path_bytes: Array<number>;
+  reason: CodeIndexSourceOmissionReasonV1;
+};
+
 export type CodeIndexRestoreProgressV1 = {
   artifact_digest: string;
   authenticated_completed: number;
@@ -933,6 +954,15 @@ export type CodeIndexRestoreProgressV1 = {
   authenticated_total: number;
   generation_id: string;
 };
+
+export type CodeIndexSourceOmissionReasonV1 = 
+  | {
+    detail: string;
+    kind: "privacy_withheld";
+  }
+  | {
+    kind: "unrepresentable_path";
+  };
 
 export type CodeIndexStalenessStateV1 = "fresh" | "indexing" | "parked" | "refreshing" | "restoring" | "stale" | "verifying";
 
@@ -970,6 +1000,7 @@ export type CodeIndexWorktreeFreshnessV1 = {
   hook_hint_count: number | null;
   last_reconcile_micros: number | null;
   latest_generation_id: string | null;
+  omitted_sources?: CodeIndexOmittedSourcesV1 | null | undefined;
   parked: CodeIndexConvergenceParkedV1 | null;
   progress: CodeIndexBuildProgressV1 | null;
   rebuild_in_flight: boolean;
@@ -4341,6 +4372,7 @@ export type RequestCostReceiptV1 = {
   adjacency_queries: number;
   adjacency_rows: number;
   bytes_hydrated: number;
+  catalog_symbols: number;
   point_reads: StorePointReadsV1;
   wall_micros: number;
 };

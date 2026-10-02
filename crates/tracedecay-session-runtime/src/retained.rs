@@ -105,7 +105,9 @@ pub fn session_retrieval_unavailable_detail(
 
 pub fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {
     match error {
-        TraceDecayError::Config { .. } => RetainedSurfaceExecutionErrorV1::InvalidRequest,
+        TraceDecayError::Config { .. } | TraceDecayError::InvalidRequest { .. } => {
+            RetainedSurfaceExecutionErrorV1::InvalidRequest
+        }
         TraceDecayError::ProjectRoute {
             retryable: false, ..
         } => RetainedSurfaceExecutionErrorV1::Conflict,
@@ -130,6 +132,8 @@ pub fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionEr
         | TraceDecayError::Search { .. }
         | TraceDecayError::File { .. }
         | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::ServiceUnitNotOwned { .. }
+        | TraceDecayError::ProjectOpen { .. }
         | TraceDecayError::ToolRefused { .. }
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)

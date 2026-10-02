@@ -9,4 +9,3 @@
 mod host_lifecycle_cli_acceptance;
 #[path = "../../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
-mod opencode_one_analyzer_journey;

@@ -13,7 +13,7 @@
 use axum::Json;
 use axum::extract::State;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
+    CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1, CodeIndexStalenessStateV1,
 };
 
 use super::DashboardState;
@@ -44,15 +44,17 @@ async fn project_code_index_freshness(
         None => Ok(None),
     };
     let read = match read {
-        Err(_) => {
-            return DashboardEnvelopeV1::unavailable(
-                scope_from_state(state),
-                CodeIndexFreshnessPayloadV1 {
-                    worktrees: Vec::new(),
-                    note: "code-index freshness read failed".to_owned(),
-                },
-                "code-index freshness read failed",
-            );
+        Err(failure) => {
+            let payload = CodeIndexFreshnessPayloadV1::from_read_failure(failure);
+            let reason = payload.note.clone();
+            return match failure {
+                CodeIndexFreshnessReadFailureV1::ReadFailed => {
+                    DashboardEnvelopeV1::unavailable(scope_from_state(state), payload, reason)
+                }
+                CodeIndexFreshnessReadFailureV1::MountFailed => {
+                    DashboardEnvelopeV1::error(scope_from_state(state), payload, reason)
+                }
+            };
         }
         Ok(read) => read,
     };
@@ -65,11 +67,7 @@ async fn project_code_index_freshness(
         (false, _) => CodeIndexFreshnessPayloadV1::from_unattached_registry(),
     };
     match live {
-        Some(worktree)
-            if worktree.latest_generation_id.is_some()
-                && worktree.coverage == CodeIndexFreshnessCoverageV1::Complete
-                && worktree.staleness_state == Some(CodeIndexStalenessStateV1::Fresh) =>
-        {
+        Some(worktree) if worktree.is_authoritative() => {
             DashboardEnvelopeV1::ready(
                 scope_from_state(state),
                 DashboardCoverageV1::complete(1, "mounted_worktree"),
@@ -159,8 +157,9 @@ mod tests {
     use super::*;
     use crate::read_model::DashboardDomainStateV1;
     use tracedecay_contracts::code_index_freshness::{
-        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
-        CodeIndexWorktreeFreshnessV1,
+        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessReadFailureV1,
+        CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
+        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
@@ -201,6 +200,7 @@ mod tests {
                     rebuild_in_flight: false,
                     hook_hint_count: Some(0),
                     coverage: CodeIndexFreshnessCoverageV1::Complete,
+                    omitted_sources: None,
                     progress: None,
                     restore_progress: None,
                     parked: None,
@@ -224,6 +224,30 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Absent);
+    }
+
+    #[tokio::test]
+    async fn failed_mount_is_an_error_with_operator_remediation() {
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|_| {
+            Box::pin(async { Err(CodeIndexFreshnessReadFailureV1::MountFailed) })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Error);
+        let failure = envelope
+            .payload
+            .mount_failure
+            .expect("the failed mount remains visible");
+        assert_eq!(
+            failure.message,
+            "the code-index scheduler could not mount for this project"
+        );
+        assert_eq!(
+            failure.remediation,
+            "run `tracedecay sync` to retry the code-index mount"
+        );
     }
 
     #[tokio::test]
@@ -287,5 +311,40 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+
+    /// Sources no generation can index do not keep the dashboard waiting:
+    /// the fresh generation is ready and the payload still names them.
+    #[tokio::test]
+    async fn fresh_generation_with_omitted_sources_is_ready_and_names_them() {
+        let omitted = CodeIndexOmittedSourcesV1 {
+            count: 1,
+            sources: vec![CodeIndexOmittedSourceV1 {
+                git_path_bytes: b"src/odd\\name.rs".to_vec(),
+                display_path: "src/odd\\name.rs".to_owned(),
+                reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+            }],
+        };
+        let served = omitted.clone();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(move |root| {
+            let omitted = served.clone();
+            Box::pin(async move {
+                Ok(Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    latest_generation_id: Some("generation.fixture".to_owned()),
+                    staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                    coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+                    omitted_sources: Some(omitted),
+                    hook_hint_count: Some(0),
+                    ..Default::default()
+                }))
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
+        assert_eq!(envelope.payload.worktrees[0].omitted_sources, Some(omitted));
     }
 }

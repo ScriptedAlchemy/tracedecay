@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     io::Read,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -332,6 +332,7 @@ fn request_at_path(
         content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: vec![file.clone()],
+        omitted_sources: Vec::new(),
     };
 
     CodeIndexBuildRequestV1 {
@@ -915,6 +916,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
             content_identity: content_digest(format!("{fast_source}{slow_source}").as_bytes()),
             captured_at: UtcMicros(1_000_000),
             files: vec![fast.clone(), slow.clone()],
+            omitted_sources: Vec::new(),
         },
         captured_files: vec![
             CodeIndexCapturedFileV1 {
@@ -2875,6 +2877,7 @@ fn partitioned_request(
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files,
@@ -2933,6 +2936,11 @@ fn collect_published_segments<'a>(
             SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                 *published_files += 1;
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 evidence_pack.extend_from_slice(bytes);
@@ -2996,23 +3004,35 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:3dddd40ede9c3bbe6f8b3b8f167a218ec62f94aa3bdd86e60ca76a9b16c6d4cf";
+    "sha256:ac3b75376f07a86524d45a5e1f6dfe14b1a63d0a8a3d1da399e4a2503f75ce84";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:3bb9509e6da5059d42c95f1e9499e2748e4fd62b5c9769dccbb02b1cf59e73c6",
-        1_733,
+        "sha256:8e9ad377067c5f3b8f967a8b6e0ebe75c061683b6a33e83502b7a324373fec72",
+        1_732,
     ),
     (
-        "sha256:e0e8d620ecc318c46472c3460f68d5d032c9c3d181f178d74757088d9ec84789",
-        1_260,
+        "sha256:7c35a2c0b0dda1c2eb2f7f1e774a3e6eec5b31a0a9b473d28fa4ff60407e5205",
+        1_261,
     ),
     (
-        "sha256:aac76c651bf6ccbff6126e90d328de197c94c093a899ba39cff2ed70e75c4eda",
+        "sha256:209c0686cb2ca402c068a08b8fba0fc9d445d224d6bb7c4dddc78447e282f171",
         1_311,
     ),
     (
-        "sha256:5300546439346f41ef6249536d6468df024e4c89991d588da17c40e6e8e31fb4",
-        2_889,
+        "sha256:708872cc052de2eba0b77c777813a7838420413b244305a035c702a6b212a6a7",
+        2_911,
+    ),
+    (
+        "sha256:43cb26ecd5d8a87a7907b2cad1f77466b080a8d5cd504d5ef5869fcc51d5fe3f",
+        3_984,
+    ),
+    (
+        "sha256:0a5746563e2465439f54069e2dccc4972170d206bd5420a8955a3ebb863e9a51",
+        1_329,
+    ),
+    (
+        "sha256:e303343adb9c31758c787fe148e8e88cff01d183e26650d682a7013dbd042187",
+        1_370,
     ),
 ];
 
@@ -3025,7 +3045,13 @@ fn partitioned_file_segments_omit_the_identities_they_determine() {
     let (_, manifest, segments) = partitioned_codec_fixture();
     let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
         .expect("partitioned segment identities parse");
-    let (files, _evidence) = identities.split_at(identities.len() - 1);
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
+    let files = &identities[..file_segment_count];
     let mut chunks = 0;
     let mut explicit_ids = 0;
     let mut whole_symbol_terms = 0;
@@ -3083,6 +3109,17 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     );
     let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
         .expect("partitioned segment identities parse");
+    let graph_page_digests = envelope["generation"]["code_graph_pages"]
+        .as_array()
+        .expect("code graph page descriptors")
+        .iter()
+        .map(|page| {
+            page["page_digest"]
+                .as_str()
+                .expect("code graph page digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         identities
             .iter()
@@ -3135,7 +3172,10 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     tracedecay_code_index::parallelism::force_indexing_workers_for_test(2);
     let _forced_width = ForcedDecodeWidth;
     let window = CodeIndexPublishedGenerationV1::partitioned_decode_window_files();
-    let file_segment_count = PARTITIONED_FORMAT_SEGMENTS.len() - 1;
+    let file_segment_count = envelope["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .len();
     assert!(
         window == 2 && file_segment_count > window,
         "the fixture must span more file segments than one decode window"
@@ -3144,7 +3184,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     // Buffer address -> its capacity after the last read it served.
     let mut file_buffers = BTreeMap::new();
     let evidence_buffer_address = Cell::new(None);
-    let segment_reads = Cell::new(0_usize);
+    let segment_reads = RefCell::new(BTreeSet::new());
     let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
     let evidence_buffer_capacity = Cell::new(0_usize);
@@ -3186,12 +3226,27 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
                 evidence_buffer_capacity.set(buffer.capacity());
             }
-            segment_reads.set(segment_reads.get() + 1);
+            segment_reads
+                .borrow_mut()
+                .insert(digest.as_str().to_owned());
             Ok(())
         },
     )
     .expect("partitioned bytes decode");
-    assert_eq!(segment_reads.get(), PARTITIONED_FORMAT_SEGMENTS.len());
+    assert!(
+        segment_reads.borrow().is_disjoint(&graph_page_digests),
+        "text decode must leave independently served graph pages untouched"
+    );
+    let eagerly_decoded_digests = identities
+        .iter()
+        .map(|identity| identity.digest.as_str().to_owned())
+        .filter(|digest| !graph_page_digests.contains(digest))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        *segment_reads.borrow(),
+        eagerly_decoded_digests,
+        "decode must read every non-graph segment and defer only graph pages"
+    );
     let largest_file_segment = largest_file_segment.get();
     assert_eq!(
         file_buffers.len(),
@@ -3228,7 +3283,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
 
     // Segment authentication without decoding, which graph replay verifies a
     // retained generation through: intact segments verify, and one flipped
-    // byte in any of them is refused by the verifier and by the decoder.
+    // byte in any of them is refused. Text decode authenticates only the file
+    // and evidence segments it consumes; graph pages stay lazy and authenticate
+    // when the graph store reads them.
     let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
@@ -3270,15 +3327,16 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, flip).is_err(),
             "one flipped byte in segment {corrupted} must fail authentication"
         );
-        assert!(
-            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-                &manifest,
-                &SharedDecodedContentPoolV1::default(),
-                flip
-            )
-            .is_err(),
-            "one flipped byte in segment {corrupted} must fail the decoder"
+        let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            flip,
         );
+        if graph_page_digests.contains(*corrupted) {
+            decoded.expect("text decode must not materialize a graph page");
+        } else {
+            decoded.expect_err("a consumed corrupt segment must fail text decode");
+        }
     }
 
     let mut reencoded_segments = BTreeMap::new();
@@ -3288,6 +3346,11 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    reencoded_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     reencoded_evidence_pack.extend_from_slice(bytes);
@@ -3517,6 +3580,13 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                         file_segments += 1;
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                         bytes, ..
@@ -3887,6 +3957,32 @@ fn assert_reused_segment_descriptors_stable(parent_manifest: &[u8], child_manife
     }
 }
 
+fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(manifest).expect("partitioned manifest JSON");
+    let files = manifest["generation"]["snapshot"]["files"]
+        .as_array()
+        .expect("snapshot files");
+    manifest["generation"]["file_segments"]
+        .as_array()
+        .expect("file segment descriptors")
+        .iter()
+        .map(|segment| {
+            let file_key = usize::try_from(segment["file_key"].as_u64().expect("file segment key"))
+                .expect("file segment key fits usize");
+            let path = files[file_key]["logical_path"]
+                .as_str()
+                .expect("snapshot logical path")
+                .to_owned();
+            let digest = segment["segment_digest"]
+                .as_str()
+                .expect("file segment digest")
+                .to_owned();
+            (path, digest)
+        })
+        .collect()
+}
+
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
@@ -3903,19 +3999,29 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         .expect("delta child generation");
 
     let mut published_files = Vec::new();
-    let mut published_evidence_pages = 0_usize;
-    let mut evidence_commits = 0_usize;
+    let mut published_evidence_pages = BTreeSet::new();
+    let mut committed_evidence_pages = None;
     let child_manifest = child
         .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
                 }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { .. } => {
-                    published_evidence_pages += 1;
+                SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                    page_ordinal,
+                    ..
+                } => {
+                    published_evidence_pages.insert(page_ordinal);
                 }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit { .. } => {
-                    evidence_commits += 1;
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    page_count,
+                    ..
+                } => {
+                    assert!(
+                        committed_evidence_pages.replace(page_count).is_none(),
+                        "generation evidence must commit exactly once"
+                    );
                 }
             }
             Ok(())
@@ -3926,35 +4032,44 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         child.snapshot().files.len() > published_files.len(),
         "the fixture must carry unchanged files beside the edited one"
     );
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
     assert_eq!(
-        published_files.len(),
-        1,
-        "only the edited file may be re-encoded: {published_files:?}"
+        child_file_digests.get("src/alpha.rs"),
+        parent_file_digests.get("src/alpha.rs"),
+        "the unchanged caller must reuse its file segment"
     );
     assert_eq!(
-        published_evidence_pages, 1,
-        "the small fixture fits one generation-evidence page"
+        child_file_digests.get("src/unresolved.rs"),
+        parent_file_digests.get("src/unresolved.rs"),
+        "the unchanged unresolved fixture must reuse its file segment"
     );
-    assert_eq!(evidence_commits, 1, "all evidence pages commit as one pack");
-
-    let parent_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
-            .expect("parent identities parse");
-    let child_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
-            .expect("child identities parse");
-    let carried = child_identities
+    assert_ne!(
+        child_file_digests.get("src/beta.rs"),
+        parent_file_digests.get("src/beta.rs"),
+        "the edited file must replace its file segment"
+    );
+    let replaced_file_digests = child_file_digests
         .iter()
-        .filter(|identity| {
-            parent_identities
-                .iter()
-                .any(|parent| parent.digest == identity.digest)
+        .filter_map(|(path, digest)| {
+            (parent_file_digests.get(path) != Some(digest)).then_some(digest.clone())
         })
-        .count();
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        carried,
-        child.snapshot().files.len() - 1,
-        "every unchanged file must keep the parent generation's content address"
+        published_files
+            .iter()
+            .map(|(digest, _)| digest.clone())
+            .collect::<BTreeSet<_>>(),
+        replaced_file_digests,
+        "the encoder must publish exactly the replaced file segments"
+    );
+    assert_eq!(
+        committed_evidence_pages,
+        Some(
+            u32::try_from(published_evidence_pages.len())
+                .expect("published evidence page count fits u32")
+        ),
+        "the commit must cover every published evidence page"
     );
 
     assert_reused_segment_descriptors_stable(&parent_manifest, &child_manifest);
@@ -4071,27 +4186,25 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     // carried file hashes to its parent's digest (the encoder writes the
     // generation as a marker), so only the publication itself proves the
     // carried file took the `Reused(descriptor)` path this test exercises.
-    assert_eq!(
-        child_file_segments, 1,
-        "only the edited file is re-encoded; the carried file reuses its parent segment"
-    );
-    let parent_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
-            .expect("parent identities parse");
-    let child_identities =
-        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
-            .expect("child identities parse");
-    let carried_from_parent = child_identities
+    let parent_file_digests = file_segment_digests_by_path(&parent_manifest);
+    let child_file_digests = file_segment_digests_by_path(&child_manifest);
+    let replaced_file_segments = child_file_digests
         .iter()
-        .filter(|identity| {
-            parent_identities
-                .iter()
-                .any(|parent| parent.digest == identity.digest)
-        })
+        .filter(|(path, digest)| parent_file_digests.get(*path) != Some(*digest))
         .count();
     assert_eq!(
-        carried_from_parent, 1,
-        "the carried file's segment is the parent's content address"
+        child_file_segments, replaced_file_segments,
+        "only replaced file segments may be published"
+    );
+    assert_eq!(
+        child_file_digests.get("src/carried.rs"),
+        parent_file_digests.get("src/carried.rs"),
+        "the carried file must keep its parent's content address"
+    );
+    assert_ne!(
+        child_file_digests.get("src/edited.rs"),
+        parent_file_digests.get("src/edited.rs"),
+        "the edited file must replace its parent's content address"
     );
 
     let expected = sealed_clone_bindings(&child);

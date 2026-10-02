@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_code_index::production::CodeGraphBuildBoundV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
@@ -31,6 +32,15 @@ use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLea
 pub struct CodeGraphReplayBindingV1 {
     pub generations_root: PathBuf,
     pub sealed_state_digest: SealedGraphStateDigest,
+}
+
+/// Process-memory admission authority invoked after a sealed build has
+/// selected its cold or changed-page plan and before it materializes a page.
+pub trait CodeGraphBuildAdmissionV1: Send + Sync {
+    fn admit(
+        &self,
+        bound: CodeGraphBuildBoundV1,
+    ) -> std::result::Result<Box<dyn Send>, GraphDbError>;
 }
 
 /// Short-lived activation lease returned by [`CodeGraphSeatRuntimePortV1`].
@@ -45,6 +55,12 @@ pub trait CodeGraphSeatLeaseV1: Send {
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
+
+    fn publish_verified_snapshot_admitted(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+        admission: Arc<dyn CodeGraphBuildAdmissionV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn recover_verified_snapshot_from_head(

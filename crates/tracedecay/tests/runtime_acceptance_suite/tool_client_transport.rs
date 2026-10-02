@@ -121,6 +121,7 @@ fn files_result(paths: impl IntoIterator<Item = String>) -> FilesResultV1 {
         count: files.len(),
         layout: FilesLayoutV1::Flat,
         files,
+        worktree_omitted_sources: None,
     }
 }
 

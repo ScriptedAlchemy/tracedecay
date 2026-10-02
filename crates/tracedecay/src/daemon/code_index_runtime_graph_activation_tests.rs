@@ -2202,6 +2202,132 @@ async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
     mount.shutdown().await;
 }
 
+/// Issue #2874. Once the idle window lapsed, status went on reporting the
+/// graph `ready` while name lookups refused as warming. The idle release
+/// keeps the catalog, status and doctor name the warming state while the
+/// engine is away, and the next read restores it instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+        "idle release reports warming",
+    )
+    .await;
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().to_path_buf(),
+        mount.scope.clone(),
+    );
+    let context = graph_request_context(mount.scope.clone(), "idle-release");
+    let resolve_alpha = || async {
+        let observed_at = now_micros();
+        port.open(CodeGraphReadRequest::from_context(&context, observed_at))
+            .await?
+            .reader(&context, observed_at)?
+            .resolve_simple_name("alpha", None, 2, request_graph_cancellation(&context))
+            .map(|symbols| {
+                symbols
+                    .into_iter()
+                    .map(|symbol| symbol.occurrence.as_str().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .map_err(tracedecay_graph_query::map_projection_error)
+    };
+    let serving = || async {
+        let freshness = mount
+            .registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted worktree");
+        (freshness.code_graph_serving, freshness.staleness_state)
+    };
+    let fresh = Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh);
+    let ready =
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready);
+    let serving = &serving;
+    let (fresh_state, ready_state) = (&fresh, &ready);
+    let until_ready = |what: &'static str| async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let (graph, staleness) = serving().await;
+            if &graph == ready_state {
+                return;
+            }
+            assert!(
+                matches!(
+                    graph,
+                    Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming { .. })
+                ) && &staleness == fresh_state,
+                "{what}: the graph is warming and the index stays fresh: {graph:?} {staleness:?}"
+            );
+            assert!(std::time::Instant::now() <= deadline, "{what}: {graph:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    until_ready("first activation").await;
+    let warm = resolve_alpha()
+        .await
+        .expect("the warm graph resolves `alpha`");
+    assert_eq!(warm.len(), 1, "{warm:?}");
+
+    let released = owners.release_idle(std::time::Instant::now() + RESIDENT_OWNER_IDLE_WINDOW_V1);
+    assert_eq!(
+        released
+            .iter()
+            .map(|release| release.kind)
+            .filter(|kind| matches!(
+                kind,
+                ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
+            ))
+            .collect::<Vec<_>>(),
+        [ResidentOwnerKindV1::GraphEngine],
+        "the idle window takes the engine and keeps the catalog"
+    );
+    assert_eq!(
+        serving().await,
+        (
+            Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
+                    reason: "code graph engine was released for memory; the next graph read \
+                             re-warms it"
+                        .to_owned(),
+                }
+            ),
+            fresh,
+        )
+    );
+    assert_eq!(
+        tracedecay_daemon_service::doctor_kernel::code_index_read_from_registry(
+            &mount.registry,
+            fixture.path(),
+        )
+        .await,
+        tracedecay_contracts::doctor::CodeIndexMountReadV1::Observed {
+            state: tracedecay_contracts::doctor::CodeIndexMountStateV1::Mounted,
+            coverage: tracedecay_contracts::doctor::DoctorCoverageCompletenessV1::Complete,
+        },
+        "doctor reads the verdict status reports"
+    );
+
+    assert_eq!(
+        resolve_alpha().await,
+        Err(tracedecay_graph_query::CodeGraphReadError::Unavailable {
+            detail: "code graph engine was released and is re-warming in the background".to_owned(),
+        }),
+        "the read that finds the engine away answers the retryable warming state"
+    );
+    until_ready("re-warm").await;
+    assert_eq!(resolve_alpha().await, Ok(warm));
+
+    mount.shutdown().await;
+}
+
 /// Issue #2619. The modelled process holds, beside the first generation's
 /// serving graph, everything else up to one byte under the admission
 /// watermark, so nothing the refresh after a commit charges fits until that

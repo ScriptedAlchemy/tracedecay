@@ -39,14 +39,15 @@ use super::*;
 /// parent delta (optional parent binding). Evidence lineage, request, and
 /// receipt rows leave implicit what the generation's own symbols and chunks
 /// imply. Evidence also carries the cross-file edges sealing resolved, so a
-/// restore never re-resolves the corpus.
+/// restore never re-resolves the corpus. The snapshot carries the sources
+/// capture omitted, with the reason.
 ///
 /// Every other revision is refused through
 /// [`superseded_sealed_generation_revision`], and the generation is rebuilt
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
 /// successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 17;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 18;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
@@ -1065,6 +1066,7 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
     pub(super) projection_receipt: ProjectionBatchReceiptV1,
     /// The edges sealing derived across files, restored as sealed.
     pub(super) cross_file_edges: Vec<CanonicalRelationEdgeV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -1146,6 +1148,7 @@ pub(super) fn assemble_published_generation(
         projection_request,
         projection_receipt,
         cross_file_edges,
+        unresolved_calls,
     } = generation;
     let files = content.files.clone();
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
@@ -1230,6 +1233,7 @@ pub(super) fn assemble_published_generation(
         lineage,
         imports,
         edges,
+        unresolved_calls,
         edge_abstentions,
         clone_payloads_reused: 0,
         clone_payloads_computed: 0,

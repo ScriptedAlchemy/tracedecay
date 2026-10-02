@@ -214,19 +214,30 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
     };
     let mut worktrees = vec![primary.worktree_id.clone(), secondary.worktree_id.clone()];
     worktrees.sort();
+    let alone_decoded = decoded(&alone);
+    let [(alone_worktrees, true, Some(alone_bytes))] = alone_decoded.as_slice() else {
+        panic!("one decoded owner must serve the primary worktree: {alone_decoded:?}");
+    };
+    assert_eq!(alone_worktrees, &vec![primary.worktree_id.clone()]);
+    assert_eq!(alone.measured_bytes, *alone_bytes);
+
+    let both_decoded = decoded(&both);
+    let [(both_worktrees, true, Some(both_bytes))] = both_decoded.as_slice() else {
+        panic!("one content-addressed decode must serve both worktrees: {both_decoded:?}");
+    };
     assert_eq!(
-        decoded(&alone),
-        [(vec![primary.worktree_id.clone()], true, Some(1_462_329))]
+        both_worktrees, &worktrees,
+        "one decode row must name both worktrees"
     );
-    assert_eq!(alone.measured_bytes, 1_462_329);
-    // Two copies would hold 2,924,658 bytes; the linked worktree adds only
-    // the manifest, lineage, and projection evidence it sealed itself.
-    assert_eq!(
-        decoded(&both),
-        [(worktrees, true, Some(1_849_421))],
-        "one decode row for one content, naming both worktrees"
+    assert_eq!(both.measured_bytes, *both_bytes);
+    assert!(
+        both_bytes > alone_bytes,
+        "the second owner still contributes its own manifest evidence"
     );
-    assert_eq!(both.measured_bytes, 1_849_421);
+    assert!(
+        *both_bytes < alone_bytes.saturating_mul(2),
+        "identical content must not retain two full decodes"
+    );
 
     let later = Instant::now() + IDLE_WINDOW;
     let released = owners.release_idle(later);
@@ -251,7 +262,7 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
             .iter()
             .map(|release| release.bytes.measured().unwrap_or(0))
             .sum::<u64>(),
-        1_849_421,
+        *both_bytes,
         "the two releases give back exactly what the shared row held"
     );
     let idle = owners.report(later);

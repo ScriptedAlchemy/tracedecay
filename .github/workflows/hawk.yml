@@ -40,9 +40,13 @@ jobs:
 
       - uses: ./.github/actions/setup-pnpm
 
+      # The workspace roots keep the vendored dependencies (see the
+      # debug-cli cache step in ci.yml).
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ". -> target/hawk"
+          workspaces: |
+            crates -> ../target/hawk
+            . -> target/rust-cache-lockfile-key
           cache-workspace-crates: "false"
           cache-on-failure: true
 

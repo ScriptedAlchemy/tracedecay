@@ -11,9 +11,6 @@ use tracedecay_domain::{
     CURSOR_INVALID_CODE, CURSOR_PARAMETER_CHANGED_CODE, CursorBindingMismatchV1,
 };
 
-use crate::response_handles::{
-    RESPONSE_RETRIEVE_TOOL, RETRIEVE_CORRUPT_RECORD_REASON, RETRIEVE_READ_FAILED_REASON,
-};
 use crate::tools::ToolResult;
 use crate::transport::{ErrorCode, JsonRpcResponse};
 
@@ -227,75 +224,6 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             project_route_problem(tool_name, error),
         );
     }
-    if tool_name == RESPONSE_RETRIEVE_TOOL {
-        match error {
-            TraceDecayError::Config { message }
-                if message.starts_with(
-                    "invalid arguments for tracedecay_retrieve: missing field `handle`",
-                ) =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InvalidParams,
-                    "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope."
-                        .to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "missing_handle_argument",
-                        "retryable": false,
-                        "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
-                    })),
-                );
-            }
-            TraceDecayError::Config { message }
-                if message.starts_with("invalid response handle") =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InvalidParams,
-                    message.clone(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "invalid_handle",
-                        "retryable": false,
-                        "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
-                    })),
-                );
-            }
-            TraceDecayError::ProjectRoute { reason_code, .. }
-                if reason_code == RETRIEVE_CORRUPT_RECORD_REASON =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "tool execution failed: cached response handle record is unreadable."
-                        .to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "corrupt_handle_record",
-                        "retryable": true,
-                        "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."
-                    })),
-                );
-            }
-            TraceDecayError::ProjectRoute { reason_code, .. }
-                if reason_code == RETRIEVE_READ_FAILED_REASON =>
-            {
-                return JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "tool execution failed: failed to read cached response handle.".to_string(),
-                    Some(json!({
-                        "tool": RESPONSE_RETRIEVE_TOOL,
-                        "reason_code": "handle_read_failed",
-                        "retryable": true,
-                        "retry_instruction": "Fix the local project cache/filesystem issue, then re-run the original MCP tool to regenerate the full response and a fresh handle."
-                    })),
-                );
-            }
-            _ => {}
-        }
-    }
     // A refused persisted shape is a terminal typed state with one legal
     // action (reset); it travels with its authority so the client can render
     // the exact reset command instead of an anonymous internal error.
@@ -315,49 +243,18 @@ pub fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) 
             })),
         );
     }
-    if let TraceDecayError::ProjectRoute {
-        reason_code,
-        retryable: false,
-        detail,
-        ..
-    } = error
-    {
+    if let TraceDecayError::InvalidRequest { reason, message } = error {
         return JsonRpcResponse::error_with_data(
             id,
             ErrorCode::InvalidParams,
-            detail.clone(),
+            message.clone(),
             Some(json!({
                 "tool": tool_name,
-                "reason_code": reason_code,
+                "reason_code": reason.reason_code(),
                 "retryable": false,
-                "detail": detail,
+                "detail": message,
             })),
         );
-    }
-    if let TraceDecayError::Config { message } = error {
-        // Handler-authored argument and lookup failures follow two message
-        // conventions; surface them as typed invalid-params data instead of
-        // an untyped internal error.
-        let reason_code = if message.starts_with("missing required parameter") {
-            Some("missing_required_parameter")
-        } else if message.contains("not found") {
-            Some("not_found")
-        } else {
-            None
-        };
-        if let Some(reason_code) = reason_code {
-            return JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InvalidParams,
-                message.clone(),
-                Some(json!({
-                    "tool": tool_name,
-                    "reason_code": reason_code,
-                    "retryable": false,
-                    "detail": message,
-                })),
-            );
-        }
     }
 
     let cli_name = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
@@ -385,17 +282,21 @@ fn is_project_store_authority(authority: &str) -> bool {
     PROJECT_STORE_AUTHORITIES.contains(&authority)
 }
 
-/// Authorities refused while admitting a registered store. The daemon holds
-/// that store in its typed reset-required state, so the scoped reset deletes
-/// exactly the refused stores.
-const REGISTERED_STORE_AUTHORITIES: [&str; 7] = [
+/// Authorities refused while admitting a registered store: the profile
+/// authority or a session store. The daemon holds that store in its typed
+/// reset-required state, so the scoped reset deletes exactly the refused
+/// stores.
+const REGISTERED_STORE_AUTHORITIES: [&str; 10] = [
+    "project registry",
     "observations",
     "session temporal",
     "session temporal profile schema",
     "workflow",
     "authority schema",
     "LCM",
+    "LCM profile schema",
     "git correlation",
+    "git correlation profile schema",
 ];
 
 fn is_registered_store_authority(authority: &str) -> bool {
@@ -470,7 +371,10 @@ pub fn reset_required_remedy(authority: &str, project_root: Option<&std::path::P
              this binary does not open or migrate that shape; reset it (its old data is \
              deleted, nothing is backed up):\n  \
              {command}    deletes only the stores the daemon reports as requiring reset\n\
-             the daemon recreates each one empty"
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
         );
     }
     format!(
@@ -543,6 +447,48 @@ mod tests {
     use super::tool_error_response;
 
     #[test]
+    fn a_typed_lookup_miss_is_invalid_params_not_found() {
+        let response = tool_error_response(
+            json!(4),
+            "tracedecay_automation_run_view",
+            &TraceDecayError::not_found("automation run not found: run.missing"),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        assert_eq!(
+            wire["error"],
+            json!({
+                "code": -32602,
+                "message": "automation run not found: run.missing",
+                "data": {
+                    "tool": "tracedecay_automation_run_view",
+                    "reason_code": "not_found",
+                    "retryable": false,
+                    "detail": "automation run not found: run.missing",
+                },
+            })
+        );
+    }
+
+    /// A configuration failure is not a lookup miss because its text says
+    /// "not found"; it stays an execution failure with the CLI fallback.
+    #[test]
+    fn a_config_error_reading_not_found_is_not_a_lookup_miss() {
+        let response = tool_error_response(
+            json!(5),
+            "tracedecay_admin_sync",
+            &TraceDecayError::Config {
+                message: "warming failed to publish not found or is not authorized invocation \
+                          contract is invalid"
+                    .to_owned(),
+            },
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        assert_eq!(wire["error"]["code"], -32603);
+        assert_eq!(wire["error"]["data"].get("reason_code"), None, "{wire}");
+        assert_eq!(wire["error"]["data"]["tool"], "tracedecay_admin_sync");
+    }
+
+    #[test]
     fn reset_required_travels_with_its_authority_and_reason() {
         let response = tool_error_response(
             json!(3),
@@ -578,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn lcm_profile_schema_refusal_names_the_profile_wide_reset() {
+    fn lcm_profile_schema_refusal_names_the_scoped_reset() {
         let response = tool_error_response(
             json!(4),
             "tracedecay_message_search",
@@ -593,21 +539,10 @@ mod tests {
             .as_str()
             .expect("the refusal names its reset command");
         assert!(
-            remedy.contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
+            remedy.contains("\n  tracedecay wipe --stale --yes"),
             "{remedy}"
         );
-        assert!(
-            !remedy.contains(tracedecay_domain::errors::STALE_STORE_RESET_COMMAND),
-            "{remedy}"
-        );
-        assert_eq!(
-            wire["error"]["message"]
-                .as_str()
-                .expect("human-readable refusal")
-                .contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
-            true,
-            "the human-readable message must carry the profile-wide reset too: {wire}"
-        );
+        assert!(!remedy.contains("wipe --all"), "{remedy}");
     }
 
     #[test]
@@ -642,13 +577,18 @@ mod tests {
         );
         assert!(!stale.contains("wipe --all"), "{stale}");
 
-        let profile = super::reset_required_remedy("project registry", None);
-        assert!(profile.contains("refused authority: project registry"));
-        assert!(
-            profile.contains("\n  tracedecay wipe --all --yes"),
-            "{profile}"
+        assert_eq!(
+            super::reset_required_remedy("project registry", None),
+            "refused authority: project registry\n\
+             this binary does not open or migrate that shape; reset it (its old data is \
+             deleted, nothing is backed up):\n  \
+             tracedecay wipe --stale --yes    deletes only the stores the daemon reports as \
+             requiring reset\n\
+             the daemon recreates each one empty; resetting the profile authority (global.db) \
+             loses the project registry, usage accounting and remote-deletion records it holds, \
+             leaves every project store (code index, graph, sessions, memory) in place, and \
+             prints the `tracedecay init` command that registers each project again"
         );
-        assert!(!profile.contains("reset-project-store"), "{profile}");
 
         let host = super::reset_required_remedy("managed skill prompt index", None);
         assert!(host.contains("refused authority: managed skill prompt index"));

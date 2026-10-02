@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
-use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeSourceOmissionReasonV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
@@ -262,6 +264,12 @@ pub(crate) fn coverage_summary(
             SnapshotFileDispositionV1::Deleted | SnapshotFileDispositionV1::Renamed => {}
         }
     }
+    // Withheld sources already count through their `Ignored` row.
+    coverage.files_unsupported += snapshot
+        .omitted_sources
+        .iter()
+        .filter(|source| source.reason == CodeSourceOmissionReasonV1::UnrepresentablePath)
+        .count() as u64;
     for file in files {
         coverage.ranges_unsupported += u64::try_from(
             file.extraction.error_ranges.len() + file.extraction.unsupported_ranges.len(),
@@ -565,6 +573,7 @@ where
                 .push((index, symbol));
         }
     }
+    let mut receiver_gaps = HashSet::new();
     for (index, reference) in selected_references(files, selection) {
         let file = files[index].as_ref();
         if !is_typescript_family(file.extraction.language.as_str())
@@ -573,15 +582,26 @@ where
         {
             continue;
         }
-        if typescript_import_call_outcome(
+        match typescript_import_call_outcome(
             files,
             &by_simple_name,
             &typescript_modules,
             file,
             reference,
-        ) == Some(ImportBindingOutcomeV1::Unresolved)
-        {
-            unresolved.push(reference.clone());
+        ) {
+            Some(ImportBindingOutcomeV1::Unresolved) => unresolved.push(reference.clone()),
+            // A member call no import names is a receiver call nothing binds.
+            // It can only be a missing edge to a project symbol of that name,
+            // and one site per caller and name is the whole disclosure.
+            None => {
+                if let Some((_, member)) = reference.reference_name.rsplit_once('.')
+                    && by_simple_name.contains_key(member)
+                    && receiver_gaps.insert((&reference.from_occurrence, member))
+                {
+                    unresolved.push(reference.clone());
+                }
+            }
+            Some(_) => {}
         }
     }
     unresolved

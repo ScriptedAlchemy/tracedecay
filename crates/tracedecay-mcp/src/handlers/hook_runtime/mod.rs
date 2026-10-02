@@ -1,9 +1,7 @@
 use serde_json::Value;
 use std::path::Path;
 use tracedecay_automation_runtime::automation::config_error;
-use tracedecay_contracts::retrieval::{
-    HookRuntimeAcceptedV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
-};
+use tracedecay_contracts::retrieval::{HookRuntimeResultV1, HookRuntimeSurfaceRequestV1};
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::SharedHostAdmissionBroker;
@@ -24,7 +22,7 @@ mod entry_tests;
 mod test_support;
 
 pub use admission::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
+    HookV2AdmissionLedgerUnavailable, HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
     admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };
 pub use envelope::daemon_mint_hook_v2_file_id;
@@ -93,12 +91,6 @@ pub async fn compute_hook_runtime(
             envelope,
             feedback_notice,
         )?),
-        Request::OpencodeLspUpdated { event } => {
-            opencode_lsp_updated(cg, &event, required_project_db(&session_authorities)?).await?;
-            HookRuntimeResultV1::OpencodeLspUpdated {
-                status: HookRuntimeAcceptedV1::Accepted,
-            }
-        }
         Request::IngestTranscript(request) => {
             if request.user_scope {
                 return Err(config_error(
@@ -142,28 +134,6 @@ pub async fn compute_hook_runtime(
             return Err(requires_projectless_routing("hook_v2_profile_admit"));
         }
     })
-}
-
-#[hotpath::measure(future = true, label = "mcp.hook_runtime.lsp")]
-async fn opencode_lsp_updated(
-    cg: &TraceDecay,
-    event: &Value,
-    project_sessions: &RegisteredGlobalDb,
-) -> Result<()> {
-    let payload = serde_json::to_vec(event)
-        .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
-    tracedecay_hooks::decode_opencode_lsp_event(&payload)
-        .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
-    tracedecay_session_memory::event_lane::publish(
-        project_sessions,
-        tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
-        cg.project_root(),
-        None,
-        1,
-        Some("opencode_lsp_updated"),
-    )
-    .await;
-    Ok(())
 }
 
 /// Runs one hook-runtime action that has no project route: it lands in the
@@ -229,7 +199,6 @@ pub async fn compute_projectless_hook_runtime(
         | Request::HookV2Admit(_)
         | Request::HookV2DeliveryReceipt { .. }
         | Request::HookV2FeedbackNoticeDelivery { .. }
-        | Request::OpencodeLspUpdated { .. }
         | Request::IngestTranscript(_)
         | Request::CodexCompact { .. }
         | Request::ClaudeCompact { .. }

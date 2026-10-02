@@ -19,7 +19,9 @@ use super::util;
 /// `lcm_raw_messages` also holds the session message projection, so each
 /// message body is stored once beside the session-only columns (`kind`,
 /// `model`, `tool_names`, `source_path`, `source_offset`), and one FTS index
-/// serves both LCM grep and session message search. There are no LCM summary
+/// serves both LCM grep and session message search. An observation projects at
+/// most one message row, the one occurrence its retrieval anchor resolves to,
+/// so a host record's parts share that row. There are no LCM summary
 /// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
@@ -783,6 +785,31 @@ mod tests {
             raw_fts_structure_is_current(&*conn).await,
             Some(false),
             "missing raw FTS table was accepted as current"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shipped_v13_profile_remains_admissible_for_projector_rebuild() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 13, 123);",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            require_admissible_lcm_schema(&*conn)
+                .await
+                .map_err(|error| error.to_string())?,
+            LcmSchemaAdmission::Current
         );
         Ok(())
     }

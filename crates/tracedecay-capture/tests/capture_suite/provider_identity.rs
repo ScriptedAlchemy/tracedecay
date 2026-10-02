@@ -247,6 +247,56 @@ fn cursor_checked_in_tool_fixture_preserves_projection() {
 }
 
 #[test]
+fn cursor_tools_without_host_ids_neither_invent_ids_nor_names() {
+    let native = json!({
+        "role": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Read", "input": {"path": "src/lib.rs"}},
+                {"type": "tool_use", "name": "Shell", "input": {"command": "git status"}},
+                {"type": "tool_use", "input": {"query": "unnamed"}}
+            ]
+        }
+    });
+    let record_id = cursor::observation_native_record_id("cursor-id-coverage", &native).unwrap();
+    let actual = serde_json::to_value(
+        cursor::normalize_cursor_observation(
+            &native,
+            "cursor-id-coverage",
+            record_id,
+            ObservationSourceRangeV1::new(0, 64).unwrap(),
+            None,
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let tool_invocations = actual["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fact| fact["kind"] == "tool_invocation")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tool_invocations,
+        vec![
+            json!({
+                "kind": "tool_invocation",
+                "name": "Read",
+                "arguments": {"path": "src/lib.rs"}
+            }),
+            json!({
+                "kind": "tool_invocation",
+                "name": "Shell",
+                "arguments": {"command": "git status"}
+            }),
+        ]
+    );
+}
+
+#[test]
 fn cursor_composer_checked_in_bubble_preserves_projection() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/cursor_composer");
@@ -303,6 +353,7 @@ fn vibe_checked_in_message_preserves_projection_without_workflow_inference() {
             &native,
             "vibe-lookalike",
             Some("vibe-model"),
+            None,
             record_id.clone(),
             range,
         )

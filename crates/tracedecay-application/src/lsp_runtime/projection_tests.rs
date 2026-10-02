@@ -8,8 +8,9 @@ use super::managed_test_runs::bind_test_run_document_content;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{LspFeedbackProjectionScope, ProjectionChangeQueue};
-use crate::operation_stream::{ManagedTestRunResult, ManagedTestRunSnapshot, OperationId};
-use tracedecay_contracts::{Deadline, OperationTermination, RequestId};
+use crate::managed_test_runs::ManagedTestRunSnapshot;
+use tracedecay_contracts::feedback::TestResultProjectionV1;
+use tracedecay_contracts::{Deadline, OperationTermination};
 use tracedecay_domain::feedback::{
     FeedbackAdvisoryProviderStateV1, FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1,
     FeedbackDiagnosticProducerV1, FeedbackDiagnosticProjectionV1, FeedbackFindingId,
@@ -380,23 +381,15 @@ fn feedback_projection_requires_exact_saved_generation_and_file_identity() {
 fn root_latest_test_run_is_not_relabelled_as_current_code_scope() {
     let scope = projection_scope();
     let snapshot = ManagedTestRunSnapshot {
-        operation_id: OperationId::from_request(
-            RequestId::new("request.test-run.unbound").expect("request"),
-        ),
-        generation: 7,
-        source_revision: 1,
+        operation_id: "request.test-run.unbound".to_owned(),
         head_commit_id: None,
         code_generation_id: None,
         document_content_digests: BTreeMap::new(),
         deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
         results: Vec::new(),
-        result_offset: 0,
-        available_results: 0,
-        next_cursor: None,
         completed: 0,
         total: Some(0),
         termination: Some(OperationTermination::Completed),
-        receipt: None,
     };
 
     assert_eq!(
@@ -417,26 +410,18 @@ fn root_latest_test_run_is_not_relabelled_as_current_code_scope() {
 fn current_complete_test_run_projects_ready_results() {
     let scope = projection_scope();
     let snapshot = ManagedTestRunSnapshot {
-        operation_id: OperationId::from_request(
-            RequestId::new("request.test-run.current").expect("request"),
-        ),
-        generation: 7,
-        source_revision: 1,
+        operation_id: "request.test-run.current".to_owned(),
         head_commit_id: Some(scope.head_commit_id.clone()),
         code_generation_id: Some(scope.code_generation_id.clone()),
         document_content_digests: BTreeMap::new(),
         deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
-        results: vec![ManagedTestRunResult {
+        results: vec![TestResultProjectionV1 {
             test: "suite::passes".to_owned(),
             passed: true,
         }],
-        result_offset: 0,
-        available_results: 1,
-        next_cursor: None,
         completed: 1,
         total: Some(1),
         termination: Some(OperationTermination::Completed),
-        receipt: None,
     };
 
     let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
@@ -474,29 +459,22 @@ fn preexisting_dirty_overlay_cannot_relabel_saved_test_results() {
 #[test]
 fn current_test_run_projection_reports_the_canonical_page_boundary() {
     let scope = projection_scope();
-    let operation_id =
-        OperationId::from_request(RequestId::new("request.test-run.bounded").expect("request"));
+    let operation_id = "request.test-run.bounded".to_owned();
     let snapshot = ManagedTestRunSnapshot {
         operation_id: operation_id.clone(),
-        generation: 7,
-        source_revision: 1,
         head_commit_id: Some(scope.head_commit_id.clone()),
         code_generation_id: Some(scope.code_generation_id.clone()),
         document_content_digests: BTreeMap::new(),
         deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
-        results: (0..MAX_CONTEXT_PROJECTION_ITEMS)
-            .map(|index| ManagedTestRunResult {
+        results: (0..=MAX_CONTEXT_PROJECTION_ITEMS)
+            .map(|index| TestResultProjectionV1 {
                 test: format!("suite::test_{index}"),
                 passed: true,
             })
             .collect(),
-        result_offset: 0,
-        available_results: MAX_CONTEXT_PROJECTION_ITEMS + 1,
-        next_cursor: None,
         completed: (MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64,
         total: Some((MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64),
         termination: Some(OperationTermination::Completed),
-        receipt: None,
     };
 
     let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
@@ -551,23 +529,15 @@ fn saved_document_drift_rejects_stale_test_run_results() {
         ..projection_scope()
     };
     let snapshot = ManagedTestRunSnapshot {
-        operation_id: OperationId::from_request(
-            RequestId::new("request.test-run.saved-drift").expect("request"),
-        ),
-        generation: 7,
-        source_revision: 1,
+        operation_id: "request.test-run.saved-drift".to_owned(),
         head_commit_id: Some(scope.head_commit_id.clone()),
         code_generation_id: Some(scope.code_generation_id.clone()),
         document_content_digests: BTreeMap::from([(document_uri.to_owned(), stale_digest)]),
         deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
         results: Vec::new(),
-        result_offset: 0,
-        available_results: 0,
-        next_cursor: None,
         completed: 0,
         total: Some(0),
         termination: Some(OperationTermination::Completed),
-        receipt: None,
     };
 
     assert_eq!(
@@ -594,23 +564,15 @@ fn overlay_projection_requires_test_run_document_identity() {
         ..projection_scope()
     };
     let snapshot = ManagedTestRunSnapshot {
-        operation_id: OperationId::from_request(
-            RequestId::new("request.test-run.overlay-unbound").expect("request"),
-        ),
-        generation: 7,
-        source_revision: 1,
+        operation_id: "request.test-run.overlay-unbound".to_owned(),
         head_commit_id: Some(scope.head_commit_id.clone()),
         code_generation_id: Some(scope.code_generation_id.clone()),
         document_content_digests: BTreeMap::new(),
         deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
         results: Vec::new(),
-        result_offset: 0,
-        available_results: 0,
-        next_cursor: None,
         completed: 0,
         total: Some(0),
         termination: Some(OperationTermination::Completed),
-        receipt: None,
     };
 
     assert_eq!(
@@ -631,23 +593,15 @@ fn overlay_projection_requires_test_run_document_identity() {
 fn expired_unfinished_test_run_projects_timed_out_unavailable() {
     let scope = projection_scope();
     let snapshot = ManagedTestRunSnapshot {
-        operation_id: OperationId::from_request(
-            RequestId::new("request.test-run.expired").expect("request"),
-        ),
-        generation: 7,
-        source_revision: 1,
+        operation_id: "request.test-run.expired".to_owned(),
         head_commit_id: Some(scope.head_commit_id.clone()),
         code_generation_id: Some(scope.code_generation_id.clone()),
         document_content_digests: BTreeMap::new(),
         deadline: Deadline::new(UtcMicros(1)).expect("deadline"),
         results: Vec::new(),
-        result_offset: 0,
-        available_results: 0,
-        next_cursor: None,
         completed: 0,
         total: Some(1),
         termination: None,
-        receipt: None,
     };
 
     let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
@@ -685,23 +639,15 @@ fn noncomplete_test_terminations_use_protocol_valid_state_pairs() {
     ] {
         let scope = projection_scope();
         let snapshot = ManagedTestRunSnapshot {
-            operation_id: OperationId::from_request(
-                RequestId::new(format!("request.test-run.{termination:?}")).expect("request"),
-            ),
-            generation: 7,
-            source_revision: 1,
+            operation_id: format!("request.test-run.{termination:?}"),
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
             document_content_digests: BTreeMap::new(),
             deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
             results: Vec::new(),
-            result_offset: 0,
-            available_results: 0,
-            next_cursor: None,
             completed: 0,
             total: Some(1),
             termination: Some(termination),
-            receipt: None,
         };
         let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
             AdmittedRoot::new("file:///root"),

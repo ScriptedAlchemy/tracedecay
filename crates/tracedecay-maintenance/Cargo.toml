@@ -35,9 +35,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }

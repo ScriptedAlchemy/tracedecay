@@ -729,6 +729,7 @@ fn build_request(
         content_identity: content_digest(&identity_hash),
         captured_at: UtcMicros(SEALED_AT - 1_000_000),
         files: snapshot_files,
+        omitted_sources: Vec::new(),
     };
     CodeIndexBuildRequestV1 {
         snapshot,

@@ -447,6 +447,11 @@ impl CodeIndexPublishedGenerationV1 {
                 edge_heap_bytes,
             ))
             .saturating_add(vec_bytes(
+                &self.unresolved_calls,
+                self.unresolved_calls.capacity(),
+                unresolved_heap_bytes,
+            ))
+            .saturating_add(vec_bytes(
                 &self.edge_abstentions,
                 self.edge_abstentions.capacity(),
                 abstention_heap_bytes,

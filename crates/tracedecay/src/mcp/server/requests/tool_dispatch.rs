@@ -181,32 +181,19 @@ impl McpServer {
         // `routed.selected_server`; an unselected call is admitted on `self`.
         // Never resolve or fall back to another project inside the worker.
         let dispatch_server = self;
-        let (cg, live_branch) =
-            match tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name) {
-                tracedecay_mcp::tools::binding::BranchSensitivity::Independent => {
-                    let cg = dispatch_server.cg_snapshot().await;
-                    let live_branch = tracedecay_runtime_core::branch::BranchMemo::resolved(
-                        cg.project_root(),
-                        cg.serving_branch().map(str::to_owned),
-                    );
-                    (cg, live_branch)
-                }
-                tracedecay_mcp::tools::binding::BranchSensitivity::Sensitive => {
-                    dispatch_server.reopen_if_branch_drifted_memoized().await
-                }
-            };
-        let project_reader_preselected = routed.selected_project.is_some();
+        let cg = match tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name) {
+            tracedecay_mcp::tools::binding::BranchSensitivity::Independent => {
+                dispatch_server.cg_snapshot().await
+            }
+            tracedecay_mcp::tools::binding::BranchSensitivity::Sensitive => {
+                dispatch_server.reopen_if_branch_drifted_memoized().await.0
+            }
+        };
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
         dispatch_server
-            .begin_tool_dispatch(
-                tool_name,
-                &cg,
-                &live_branch,
-                project_reader_preselected,
-                publish_activity,
-            )
+            .begin_tool_dispatch(tool_name, &cg, publish_activity)
             .await;
         let ApplicationSurfaceDispatch {
             invocation_executor: application_invocation_executor,

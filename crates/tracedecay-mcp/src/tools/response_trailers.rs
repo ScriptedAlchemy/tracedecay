@@ -74,11 +74,13 @@ pub fn append_request_cost(result: &mut ToolResult, cost: &RequestCostReceiptV1)
         adjacency_queries,
         adjacency_rows,
         bytes_hydrated,
+        catalog_symbols,
     } = cost;
     content.push(json!({"type": "text", "text": format!(
         "\n{REQUEST_COST_TRAILER_PREFIX} wall_us={wall_micros} graph_sealed_reads={} \
          graph_staging_reads={} adjacency_queries={adjacency_queries} \
-         adjacency_rows={adjacency_rows} bytes_hydrated={bytes_hydrated}",
+         adjacency_rows={adjacency_rows} bytes_hydrated={bytes_hydrated} \
+         catalog_symbols={catalog_symbols}",
         point_reads.graph_sealed, point_reads.graph_staging,
     )}));
 }
@@ -268,6 +270,7 @@ mod tests {
             adjacency_queries: 1,
             adjacency_rows: 107,
             bytes_hydrated: 9_876,
+            catalog_symbols: 42,
         };
         let mut metered = text_result("{}", Vec::new());
         ResponseTrailer {
@@ -280,7 +283,7 @@ mod tests {
             block(&metered, 1),
             Some(
                 "\ntracedecay_cost: wall_us=1250 graph_sealed_reads=21 graph_staging_reads=3 \
-                 adjacency_queries=1 adjacency_rows=107 bytes_hydrated=9876"
+                 adjacency_queries=1 adjacency_rows=107 bytes_hydrated=9876 catalog_symbols=42"
             )
         );
         assert_eq!(metered.cost(), Some(cost));

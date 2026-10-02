@@ -1333,6 +1333,19 @@ impl ProjectRuntimeRegistryV1 {
             .map(|runtime| runtime.publication.clone())
     }
 
+    /// [`Self::publication_state`] with a receiver subscribed before the read,
+    /// so a publication that finishes after it is never missed.
+    pub fn publication_view(
+        &self,
+        project_root: &Path,
+    ) -> (
+        Option<ProjectRuntimePublicationStateV1>,
+        watch::Receiver<u64>,
+    ) {
+        let changed = self.published_changed.subscribe();
+        (self.publication_state(project_root), changed)
+    }
+
     /// Begin mandatory owner publication for an exact registered root.
     pub fn begin_publication(
         &self,

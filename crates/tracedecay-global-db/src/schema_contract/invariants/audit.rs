@@ -11,14 +11,13 @@ use tracedecay_store::{
 
 use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
 
-use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::released_rendering::{
     ReleasedRenderingLedger, StoredProvenanceRendering, admit_provenance_row,
 };
-use super::rows::{authority_violation, decode_authority_json};
-use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
+use super::rows::{audit_read_error, authority_violation, decode_authority_json};
+use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
@@ -81,7 +80,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
         );",
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(audit_read_error)?;
     let mut rows = conn
         .query(
             "SELECT 1 FROM pragma_table_xinfo('authority_audit_checkpoints')
@@ -89,12 +88,8 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let has_bounded_passes = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some();
+        .map_err(audit_read_error)?;
+    let has_bounded_passes = rows.next().await.map_err(audit_read_error)?.is_some();
     drop(rows);
     if !has_bounded_passes {
         conn.execute(
@@ -103,7 +98,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     let mut rows = conn
         .query(
@@ -112,19 +107,11 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut has_source_cursor_rowid = false;
     let mut has_source_advance_rowid = false;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        match row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .as_str()
-        {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        match row.get::<String>(0).map_err(audit_read_error)?.as_str() {
             "source_cursor_rowid" => has_source_cursor_rowid = true,
             "source_advance_rowid" => has_source_advance_rowid = true,
             _ => {}
@@ -138,7 +125,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     if !has_source_advance_rowid {
         conn.execute(
@@ -147,7 +134,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     }
     Ok(())
 }
@@ -162,14 +149,14 @@ async fn validate_existing_audit_checkpoint_baseline(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let exists = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint catalog query returned no row"))?
         .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         != 0;
     drop(rows);
     if !exists {
@@ -190,14 +177,14 @@ async fn validate_existing_audit_checkpoint_baseline(
             (),
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let found = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint shape query returned no row"))?
         .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     if found != REQUIRED_BASELINE_COLUMNS {
         return Err(authority_violation(
             "authority audit checkpoint table is missing required baseline columns",
@@ -220,42 +207,20 @@ pub(super) async fn read_audit_checkpoint(
             params![AUDIT_NAME, AUDIT_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
+        .map_err(audit_read_error)?;
+    let Some(row) = rows.next().await.map_err(audit_read_error)? else {
         return Ok(None);
     };
     Ok(Some(AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        bounded_passes_since_exhaustive: row
-            .get(8)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        receipt_rowid: row.get(0).map_err(audit_read_error)?,
+        observation_sequence: row.get(1).map_err(audit_read_error)?,
+        source_cursor_rowid: row.get(2).map_err(audit_read_error)?,
+        source_advance_rowid: row.get(3).map_err(audit_read_error)?,
+        provenance_rowid: row.get(4).map_err(audit_read_error)?,
+        disposition_rowid: row.get(5).map_err(audit_read_error)?,
+        alias_rowid: row.get(6).map_err(audit_read_error)?,
+        projection_checkpoint: row.get(7).map_err(audit_read_error)?,
+        bounded_passes_since_exhaustive: row.get(8).map_err(audit_read_error)?,
     }))
 }
 
@@ -292,37 +257,21 @@ pub(super) async fn audit_checkpoint_is_plausible(
             params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let row = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("audit checkpoint frontier query returned no row"))?;
     let frontiers = AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        receipt_rowid: row.get(0).map_err(audit_read_error)?,
+        observation_sequence: row.get(1).map_err(audit_read_error)?,
+        source_cursor_rowid: row.get(2).map_err(audit_read_error)?,
+        source_advance_rowid: row.get(3).map_err(audit_read_error)?,
+        provenance_rowid: row.get(4).map_err(audit_read_error)?,
+        disposition_rowid: row.get(5).map_err(audit_read_error)?,
+        alias_rowid: row.get(6).map_err(audit_read_error)?,
+        projection_checkpoint: row.get(7).map_err(audit_read_error)?,
         ..AuditCheckpoint::default()
     };
     Ok(checkpoint.receipt_rowid <= frontiers.receipt_rowid
@@ -368,31 +317,20 @@ impl ProjectionAuthorityState {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| {
                 authority_violation("projection authority count query returned no row")
             })?;
         Ok(Self {
-            provenance_rows: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            disposition_rows: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            alias_rows: row
-                .get(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            workflow_rows: row
-                .get(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            queued: row
-                .get::<i64>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-                != 0,
+            provenance_rows: row.get(0).map_err(audit_read_error)?,
+            disposition_rows: row.get(1).map_err(audit_read_error)?,
+            alias_rows: row.get(2).map_err(audit_read_error)?,
+            workflow_rows: row.get(3).map_err(audit_read_error)?,
+            queued: row.get::<i64>(4).map_err(audit_read_error)? != 0,
         })
     }
 
@@ -442,19 +380,15 @@ impl ProjectionAliasRow {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| authority_violation("projection alias disappeared"))?;
         Ok(Self {
-            provider: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            message_id: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            provider: row.get(0).map_err(audit_read_error)?,
+            message_id: row.get(1).map_err(audit_read_error)?,
         })
     }
 }
@@ -493,7 +427,7 @@ impl ProjectionProvenanceRow {
         let requested_keys = observation_ids.iter().collect::<Vec<_>>();
         for chunk in requested_keys.chunks(PROVENANCE_ROW_BATCH_KEYS) {
             let requested = serde_json::to_string(&chunk)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(|error| authority_violation(error.to_string()))?;
             let mut rows = conn
                 .query(
                     "SELECT provenance.observation_id, provenance.output_ordinal,
@@ -507,39 +441,19 @@ impl ProjectionProvenanceRow {
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                let observation_id = row
-                    .get::<String>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let output_ordinal = row
-                    .get::<i64>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(audit_read_error)?;
+            while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+                let observation_id = row.get::<String>(0).map_err(audit_read_error)?;
+                let output_ordinal = row.get::<i64>(1).map_err(audit_read_error)?;
                 rows_by_key.insert(
                     (observation_id, output_ordinal),
                     Self {
-                        retrieval_anchor_id: row
-                            .get(2)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        receipt_id: row
-                            .get(3)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_provider: row
-                            .get(4)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_message_id: row
-                            .get(5)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        output_digest: row
-                            .get(6)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        message_created: row
-                            .get(7)
-                            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                        retrieval_anchor_id: row.get(2).map_err(audit_read_error)?,
+                        receipt_id: row.get(3).map_err(audit_read_error)?,
+                        output_provider: row.get(4).map_err(audit_read_error)?,
+                        output_message_id: row.get(5).map_err(audit_read_error)?,
+                        output_digest: row.get(6).map_err(audit_read_error)?,
+                        message_created: row.get(7).map_err(audit_read_error)?,
                     },
                 );
             }
@@ -566,19 +480,15 @@ impl ProjectionDispositionRow {
                 params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let row = rows
             .next()
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map_err(audit_read_error)?
             .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
         Ok(Self {
-            receipt_id: row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            reason: row
-                .get(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            receipt_id: row.get(0).map_err(audit_read_error)?,
+            reason: row.get(1).map_err(audit_read_error)?,
         })
     }
 }
@@ -621,7 +531,7 @@ impl ProjectionOutputOwnership {
                     })
                     .collect::<Vec<_>>(),
             )
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(|error| authority_violation(error.to_string()))?;
             let mut rows = conn
                 .query(
                     "SELECT provenance.output_provider, provenance.output_message_id,
@@ -636,21 +546,11 @@ impl ProjectionOutputOwnership {
                     params![requested.as_str()],
                 )
                 .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                let provider = row
-                    .get::<String>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let message_id = row
-                    .get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                let creator_count = row
-                    .get::<i64>(2)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .map_err(audit_read_error)?;
+            while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+                let provider = row.get::<String>(0).map_err(audit_read_error)?;
+                let message_id = row.get::<String>(1).map_err(audit_read_error)?;
+                let creator_count = row.get::<i64>(2).map_err(audit_read_error)?;
                 counts.insert((provider, message_id), creator_count);
             }
         }
@@ -1084,10 +984,9 @@ async fn validate_composite_projection(
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority<'_>,
     message: Option<&SessionMessageProjection>,
-    derived_messages: &[SessionMessageProjection],
     workflow_facts: &[WorkflowFactProjection],
 ) -> tracedecay_domain::errors::Result<()> {
-    if workflow_facts.is_empty() && derived_messages.is_empty() {
+    if workflow_facts.is_empty() {
         return Err(authority_violation(
             "composite projection has no additional output",
         ));
@@ -1104,9 +1003,7 @@ async fn validate_composite_projection(
         let alias = ProjectionAliasRow::load(conn, observation_id).await?;
         validate_alias_binding(&alias, unaliased, projection)?;
     }
-    let expected_message_rows =
-        i64::try_from(usize::from(message.is_some()) + derived_messages.len())
-            .map_err(|_| authority_violation("message projection count overflow"))?;
+    let expected_message_rows = i64::from(message.is_some());
     if state.queued {
         if state.disposition_rows != 0
             || state.workflow_rows != 0
@@ -1118,12 +1015,6 @@ async fn validate_composite_projection(
         }
         let mut validated_rows = 0_i64;
         if let Some(projection) = message {
-            validated_rows += i64::from(
-                validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-                    .await?,
-            );
-        }
-        for projection in derived_messages {
             validated_rows += i64::from(
                 validate_message_projection_row(conn, observation_id, effect, resolved, projection)
                     .await?,
@@ -1146,13 +1037,6 @@ async fn validate_composite_projection(
             .await?
     {
         return Err(authority_violation("projection provenance disappeared"));
-    }
-    for projection in derived_messages {
-        if !validate_message_projection_row(conn, observation_id, effect, resolved, projection)
-            .await?
-        {
-            return Err(authority_violation("projection provenance disappeared"));
-        }
     }
     let expected_workflow_rows = i64::try_from(workflow_facts.len())
         .map_err(|_| authority_violation("workflow projection count overflow"))?;
@@ -1191,11 +1075,9 @@ async fn derive_projection_effect(
 /// cheaper than deciding per row whether its authority will be consulted.
 fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, String)> {
     let mut outputs = BTreeSet::new();
-    for effect in effects {
-        for projection in effect.messages() {
-            let message = projection.message();
-            outputs.insert((message.provider.clone(), message.message_id.clone()));
-        }
+    for projection in effects.iter().filter_map(ObservationProjection::message) {
+        let message = projection.message();
+        outputs.insert((message.provider.clone(), message.message_id.clone()));
     }
     outputs
 }
@@ -1325,7 +1207,6 @@ async fn validate_projection_effect(
         }
         ObservationProjection::Composite {
             message,
-            derived_messages,
             workflow_facts,
         } => {
             let unaliased = derive_unaliased_projection(observation)?;
@@ -1337,7 +1218,6 @@ async fn validate_projection_effect(
                 effect,
                 resolved,
                 message.as_deref(),
-                derived_messages,
                 workflow_facts,
             )
             .await
@@ -1365,16 +1245,16 @@ async fn observation_by_id(
             params![observation_id],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let json = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| {
             authority_violation("projection authority references a missing observation")
         })?
         .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     decode_authority_json(&json, "projected observation authority JSON")
 }
 
@@ -1393,17 +1273,15 @@ async fn count_suffix_rows(
             params![after_rowid, SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let row = rows
         .next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map_err(audit_read_error)?
         .ok_or_else(|| authority_violation("projection suffix count returned no row"))?;
     Ok((
-        row.get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        row.get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        row.get(0).map_err(audit_read_error)?,
+        row.get(1).map_err(audit_read_error)?,
     ))
 }
 
@@ -1439,21 +1317,12 @@ async fn collect_projection_suffix_ids(
                 ],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = rows.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            scan_cursor = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            observation_ids.insert(
-                row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            );
+            scan_cursor = row.get::<i64>(0).map_err(audit_read_error)?;
+            observation_ids.insert(row.get::<String>(1).map_err(audit_read_error)?);
         }
         drop(rows);
         if page_rows < AUDIT_PAGE_ROWS {
@@ -1539,45 +1408,24 @@ async fn validate_projection_authority_suffix_pages(
                 ],
             )
             .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            .map_err(audit_read_error)?;
         let mut page_rows = 0_i64;
         let mut detailed_observations = Vec::<(i64, DurableObservationV1)>::new();
         let mut detailed_limit_reached = false;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
+        while let Some(row) = rows.next().await.map_err(audit_read_error)? {
             page_rows += 1;
-            scan_cursor = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation_receipt_id = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            scan_cursor = row.get::<i64>(0).map_err(audit_read_error)?;
+            let observation_receipt_id = row.get::<String>(2).map_err(audit_read_error)?;
             let state = ProjectionAuthorityState {
-                provenance_rows: row
-                    .get(3)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                disposition_rows: row
-                    .get(4)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                alias_rows: row
-                    .get(5)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                workflow_rows: row
-                    .get(6)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                queued: row
-                    .get::<i64>(7)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?
-                    != 0,
+                provenance_rows: row.get(3).map_err(audit_read_error)?,
+                disposition_rows: row.get(4).map_err(audit_read_error)?,
+                alias_rows: row.get(5).map_err(audit_read_error)?,
+                workflow_rows: row.get(6).map_err(audit_read_error)?,
+                queued: row.get::<i64>(7).map_err(audit_read_error)? != 0,
             };
             let disposition = match (
-                row.get::<Option<String>>(8)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                row.get::<Option<String>>(9)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<Option<String>>(8).map_err(audit_read_error)?,
+                row.get::<Option<String>>(9).map_err(audit_read_error)?,
             ) {
                 (Some(receipt_id), Some(reason)) => {
                     Some(ProjectionDispositionRow { receipt_id, reason })
@@ -1616,8 +1464,7 @@ async fn validate_projection_authority_suffix_pages(
                 continue;
             }
             let observation = decode_authority_json::<DurableObservationV1>(
-                &row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                &row.get::<String>(1).map_err(audit_read_error)?,
                 "projected observation authority JSON",
             )?;
             if disposition.as_ref().is_some_and(|value| {
@@ -1846,7 +1693,7 @@ pub(super) async fn write_audit_checkpoint(
     )
     .await
     .map(|_| ())
-    .map_err(|error| global_db_operation_error(OPERATION, error))
+    .map_err(audit_read_error)
 }
 
 #[cfg(test)]
@@ -2956,9 +2803,17 @@ mod tests {
                 .await
                 .expect_err("a planted disposition on a projected message must fail the audit");
         assert_eq!(
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                }
+            ),
+            "a planted row is a verdict about the stored data: {error:?}"
+        );
+        assert_eq!(
             error.to_string(),
-            "database error: projection authority must contain exactly one skip outcome \
-             without an alias (operation: ensure global database authority invariants)"
+            "projection authority must contain exactly one skip outcome without an alias"
         );
     }
 

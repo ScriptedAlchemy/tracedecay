@@ -274,6 +274,11 @@ fn seal_lexical_artifact(
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     evidence_pack.extend_from_slice(bytes);
                 }
@@ -1380,6 +1385,7 @@ fn publish_scope_generation(
         ))?)?,
         captured_at: UtcMicros(1_000_000),
         files,
+        omitted_sources: Vec::new(),
     };
     let target_projection_key = ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,

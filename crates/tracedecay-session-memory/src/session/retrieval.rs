@@ -32,7 +32,7 @@ use crate::context::{
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRetrievalUnavailableCause, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 use tracedecay_session_temporal_store::execution::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
@@ -404,7 +404,9 @@ where
             Ok(report) if expected_execution.validates_report(&report) => {
                 map_report(report, query.freshness_policy)
             }
-            Ok(_) => SessionRetrievalOutcome::Unavailable,
+            Ok(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
             Err(error) => map_execution_error(error),
         }
     }
@@ -584,7 +586,9 @@ fn map_report(
             };
         }
         if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
-            return SessionRetrievalOutcome::Unavailable;
+            return SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable,
+            );
         }
         // Authorized empty roots are searchable zero-hit results, not unavailable.
         return SessionRetrievalOutcome::CompleteZero { freshness };
@@ -626,7 +630,9 @@ fn map_execution_error(
         SessionTemporalExecutionError::Redacted => SessionRetrievalOutcome::Redacted,
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
-        SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Unavailable => {
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
+        }
         SessionTemporalExecutionError::ResetRequired => SessionRetrievalOutcome::ResetRequired,
         // A partial generation is a projection still converging, not an
         // authoritative empty root: answering `CompleteZero` there publishes
@@ -649,7 +655,9 @@ fn map_execution_error(
         }
         // A failed storage read is not an absent authority; the operation and
         // cause travel with it so the surface can say which read broke.
-        SessionTemporalExecutionError::Storage { .. } => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Storage { .. } => {
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
+        }
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -698,13 +706,19 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
             TemporalPortError::ResetRequired { .. } => SessionRetrievalOutcome::ResetRequired,
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
-            | TemporalPortError::ZeroVersion { .. }
-            | TemporalPortError::Read { .. } => SessionRetrievalOutcome::Unavailable,
+            | TemporalPortError::ZeroVersion { .. } => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
+            TemporalPortError::Read { .. } => {
+                SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
+            }
         },
         TemporalKernelError::Cursor(error) => match error {
             CursorError::Binding(mismatch) => SessionRetrievalOutcome::CursorRefused(mismatch),
@@ -734,8 +748,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::SummaryWatermarkMismatch
             | CursorError::KeyIdMismatch
             | CursorError::KeyVersionMismatch
-            | CursorError::KeyUnavailable
-            | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable,
+            | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
+            CursorError::KeyUnavailable => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
             CursorError::CandidateCohortMismatch => SessionRetrievalOutcome::CursorStale,
         },
         TemporalKernelError::Hydration(error) => match error {
@@ -757,7 +775,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             }
             HydrationError::Unavailable
             | HydrationError::InvalidDenial
-            | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+            | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable,
+            ),
         },
         TemporalKernelError::Context(error) => match error {
             ContextError::BudgetExceeded { resource } => {
@@ -777,10 +797,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             }
             ContextError::EstimatorVersionMismatch
             | ContextError::InvalidBundle(_)
-            | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+            | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::KernelRefused,
+            ),
         },
         TemporalKernelError::Ranking(_) | TemporalKernelError::CandidateExportContract(_) => {
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::KernelRefused)
         }
     }
 }
@@ -1233,7 +1255,9 @@ mod tests {
             (
                 ContextOmissionReasonV1::Unavailable,
                 coverage(0, 0, 1, 0),
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
             ),
             (
                 ContextOmissionReasonV1::ByteBudget,
@@ -1272,7 +1296,9 @@ mod tests {
                 coverage: coverage(1, 0, 0, 0),
                 ..Page::default()
             }),
-            SessionRetrievalOutcome::Unavailable,
+            SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::HydrationUnavailable
+            ),
             "visible coverage without ranked items is not an authoritative zero"
         );
     }
@@ -1315,25 +1341,33 @@ mod tests {
                 SummaryLineageRejection::StaleSource {
                     anchor_id: anchor_id.clone(),
                 },
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
             ),
             (
                 SummaryLineageRejection::UnavailableSource {
                     anchor_id: anchor_id.clone(),
                 },
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
             ),
             (
                 SummaryLineageRejection::MissingSource {
                     anchor_id: anchor_id.clone(),
                 },
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
             ),
             (
                 SummaryLineageRejection::CycleSource {
                     anchor_id: anchor_id.clone(),
                 },
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::HydrationUnavailable,
+                ),
             ),
         ] {
             let label = format!("{rejection:?}");
@@ -1444,7 +1478,9 @@ mod tests {
             ),
             (
                 SessionTemporalExecutionError::Unavailable,
-                SessionRetrievalOutcome::Unavailable,
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::AuthorityAbsent,
+                ),
             ),
             // The store names the boundary it refused at and the numbers that
             // boundary counted; the service forwards both instead of
@@ -1508,14 +1544,19 @@ mod tests {
             CursorError::SummaryWatermarkMismatch,
             CursorError::KeyIdMismatch,
             CursorError::KeyVersionMismatch,
-            CursorError::KeyUnavailable,
             CursorError::InvalidKeyMaterial,
         ] {
             assert_eq!(
                 map_kernel_error(TemporalKernelError::Cursor(error)),
-                SessionRetrievalOutcome::Unavailable
+                SessionRetrievalOutcome::Unavailable(
+                    SessionRetrievalUnavailableCause::KernelRefused
+                )
             );
         }
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cursor(CursorError::KeyUnavailable)),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
+        );
     }
 
     #[test]
@@ -1594,7 +1635,7 @@ mod tests {
             map_kernel_error(TemporalKernelError::Port(
                 TemporalPortError::EmptyParticipantManifest,
             )),
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
         );
     }
 
@@ -1626,7 +1667,23 @@ mod tests {
                 operation: "read temporal candidates",
                 message: "unavailable".to_owned(),
             })),
-            SessionRetrievalOutcome::Unavailable
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::ReadFailed)
+        );
+    }
+
+    #[test]
+    fn kernel_refusal_is_not_reported_as_a_missing_store() {
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Kernel(
+                TemporalKernelError::CandidateExportContract(
+                    "temporal export repeated a hydration anchor".to_owned(),
+                ),
+            )),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::KernelRefused)
+        );
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Unavailable),
+            SessionRetrievalOutcome::Unavailable(SessionRetrievalUnavailableCause::AuthorityAbsent)
         );
     }
 

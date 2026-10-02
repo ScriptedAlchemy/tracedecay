@@ -543,6 +543,7 @@ fn request(
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(sealed_at - 1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files: changed,
@@ -585,6 +586,11 @@ fn seal(
         match publication {
             SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                 file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
+            SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                page_digest, bytes, ..
+            } => {
+                file_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                 pack.extend_from_slice(bytes);
