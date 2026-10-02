@@ -195,18 +195,11 @@ impl McpServer {
                     dispatch_server.reopen_if_branch_drifted_memoized().await
                 }
             };
-        let project_reader_preselected = routed.selected_project.is_some();
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
         dispatch_server
-            .begin_tool_dispatch(
-                tool_name,
-                &cg,
-                &live_branch,
-                project_reader_preselected,
-                publish_activity,
-            )
+            .begin_tool_dispatch(tool_name, &cg, &live_branch, publish_activity)
             .await;
         let ApplicationSurfaceDispatch {
             invocation_executor: application_invocation_executor,

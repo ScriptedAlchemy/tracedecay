@@ -6,18 +6,18 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
     ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
     ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
-    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
-    StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
-    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1,
-    StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
+    StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1,
+    StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
@@ -130,9 +130,8 @@ fn ready_serving_source(
 ) -> Option<ReadyServingSourceV1<'_>> {
     let freshness = payload?.worktrees.first()?;
     if freshness.latest_generation_id.is_none()
-        || !matches!(
-            freshness.code_graph_serving,
-            Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
+        || !freshness.code_graph_serving.as_ref().is_some_and(
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::is_activated,
         )
     {
         return None;
@@ -140,7 +139,7 @@ fn ready_serving_source(
     Some(ReadyServingSourceV1 {
         reference: freshness.source_reference.as_deref()?,
         revision: freshness.source_revision.as_deref(),
-        current_source_verified: freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
+        current_source_verified: freshness.coverage.covers_indexable_sources()
             && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh),
     })
 }
@@ -404,19 +403,25 @@ fn git_staleness(
 
 /// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
 /// request counters; `session_projection` is the project refresh worker's
-/// serving status; `wait` is the readiness wait the owner held the read
-/// for, when the request asked for one, and `reached_freshness` the reading
-/// that satisfied it, which the payload reports instead of a later reading.
+/// serving status; `hook_replay` is the daemon replay consumer's last sweep;
+/// `waited` is the readiness wait the owner held the read for, when the
+/// request asked for one, with the reading that satisfied it, which the
+/// payload reports instead of a later reading.
 #[hotpath::measure(label = "mcp.info.status.total")]
 pub async fn compute_status(
     ctx: &McpToolContext<'_>,
     request: &StatusSurfaceRequestV1,
     server_stats: Option<Value>,
     session_projection: SessionProjectionServingStatus,
+    hook_replay: StatusHookReplayV1,
     scope_prefix: Option<&str>,
-    wait: Option<CodeIndexReadinessWaitOutcomeV1>,
-    reached_freshness: Option<CodeIndexWorktreeFreshnessV1>,
+    waited: Option<(
+        CodeIndexReadinessWaitOutcomeV1,
+        Option<CodeIndexWorktreeFreshnessV1>,
+    )>,
 ) -> Result<StatusResultV1> {
+    let (wait, reached_freshness) =
+        waited.map_or((None, None), |(wait, reached)| (Some(wait), reached));
     if request.admission_only {
         return Ok(StatusResultV1::Admission(StatusAdmissionV1 {
             project_admitted: true,
@@ -504,6 +509,7 @@ pub async fn compute_status(
             label = "mcp.info.status.session_git_evidence"
         )
         .await,
+        hook_replay,
         git_staleness: request
             .include_staleness
             .then(|| git_staleness(freshness_payload.as_ref(), ctx.project_root())),
@@ -647,7 +653,13 @@ fn code_index_freshness_projection(
         return (status, Some(warning));
     }
     if authoritative {
-        (FreshnessLabelV1::Current, None)
+        let warning = freshness.omitted_sources.as_ref().map(|omitted| {
+            format!(
+                "{} captured source file(s) are not indexed; code_index_freshness.worktree.omitted_sources names them and why",
+                omitted.count
+            )
+        });
+        (FreshnessLabelV1::Current, warning)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         let warning = if freshness.restore_progress.is_some() {
             "the sealed lexical artifact is completing bounded authentication before serving"
@@ -878,6 +890,18 @@ pub(crate) fn render_status_md(value: &Value) -> String {
                             md.bullet(&finding.to_string());
                         }
                     }
+                    if k == "hook_replay"
+                        && let Some(failures) = o.get("failures").and_then(Value::as_array)
+                    {
+                        for failure in failures {
+                            md.bullet(&format!(
+                                "{} {} drain failed: {}",
+                                failure["host"].as_str().unwrap_or_default(),
+                                failure["spool"].as_str().unwrap_or_default(),
+                                failure["cause"].as_str().unwrap_or_default(),
+                            ));
+                        }
+                    }
                 }
                 Value::Null => {}
             }
@@ -967,7 +991,8 @@ mod tests {
         schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
-        CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+        CodeIndexFreshnessCoverageV1, CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1,
+        CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
     };
     use tracedecay_contracts::storage::{
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
@@ -1449,6 +1474,45 @@ mod tests {
                         .to_owned()
                 )
             )
+        );
+    }
+
+    /// Sources no generation can index leave the read current, but status
+    /// says how many captured sources the index does not hold.
+    #[test]
+    fn a_fresh_read_with_omitted_sources_is_current_and_names_their_count() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+            coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            omitted_sources: Some(CodeIndexOmittedSourcesV1 {
+                count: 2,
+                sources: vec![CodeIndexOmittedSourceV1 {
+                    git_path_bytes: b"src/odd\\name.rs".to_vec(),
+                    display_path: "src/odd\\name.rs".to_owned(),
+                    reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, FreshnessLabelV1::Current);
+        assert!(
+            warning
+                .expect("omitted sources are named")
+                .starts_with("2 captured source file(s) are not indexed")
+        );
+        let complete = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            omitted_sources: None,
+            ..freshness
+        };
+        assert_eq!(
+            code_index_freshness_projection(&complete),
+            (FreshnessLabelV1::Current, None)
         );
     }
 

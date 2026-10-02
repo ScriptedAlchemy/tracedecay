@@ -14,6 +14,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::errors::StoreResetRequiredV1;
 
 use crate::code_index_freshness::{
@@ -128,6 +129,9 @@ pub struct ProjectStatusV1 {
     /// The session↔Git evidence `tracedecay_sessions_for` and the
     /// branch/commit session filters read.
     pub session_git_evidence: StatusSessionGitEvidenceV1,
+    /// The daemon's drain of this project's hook spools, as its last sweep
+    /// left it.
+    pub hook_replay: StatusHookReplayV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_staleness: Option<StatusGitStalenessV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +160,43 @@ pub enum StatusSessionGitEvidenceV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+}
+
+/// The daemon's hook spool drain for one project.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StatusHookReplayV1 {
+    /// No replay consumer drains this project's hook spools in this daemon.
+    Unowned,
+    /// The replay consumer has not finished its first sweep.
+    Starting,
+    /// The last sweep drained every hook spool it found.
+    Drained,
+    /// The last sweep could not drain these spools. Their records stay
+    /// durable and the next sweep retries them.
+    Failed {
+        failures: Vec<StatusHookReplayFailureV1>,
+    },
+}
+
+/// One hook spool the last replay sweep could not drain.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusHookReplayFailureV1 {
+    pub host: NativeHostIdentityV1,
+    pub spool: StatusHookReplaySpoolV1,
+    pub cause: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusHookReplaySpoolV1 {
+    /// The host's spooled hook events.
+    Records,
+    /// The host's hook delivery receipts.
+    DeliveryReceipts,
+    /// The producer work the host's admission ledger still owes.
+    PendingWork,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

@@ -31,8 +31,9 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_contracts::{
     code_index_freshness::{
         CodeCloneIndexBudgetsV1, CodeCloneIndexCoverageV1, CodeCloneIndexObservationV1,
-        CodeCloneIndexResourcesV1, CodeCloneIndexStatusV1, CodeIndexBuildBlockedReasonV1,
-        CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1, CodeIndexRestoreProgressV1,
+        CodeCloneIndexResourcesV1, CodeCloneIndexStatusV1, CodeGraphServingReadinessV1,
+        CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+        CodeIndexRestoreProgressV1,
     },
     now_micros,
 };
@@ -51,7 +52,9 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::{
     code_index::{
-        graph_projection::{CodeGraphEvidenceReader, CodeGraphProjectionStore},
+        graph_projection::{
+            CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
+        },
         production::{
             CodeIndexExecutionControlV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
@@ -2191,9 +2194,7 @@ impl LatestCompleteCodeIndexV1 {
 
     /// Snapshot graph-serving activation with one lock acquisition so status
     /// cannot combine states from opposite sides of an activation transition.
-    pub fn code_graph_serving_readiness(
-        &self,
-    ) -> tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1 {
+    pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
         self.text.code_graph_serving_readiness()
     }
 
@@ -2241,30 +2242,41 @@ impl LatestCodeTextGenerationV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    pub fn code_graph_serving_readiness(
-        &self,
-    ) -> tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1 {
-        match &*self
+    /// An activated graph reports what its reads would find: `ready` only
+    /// while the engine and catalog they need are resident.
+    pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
+        let store = match &*self
             .graph_activation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
-            CodeGraphActivationStateV1::Pending => {
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending
-            }
+            CodeGraphActivationStateV1::Pending => return CodeGraphServingReadinessV1::Pending,
             CodeGraphActivationStateV1::Refused(reason) => {
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
+                return CodeGraphServingReadinessV1::Refused {
                     reason: (*reason).to_owned(),
-                }
+                };
             }
             CodeGraphActivationStateV1::Unavailable(reason) => {
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
+                return CodeGraphServingReadinessV1::Unavailable {
                     reason: reason.clone(),
-                }
+                };
             }
-            CodeGraphActivationStateV1::Ready(_) => {
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
+            CodeGraphActivationStateV1::Ready(serving) => serving.store.clone(),
+        };
+        match store
+            .as_deref()
+            .map(CodeGraphProjectionStore::serving_warmth)
+        {
+            None | Some(Ok(CodeGraphServingWarmthV1::Warm)) => CodeGraphServingReadinessV1::Ready,
+            Some(Ok(CodeGraphServingWarmthV1::Warming(reason))) => {
+                CodeGraphServingReadinessV1::Warming { reason }
             }
+            Some(Ok(CodeGraphServingWarmthV1::Failed(reason))) => {
+                CodeGraphServingReadinessV1::Unavailable { reason }
+            }
+            Some(Err(error)) => CodeGraphServingReadinessV1::Unavailable {
+                reason: error.to_string(),
+            },
         }
     }
 

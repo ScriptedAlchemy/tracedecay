@@ -181,6 +181,16 @@ impl RegisteredGlobalDbOwnerV1 {
         ))
     }
 
+    /// The typed reset attach would refuse this existing store with, `None`
+    /// when it admits, decided without changing the store or retaining a
+    /// client.
+    pub async fn attach_reset_refusal(
+        database: &DatabaseOwnerV1,
+    ) -> tracedecay_domain::errors::Result<Option<TraceDecayError>> {
+        let temporary = database.issue_lease().map_err(registered_owner_error)?;
+        super::schema_stages::attached_registered_schema_reset_refusal(&temporary).await
+    }
+
     /// Issues a read-write client when the underlying map owner is writable.
     /// Each call owns one fresh Store client token; clones of the result share
     /// only that issuance.

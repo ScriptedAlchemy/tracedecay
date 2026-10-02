@@ -509,6 +509,7 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         content_identity: content_digest(identity_source),
         captured_at: UtcMicros(1_000_000),
         files: sources.iter().map(|(file, _)| file.clone()).collect(),
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,

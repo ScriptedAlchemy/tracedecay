@@ -72,6 +72,7 @@ mod hotpath_observe;
 pub mod http_agent;
 pub mod lsp_runtime;
 mod lsp_support;
+mod managed_test_runs;
 pub mod native_integration;
 pub mod observability;
 pub mod operation_stream;

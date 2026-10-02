@@ -143,6 +143,8 @@ impl ReplaySettlement {
 /// Drain one admitted host spool once. `admit` reauthorizes and admits a
 /// single envelope; production passes the daemon admission path, tests pass a
 /// fake. The spool handle is dropped across admission so a live hook can append.
+/// Any spool failure fails the pass with its cause; unacknowledged records
+/// stay durable for the next pass.
 ///
 /// Each lease acquisition waits out a live writer for at most its lease: an
 /// append wakes the drain while the appender still holds the lease, so
@@ -166,7 +168,8 @@ where
 
     // Age-expired records are terminal regardless of binding state: the spool
     // keeps them durable precisely until the drain says otherwise.
-    if let Ok(expired) = spool.expired_records(now) {
+    let expired = spool.expired_records(now)?;
+    if !expired.is_empty() {
         let disposition = HookSpoolAckDispositionV1::TerminalTombstone;
         let acknowledgements = expired
             .iter()
@@ -176,13 +179,12 @@ where
                 disposition,
             })
             .collect::<Vec<_>>();
-        if let Ok(outcomes) = spool.acknowledge_many(&acknowledgements, now) {
-            for (record, outcome) in expired.iter().zip(outcomes) {
-                if matches!(outcome, Ok(true)) {
-                    hotpath::gauge!("hooks.replay.expired").inc(1.0);
-                    log_tombstone(host, record, HookReplayTombstoneReasonV1::Expired);
-                    pass.tombstoned = pass.tombstoned.saturating_add(1);
-                }
+        let outcomes = spool.acknowledge_many(&acknowledgements, now)?;
+        for (record, outcome) in expired.iter().zip(outcomes) {
+            if outcome? {
+                hotpath::gauge!("hooks.replay.expired").inc(1.0);
+                log_tombstone(host, record, HookReplayTombstoneReasonV1::Expired);
+                pass.tombstoned = pass.tombstoned.saturating_add(1);
             }
         }
     }
@@ -195,17 +197,13 @@ where
         return Ok(pass);
     };
 
-    let Ok(batches) = spool.claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS) else {
-        return Ok(pass);
-    };
+    let batches = spool.claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS)?;
     let mut replay_batches = Vec::with_capacity(batches.len());
     for batch in batches {
-        let Ok(record_count) = u16::try_from(batch.records.len()) else {
-            let _ = spool.release_replay_claim(batch.claim_id);
-            return Ok(pass);
-        };
+        let record_count =
+            u16::try_from(batch.records.len()).map_err(|_| HookSpoolError::ReplayBatchExceeded)?;
         if validate_replay_batch(record_count, batch.byte_count).is_err() {
-            let _ = spool.release_replay_claim(batch.claim_id);
+            spool.release_replay_claim(batch.claim_id)?;
             hotpath::gauge!("hooks.replay.retained").inc(f64::from(record_count));
             pass.retained = pass.retained.saturating_add(record_count.into());
             continue;
@@ -266,20 +264,9 @@ where
         }
     }
 
-    let retained_without_ack = completions.iter().fold(0_u32, |retained, completion| {
-        retained.saturating_add(match completion {
-            ReplayCompletion::Retained(count) => *count,
-            ReplayCompletion::Committed(_)
-            | ReplayCompletion::ExactDuplicate(_)
-            | ReplayCompletion::Tombstone(_, _) => 1,
-        })
-    });
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
-    else {
-        hotpath::gauge!("hooks.replay.retained").inc(f64::from(retained_without_ack));
-        pass.retained = pass.retained.saturating_add(retained_without_ack);
-        return Ok(pass);
-    };
+    // Records admitted above but not acknowledged here stay durable and replay
+    // as exact duplicates on the next pass.
+    let (mut spool, _) = HookSpoolV1::open_within(root, config, now, config.writer_lease())?;
     let mut settled = Vec::new();
     for completion in completions {
         match completion {
@@ -306,11 +293,9 @@ where
             disposition: settlement.disposition(),
         })
         .collect::<Vec<_>>();
-    let Ok(outcomes) = spool.acknowledge_many(&acknowledgements, now) else {
-        return Ok(pass);
-    };
+    let outcomes = spool.acknowledge_many(&acknowledgements, now)?;
     for ((record, settlement), outcome) in settled.into_iter().zip(outcomes) {
-        if !matches!(outcome, Ok(true)) {
+        if !outcome? {
             continue;
         }
         match settlement {
@@ -386,6 +371,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
@@ -723,6 +710,42 @@ mod tests {
         writer.lock().unwrap().take().unwrap().join().unwrap();
         assert_eq!((report.committed, report.retained), (1, 0));
         assert_eq!(pending_records(data_root.path(), current), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_spool_that_cannot_reopen_for_acknowledgement_fails_the_pass_and_keeps_the_record() {
+        let data_root = TestRoot::new("ack-unsafe");
+        let current = UtcMicros(10);
+        let binding = binding(7);
+        publish_binding(data_root.path(), &binding, current);
+        spool_envelopes(
+            data_root.path(),
+            &binding,
+            &[envelope(9, &binding)],
+            current,
+        );
+        let spool_root = hook_v2_spool_root(data_root.path(), HOST);
+        let set_mode = |mode| {
+            std::fs::set_permissions(&spool_root, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        let pass = drain_host_spool_once(
+            &spool_root,
+            HookSpoolConfigV1::stock(HOST),
+            PROJECT_ID,
+            Some(&binding),
+            current,
+            |_, _| {
+                set_mode(0o755);
+                async { admitted() }
+            },
+        )
+        .await;
+
+        assert_eq!(pass, Err(HookSpoolError::UnsafePath));
+        set_mode(0o700);
+        assert_eq!(pending_records(data_root.path(), current), 1);
     }
 
     #[tokio::test]
