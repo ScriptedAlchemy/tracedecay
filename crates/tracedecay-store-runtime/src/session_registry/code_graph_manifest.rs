@@ -410,6 +410,12 @@ struct SealRoutes {
     segment_roots: Vec<PathBuf>,
 }
 
+struct VerifiedSealGraphSourceV1 {
+    source: SealedGenerationFileWindowsV1,
+    sealed_state_digest: ManifestDigest,
+    routes: SealRoutes,
+}
+
 /// Runs a graph build over `source`'s file segments, read from the segment
 /// roots of `routes`, and classifies its failure. A cancellation or deadline
 /// the segment reader observed is the build's outcome, whatever error the
@@ -466,9 +472,7 @@ fn with_verified_segments<T>(
 #[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
 #[allow(clippy::too_many_arguments)]
 fn spill_verified_seal_graph(
-    source: &SealedGenerationFileWindowsV1,
-    sealed_state_digest: &ManifestDigest,
-    routes: &SealRoutes,
+    seal: &VerifiedSealGraphSourceV1,
     projection: GraphProjectionIdentity,
     projector_revision: &GraphProjectorRevision,
     spill: GraphGenerationRowSpill,
@@ -477,17 +481,22 @@ fn spill_verified_seal_graph(
     ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SpilledGraphGeneration, GraphDbError> {
-    with_verified_segments(sealed_state_digest, routes, check, |read_segment| {
-        build_sealed_code_graph_rows(
-            projection,
-            source,
-            read_segment,
-            projector_revision,
-            spill,
-            admit,
-            check,
-        )
-    })
+    with_verified_segments(
+        &seal.sealed_state_digest,
+        &seal.routes,
+        check,
+        |read_segment| {
+            build_sealed_code_graph_rows(
+                projection,
+                &seal.source,
+                read_segment,
+                projector_revision,
+                spill,
+                admit,
+                check,
+            )
+        },
+    )
 }
 
 /// Authenticates a seal's partitioned manifest for a streaming graph build.
@@ -523,7 +532,7 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
     spill: GraphGenerationRowSpill,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SpilledGraphGeneration, GraphDbError> {
-    let (source, sealed_state_digest, routes) = open_seal_from_roots(
+    let seal = open_seal_from_roots(
         generations_root,
         replay_root,
         sealed_state_digest,
@@ -532,9 +541,7 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
         "code_graph_manifest.spill_sealed_generation_graph",
     )?;
     spill_verified_seal_graph(
-        &source,
-        &sealed_state_digest,
-        &routes,
+        &seal,
         projection,
         projector_revision,
         spill,
@@ -554,7 +561,7 @@ fn open_seal_from_roots(
     generation: &tracedecay_domain::CodeGenerationId,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     site: &'static str,
-) -> Result<(SealedGenerationFileWindowsV1, ManifestDigest, SealRoutes), GraphDbError> {
+) -> Result<VerifiedSealGraphSourceV1, GraphDbError> {
     let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
@@ -581,7 +588,11 @@ fn open_seal_from_roots(
         seal_paths: vec![canonical, pool],
         segment_roots: vec![segments_root],
     };
-    Ok((source, sealed_state_digest, routes))
+    Ok(VerifiedSealGraphSourceV1 {
+        source,
+        sealed_state_digest,
+        routes,
+    })
 }
 
 /// A layered row spill over a parent's sealed graph, or why it has none.
@@ -611,7 +622,7 @@ pub(super) fn graph_rows_from_roots(
     ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
-    let (source, sealed_state_digest, routes) = open_seal_from_roots(
+    let seal = open_seal_from_roots(
         generations_root,
         replay_root,
         sealed_state_digest,
@@ -619,22 +630,25 @@ pub(super) fn graph_rows_from_roots(
         check,
         "code_graph_manifest.graph_rows",
     )?;
-    if let Some(parent) = source.manifest().parent_generation.clone() {
+    if let Some(parent) = seal.source.manifest().parent_generation.clone() {
         let layered = layered_spill(&parent).and_then(|spill| match spill {
-            Ok(spill) => {
-                with_verified_segments(&sealed_state_digest, &routes, check, |read_segment| {
+            Ok(spill) => with_verified_segments(
+                &seal.sealed_state_digest,
+                &seal.routes,
+                check,
+                |read_segment| {
                     build_layered_code_graph_rows(
                         projection.clone(),
-                        &source,
+                        &seal.source,
                         read_segment,
                         projector_revision,
                         spill,
                         admit,
                         check,
                     )
-                })
-                .map(|built| built.map_err(|decline| format!("{decline:?}")))
-            }
+                },
+            )
+            .map(|built| built.map_err(|decline| format!("{decline:?}"))),
             Err(absence) => Ok(Err(format!("{absence:?}"))),
         });
         match layered {
@@ -663,9 +677,7 @@ pub(super) fn graph_rows_from_roots(
         }
     }
     let spilled = spill_verified_seal_graph(
-        &source,
-        &sealed_state_digest,
-        &routes,
+        &seal,
         projection,
         projector_revision,
         cold_spill()?,
@@ -1255,14 +1267,6 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         };
         let (sealed, sealed_state_digest) = open_verified_seal(&manifest, digest)?;
         drop(manifest);
-        let seal_routes = SealRoutes {
-            seal_paths: routes
-                .iter()
-                .map(|route| route.generations_root.join(&seal_file))
-                .chain(std::iter::once(binding.replay_root.join(&seal_file)))
-                .collect(),
-            segment_roots,
-        };
         if sealed.manifest().project_id != binding.project_id
             || sealed.snapshot().repository != source.repository
             || sealed.generation_id() != &source.generation
@@ -1271,6 +1275,18 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                 "code_graph_manifest.hydrate_sealed_code_generation",
             ));
         }
+        let seal = VerifiedSealGraphSourceV1 {
+            source: sealed,
+            sealed_state_digest,
+            routes: SealRoutes {
+                seal_paths: routes
+                    .iter()
+                    .map(|route| route.generations_root.join(&seal_file))
+                    .chain(std::iter::once(binding.replay_root.join(&seal_file)))
+                    .collect(),
+                segment_roots,
+            },
+        };
         let projection = GraphProjectionIdentity::new(
             GraphNamespace::new(owner.namespace.as_str())?,
             GraphProjectionId::new(owner.projection.as_str())?,
@@ -1281,9 +1297,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         // the registry compares the rebuilt digests with the durable replay
         // before any row is served.
         spill_verified_seal_graph(
-            &sealed,
-            &sealed_state_digest,
-            &seal_routes,
+            &seal,
             projection,
             &source.projector_revision,
             spill,
