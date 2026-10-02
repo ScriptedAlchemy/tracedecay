@@ -184,7 +184,7 @@ impl AgentIntegration for PiIntegration {
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         use HostBundleRegistrationStateV1 as State;
 
-        eprintln!("\n\x1b[1mPi integration\x1b[0m");
+        dc.section("Pi integration");
         let loaded = pi_agent_dir(&ctx.home);
         for (component, label, relative) in [
             (

@@ -716,7 +716,7 @@ Start the daemon and re-run Doctor to read the findings.
 A project runtime that is still mounting (`application.runtime.mounting`) is
 reported as pending with a wait remedy; it does not change the exit status.
 
-`tracedecay doctor --json` keeps the human report on stderr and prints one JSON
+`tracedecay doctor --json` writes no human report and prints one JSON
 document on stdout with `version`, `outcome` (`healthy`, `issue`, or
 `pending_operator_action`), the `issues` / `warnings` / `pending_actions`
 counts, every check line in `checks` (`level` and `message`), and
