@@ -3019,8 +3019,20 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_311,
     ),
     (
-        "sha256:09668c3306b167aa9b04cc1a87e8b5dfcbcf3bc7697b8a20966de80d360fc1d7",
-        9_594,
+        "sha256:0468bf4b97ec3e657e908c34b5b992e137eff3e751e6fd571eb1ea68d62230a5",
+        2_911,
+    ),
+    (
+        "sha256:43cb26ecd5d8a87a7907b2cad1f77466b080a8d5cd504d5ef5869fcc51d5fe3f",
+        3_984,
+    ),
+    (
+        "sha256:0a5746563e2465439f54069e2dccc4972170d206bd5420a8955a3ebb863e9a51",
+        1_329,
+    ),
+    (
+        "sha256:e303343adb9c31758c787fe148e8e88cff01d183e26650d682a7013dbd042187",
+        1_370,
     ),
 ];
 
