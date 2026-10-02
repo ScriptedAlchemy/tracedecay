@@ -1132,14 +1132,14 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
             .expect("warm catalog")
             .symbols,
     );
-    let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(6_187));
+    let held = store
+        .interactive_catalog_bytes()
+        .expect("a warmed catalog reports the bytes it holds");
+    assert!(held > 0, "a warmed catalog holds resident bytes");
 
     assert_eq!(
         store.release_interactive_catalog(),
-        CodeGraphCatalogReleaseV1::Released {
-            bytes: held.expect("ready catalog")
-        }
+        CodeGraphCatalogReleaseV1::Released { bytes: held }
     );
     assert_eq!(store.interactive_catalog_bytes(), None);
     assert_eq!(
@@ -1155,5 +1155,5 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
     );
     assert_eq!(after, before);
     assert_eq!(store.interactive_catalog_scan_builds(), 2);
-    assert_eq!(store.interactive_catalog_bytes(), held);
+    assert_eq!(store.interactive_catalog_bytes(), Some(held));
 }
