@@ -651,7 +651,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                  WHERE p.projector_version = ?2
                    AND p.output_provider = m.provider
                    AND p.output_message_id = m.message_id
-                 ORDER BY p.observation_sequence DESC
+                 ORDER BY p.output_ordinal
                  LIMIT 1) AS observation_id,
                 bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
              FROM lcm_raw_messages_fts
