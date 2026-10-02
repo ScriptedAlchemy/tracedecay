@@ -436,7 +436,7 @@ fn assert_invalid_request(result: &Value) {
 
 fn assert_schema_refusal(response: &Value, detail: &str) {
     assert_eq!(
-        route_refusal(&response),
+        route_refusal(response),
         application_invalid_request_error(detail),
         "{response}"
     );

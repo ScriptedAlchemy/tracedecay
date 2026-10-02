@@ -579,7 +579,7 @@ async fn fact_store_add_user_scope_stores_a_profile_owned_fact() {
 fn assert_argument_error(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(
-        route_refusal(&response),
+        route_refusal(response),
         application_invalid_request_error(detail)
     );
 }

@@ -1180,6 +1180,7 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.tools_call.complete", future = true)]
+    #[allow(clippy::too_many_arguments)]
     async fn complete_tool_call(
         self: &Arc<Self>,
         id: Value,

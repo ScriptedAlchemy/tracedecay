@@ -199,7 +199,7 @@ fn assert_schema_rejection(response: &Value, detail: &str) {
     assert_eq!(response["jsonrpc"], "2.0", "{response}");
     assert_eq!(response["id"], 1, "{response}");
     assert_eq!(
-        route_refusal(&response),
+        route_refusal(response),
         application_invalid_request_error(detail),
         "{response}"
     );
