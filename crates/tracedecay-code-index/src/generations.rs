@@ -808,6 +808,7 @@ mod tests {
             content_identity: digest('f'),
             captured_at: UtcMicros(1_000),
             files,
+            omitted_sources: Vec::new(),
         }
     }
 

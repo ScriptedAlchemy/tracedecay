@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphRankedNeighborsV1,
-    CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
+    CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
+    CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
@@ -344,6 +344,15 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .files(max_files, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    /// Generation-wide counts with the `largest_files` most symbol-dense
+    /// files, from aggregates the catalog derived when it was built.
+    pub fn census(&self, largest_files: usize) -> Result<CodeGraphCensusV1> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .census(largest_files, Arc::clone(&self.cancellation))
             .map_err(graph_projection_error)
     }
 

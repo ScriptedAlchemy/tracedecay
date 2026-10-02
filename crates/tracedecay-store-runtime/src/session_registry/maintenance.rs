@@ -569,6 +569,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     ) {
         let reset_required = refusal.and_then(|error| {
             let resettable = match &shard_id.scope {
+                StoreShardScopeV1::Profile => Some(ResettableStoreV1::ProfileAuthority),
                 StoreShardScopeV1::ProfileSessions => Some(ResettableStoreV1::ProfileSessions),
                 StoreShardScopeV1::ProjectSessions { project_id } => {
                     Some(ResettableStoreV1::ProjectSessions {
@@ -579,13 +580,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             };
             match resettable {
                 Some(store) => error.store_reset_required(store.label(), STALE_STORE_RESET_COMMAND),
-                None => {
-                    let store = match &shard_id.scope {
-                        StoreShardScopeV1::Profile => "profile authority".to_owned(),
-                        scope => format!("{scope:?}"),
-                    };
-                    error.store_reset_required(store, PROFILE_RESET_COMMAND)
-                }
+                None => error
+                    .store_reset_required(format!("{:?}", shard_id.scope), PROFILE_RESET_COMMAND),
             }
         });
         let mut stores = self

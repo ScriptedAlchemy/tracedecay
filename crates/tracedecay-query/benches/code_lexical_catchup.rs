@@ -272,6 +272,7 @@ fn build_fixture() -> Fixture {
         content_identity: content_digest(&sources[0].1),
         captured_at: UtcMicros(1_000_000),
         files: sources.iter().map(|(file, _)| file.clone()).collect(),
+        omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,

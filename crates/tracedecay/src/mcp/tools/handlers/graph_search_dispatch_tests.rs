@@ -4,7 +4,11 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use serde_json::{Value, json};
-use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessReader, CodeIndexOmittedSourceV1,
+    CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
+};
 use tracedecay_domain::ExactClass;
 use tracedecay_mcp::ToolResult;
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
@@ -648,5 +652,121 @@ async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     .await
     .expect_err("empty anchors are rejected");
     assert!(error.to_string().contains("anchor 0 is empty"), "{error}");
+    cg.close();
+}
+
+#[test]
+fn files_names_the_worktree_sources_the_serving_snapshot_omits() {
+    run_on_current_thread(files_names_the_worktree_sources_the_serving_snapshot_omits_case());
+}
+
+async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
+    let dir = tempfile::TempDir::new().expect("omitted sources isolation");
+    let profile =
+        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
+    let project = dir.path().join("omitted-sources-files");
+    std::fs::create_dir_all(project.join("src")).expect("create omitted sources tree");
+    std::fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("write omitted sources fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.omitted-sources-files",
+    )
+    .await
+    .expect("registered omitted sources fixture");
+
+    let omitted = CodeIndexOmittedSourcesV1 {
+        count: 1,
+        sources: vec![CodeIndexOmittedSourceV1 {
+            git_path_bytes: b"src/\xff.rs".to_vec(),
+            display_path: "src/\u{fffd}.rs".to_owned(),
+            reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+        }],
+    };
+    let reader_for = |generation: &str| -> CodeIndexFreshnessReader {
+        let generation = generation.to_owned();
+        let served = omitted.clone();
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness = CodeIndexWorktreeFreshnessV1 {
+                worktree_root: worktree_root.display().to_string(),
+                latest_generation_id: Some(generation.clone()),
+                staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                rebuild_in_flight: false,
+                hook_hint_count: Some(0),
+                coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+                omitted_sources: Some(served.clone()),
+                ..Default::default()
+            };
+            Box::pin(async move { Ok(Some(freshness)) })
+        })
+    };
+    let options_for = |generation: &str| {
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions {
+                code_index_freshness_reader: Some(reader_for(generation)),
+                ..crate::mcp::tools::handlers::ToolCallRegistryOptions::default()
+            },
+        )
+    };
+    let with_reader = || options_for("generation.mcp-verified-graph-fixture.1");
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        with_reader(),
+    )
+    .await
+    .expect("files renders with omitted sources");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert_eq!(
+        payload["worktree_omitted_sources"],
+        serde_json::to_value(&omitted).expect("omitted sources JSON")
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({}),
+        with_reader(),
+    )
+    .await
+    .expect("files renders markdown with omitted sources");
+    let text = response_text(&result);
+    assert!(text.contains("worktree sources not indexed"), "{text}");
+    assert!(
+        text.contains("\"src/\u{fffd}.rs\" (unrepresentable path)"),
+        "{text}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        options_for("generation.mcp-verified-graph-fixture.2"),
+    )
+    .await
+    .expect("files renders while a newer generation is latest");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert!(
+        payload.get("worktree_omitted_sources").is_none(),
+        "omissions recorded for another generation never annotate this listing: {payload}"
+    );
+
+    let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_files",
+        json!({"format": "json"}),
+        crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
+            &cg,
+            crate::mcp::tools::handlers::ToolCallRegistryOptions::default(),
+        ),
+    )
+    .await
+    .expect("files renders without a freshness reader");
+    let payload: Value = serde_json::from_str(&response_text(&result)).expect("files JSON");
+    assert!(payload.get("worktree_omitted_sources").is_none());
     cg.close();
 }

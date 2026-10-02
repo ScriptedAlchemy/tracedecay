@@ -845,7 +845,6 @@ impl McpServer {
         tool_name: &str,
         cg: &Arc<TraceDecay>,
         live_branch: &tracedecay_runtime_core::branch::BranchMemo,
-        project_reader_preselected: bool,
         publish_activity: bool,
     ) {
         // Notification-free freshness is useful before tools that edit source
@@ -856,12 +855,9 @@ impl McpServer {
         let skip_graph_freshness =
             tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name)
                 == tracedecay_mcp::tools::binding::BranchSensitivity::Independent;
-        if !skip_graph_freshness
-            && !project_reader_preselected
-            && needs_lazy_sync_before_dispatch(tool_name)
-        {
+        if !skip_graph_freshness && needs_lazy_sync_before_dispatch(tool_name) {
             self.maybe_sync_if_stale().await;
-        } else if !skip_graph_freshness && !project_reader_preselected {
+        } else if !skip_graph_freshness {
             // D4: sync-on-read (never blocking). Read tools serve the current
             // answer IMMEDIATELY and, when the read-refresh cooldown has
             // elapsed, kick a single-flighted background refresh so the *next*
@@ -2038,7 +2034,7 @@ mod activity_dispatch_tests {
 
         tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            server.begin_tool_dispatch("tracedecay_status", &graph, &live_branch, false, true),
+            server.begin_tool_dispatch("tracedecay_status", &graph, &live_branch, true),
         )
         .await
         .expect("foreground dispatch must not wait for optional activity persistence");
