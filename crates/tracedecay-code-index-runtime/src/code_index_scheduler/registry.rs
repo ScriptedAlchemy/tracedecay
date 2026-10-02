@@ -43,7 +43,7 @@ use super::{
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
     CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
     CodeIndexWorktreeSchedulerV1, DaemonCodeIndexControlV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
+    LatestCompleteCodeIndexV1, PendingHintsV1, ServingReadLeaseV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -907,6 +907,13 @@ const CONVERGENCE_PARK_GRAPH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the native 
      was refused because daemon memory reached its admission watermark; exact and lexical \
      search keep serving, and the graph retries on its own once retained memory is given \
      back or RSS falls (a source change that seals a new generation also retries it)";
+
+/// A refresh refused for resident memory keeps the last complete generation
+/// serving; the headroom wake is its only retry.
+const CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1: &str = "the refresh was \
+     refused because daemon memory reached its admission watermark; the last complete \
+     generation keeps serving, and the refresh retries on its own once retained memory is \
+     given back or RSS falls";
 
 /// Remediation when a worktree refused by a held code-generation store lock
 /// cannot wait for that lock's release.
@@ -3613,9 +3620,14 @@ impl CodeIndexSchedulerRegistryV1 {
             return None;
         }
         // Feedback identity reads only the sealed manifest's snapshot, so an
-        // undecoded generation's text owner answers as well as a decoded one.
+        // undecoded generation's text owner answers as well as a decoded one,
+        // and asking must not keep the decode resident.
         if let Some(generation) = self
-            .latest_complete_ready_decoded_for_root_scope(&project_root, scope)
+            .latest_complete_ready_decoded_for_root_scope_with(
+                &project_root,
+                scope,
+                ServingReadLeaseV1::Observe,
+            )
             .await
         {
             return Some(generation.text_generation_handle());
