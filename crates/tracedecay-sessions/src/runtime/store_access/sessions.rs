@@ -956,7 +956,8 @@ async fn search_workflow_facts(
             query_params.len()
         ));
     }
-    let _ = write!(sql, " AND ({})", term_predicates.join(" OR "));
+    let matching_predicate = term_predicates.join(" OR ");
+    let _ = write!(sql, " AND ({matching_predicate})");
     query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
@@ -984,7 +985,9 @@ async fn search_workflow_facts(
         ORDER BY matched.item_order_missing, matched.first_item_order,
                  (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
                  matched.latest_sequence DESC, matched.first_fact_ordinal,
-                 CASE WHEN w.fact_ordinal = matched.first_fact_ordinal THEN 0 ELSE 1 END,
+                 CASE WHEN ({matching_predicate}) THEN 0 ELSE 1 END,
+                 CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END, w.item_order,
+                 (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
                  w.fact_ordinal",
         query_params.len()
     );
