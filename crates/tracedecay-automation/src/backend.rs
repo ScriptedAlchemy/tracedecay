@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use tracedecay_contracts::automation::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
-use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
 
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
@@ -546,6 +546,18 @@ pub fn runtime_failure_class(error: &TraceDecayError) -> AgentTaskFailureClass {
                 AgentTaskFailureClass::Permanent
             }
         }
+        TraceDecayError::ProjectOpen { kind, .. } => match kind {
+            ProjectOpenFailureKind::IndexMissing
+            | ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { .. }
+            | ProjectOpenFailureKind::BackedOff { .. }
+            | ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: true,
+            } => AgentTaskFailureClass::Retryable,
+            ProjectOpenFailureKind::IdentityUnregistered
+            | ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            } => AgentTaskFailureClass::Permanent,
+        },
         TraceDecayError::HostCliUnavailable { .. } => AgentTaskFailureClass::Unavailable,
         TraceDecayError::Io(error) => match error.kind() {
             std::io::ErrorKind::TimedOut => AgentTaskFailureClass::Timeout,
@@ -566,6 +578,7 @@ pub fn runtime_failure_class(error: &TraceDecayError) -> AgentTaskFailureClass {
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
         | TraceDecayError::Config { .. }
+        | TraceDecayError::InvalidRequest { .. }
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ToolRefused(_)
@@ -911,6 +924,26 @@ mod tests {
                 TraceDecayError::Config {
                     message: "invalid configuration".to_owned(),
                 },
+                AgentTaskFailureClass::Permanent,
+            ),
+            (
+                TraceDecayError::project_open(
+                    ProjectOpenFailureKind::CodeRuntimeBudgetExhausted { limit: 4 },
+                    "every code-runtime seat is taken",
+                ),
+                AgentTaskFailureClass::Retryable,
+            ),
+            (
+                TraceDecayError::project_open(
+                    ProjectOpenFailureKind::AuthorityVerdict {
+                        migration_pending: false,
+                    },
+                    "persisted rows rejected",
+                ),
+                AgentTaskFailureClass::Permanent,
+            ),
+            (
+                TraceDecayError::not_found("symbol 'missing' not found"),
                 AgentTaskFailureClass::Permanent,
             ),
         ];
