@@ -850,6 +850,23 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
         ]
         .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
     );
+
+    let spanning_hit = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "summary beta", 2)
+        .await
+        .expect("search across one observation's message and workflow facts")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spanning_hit,
+        [(
+            "message".to_owned(),
+            "release summary repeats release task alpha\n\nrelease task beta".to_owned(),
+        )]
+    );
 }
 
 #[tokio::test]
