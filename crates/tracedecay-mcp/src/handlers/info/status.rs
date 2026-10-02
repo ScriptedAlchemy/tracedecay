@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
-    CodeIndexWorktreeFreshnessV1,
+    CODE_INDEX_MOUNT_FAILED, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
@@ -310,6 +310,18 @@ fn code_index_freshness_status(
         );
     };
     let Some(freshness) = payload.worktrees.first() else {
+        if let Some(failure) = &payload.mount_failure {
+            return (
+                StatusCodeIndexFreshnessV1::MountFailed {
+                    message: failure.message.clone(),
+                    remediation: failure.remediation.clone(),
+                },
+                Some(format!("{}; {}", failure.message, failure.remediation)),
+                Some(StatusRetrievalServingV1::Unavailable {
+                    reason: CODE_INDEX_MOUNT_FAILED.to_owned(),
+                }),
+            );
+        }
         return (
             StatusCodeIndexFreshnessV1::Unavailable {
                 reason: "code_index_scheduler_not_mounted".to_owned(),
@@ -986,18 +998,46 @@ mod tests {
 
     use super::{
         CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
-        code_index_freshness_projection, git_staleness, graph_statistics_value,
-        historical_session_catch_up_state, readiness_wait_outcome, render_status_md,
-        schema_convergence_status, session_git_evidence_state,
+        code_index_freshness_projection, code_index_freshness_status, git_staleness,
+        graph_statistics_value, historical_session_catch_up_state, readiness_wait_outcome,
+        render_status_md, schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
-        CodeIndexFreshnessCoverageV1, CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1,
-        CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
+        CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1,
+        CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
+        CodeIndexStalenessStateV1,
     };
+    use tracedecay_contracts::retrieval::{StatusCodeIndexFreshnessV1, StatusRetrievalServingV1};
     use tracedecay_contracts::storage::{
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
     };
+
+    #[test]
+    fn failed_mount_is_a_typed_status_with_operator_remediation() {
+        let payload = CodeIndexFreshnessPayloadV1::from_read_failure(
+            CodeIndexFreshnessReadFailureV1::MountFailed,
+        );
+
+        let (status, warning, retrieval) = code_index_freshness_status(Some(&payload));
+
+        assert_eq!(
+            status,
+            StatusCodeIndexFreshnessV1::MountFailed {
+                message: "the code-index scheduler could not mount for this project".to_owned(),
+                remediation: "run `tracedecay sync` to retry the code-index mount".to_owned(),
+            }
+        );
+        assert_eq!(
+            retrieval,
+            Some(StatusRetrievalServingV1::Unavailable {
+                reason: "code_index_mount_failed".to_owned(),
+            })
+        );
+        let warning = warning.expect("a failed mount carries an operator warning");
+        assert!(warning.contains("could not mount"));
+        assert!(warning.contains("tracedecay sync"));
+    }
 
     #[test]
     fn session_git_evidence_reports_the_installed_generation_or_its_absence() {
@@ -1337,6 +1377,7 @@ mod tests {
                     },
                 ],
                 note: String::new(),
+                mount_failure: None,
             }
         };
         let staleness = |payload| {

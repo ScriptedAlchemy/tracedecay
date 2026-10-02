@@ -685,6 +685,15 @@ impl CodeIndexOmittedSourcesV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeIndexFreshnessReadFailureV1 {
     ReadFailed,
+    /// The route's last code-index mount failed and no later attempt mounted.
+    MountFailed,
+}
+
+/// Safe operator-facing status for a failed code-index mount.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CodeIndexMountFailureV1 {
+    pub message: String,
+    pub remediation: String,
 }
 
 pub type CodeIndexFreshnessReadFuture = Pin<
@@ -852,6 +861,8 @@ pub type CodeIndexReadinessWaiter = Arc<
 pub struct CodeIndexFreshnessPayloadV1 {
     pub worktrees: Vec<CodeIndexWorktreeFreshnessV1>,
     pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_failure: Option<CodeIndexMountFailureV1>,
 }
 
 const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
@@ -859,6 +870,12 @@ const UNMOUNTED_NOTE: &str =
     "the daemon scheduler registry has no mounted scheduler for this project";
 const UNAVAILABLE_NOTE: &str =
     "the dashboard is not attached to a daemon-owned code-index scheduler registry";
+const READ_FAILED_NOTE: &str = "code-index freshness read failed";
+const MOUNT_FAILED_NOTE: &str = "the last code-index mount for this project failed";
+const MOUNT_FAILED_MESSAGE: &str = "the code-index scheduler could not mount for this project";
+const MOUNT_FAILED_REMEDIATION: &str = "run `tracedecay sync` to retry the code-index mount";
+/// Stable reason code for a failed demand-driven code-index mount.
+pub const CODE_INDEX_MOUNT_FAILED: &str = "code_index_mount_failed";
 
 impl CodeIndexFreshnessPayloadV1 {
     /// Payload after the daemon scheduler registry answered for this project.
@@ -871,6 +888,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: worktrees.into_iter().collect(),
             note: LIVE_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -879,6 +897,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: Vec::new(),
             note: UNMOUNTED_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -887,6 +906,7 @@ impl CodeIndexFreshnessPayloadV1 {
         Self {
             worktrees: Vec::new(),
             note: UNAVAILABLE_NOTE.to_owned(),
+            mount_failure: None,
         }
     }
 
@@ -895,6 +915,25 @@ impl CodeIndexFreshnessPayloadV1 {
         match worktree {
             Some(worktree) => Self::from_scheduler_observation([worktree]),
             None => Self::from_unmounted_scheduler(),
+        }
+    }
+
+    /// A scheduler read that could not answer with a worktree.
+    pub fn from_read_failure(failure: CodeIndexFreshnessReadFailureV1) -> Self {
+        match failure {
+            CodeIndexFreshnessReadFailureV1::ReadFailed => Self {
+                worktrees: Vec::new(),
+                note: READ_FAILED_NOTE.to_owned(),
+                mount_failure: None,
+            },
+            CodeIndexFreshnessReadFailureV1::MountFailed => Self {
+                worktrees: Vec::new(),
+                note: MOUNT_FAILED_NOTE.to_owned(),
+                mount_failure: Some(CodeIndexMountFailureV1 {
+                    message: MOUNT_FAILED_MESSAGE.to_owned(),
+                    remediation: MOUNT_FAILED_REMEDIATION.to_owned(),
+                }),
+            },
         }
     }
 }
@@ -925,6 +964,26 @@ mod tests {
         let unattached = CodeIndexFreshnessPayloadV1::from_unattached_registry();
         assert_eq!(unattached.note, UNAVAILABLE_NOTE);
         assert!(unattached.worktrees.is_empty());
+    }
+
+    #[test]
+    fn mount_failure_payload_names_the_failure_and_retry() {
+        let payload = CodeIndexFreshnessPayloadV1::from_read_failure(
+            CodeIndexFreshnessReadFailureV1::MountFailed,
+        );
+        let failure = payload
+            .mount_failure
+            .expect("a failed mount carries its typed status");
+
+        assert_eq!(payload.note, MOUNT_FAILED_NOTE);
+        assert_eq!(
+            failure.message,
+            "the code-index scheduler could not mount for this project"
+        );
+        assert_eq!(
+            failure.remediation,
+            "run `tracedecay sync` to retry the code-index mount"
+        );
     }
 
     #[test]

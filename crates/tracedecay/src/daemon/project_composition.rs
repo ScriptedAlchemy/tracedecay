@@ -912,6 +912,14 @@ impl ProjectOpenInputs<'_> {
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&code_index_activation),
         );
+        let dashboard_code_index_freshness_reader = project_dashboard_freshness_reader(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
+        let code_index_readiness_waiter = project_readiness_waiter(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode
@@ -949,12 +957,8 @@ impl ProjectOpenInputs<'_> {
             code_index_activation,
             ports: ProjectRoutePorts {
                 code_index,
-                dashboard_code_index_freshness_reader: project_dashboard_freshness_reader(
-                    self.invocation.code_index_schedulers.clone(),
-                ),
-                code_index_readiness_waiter: project_readiness_waiter(
-                    self.invocation.code_index_schedulers.clone(),
-                ),
+                dashboard_code_index_freshness_reader,
+                code_index_readiness_waiter,
                 dashboard_feedback_status_reader:
                     tracedecay_dashboard_api::feedback_api::feedback_status_reader(
                         self.invocation.feedback_runtime_registrar(),
@@ -1999,27 +2003,74 @@ fn project_code_index_authorities(
 }
 
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
+///
+/// A scheduler absence after a failed activation is a terminal observation,
+/// not the same state as a route that has never mounted.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader {
-    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
-        Arc::new(move |project_root| {
+    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader = Arc::new(
+        move |project_root| {
             let schedulers = schedulers.clone();
-            Box::pin(async move { schedulers.dashboard_freshness_read(&project_root).await })
-        });
+            let activation = Arc::clone(&activation);
+            Box::pin(async move {
+                match schedulers.dashboard_freshness_read(&project_root).await? {
+                    Some(worktree) => Ok(Some(worktree)),
+                    None if activation.mount_failed() => Err(
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed,
+                    ),
+                    None => Ok(None),
+                }
+            })
+        },
+    );
     reader
 }
 
 /// `tracedecay_status` `wait_for` over this route's code-index schedulers.
 fn project_readiness_waiter(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter {
     Arc::new(move |project_root, target, budget| {
         let schedulers = schedulers.clone();
+        let activation = Arc::clone(&activation);
         Box::pin(async move {
-            schedulers
-                .wait_for_readiness(&project_root, target, budget)
-                .await
+            let mut mount_failure = activation.subscribe_mount_failure();
+            // The retained failure is a terminal observation only once no
+            // mount attempt is in flight: an explicit `tracedecay sync`
+            // retry keeps the flag set until it settles, and bailing on it
+            // would deny this wait the mount that retry may land inside
+            // the caller's own budget.
+            if !activation.mount_in_progress() && *mount_failure.borrow_and_update() {
+                return Ok(
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                        reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_MOUNT_FAILED.to_owned(),
+                    },
+                );
+            }
+            let waiting = schedulers.wait_for_readiness(&project_root, target, budget);
+            tokio::pin!(waiting);
+            loop {
+                tokio::select! {
+                    result = &mut waiting => return result,
+                    changed = mount_failure.changed() => {
+                        if changed.is_err() {
+                            return waiting.await;
+                        }
+                        if *mount_failure.borrow_and_update()
+                            && !activation.mount_in_progress()
+                        {
+                            return Ok(
+                                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                                    reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_MOUNT_FAILED.to_owned(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
         })
     })
 }
