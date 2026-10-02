@@ -1164,9 +1164,9 @@ fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_releas
 }
 
 #[test]
-fn allocator_trim_reclaimer_resamples_pressure_after_checkpoint_throttle() {
+fn allocator_trim_readmits_growth_when_memory_recovers_inside_checkpoint_throttle() {
     let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
-    let measured = Arc::new(AtomicU64::new(0));
+    let measured = Arc::new(AtomicU64::new(PRESSURE_TEST_LIMIT_BYTES));
     let sampled = Arc::clone(&measured);
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
         limit,
@@ -1180,28 +1180,27 @@ fn allocator_trim_reclaimer_resamples_pressure_after_checkpoint_throttle() {
             })
         }),
     ));
-    let above_high = pressure.high_watermark_bytes() + 1;
-    let below_low = pressure.low_watermark_bytes().saturating_sub(1);
-    measured.store(above_high, Ordering::Release);
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
     let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
         .expect("allocator trim registration");
+    let owner = key("project-a", "worktree-a", "generation-a", "canonical");
 
-    assert!(pressure.sample_for_checkpoint().is_over_budget());
-    assert!(matches!(
-        pressure.state(),
-        ResidentMemoryPressureStateV1::OverBudget { .. }
-    ));
+    pressure.sample_for_checkpoint();
+    let refused = authority
+        .reserve(owner.clone(), growth_request())
+        .expect_err("a process at its limit refuses growth");
+    assert!(refused.is_observed_over_budget());
 
-    measured.store(below_low, Ordering::Release);
-    pressure.publish_observed_resident_bytes(above_high);
+    measured.store(64 * 1024 * 1024, Ordering::Release);
+    pressure.publish_observed_resident_bytes(PRESSURE_TEST_LIMIT_BYTES);
 
-    assert!(matches!(
-        pressure.state(),
-        ResidentMemoryPressureStateV1::Nominal {
-            observed_bytes,
-            ..
-        } if observed_bytes == below_low
-    ));
+    let _admitted = authority
+        .reserve(owner, growth_request())
+        .expect("growth is admitted once the trim measures recovered memory");
+    assert_eq!(authority.snapshot().used_bytes, 16 * 1024 * 1024);
 }
 
 #[test]
