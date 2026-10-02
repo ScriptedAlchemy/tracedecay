@@ -100,17 +100,6 @@ impl PreparedCodeLexicalArtifactPageV1 {
             .max()
             .unwrap_or(0)
     }
-
-    pub fn ledger_charge_bytes(&self) -> Result<usize, CodeLexicalArtifactErrorV1> {
-        self.source_retained_bytes
-            .checked_add(self.prepared_retained_bytes)
-            .and_then(|bytes| bytes.checked_add(self.preparation_scratch_bytes))
-            .ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "prepared lexical page ledger charge overflowed".to_owned(),
-                )
-            })
-    }
 }
 
 #[derive(Debug)]
