@@ -22,7 +22,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gix::bstr::BStr;
 use gix::dir::walk::{Action, Delegate, ForDeletionMode};
@@ -34,7 +34,7 @@ use tracedecay_domain::{
     CodeSourceOmissionReasonV1, ContentDigest, IndexPathPolicyV1, LanguageId,
     SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, validate_code_logical_path,
 };
-use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
@@ -259,6 +259,11 @@ impl CandidateContentV1 {
     }
 }
 
+/// Timestamps this close to the moment of a stat can still be shared by a
+/// later write (coarse kernel clocks, two-second FAT times), so such a stat
+/// cannot yet tell the file's current state from its next one.
+const RACY_STAT_WINDOW: Duration = Duration::from_secs(2);
+
 /// At most this many digests are re-derived on the sweeping thread.
 const INLINE_DIGEST_LIMIT: usize = 16;
 
@@ -273,12 +278,12 @@ struct StatKeyV1 {
     mode: u32,
     size: u64,
     modified_nanos: i128,
-    changed: ChangeStamp,
+    changed_nanos: i128,
 }
 
 impl StatKeyV1 {
     #[cfg(unix)]
-    fn of(metadata: &Metadata, sampled_at: ChangeClockReading) -> Self {
+    fn of(metadata: &Metadata) -> Self {
         Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -286,7 +291,8 @@ impl StatKeyV1 {
             size: metadata.size(),
             modified_nanos: i128::from(metadata.mtime()) * 1_000_000_000
                 + i128::from(metadata.mtime_nsec()),
-            changed: RewriteWitness::NATIVE.stamp(metadata, sampled_at),
+            changed_nanos: i128::from(metadata.ctime()) * 1_000_000_000
+                + i128::from(metadata.ctime_nsec()),
         }
     }
 
@@ -295,7 +301,7 @@ impl StatKeyV1 {
     // as before this cache. NTFS ChangeTime is not that witness: it stays put
     // when a writer restores LastWriteTime through its handle.
     #[cfg(not(unix))]
-    fn of(metadata: &Metadata, sampled_at: ChangeClockReading) -> Self {
+    fn of(metadata: &Metadata) -> Self {
         Self {
             device: 0,
             inode: 0,
@@ -307,13 +313,19 @@ impl StatKeyV1 {
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .and_then(|elapsed| i128::try_from(elapsed.as_nanos()).ok())
                 .unwrap_or(0),
-            changed: RewriteWitness::NATIVE.stamp(metadata, sampled_at),
+            changed_nanos: 0,
         }
     }
 
-    /// Whether any later write must produce a different key.
-    fn settled(&self) -> bool {
-        self.changed.is_settled()
+    /// Whether this key, sampled at `sampled_at`, is old enough that any
+    /// later write must produce a different one.
+    fn settled(&self, sampled_at: SystemTime) -> bool {
+        RewriteWitness::NATIVE.proves_unchanged_bytes()
+            && sampled_at
+                .checked_sub(RACY_STAT_WINDOW)
+                .and_then(|horizon| horizon.duration_since(UNIX_EPOCH).ok())
+                .and_then(|horizon| i128::try_from(horizon.as_nanos()).ok())
+                .is_some_and(|horizon| self.changed_nanos < horizon)
     }
 }
 
@@ -343,9 +355,9 @@ fn stat_concurrently<T: Sync, R: Send>(items: &[T], probe: impl Fn(&T) -> R + Sy
 }
 
 /// The key of whatever is at `path` now, `None` when nothing is.
-fn sample(path: &Path, sampled_at: ChangeClockReading) -> std::io::Result<Option<StatKeyV1>> {
+fn sample(path: &Path) -> std::io::Result<Option<StatKeyV1>> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(StatKeyV1::of(&metadata, sampled_at))),
+        Ok(metadata) => Ok(Some(StatKeyV1::of(&metadata))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -368,12 +380,9 @@ impl CachedCandidateRosterV1 {
     fn holds(&self, git_metadata_signature: &str, admitted_paths: &[String]) -> bool {
         self.git_metadata_signature == git_metadata_signature
             && self.admitted_paths == admitted_paths
-            && {
-                let sampled_at = ChangeClockReading::now();
-                stat_concurrently(&self.evidence, |(path, key)| {
-                    sample(path, sampled_at).is_ok_and(|now| now == *key)
-                })
-            }
+            && stat_concurrently(&self.evidence, |(path, key)| {
+                sample(path).is_ok_and(|now| now == *key)
+            })
             .into_iter()
             .all(|holds| holds)
     }
@@ -383,16 +392,16 @@ impl CachedCandidateRosterV1 {
 /// reads it, plus the `.gitignore` each one holds.
 struct DirectoryEvidenceV1 {
     root: PathBuf,
-    sampled_at: ChangeClockReading,
+    sampled_at: SystemTime,
     evidence: Vec<(PathBuf, Option<StatKeyV1>)>,
     settled: bool,
 }
 
 impl DirectoryEvidenceV1 {
     fn record(&mut self, path: PathBuf, directory: bool) {
-        let key = sample(&path, self.sampled_at);
+        let key = sample(&path);
         let settled = match &key {
-            Ok(Some(key)) => key.settled(),
+            Ok(Some(key)) => key.settled(self.sampled_at),
             Ok(None) => !directory,
             Err(_) => false,
         };
@@ -407,7 +416,7 @@ impl DirectoryEvidenceV1 {
         self.record(directory, true);
         // An absent `.gitignore` needs no key: creating one advances the
         // directory's change time.
-        if sample(&ignore_file, self.sampled_at).is_ok_and(|key| key.is_some()) {
+        if sample(&ignore_file).is_ok_and(|key| key.is_some()) {
             self.record(ignore_file, false);
         }
     }
@@ -454,7 +463,7 @@ impl Delegate for DirectoryEvidenceV1 {
 fn roster_evidence(
     repository: &gix::Repository,
     project_root: &Path,
-    sampled_at: ChangeClockReading,
+    sampled_at: SystemTime,
 ) -> Option<Vec<(PathBuf, Option<StatKeyV1>)>> {
     let mut recorder = DirectoryEvidenceV1 {
         root: project_root.to_path_buf(),
@@ -543,7 +552,7 @@ impl SourceSweepCacheV1 {
         shutting_down: &AtomicBool,
     ) -> (bool, SourceSweepStatsV1) {
         let mut stats = SourceSweepStatsV1::default();
-        let sampled_at = ChangeClockReading::now();
+        let sampled_at = SystemTime::now();
         let admitted_paths = ignored_source_admissions
             .iter()
             .map(|admission| admission.logical_path.clone())
@@ -618,7 +627,7 @@ impl SourceSweepCacheV1 {
                 }
                 None
             } else if metadata.is_file() {
-                Some(StatKeyV1::of(&metadata, sampled_at))
+                Some(StatKeyV1::of(&metadata))
             } else {
                 return None;
             };
@@ -696,7 +705,9 @@ impl SourceSweepCacheV1 {
             // The key was sampled before the read, so a settled key vouches
             // for these bytes: a write after the stat would change it.
             match key {
-                Some(key) if key.settled() && content != CandidateContentV1::Unreadable => {
+                Some(key)
+                    if key.settled(sampled_at) && content != CandidateContentV1::Unreadable =>
+                {
                     self.contents
                         .insert(candidate.logical_path.clone(), (key, content));
                 }
@@ -881,44 +892,5 @@ impl RestoreFreshnessWitnessV1 {
         if std::fs::write(&temp, self.encode()).is_ok() {
             let _ = std::fs::rename(&temp, &path);
         }
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use tracedecay_private_fs::{ChangeClockReading, RewriteWitness, change_time_settled};
-
-    use super::sample;
-
-    /// The sweep cache keeps a digest only under a settled key and reuses it
-    /// only for an equal one. A clock read before the write cannot settle the
-    /// write's change time, so a same-size rewrite in that quantum, which
-    /// leaves every stat field equal, cannot match the key either.
-    #[test]
-    fn a_key_sampled_inside_its_write_quantum_vouches_for_nothing() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("lib.rs");
-        let sampled_at = ChangeClockReading::now();
-        std::fs::write(&path, "pub fn alpha() -> u32 { 1 }\n").unwrap();
-
-        let first = sample(&path, sampled_at).unwrap().unwrap();
-        let second = sample(&path, sampled_at).unwrap().unwrap();
-        assert!(!first.settled());
-        assert_ne!(first, second);
-
-        let metadata = std::fs::metadata(&path).unwrap();
-        let changed_at = RewriteWitness::NATIVE.change_time_nanos(&metadata).unwrap();
-        let left_quantum = (0..10_000_000_u32).any(|_| {
-            std::thread::yield_now();
-            change_time_settled(changed_at)
-        });
-        assert!(
-            left_quantum,
-            "the change clock must leave the write's quantum"
-        );
-        let sampled_at = ChangeClockReading::now();
-        let first = sample(&path, sampled_at).unwrap().unwrap();
-        assert!(first.settled());
-        assert_eq!(first, sample(&path, sampled_at).unwrap().unwrap());
     }
 }

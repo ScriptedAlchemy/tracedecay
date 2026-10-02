@@ -898,6 +898,7 @@ mod durable_inventory {
             branch_meta_relpath: PathBuf::from(
                 tracedecay_runtime_core::storage::BRANCH_META_FILENAME,
             ),
+            sessions_schema_digest: None,
         };
         serde_json::to_vec(&manifest).unwrap()
     }

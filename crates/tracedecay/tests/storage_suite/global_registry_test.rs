@@ -74,6 +74,7 @@ fn write_observation_store_manifest(
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
             branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
+            sessions_schema_digest: None,
         },
     )
     .unwrap();

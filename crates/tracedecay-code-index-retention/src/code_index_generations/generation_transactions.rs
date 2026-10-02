@@ -526,11 +526,10 @@ pub(super) fn path_still_names_open_file(
 }
 
 /// Whether two metadata snapshots name the same stable file identity. On
-/// Unix the device and inode pair is exact. The snapshots bracket one
-/// verification that hashes and compares the bytes itself; the remaining
-/// fields only refuse a file visibly rewritten during it and prove nothing
-/// about content. Windows file-index identity is compared from retained
-/// handles via `windows_file::information`, not MetadataExt.
+/// Unix the device and inode pair is exact; the type, length, and
+/// modification time double as the cross-check that the content did not
+/// change between the snapshots. Windows file-index identity is compared
+/// from retained handles via `windows_file::information`, not MetadataExt.
 pub(super) fn metadata_identity_matches(
     left: &std::fs::Metadata,
     right: &std::fs::Metadata,

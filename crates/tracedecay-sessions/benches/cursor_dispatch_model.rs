@@ -15,6 +15,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -112,8 +114,9 @@ fn wait_until_change_settled(path: &Path) {
     {
         for _ in 0..10_000_000u32 {
             let metadata = fs::metadata(path).expect("stat parent transcript");
-            if tracedecay_private_fs::RewriteWitness::NATIVE.vouches_for_unchanged_bytes(&metadata)
-            {
+            let changed_at_nanos =
+                i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+            if tracedecay_private_fs::change_time_settled(changed_at_nanos) {
                 return;
             }
             std::thread::yield_now();

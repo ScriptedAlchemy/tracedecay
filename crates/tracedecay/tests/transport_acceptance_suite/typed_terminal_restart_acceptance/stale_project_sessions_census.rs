@@ -197,3 +197,79 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
 
     let _ = daemon.kill_and_wait();
 }
+
+/// A project sessions store admitted by this binary, by its census or its own
+/// attach, records that on its manifest, so a later census opens only stores
+/// whose stamp is missing or stale.
+/// Every store but the doctor's own project is given a refused shape: a
+/// census that opened them would name each one.
+#[test]
+fn census_opens_only_project_sessions_stores_with_a_stale_admission_stamp() {
+    const PROJECTS: usize = 20;
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let profile_root = home_path.join(".tracedecay");
+    let mut projects: Vec<(tempfile::TempDir, PathBuf, String)> = (0..PROJECTS)
+        .map(|_| {
+            let project = tempfile::TempDir::new().expect("project");
+            let path = canonical_existing_path(project.path());
+            let id = tracedecay_runtime_core::storage::default_profile_project_id(&path);
+            (project, path, id)
+        })
+        .collect();
+    projects.sort_by(|left, right| left.2.cmp(&right.2));
+    let doctor_project = projects[0].1.as_path();
+    let stale_id = projects[1].2.as_str();
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    for (_, path, _) in &projects {
+        super::initialize_project(&home_path, path, "census-stamp");
+        wait_for_code_index_hit(&home_path, path, "probe");
+    }
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote every store");
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    assert_eq!(
+        doctor_store_resets(&home_path, doctor_project).1,
+        Vec::<String>::new(),
+        "the first census inspects every store in full and admits each one"
+    );
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon whose census admitted every store");
+
+    for (_, _, id) in &projects[1..] {
+        assert_eq!(
+            give_registry_the_released_graph_scope_shape(
+                &profile_root.join("projects").join(id).join("sessions.db")
+            ),
+            0,
+            "a project sessions store records no graph scope"
+        );
+    }
+    let stale_manifest = profile_root
+        .join("projects")
+        .join(stale_id)
+        .join("store_manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stale_manifest).expect("read the stale manifest"))
+            .expect("parse the stale manifest");
+    manifest["sessions_schema_digest"] = serde_json::Value::from("admitted-by-an-earlier-schema");
+    std::fs::write(
+        &stale_manifest,
+        serde_json::to_vec_pretty(&manifest).expect("serialize the stale manifest"),
+    )
+    .expect("write the stale manifest");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    assert_eq!(
+        doctor_store_resets(&home_path, doctor_project),
+        (
+            Some(75),
+            vec![pending_reset(&format!("project sessions {stale_id}"))]
+        ),
+        "the census opens and names only the store whose admission stamp is stale"
+    );
+    let _ = daemon.kill_and_wait();
+}

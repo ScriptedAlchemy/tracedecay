@@ -1131,7 +1131,8 @@ git checkout also registers itself again the first time a command runs in it.
 At startup the daemon inspects every project sessions store whose project
 root still exists, without opening the project, so a profile written by an
 earlier release lists each refused store at once and one `wipe --stale --yes`
-resets them all. While the profile authority is reset-required, project commands
+resets them all. A store this release's schema already admitted records that
+in its `store_manifest.json` and is not opened again until the schema changes. While the profile authority is reset-required, project commands
 refuse with this reset instead of serving: project routing resolves
 enrollment, linked worktrees, and remote-deletion records through the
 registry.
