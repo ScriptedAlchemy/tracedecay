@@ -1979,7 +1979,7 @@ impl RetainedCodeGraphRuntimeV1 {
         // first time an arm needs them and shared by every later use.
         let built_rows = std::cell::OnceCell::new();
         let admission_reservation = RefCell::new(None::<Box<dyn Send>>);
-        let mut rows = || -> std::result::Result<GraphGenerationRows, GraphDbError> {
+        let rows = || -> std::result::Result<GraphGenerationRows, GraphDbError> {
             if let Some(rows) = built_rows.get() {
                 return Ok(GraphGenerationRows::clone(rows));
             }

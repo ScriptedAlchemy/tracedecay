@@ -464,6 +464,7 @@ fn with_verified_segments<T>(
 /// Builds the code graph of the authenticated seal `manifest` into `spill`,
 /// streaming its file segments from `routes` one window at a time.
 #[hotpath::measure(label = "daemon.session_registry.seal.spill_graph")]
+#[allow(clippy::too_many_arguments)]
 fn spill_verified_seal_graph(
     source: &SealedGenerationFileWindowsV1,
     sealed_state_digest: &ManifestDigest,
