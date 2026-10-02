@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -688,7 +688,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         );
 
         let mut transcript_results = Vec::new();
-        let mut matched_observations = BTreeSet::new();
+        let mut transcript_observations = BTreeMap::new();
         let mut rows = snapshot
             .query(&sql, query_params)
             .await
@@ -709,7 +709,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 .get::<Option<String>>(26)
                 .map_err(|error| session_db_operation_error(OPERATION, error))?
             {
-                matched_observations.insert(observation_id);
+                transcript_observations.insert(observation_id, transcript_results.len());
             }
             transcript_results.push(SessionMessageSearchResult {
                 session,
@@ -718,14 +718,22 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let mut workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?;
-        workflow_results
-            .retain(|(observation_id, _)| matched_observations.insert(observation_id.clone()));
-        let workflow_results = workflow_results
-            .into_iter()
-            .map(|(_, result)| result)
-            .collect();
+        let workflow_results =
+            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit)
+                .await?
+                .into_iter()
+                .filter(|(observation_id, fact)| {
+                    !transcript_observations
+                        .get(observation_id)
+                        .is_some_and(|&index| {
+                            transcript_results[index]
+                                .message
+                                .text
+                                .contains(&fact.message.text)
+                        })
+                })
+                .map(|(_, fact)| fact)
+                .collect();
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
