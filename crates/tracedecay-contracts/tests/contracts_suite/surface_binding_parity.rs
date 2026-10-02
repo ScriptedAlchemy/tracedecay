@@ -22,6 +22,11 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Http,
         BindingSurface::Dashboard,
     ];
+    const CALLABLE_READ_SURFACES: [BindingSurface; 3] = [
+        BindingSurface::Cli,
+        BindingSurface::Mcp,
+        BindingSurface::Http,
+    ];
     const ADVISORY_SURFACES: [BindingSurface; 3] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -44,7 +49,25 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         ),
     ];
     assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &git_overrides);
-    let advisory_overrides = [
+    // Reads the dashboard's closed route table does not dispatch keep the
+    // callable transports only.
+    let feedback_overrides = [
+        (
+            "capability.application.feedback.diagnostics",
+            CALLABLE_READ_SURFACES.as_slice(),
+        ),
+        (
+            "capability.application.feedback.impact",
+            CALLABLE_READ_SURFACES.as_slice(),
+        ),
+        (
+            "capability.application.feedback.affected-tests",
+            CALLABLE_READ_SURFACES.as_slice(),
+        ),
+        (
+            "capability.application.feedback.test-results",
+            CALLABLE_READ_SURFACES.as_slice(),
+        ),
         (
             "capability.application.feedback.advisory-cycle",
             ADVISORY_SURFACES.as_slice(),
@@ -62,7 +85,7 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         &feedback,
         &feedback_handlers,
         &DASHBOARD_READ_SURFACES,
-        &advisory_overrides,
+        &feedback_overrides,
     );
 }
 
