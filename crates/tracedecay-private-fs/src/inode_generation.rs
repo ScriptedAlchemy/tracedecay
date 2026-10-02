@@ -57,6 +57,9 @@ fn generation_bits(generation: libc::c_long) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStrExt;
+
+    #[cfg(target_os = "linux")]
     use super::inode_generation;
 
     #[cfg(target_os = "linux")]
@@ -85,7 +88,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn is_ext4(path: &std::path::Path) -> bool {
-        use std::os::unix::ffi::OsStrExt;
         let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: `statfs` is a plain C struct, valid when zeroed.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
