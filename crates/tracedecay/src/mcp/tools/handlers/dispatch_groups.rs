@@ -592,7 +592,10 @@ fn graph_freshness_reader<'a>(
 ) -> Option<&'a CodeIndexFreshnessReader> {
     matches!(
         tool_name,
-        "tracedecay_search" | "tracedecay_context" | "tracedecay_files"
+        "tracedecay_search"
+            | "tracedecay_context"
+            | "tracedecay_files"
+            | "tracedecay_find_exact_symbol"
     )
     .then_some(options.code_index_freshness_reader.as_ref())
     .flatten()

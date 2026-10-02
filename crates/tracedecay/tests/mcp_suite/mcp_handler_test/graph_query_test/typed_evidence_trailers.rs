@@ -146,6 +146,49 @@ async fn find_exact_symbol_carries_the_search_freshness_and_coverage_envelope() 
     shutdown_graph_fixture(fixture).await;
 }
 
+/// A dirty worktree marks the exact-symbol verdict `possibly_stale` through
+/// the daemon scheduler's own reading: a graph seat still serving its last
+/// complete generation cannot stand in for worktree state. The summary must
+/// open with the scheduler's `state=` evidence, which only a mounted
+/// freshness reader supplies; without it the seat's `current` reading would
+/// report `fresh` over a changed worktree.
+#[tokio::test]
+async fn find_exact_symbol_reports_a_dirty_worktree_as_possibly_stale() {
+    let fixture = trailer_fixture().await;
+    let dirty_dir = fixture.project_root().join("src/dirty");
+    fs::create_dir_all(&dirty_dir).unwrap();
+    for file in 0..150 {
+        fs::write(
+            dirty_dir.join(format!("dirty_{file}.rs")),
+            "pub fn dirty_marker() -> u32 { 1 }\n",
+        )
+        .unwrap();
+    }
+
+    let arguments = json!({"name": "known", "format": "json"});
+    let verdict = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let texts = call(&fixture, "tracedecay_find_exact_symbol", arguments.clone()).await;
+            let payload: Value = serde_json::from_str(&texts[0]).unwrap();
+            if payload["freshness"]["state"] == json!("possibly_stale") {
+                return payload;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("the scheduler never reported the dirty worktree");
+
+    let summary = verdict["freshness"]["indexing"]["summary"]
+        .as_str()
+        .expect("a possibly_stale verdict carries the indexing summary");
+    assert!(
+        summary.starts_with("state="),
+        "the verdict must carry the scheduler's staleness reading: {verdict:#}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
 #[tokio::test]
 async fn plan_context_returns_its_plan_sections_and_the_accounting_footer() {
     let fixture = trailer_fixture().await;
