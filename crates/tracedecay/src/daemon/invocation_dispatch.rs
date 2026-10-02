@@ -381,10 +381,10 @@ pub(super) async fn execute_portable_daemon_invocation(
     };
     let requirement = match &request.payload {
         DaemonInvocationPayload::GraphTool {
-            surface_operation: tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime,
+            surface_operation,
             arguments,
             ..
-        } => super::project_open_admission::hook_runtime_requirement(Some(arguments)),
+        } => super::project_open_admission::graph_tool_requirement(*surface_operation, arguments),
         _ => ProjectServerRequirement::Core,
     };
     if request.requires_project() {

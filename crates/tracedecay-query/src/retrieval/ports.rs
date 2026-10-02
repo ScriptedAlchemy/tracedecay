@@ -54,6 +54,12 @@ pub(crate) fn retrieval_checkpoint(
     }
 }
 
+/// Detail of [`RetrievalPortError::AuthorityUnavailable`] when another owner
+/// holds the code-generation store lock. The holder releases it on its own;
+/// a refused pass waits for that release instead of retrying.
+pub const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
+    "code-generation store has an active owner";
+
 /// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {
@@ -90,6 +96,16 @@ impl RetrievalPortError {
     /// that a later pass can clear on its own.
     pub fn is_deterministic_contract(&self) -> bool {
         matches!(self, Self::Contract(_))
+    }
+
+    /// The code-generation store lock is held by another owner. Retrying
+    /// before that owner releases it reproduces the refusal.
+    pub fn is_generation_store_lock_contended(&self) -> bool {
+        matches!(
+            self,
+            Self::AuthorityUnavailable(detail)
+                if detail == CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1
+        )
     }
 }
 
