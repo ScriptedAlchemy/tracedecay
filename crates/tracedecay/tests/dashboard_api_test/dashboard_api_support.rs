@@ -172,20 +172,16 @@ pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     )
 }
 
+type ProjectOpenPublicationSlot = (
+    tokio::sync::watch::Sender<tracedecay_dashboard_api::DashboardSessionResolutionV1>,
+    tracedecay_dashboard_api::DashboardSessionAuthoritiesV1,
+);
+
 /// The daemon's side of a dashboard started while its project is opening:
 /// the fixture attaches the project's publication channel and the session
 /// authorities the open will admit, and the test publishes the outcome.
 #[derive(Clone, Default)]
-pub(crate) struct ProjectOpenPublication(
-    Arc<
-        std::sync::Mutex<
-            Option<(
-                tokio::sync::watch::Sender<tracedecay_dashboard_api::DashboardSessionResolutionV1>,
-                tracedecay_dashboard_api::DashboardSessionAuthoritiesV1,
-            )>,
-        >,
-    >,
-);
+pub(crate) struct ProjectOpenPublication(Arc<std::sync::Mutex<Option<ProjectOpenPublicationSlot>>>);
 
 impl ProjectOpenPublication {
     fn attach(
