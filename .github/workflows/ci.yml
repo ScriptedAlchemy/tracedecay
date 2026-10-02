@@ -225,6 +225,9 @@ jobs:
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
 
+      - name: Test the real-repository hot-path benchmark harness
+        run: python3 scripts/test-bench-hot-paths.py
+
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
