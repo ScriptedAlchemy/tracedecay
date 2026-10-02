@@ -637,8 +637,8 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         let connection_ref_for_stream = connection_ref.clone();
         async {
         let activity_run_id = run_id.clone();
-            let mut stream_state = EventStreamState::new(run_id);
-            stream_state.source_receiver = Some(state.event_source_poll.subscribe(&state));
+        let mut stream_state = EventStreamState::new(run_id);
+        stream_state.source_receiver = Some(state.event_source_poll.subscribe(&state));
         // The first frame proves the stream is live before the activity
         // replay or the source baselines read a store.
         let connected = stream_state.heartbeat(&scope);
