@@ -102,6 +102,19 @@ test("inactive sessions cannot grow the guidance store indefinitely", () => {
   expect(pending.drain("ses_1023")).toEqual(["recent"])
 })
 
+test("empty sessions cannot evict undelivered guidance", () => {
+  const pending = new PendingGuidance()
+  pending.deliveryFor("ses_waiting")("fix this edit")
+  for (let index = 0; index < 127; index++) {
+    pending.deliveryFor(`ses_empty_${index}`)("delivered")
+    pending.drain(`ses_empty_${index}`)
+  }
+  pending.deliveryFor("ses_new")("new guidance")
+
+  expect(pending.drain("ses_waiting")).toEqual(["fix this edit"])
+  expect(pending.drain("ses_new")).toEqual(["new guidance"])
+})
+
 test("plugin disposal clears guidance and invalidates every in-flight delivery", () => {
   const pending = new PendingGuidance()
   const deliver = pending.deliveryFor("ses_active")

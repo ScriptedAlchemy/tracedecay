@@ -74,13 +74,18 @@ export class PendingGuidance {
     let queue = this.bySession.get(sessionID)
     if (!queue) {
       queue = []
-      this.bySession.set(sessionID, queue)
     }
     this.bySession.delete(sessionID)
     this.bySession.set(sessionID, queue)
     if (this.bySession.size > MAX_PENDING_GUIDANCE_SESSIONS) {
-      const oldest = this.bySession.keys().next()
-      if (!oldest.done) this.bySession.delete(oldest.value)
+      let evicted = this.bySession.keys().next().value
+      for (const [id, guidance] of this.bySession) {
+        if (id !== sessionID && guidance.length === 0) {
+          evicted = id
+          break
+        }
+      }
+      if (evicted !== undefined) this.bySession.delete(evicted)
     }
     const captured = queue
     return (guidance) => {
