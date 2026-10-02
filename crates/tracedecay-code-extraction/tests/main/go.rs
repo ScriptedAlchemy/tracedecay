@@ -685,3 +685,54 @@ type Box[T any] interface {
         ]
     );
 }
+
+#[test]
+fn test_go_embedded_fields_and_named_aliases_promote_methods() {
+    use tracedecay_code_extraction::{GoMethodSetRowV1, GoTypeTokenV1};
+    let rows = go_method_set_rows(
+        r#"package wrap
+
+import "bytes"
+
+type Base struct{}
+
+type Ptr struct{}
+
+type List[T any] struct{}
+
+type Wrapped struct {
+    Base
+    *Ptr
+    bytes.Buffer
+    List[int]
+    name string
+}
+
+type Same = Base
+
+type Many = []Base
+"#,
+    );
+    let promotes =
+        |name: &str, embedded| (name.to_owned(), GoMethodSetRowV1::Promotes { embedded });
+    let buffer = GoTypeTokenV1::Qualified {
+        package: "bytes".to_owned(),
+        name: "Buffer".to_owned(),
+    };
+    assert_eq!(
+        rows,
+        [
+            ("Base".to_owned(), GoMethodSetRowV1::NamedType),
+            ("List".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Many".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Ptr".to_owned(), GoMethodSetRowV1::NamedType),
+            ("Same".to_owned(), GoMethodSetRowV1::NamedType),
+            promotes("Same", vec![local("Base")]),
+            ("Wrapped".to_owned(), GoMethodSetRowV1::NamedType),
+            promotes("Wrapped", vec![local("Base")]),
+            promotes("Wrapped", vec![local("List")]),
+            promotes("Wrapped", vec![local("Ptr")]),
+            promotes("Wrapped", vec![buffer]),
+        ]
+    );
+}

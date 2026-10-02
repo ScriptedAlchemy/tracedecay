@@ -642,19 +642,24 @@ impl GoExtractor {
             row: GoMethodSetRowV1::NamedType,
         });
         state.node_stack.push((name.to_string(), id.clone()));
-        Self::extract_struct_fields(state, struct_type);
+        Self::extract_struct_fields(state, method_sets, struct_type, &id);
         state.node_stack.pop();
     }
 
     /// Extract fields from a `struct_type` node.
-    fn extract_struct_fields(state: &mut ExtractionState, struct_type: TsNode<'_>) {
+    fn extract_struct_fields(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        struct_type: TsNode<'_>,
+        struct_id: &str,
+    ) {
         if let Some(field_list) = find_direct_child_by_kind(struct_type, "field_declaration_list") {
             let mut cursor = field_list.walk();
             if cursor.goto_first_child() {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "field_declaration" {
-                        Self::extract_single_field(state, child);
+                        Self::extract_single_field(state, method_sets, child, struct_id);
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -664,9 +669,26 @@ impl GoExtractor {
         }
     }
 
-    /// Extract a single field from a `field_declaration` node.
-    fn extract_single_field(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "field_identifier").map_or_else(
+    /// Extract a single field from a `field_declaration` node. An embedded
+    /// field's type promotes its methods to the struct.
+    fn extract_single_field(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        node: TsNode<'_>,
+        struct_id: &str,
+    ) {
+        let field_name = find_direct_child_by_kind(node, "field_identifier");
+        if field_name.is_none()
+            && let Some(embedded) = node
+                .child_by_field_name("type")
+                .and_then(|ty| Self::promoted_type(state, ty))
+        {
+            method_sets.push(ExtractedGoMethodSetRowV1 {
+                node_id: struct_id.to_owned(),
+                row: GoMethodSetRowV1::Promotes { embedded },
+            });
+        }
+        let name = field_name.map_or_else(
             || "<anonymous>".to_string(),
             |n| state.node_text(n).to_string(),
         );
@@ -1021,6 +1043,15 @@ impl GoExtractor {
             node_id: id.clone(),
             row: GoMethodSetRowV1::NamedType,
         });
+        if let Some(embedded) = alias_node
+            .child_by_field_name("type")
+            .and_then(|ty| Self::promoted_type(state, ty))
+        {
+            method_sets.push(ExtractedGoMethodSetRowV1 {
+                node_id: id.clone(),
+                row: GoMethodSetRowV1::Promotes { embedded },
+            });
+        }
 
         let graph_node = Node {
             id: id.clone(),
@@ -1403,6 +1434,16 @@ impl GoExtractor {
             types.extend(std::iter::repeat_n(tokens, count));
         }
         types
+    }
+
+    /// The tokens of the type name `ty` spells with any type arguments
+    /// dropped, or `None` when `ty` is a composite type.
+    fn promoted_type(state: &ExtractionState, mut ty: TsNode<'_>) -> Option<GoTypeV1> {
+        if ty.kind() == "generic_type" {
+            ty = ty.child_by_field_name("type")?;
+        }
+        matches!(ty.kind(), "type_identifier" | "qualified_type")
+            .then(|| Self::type_tokens(state, ty))
     }
 
     /// The tokens of a type node. Identifiers that name types are `Local` or

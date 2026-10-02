@@ -254,7 +254,7 @@ fn go_embedded_fields_and_aliases_promote_methods() {
         &[
             (
                 "calc/wrapped.go",
-                "package calc\n\ntype Wrapped struct {\n\tSimple\n}\n\ntype PtrWrapped struct {\n\t*Simple\n}\n\ntype Deep struct {\n\tWrapped\n}\n\ntype Same = Simple\n",
+                "package calc\n\ntype Wrapped struct {\n\tSimple\n}\n\ntype PtrWrapped struct {\n\t*Simple\n}\n\ntype Deep struct {\n\tWrapped\n}\n\ntype Same = Simple\n\ntype Failer interface {\n\tError() string\n}\n\ntype Failure struct {\n\terror\n}\n",
             ),
             (
                 "shapes/framed.go",
@@ -275,7 +275,12 @@ fn go_embedded_fields_and_aliases_promote_methods() {
             "{implementor} carries Simple's Add: {edges:?}"
         );
     }
+    assert!(
+        edges.contains(&edge("calc/wrapped.go::Failure", "calc/wrapped.go::Failer")),
+        "an embedded error promotes Error() string: {edges:?}"
+    );
     assert!(!undecided(&cold, "calc/adder.go::Adder"));
+    assert!(!undecided(&cold, "calc/wrapped.go::Failer"));
     assert_eq!(implements(&child), edges);
 }
 

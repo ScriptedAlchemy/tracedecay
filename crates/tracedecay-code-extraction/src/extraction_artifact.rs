@@ -365,6 +365,10 @@ pub enum GoMethodSetRowV1 {
     /// `type T = U`. The row exists so chunking binds the declaration's
     /// occurrence and span.
     NamedType,
+    /// A named type whose methods the named type also carries: an embedded
+    /// struct field (`T`, `*T`, `pkg.T`, `T[int]`, recorded without pointer
+    /// or type arguments) or the target of `type A = T`.
+    Promotes { embedded: GoTypeV1 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -372,7 +376,7 @@ pub enum GoMethodSetRowV1 {
 pub struct ExtractedGoMethodSetRowV1 {
     /// The declaring node: the `StructMethod`, the `InterfaceType` (for
     /// `InterfaceMethod`, `Embeds`, `GenericInterface`), or the `Struct` /
-    /// `TypeAlias` node (for `NamedType`).
+    /// `TypeAlias` node (for `NamedType` and `Promotes`).
     pub node_id: String,
     pub row: GoMethodSetRowV1,
 }

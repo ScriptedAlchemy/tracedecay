@@ -115,20 +115,33 @@ struct InterfaceV1<'a> {
     span: SourceSpan,
     qualified_name: &'a str,
     methods: Vec<MethodKeyV1>,
-    /// Each embedding's project interface name, when it names one, and its
-    /// source text.
-    embeds: Vec<(Option<(String, String)>, String)>,
+    embeds: Vec<EmbedV1>,
     generic: bool,
 }
 
+/// An embedding's project type name, when it names one, and its source text.
+type EmbedV1 = (Option<(String, String)>, String);
+
 type ExpandedV1 = Result<HashSet<MethodKeyV1>, String>;
+
+type OwnerV1<'a> = (&'a str, &'a str);
+
+/// A named type's methods, its own and those its embeddings and alias
+/// target promote to it.
+struct EffectiveV1 {
+    methods: HashSet<MethodKeyV1>,
+    /// The first promoting type whose methods the project cannot see: the
+    /// type may carry more methods than `methods`.
+    open: Option<String>,
+}
 
 pub(super) fn go_satisfaction<T>(files: &[T], modules: &ModuleImportIndexV1<'_>) -> GoSatisfactionV1
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
-    let mut method_sets = HashMap::<(&str, &str), HashSet<MethodKeyV1>>::new();
+    let mut method_sets = HashMap::<OwnerV1<'_>, HashSet<MethodKeyV1>>::new();
+    let mut promotes = HashMap::<OwnerV1<'_>, Vec<EmbedV1>>::new();
     let mut interfaces = Vec::<InterfaceV1<'_>>::new();
     let mut interface_rows = HashMap::<&SymbolOccurrenceId, usize>::new();
     let mut interface_names = HashMap::<(&str, &str), Vec<usize>>::new();
@@ -177,6 +190,26 @@ where
                         .insert(go_file.method_key(method));
                     continue;
                 }
+                GoMethodSetRowV1::Promotes { embedded } => {
+                    let owner = (dir, symbol.simple_name.as_str());
+                    match embedded.as_slice() {
+                        // Of the predeclared types only `error` has a method.
+                        [GoTypeTokenV1::Text(name)] if name == "error" => {
+                            method_sets.entry(owner).or_default().insert(MethodKeyV1 {
+                                name: "Error".to_owned(),
+                                package: None,
+                                params: Vec::new(),
+                                results: vec!["string".to_owned()],
+                            });
+                        }
+                        [GoTypeTokenV1::Text(_)] => {}
+                        _ => promotes
+                            .entry(owner)
+                            .or_default()
+                            .push((go_file.embedded_name(embedded), render(embedded))),
+                    }
+                    continue;
+                }
                 _ => {
                     let index = *interface_rows.entry(&bound.occurrence).or_insert_with(|| {
                         interface_names
@@ -204,54 +237,80 @@ where
                     .embeds
                     .push((go_file.embedded_name(embedded), render(embedded))),
                 GoMethodSetRowV1::GenericInterface => interface.generic = true,
-                GoMethodSetRowV1::NamedType | GoMethodSetRowV1::Receiver { .. } => {}
+                GoMethodSetRowV1::NamedType
+                | GoMethodSetRowV1::Receiver { .. }
+                | GoMethodSetRowV1::Promotes { .. } => {}
             }
         }
     }
 
-    let mut by_method = HashMap::<&MethodKeyV1, Vec<(&str, &str)>>::new();
-    for (owner, methods) in &method_sets {
-        for method in methods {
+    let mut expanded = vec![None; interfaces.len()];
+    let expansions = (0..interfaces.len())
+        .map(|index| {
+            expand(
+                index,
+                &interfaces,
+                &interface_names,
+                &mut expanded,
+                &mut HashSet::new(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut owners = method_sets
+        .keys()
+        .chain(promotes.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    owners.sort_unstable();
+    owners.dedup();
+    let mut promotion = PromotionV1 {
+        named_types: &named_types,
+        interface_names: &interface_names,
+        expansions: &expansions,
+        promotes: &promotes,
+        own: method_sets,
+        effective: HashMap::new(),
+        visiting: HashSet::new(),
+    };
+    for owner in &owners {
+        promotion.resolve(*owner);
+    }
+    let effective = promotion.effective;
+    let mut by_method = HashMap::<&MethodKeyV1, Vec<OwnerV1<'_>>>::new();
+    for owner in &owners {
+        for method in &effective[owner].methods {
             by_method.entry(method).or_default().push(*owner);
         }
     }
-    let mut expanded = vec![None; interfaces.len()];
+    let holders = |method| by_method.get(method).map_or(&[][..], Vec::as_slice);
+    let open_owners = owners
+        .iter()
+        .copied()
+        .filter(|owner| effective[owner].open.is_some())
+        .collect::<Vec<_>>();
     let mut edges = Vec::new();
     let mut gaps = Vec::new();
-    for index in 0..interfaces.len() {
-        let interface = &interfaces[index];
-        let methods = match expand(
-            index,
-            &interfaces,
-            &interface_names,
-            &mut expanded,
-            &mut HashSet::new(),
-        ) {
+    for (interface, expansion) in interfaces.iter().zip(&expansions) {
+        let gap = |reference_name: &String| CodeIndexUnresolvedReferenceV1 {
+            from_occurrence: interface.occurrence.clone(),
+            reference_name: reference_name.clone(),
+            kind: RelationEdgeKindV1::Implements,
+            evidence_span: interface.span,
+            unmodeled_import: None,
+            argument_count: None,
+        };
+        let methods = match expansion {
             Ok(methods) => methods,
             Err(reference_name) => {
-                gaps.push(CodeIndexUnresolvedReferenceV1 {
-                    from_occurrence: interface.occurrence.clone(),
-                    reference_name,
-                    kind: RelationEdgeKindV1::Implements,
-                    evidence_span: interface.span,
-                    unmodeled_import: None,
-                    argument_count: None,
-                });
+                gaps.push(gap(reference_name));
                 continue;
             }
         };
-        let Some(candidates) = methods
-            .iter()
-            .map(|method| by_method.get(method).map_or(&[][..], Vec::as_slice))
-            .min_by_key(|candidates| candidates.len())
-        else {
+        let Some(candidates) = methods.iter().map(holders).min_by_key(|c| c.len()) else {
             continue;
         };
         for owner in candidates {
-            if !methods
-                .iter()
-                .all(|method| method_sets[owner].contains(method))
-            {
+            if !methods.is_subset(&effective[owner].methods) {
                 continue;
             }
             for (occurrence, span) in named_types.get(owner).into_iter().flatten() {
@@ -264,12 +323,100 @@ where
                 });
             }
         }
+        // An open owner may supply a missing method through a type the
+        // project cannot see, unless that method needs this project's types
+        // or package.
+        let suppliable = |method: &MethodKeyV1| {
+            method.package.is_none()
+                && !method
+                    .params
+                    .iter()
+                    .chain(&method.results)
+                    .any(|ty| ty.contains("\u{1f}d:"))
+        };
+        let suspects = methods
+            .iter()
+            .filter(|method| !suppliable(method))
+            .map(holders)
+            .min_by_key(|holders| holders.len())
+            .unwrap_or(&open_owners[..]);
+        let undecided = suspects
+            .iter()
+            .filter(|owner| {
+                let owner = &effective[*owner];
+                owner.open.is_some()
+                    && !methods.is_subset(&owner.methods)
+                    && methods
+                        .iter()
+                        .all(|method| owner.methods.contains(method) || suppliable(method))
+            })
+            .min();
+        if let Some(reference_name) = undecided.and_then(|owner| effective[owner].open.as_ref()) {
+            gaps.push(gap(reference_name));
+        }
     }
     edges.sort_by(edge_order);
     edges.dedup();
     gaps.sort();
     gaps.dedup();
     GoSatisfactionV1 { edges, gaps }
+}
+
+struct PromotionV1<'a> {
+    named_types: &'a HashMap<OwnerV1<'a>, Vec<(&'a SymbolOccurrenceId, SourceSpan)>>,
+    interface_names: &'a HashMap<OwnerV1<'a>, Vec<usize>>,
+    expansions: &'a [ExpandedV1],
+    promotes: &'a HashMap<OwnerV1<'a>, Vec<EmbedV1>>,
+    own: HashMap<OwnerV1<'a>, HashSet<MethodKeyV1>>,
+    effective: HashMap<OwnerV1<'a>, EffectiveV1>,
+    visiting: HashSet<OwnerV1<'a>>,
+}
+
+impl<'a> PromotionV1<'a> {
+    /// Records `owner`'s effective method set; a promotion cycle contributes
+    /// nothing beyond the methods already reached.
+    fn resolve(&mut self, owner: OwnerV1<'a>) {
+        if self.effective.contains_key(&owner) || !self.visiting.insert(owner) {
+            return;
+        }
+        let (named_types, interface_names, promotes) =
+            (self.named_types, self.interface_names, self.promotes);
+        let mut effective = EffectiveV1 {
+            methods: self.own.remove(&owner).unwrap_or_default(),
+            open: None,
+        };
+        for (name, text) in promotes.get(&owner).into_iter().flatten() {
+            let key = name
+                .as_ref()
+                .map(|(dir, name)| (dir.as_str(), name.as_str()));
+            let interface = key.and_then(|key| interface_names.get(&key));
+            let named = key
+                .and_then(|key| named_types.get_key_value(&key))
+                .map(|(target, occurrences)| (*target, occurrences.as_slice()));
+            let open = match (interface.map(Vec::as_slice), named) {
+                (Some([index]), None) => match &self.expansions[*index] {
+                    Ok(methods) => {
+                        effective.methods.extend(methods.iter().cloned());
+                        None
+                    }
+                    Err(_) => Some(text),
+                },
+                (None, Some((target, [_]))) => {
+                    self.resolve(target);
+                    self.effective.get(&target).and_then(|inner| {
+                        effective.methods.extend(inner.methods.iter().cloned());
+                        inner.open.as_ref()
+                    })
+                }
+                _ => Some(text),
+            };
+            if effective.open.is_none() {
+                effective.open = open.cloned();
+            }
+        }
+        self.visiting.remove(&owner);
+        self.effective.insert(owner, effective);
+    }
 }
 
 /// The method set of interface `index` with its embeddings expanded, or the
