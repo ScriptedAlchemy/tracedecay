@@ -1621,13 +1621,7 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
 #[test]
 fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() {
     let root = TestDir::new("lease-barrier-free");
-    // The drain retakes its lease within one lease term after each barrier;
-    // a term shorter than one callback admission would time the drain out.
-    let callback_config = HookSpoolConfigV1 {
-        writer_lease_micros: i64::try_from(crate::HOOK_SYNCHRONOUS_BUDGET.as_micros()).unwrap(),
-        ..config()
-    };
-    let (mut writer, _) = HookSpoolV1::open(&root.0, callback_config, UtcMicros(10)).unwrap();
+    let (mut writer, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
     let records = (1..=3)
         .map(|event| {
             writer
@@ -1667,7 +1661,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
                 admissions.push(
                     HookSpoolV1::open_within(
                         &root.0,
-                        callback_config,
+                        config(),
                         UtcMicros(11),
                         crate::HOOK_SYNCHRONOUS_BUDGET,
                     )
@@ -1678,11 +1672,10 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
             admissions
         });
         let outcomes = drain.acknowledge_many(&acknowledgements, UtcMicros(11));
-        // An open handle keeps its lease; only settlement is under test.
-        drop(drain);
         settled.store(true, std::sync::atomic::Ordering::SeqCst);
         // A callback that entered its lease wait just before settlement is
         // admitted once the drain lets go, within the budget it already has.
+        drop(drain);
         assert_eq!(outcomes.unwrap(), vec![Ok(true); 3]);
         callbacks.join().unwrap()
     });

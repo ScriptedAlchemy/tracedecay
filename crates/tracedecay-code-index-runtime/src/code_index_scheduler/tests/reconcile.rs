@@ -6320,23 +6320,7 @@ fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    // A queued background pass can seal this snapshot first; the noop then
-    // names the sealed generation it reproduces instead of a new publish.
-    let baseline = match scheduler.reconcile_now().expect("initial publish") {
-        CodeIndexReconcileOutcomeV1::Published(evidence) => evidence.generation_id,
-        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
-            let latest = scheduler
-                .latest_complete()
-                .expect("the noop names a sealed generation");
-            let sealed = latest.generation();
-            assert_eq!(
-                sealed.snapshot().content_identity,
-                evidence.snapshot_content_identity,
-                "the noop must reproduce the sealed snapshot"
-            );
-            sealed.manifest().generation_id.clone()
-        }
-    };
+    let baseline = published(scheduler.reconcile_now().expect("initial publish"));
     let sealed_digest = scheduler
         .latest_complete()
         .expect("served generation")
@@ -6376,21 +6360,9 @@ fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
     );
     let outcome = scheduler
         .ensure_fresh_for_query()
-        .expect("freshness ladder runs");
-    let rewritten = match outcome {
-        Some(CodeIndexReconcileOutcomeV1::Published(evidence)) => evidence.generation_id,
-        // A racing background pass can already have sealed the rewrite: the
-        // ladder then reports a noop, or nothing to do at all. The disproof
-        // is still that the sealed generation moved.
-        _ => scheduler
-            .latest_complete()
-            .expect("a sealed generation exists after the reconcile")
-            .generation()
-            .manifest()
-            .generation_id
-            .clone(),
-    };
-    assert_ne!(rewritten, baseline);
+        .expect("freshness ladder runs")
+        .expect("changed bytes under equal stat metadata must reconcile");
+    assert_ne!(published(outcome).generation_id, baseline.generation_id);
     let served = served_lexical_texts(&scheduler, "fn alpha");
     assert!(!served.is_empty(), "the rewritten file is still served");
     assert!(

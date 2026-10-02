@@ -302,3 +302,28 @@ fn typescript_calls_on_computed_receivers_make_callers_partial() {
         ]
     );
 }
+
+#[test]
+fn a_crlf_cargo_manifest_names_its_crate_for_cross_crate_calls() {
+    let graph = sealed_graph_of(&[
+        (
+            "lib/Cargo.toml",
+            "[package]\r\nname = \"crlf-lib\"\r\nversion = \"0.1.0\"\r\n",
+        ),
+        ("lib/src/lib.rs", "pub fn helper() -> u32 {\n    7\n}\n"),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "app/src/main.rs",
+            "fn main() {\n    let _ = crlf_lib::helper();\n}\n",
+        ),
+    ]);
+
+    assert_eq!(
+        graph.callers("lib/src/lib.rs::helper"),
+        ["app/src/main.rs::main"]
+    );
+    assert!(!graph.callers_partial("lib/src/lib.rs::helper"));
+}

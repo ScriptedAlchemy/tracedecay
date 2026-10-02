@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 mod collection;
 mod fence;
@@ -144,19 +145,15 @@ fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
 
 /// A project root with a live owner is live even once it is gone from disk:
 /// the owner can still write into the store until it is retired and joined.
-/// Only the exact registered root counts.
-fn classify_owned(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
-    // Owner roots arrive spelled however their caller built them while census
-    // roots come from the canonical registry; raw equality misses `\\?\`
-    // verbatim and macOS `/var` aliases of one directory.
+/// Only a registered root naming the same directory as an owner root counts.
+fn classify_owned(
+    entry: &StoreCensusEntry,
+    canonical_owner_roots: &BTreeSet<PathBuf>,
+) -> StoreDisposition {
     if std::iter::once(&entry.canonical_root)
         .chain(entry.display_root.as_ref())
         .chain(&entry.alias_roots)
-        .any(|root| {
-            owner_roots
-                .iter()
-                .any(|owner| tracedecay_runtime_core::path_safety::same_canonical_path(owner, root))
-        })
+        .any(|root| canonical_owner_roots.contains(&canonical_root_identity(root)))
     {
         return StoreDisposition::Live;
     }
@@ -222,13 +219,20 @@ pub fn classify_stores(
     now: i64,
     owner_roots: &BTreeSet<PathBuf>,
 ) -> Vec<OrphanStoreFinding> {
+    // Owner roots arrive spelled however their caller built them while census
+    // roots come from the canonical registry; raw equality misses `\\?\`
+    // verbatim, symlinked, and macOS `/var` aliases of one directory.
+    let canonical_owner_roots = owner_roots
+        .iter()
+        .map(|root| canonical_root_identity(root))
+        .collect::<BTreeSet<_>>();
     census
         .iter()
         .map(|entry| OrphanStoreFinding {
             project_id: entry.project_id.clone(),
             store_id: entry.store_id.clone(),
             data_root: entry.data_root.clone(),
-            disposition: classify_owned(entry, owner_roots),
+            disposition: classify_owned(entry, &canonical_owner_roots),
             age_secs: now.saturating_sub(entry.last_write_secs).max(0),
             size_bytes: entry.size_bytes,
             expected_store_relpath: entry.expected_store_relpath.clone(),
