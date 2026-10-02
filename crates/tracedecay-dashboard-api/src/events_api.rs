@@ -1573,15 +1573,14 @@ mod tests {
         // First poll primes the baselines and emits nothing. The shared
         // poller publishes on its own tick, so poll until its first snapshot
         // lands; every read before it must also emit nothing.
-        let mut primed = state.poll_sources(&scope).await;
         for _ in 0..100 {
+            let primed = state.poll_sources(&scope).await;
+            assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
             if state.last_store_total_bytes.is_some() && state.last_registry_digest.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            primed = state.poll_sources(&scope).await;
         }
-        assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
         let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
             .await
             .expect("graph page size")
@@ -1604,5 +1603,34 @@ mod tests {
             state.last_registry_digest.as_deref(),
             Some(format!("{:016x}", hasher.finish())).as_deref()
         );
+    }
+
+    #[tokio::test]
+    async fn shared_source_poller_releases_its_state_after_the_last_stream() {
+        let (_project, dash) = dashboard_state_fixture("project.dashboard-events-retire").await;
+        let baseline = Arc::strong_count(&dash.delivery_settlements);
+        let receiver = dash.event_source_poll.subscribe(&dash);
+        assert!(
+            Arc::strong_count(&dash.delivery_settlements) > baseline,
+            "the running poller holds a state clone"
+        );
+
+        drop(receiver);
+        let deadline = tokio::time::Instant::now() + POLL_INTERVAL * 3;
+        while Arc::strong_count(&dash.delivery_settlements) > baseline {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the poller must release its state once no stream reads it"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(dash.event_source_poll.sender.lock().unwrap().is_none());
+
+        // A later stream re-arms a fresh poller that publishes again.
+        let mut receiver = dash.event_source_poll.subscribe(&dash);
+        tokio::time::timeout(POLL_INTERVAL * 3, receiver.changed())
+            .await
+            .expect("re-armed poller publishes")
+            .expect("re-armed poller sender is alive");
     }
 }
