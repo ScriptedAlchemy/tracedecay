@@ -726,13 +726,12 @@ impl ResidentMemoryPressureV1 {
         self.state()
     }
 
-    /// Publish the canonical sampler's reading after a reclaimer released memory,
-    /// without the checkpoint throttle and without reentering reclaimers.
-    fn publish_post_reclaim_sample(&self) {
-        if let Some(sample) = (self.sampler)() {
-            self.publish_observation(sample.admission_bytes());
-            self.publish_over_budget_gauge();
-        }
+    /// Refresh pressure after reclaim without running reclaimers recursively.
+    fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
+        let sample = (self.sampler)()?;
+        self.publish_observation(sample.admission_bytes());
+        self.publish_over_budget_gauge();
+        Some(self.state())
     }
 
     fn checkpoint_micros(&self) -> u64 {
@@ -1065,7 +1064,7 @@ pub fn register_process_allocator_pressure_reclaimer_v1(
         Arc::new(move |request| {
             let trim = release_process_allocator_memory_v1();
             if let Some(pressure) = pressure_weak.upgrade() {
-                pressure.publish_post_reclaim_sample();
+                pressure.resample_after_reclaim();
             }
             tracing::info!(
                 event = "process_allocator_trimmed",

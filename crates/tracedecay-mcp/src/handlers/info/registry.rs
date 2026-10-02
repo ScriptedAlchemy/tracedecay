@@ -178,11 +178,10 @@ fn project_context_selector(
     }
     let Some(path) = request.path else {
         let Some(project_root) = project_root else {
-            return Err(TraceDecayError::Config {
-                message: "missing required parameter: path or project_selector (no active \
-                          project is connected)"
-                    .to_string(),
-            });
+            return Err(TraceDecayError::missing_required_parameter(
+                "missing required parameter: path or project_selector (no active project is \
+                 connected)",
+            ));
         };
         return Ok(ProjectRegistrySelector::Path {
             path: project_root.to_path_buf(),

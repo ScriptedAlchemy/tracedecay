@@ -1,20 +1,23 @@
 //! Durable record of daemon-managed test runs in the project sessions store.
 //!
 //! A run is written twice at the moments they happen: once when the managed
-//! run is admitted (its start time, requesting session, and source identity)
-//! and once when it terminates (its receipt, exit status, and outcome counts).
+//! run is admitted (its start time, requesting session, source identity, and
+//! the saved content digest of every changed document it covers) and once
+//! when it terminates (its receipt, exit status, and outcome counts).
 //! The row lives beside the sessions it is attributed to and shares that
 //! store's retention. A run whose request named no session keeps a NULL
 //! `session_id`; attribution is never inferred.
 
+use std::collections::BTreeMap;
+
 use tracedecay_contracts::feedback::TestResultProjectionV1;
 use tracedecay_contracts::{OperationReceipt, OperationTermination};
-use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
-use tracedecay_runtime_core::db::engine::{Row, params};
+use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, UtcMicros};
+use tracedecay_runtime_core::db::engine::{Executor, Row, params};
 
-use super::RegisteredGlobalDb;
+use super::{RegisteredGlobalDb, global_db_operation_error};
 
-pub(crate) const MANAGED_TEST_RUN_SCHEMA: &str = "
+const MANAGED_TEST_RUN_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS managed_test_runs (
         operation_id TEXT PRIMARY KEY,
         root_uri TEXT NOT NULL,
@@ -31,6 +34,8 @@ pub(crate) const MANAGED_TEST_RUN_SCHEMA: &str = "
         ignored INTEGER,
         results_json TEXT,
         receipt_json TEXT,
+        document_content_digests_json TEXT NOT NULL
+            CHECK(json_valid(document_content_digests_json)),
         CHECK (
             (finished_at_micros IS NULL AND termination IS NULL AND exit_code IS NULL
                 AND passed IS NULL AND failed IS NULL AND ignored IS NULL
@@ -46,6 +51,45 @@ pub(crate) const MANAGED_TEST_RUN_SCHEMA: &str = "
         ON managed_test_runs(root_uri, started_at_micros);
 ";
 
+/// Stores created before admission recorded document digests gain the column
+/// with every earlier run bound to no document, which is what those runs
+/// captured durably.
+const MANAGED_TEST_RUN_DOCUMENT_DIGESTS_COLUMN: &str = "
+    ALTER TABLE managed_test_runs ADD COLUMN document_content_digests_json TEXT NOT NULL
+        DEFAULT '{}' CHECK(json_valid(document_content_digests_json))
+";
+
+pub(crate) async fn ensure_managed_test_run_schema(
+    transaction: &impl Executor,
+) -> tracedecay_domain::errors::Result<()> {
+    transaction
+        .execute_batch(MANAGED_TEST_RUN_SCHEMA)
+        .await
+        .map_err(|error| global_db_operation_error("initialize managed test-run schema", error))?;
+    let mut columns = transaction
+        .query(
+            "SELECT 1 FROM pragma_table_info('managed_test_runs')
+             WHERE name = 'document_content_digests_json'",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error("inspect managed test-run schema", error))?;
+    let has_digests = columns
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("inspect managed test-run schema", error))?
+        .is_some();
+    if !has_digests {
+        transaction
+            .execute_batch(MANAGED_TEST_RUN_DOCUMENT_DIGESTS_COLUMN)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("add managed test-run document digests", error)
+            })?;
+    }
+    Ok(())
+}
+
 /// What is known when a managed run is admitted, before any test executes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManagedTestRunStartV1 {
@@ -55,6 +99,10 @@ pub struct ManagedTestRunStartV1 {
     pub session_id: Option<String>,
     pub head_commit_id: Option<CommitId>,
     pub code_generation_id: Option<CodeGenerationId>,
+    /// Saved content digest of each changed document the run covers, keyed by
+    /// its canonical `file:` URI. A reader reuses the run's result for a
+    /// document only while that document still has this digest.
+    pub document_content_digests: BTreeMap<String, ContentDigest>,
     pub started_at: UtcMicros,
     pub requested_tests: u64,
 }
@@ -100,6 +148,10 @@ impl RegisteredGlobalDb {
     ) -> Result<(), String> {
         let requested_tests = i64::try_from(start.requested_tests)
             .map_err(|_| "managed test-run requested count exceeds i64".to_owned())?;
+        let document_content_digests_json = serde_json::to_string(&start.document_content_digests)
+            .map_err(|error| {
+                format!("failed to encode managed test-run document digests: {error}")
+            })?;
         let writer = self
             .runtime_database()
             .writer_connection("record managed test-run start")
@@ -109,8 +161,8 @@ impl RegisteredGlobalDb {
             .execute(
                 "INSERT INTO managed_test_runs
                      (operation_id, root_uri, session_id, head_commit_id, code_generation_id,
-                      started_at_micros, requested_tests)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                      started_at_micros, requested_tests, document_content_digests_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     start.operation_id.as_str(),
                     normalized_root(&start.root_uri),
@@ -122,6 +174,7 @@ impl RegisteredGlobalDb {
                         .map(CodeGenerationId::as_str),
                     start.started_at.0,
                     requested_tests,
+                    document_content_digests_json,
                 ],
             )
             .await
@@ -199,7 +252,7 @@ impl RegisteredGlobalDb {
             .query(
                 "SELECT operation_id, root_uri, session_id, head_commit_id, code_generation_id,
                         started_at_micros, requested_tests, exit_code, ignored,
-                        results_json, receipt_json
+                        results_json, receipt_json, document_content_digests_json
                  FROM managed_test_runs
                  WHERE root_uri = ?1
                  ORDER BY started_at_micros DESC, operation_id DESC
@@ -243,6 +296,11 @@ fn managed_test_run_record(row: &Row) -> Result<ManagedTestRunRecordV1, String> 
             .map(CodeGenerationId::new)
             .transpose()
             .map_err(|error| decode("code_generation_id", &error))?,
+        document_content_digests: serde_json::from_str(
+            &row.get::<String>(11)
+                .map_err(|error| decode("document_content_digests", &error))?,
+        )
+        .map_err(|error| decode("document_content_digests", &error))?,
         started_at: UtcMicros(
             row.get::<i64>(5)
                 .map_err(|error| decode("started_at_micros", &error))?,
@@ -299,9 +357,73 @@ mod tests {
             session_id: Some("sess-runner".to_owned()),
             head_commit_id: None,
             code_generation_id: None,
+            document_content_digests: BTreeMap::from([(
+                "file:///work/project/src/lib.rs".to_owned(),
+                ContentDigest::new(format!("sha256:{}", "a".repeat(64))).expect("digest"),
+            )]),
             started_at: UtcMicros(started_at),
             requested_tests: 2,
         }
+    }
+
+    /// The `managed_test_runs` table as released stores created it, before
+    /// admission recorded document digests.
+    const RELEASED_TABLE_WITHOUT_DIGESTS: &str = "
+        DROP TABLE managed_test_runs;
+        CREATE TABLE managed_test_runs (
+            operation_id TEXT PRIMARY KEY,
+            root_uri TEXT NOT NULL,
+            session_id TEXT,
+            head_commit_id TEXT,
+            code_generation_id TEXT,
+            started_at_micros INTEGER NOT NULL CHECK(started_at_micros > 0),
+            requested_tests INTEGER NOT NULL CHECK(requested_tests >= 0),
+            finished_at_micros INTEGER,
+            termination TEXT,
+            exit_code INTEGER,
+            passed INTEGER,
+            failed INTEGER,
+            ignored INTEGER,
+            results_json TEXT,
+            receipt_json TEXT
+        ) STRICT;
+        INSERT INTO managed_test_runs
+            (operation_id, root_uri, session_id, started_at_micros, requested_tests)
+        VALUES ('run-released', 'file:///work/project', NULL, 1000, 1);
+    ";
+
+    #[tokio::test]
+    async fn a_released_store_gains_document_digests_and_keeps_its_runs() {
+        let harness = RegisteredGlobalDbHarness::open("managed-test-runs-digest-column").await;
+        harness
+            .registered
+            .runtime_database()
+            .writer_connection("stage released managed test-run table")
+            .await
+            .expect("writer")
+            .execute_batch(RELEASED_TABLE_WITHOUT_DIGESTS)
+            .await
+            .expect("stage released table");
+        let harness = harness.restart().await;
+        let db = &harness.registered;
+
+        let released = db
+            .latest_managed_test_run("file:///work/project")
+            .await
+            .expect("read released run")
+            .expect("released run survives the upgrade");
+        assert_eq!(released.start.operation_id, "run-released");
+        assert_eq!(released.start.document_content_digests, BTreeMap::new());
+
+        db.record_managed_test_run_start(&start("run-new", 2_000))
+            .await
+            .expect("record start on the upgraded store");
+        let recorded = db
+            .latest_managed_test_run("file:///work/project")
+            .await
+            .expect("read new run")
+            .expect("new run");
+        assert_eq!(recorded.start, start("run-new", 2_000));
     }
 
     #[tokio::test]
