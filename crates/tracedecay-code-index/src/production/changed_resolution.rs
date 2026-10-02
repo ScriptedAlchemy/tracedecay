@@ -23,11 +23,12 @@ use tracedecay_graph_db::GraphDbError;
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
 };
-use crate::graph_projection::{SealedCodeGraphRowsError, unresolved_call_limitations};
+use crate::graph_projection::unresolved_call_limitations;
 
+use super::helpers::unresolved_import_calls;
 use super::helpers::{
     collect_edge_evidence, edge_evidence, edge_order, resolve_selected_cross_file_references,
-    selected_references, unresolved_import_calls,
+    selected_references,
 };
 use super::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
@@ -37,6 +38,12 @@ type SiteV1<'a> = (&'a SymbolOccurrenceId, SourceSpan);
 
 /// Each edited file's child index, with the file its path held in the parent.
 pub(super) type EditedFilesV1 = Vec<(usize, Arc<FileGenerationArtifactsV1>)>;
+
+pub(super) struct GraphResolutionOutputsV1 {
+    pub(super) edges: Vec<CanonicalRelationEdgeV1>,
+    pub(super) abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+}
 
 /// The call sites an in-place edit can move, and the references that decide
 /// them.
@@ -102,6 +109,7 @@ impl<'f> ChangedSitesV1<'f> {
     }
 
     /// References re-decided at the moved sites.
+    #[cfg(feature = "hotpath")]
     pub(super) fn resolved_references(&self) -> usize {
         self.selection.iter().map(|(_, picks)| picks.len()).sum()
     }
@@ -138,7 +146,7 @@ impl<'f> ChangedSitesV1<'f> {
         cross_file_edges: &[CanonicalRelationEdgeV1],
         parent_unresolved: &[CodeIndexUnresolvedReferenceV1],
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, SealedCodeGraphRowsError> {
+    ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1> {
         let references = selected_references(files, Some(&self.selection))
             .map(|(index, reference)| (files[index].authority.logical_path.as_str(), reference))
             .collect::<Vec<_>>();
@@ -159,7 +167,8 @@ impl<'f> ChangedSitesV1<'f> {
             file_edges.chain(cross_file_edges.iter().filter(at_sites)),
             unresolved_import_calls(files, Some(&self.selection)),
             check,
-        )?;
+        )
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         let mut unresolved = parent_unresolved
             .iter()
             .filter(|reference| !self.moved.contains(&site(reference)))
@@ -199,10 +208,7 @@ pub(super) fn edge_evidence_over_parent(
     files: &[Arc<FileGenerationArtifactsV1>],
     parent: &CodeIndexPublishedGenerationV1,
     shared: &BTreeSet<FileOccurrenceId>,
-) -> Result<
-    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
-    CodeIndexProductionErrorV1,
-> {
+) -> Result<GraphResolutionOutputsV1, CodeIndexProductionErrorV1> {
     // Shared files are the same files on both sides, so equal file counts
     // and a parent file at every edited path mean the same set of paths.
     let edited = pair_edited_files(
@@ -215,7 +221,14 @@ pub(super) fn edge_evidence_over_parent(
         .as_ref()
         .and_then(|(edited, _)| ChangedSitesV1::new(files, edited))
     else {
-        return collect_edge_evidence(files);
+        let (edges, abstentions) = collect_edge_evidence(files)?;
+        let unresolved =
+            super::resolution_outputs::unresolved_calls_for_edges(files, &edges, &|| Ok(()))?;
+        return Ok(GraphResolutionOutputsV1 {
+            edges,
+            abstentions,
+            unresolved_calls: unresolved,
+        });
     };
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("code_index.build.references_resolved").inc(sites.resolved_references() as u64);
@@ -227,7 +240,14 @@ pub(super) fn edge_evidence_over_parent(
             .iter()
             .filter(|edge| edge.authority == EdgeAuthorityV1::NameResolved),
     )?;
-    Ok(edge_evidence(files, cross_file))
+    let unresolved =
+        sites.unresolved_calls(files, &cross_file, &parent.unresolved_calls, &|| Ok(()))?;
+    let (edges, abstentions) = edge_evidence(files, cross_file);
+    Ok(GraphResolutionOutputsV1 {
+        edges,
+        abstentions,
+        unresolved_calls: unresolved,
+    })
 }
 
 fn site(reference: &CodeIndexUnresolvedReferenceV1) -> SiteV1<'_> {

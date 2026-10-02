@@ -355,7 +355,7 @@ pub fn deploy_managed_skills_at(
 }
 
 #[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
-fn deploy_managed_skills(
+pub(crate) fn deploy_managed_skills(
     host_io: &HostIo,
     host_home: Option<&Path>,
     profile_root: &Path,

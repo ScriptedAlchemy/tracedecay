@@ -101,16 +101,21 @@ mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
+pub(crate) use graph_build_bound::{layered_page_graph_build_bound, sealed_page_graph_build_bound};
 mod changed_resolution;
-mod graph_base_inputs;
-use changed_resolution::edge_evidence_over_parent;
-pub(crate) use graph_base_inputs::CodeGraphBaseInputsWriterV1;
-mod graph_inputs;
-pub(crate) use graph_inputs::{
-    CodeGraphLayeredResolutionV1, CodeGraphRemovedFileV1, CodeGraphResolutionV1,
+mod graph_page_store;
+mod graph_pages;
+use changed_resolution::{GraphResolutionOutputsV1, edge_evidence_over_parent};
+#[cfg(test)]
+pub(crate) use graph_page_store::CodeGraphPageBuildFootprintV1;
+pub(crate) use graph_page_store::{
+    CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1,
+    FileCodeGraphPageStoreV1, SealedCodeGraphPageStoreV1,
 };
+pub(crate) use graph_pages::PersistedCodeGraphPageV1;
 mod partitioned_codec;
 pub(crate) mod resident_bytes;
+mod resolution_outputs;
 pub use partitioned_codec::{
     SealedGenerationFileWindowsV1, SealedGenerationSegmentIdentityV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
@@ -801,6 +806,8 @@ pub struct CodeIndexPublishedGenerationV1 {
     lineage: Vec<SymbolLineageCandidateV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
+    /// Canonical unresolved-call limitations derived while sealing.
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
     clone_payloads_reused: u64,
@@ -2216,15 +2223,32 @@ where
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
             );
-            let (edges, edge_abstentions) = hotpath::measure_block!(
-                "code_index.build.assemble.edge_evidence",
+            let graph_outputs = hotpath::measure_block!(
+                "code_index.build.assemble.graph_outputs",
                 match (active.as_deref(), staged.parent_shared_occurrences.as_ref()) {
                     (Some(parent), Some(shared)) => {
                         edge_evidence_over_parent(&staged.files, parent, shared)
                     }
-                    _ => collect_edge_evidence(&staged.files),
+                    _ => {
+                        let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
+                        let unresolved = resolution_outputs::unresolved_calls_for_edges(
+                            &staged.files,
+                            &edges,
+                            &|| Ok(()),
+                        )?;
+                        Ok(GraphResolutionOutputsV1 {
+                            edges,
+                            abstentions,
+                            unresolved_calls: unresolved,
+                        })
+                    }
                 }
             )?;
+            let GraphResolutionOutputsV1 {
+                edges,
+                abstentions: edge_abstentions,
+                unresolved_calls,
+            } = graph_outputs;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
                 staged.symbols.symbols.len(),
@@ -2242,6 +2266,7 @@ where
                 lineage: staged.lineage,
                 imports,
                 edges,
+                unresolved_calls,
                 edge_abstentions,
                 statistics,
                 clone_payloads_reused: staged.clone_payloads_reused,

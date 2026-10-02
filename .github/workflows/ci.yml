@@ -71,7 +71,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           vars.HAULER_CI_ENABLED == 'true'
         continue-on-error: true
-        uses: ScriptedAlchemy/cargo-hauler@50341b006f8afd2a193e5d90f450d0644e4974ed
+        uses: ScriptedAlchemy/cargo-hauler@34d512901e8b47ca4741befa2b40f533ba2b541b
         with:
           mode: route
           token: ${{ github.token }}
@@ -159,18 +159,37 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
 
       # This is the workflow's only dev-profile build, so `ci-dev-*` has one
-      # writer. rust-cache stores dependency artifacts only. The repository
-      # cache is capped at 10 GB and was full of per-job copies of the same
-      # dependencies (`pr-dogfood` and `dashboard` each built this graph too),
-      # which evicted the test lanes' caches between runs and made every test
-      # run a cold build. Only the lockfile-keyed dependency cache is kept:
-      # the workspace crates are exactly what a push changes, so caching
-      # their outputs per run re-saved ~1 GB per push for a restore that hit
-      # nothing.
+      # writer. Every rust-cache step in this workflow stores dependency
+      # artifacts only: the workspace crates are exactly what a push changes,
+      # so caching their outputs per run re-saved ~1 GB per push for a
+      # restore that hit nothing.
+      #
+      # Before saving, rust-cache deletes the target/ artifacts of every
+      # package whose manifest lies under its workspace root. With the default
+      # root (`.`) that was every package: `.cargo/config.toml` points the
+      # crates-io and git sources at `.pnpm/crates` inside the checkout, so
+      # each save was an empty ~2 KB entry (run 36970303886 restored one and
+      # compiled 562 crates cold). The workspace members all live under
+      # `crates/`, so rooting rust-cache there keeps the vendored dependencies
+      # and still drops the members; `../target` is the repository target
+      # directory. rust-cache hashes `<root>/Cargo.lock` into the key, so the
+      # second root exists only to key on the real lockfile: its target
+      # directory is never created, so it owns no artifacts. `v1-rust` steps
+      # past the empty `v0-rust` entries, whose exact-key hits skip a save.
+      #
+      # Only pushes and dispatches save. A pull-request run restores the
+      # base branch's entry; its own save would be scoped to its merge ref,
+      # a multi-GB copy no other PR can restore that evicts master's
+      # entries from the repository's 10 GB cache budget.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-dev-${{ runner.os }}-${{ runner.arch }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
+          save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
 
       - name: Build tracedecay binary
@@ -224,6 +243,9 @@ jobs:
 
       - name: Test worktree GC classification and build reclamation
         run: python3 scripts/test-worktree-gc.py
+
+      - name: Test the real-repository hot-path benchmark harness
+        run: python3 scripts/test-bench-hot-paths.py
 
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
@@ -357,19 +379,22 @@ jobs:
       # `root-lib` and the `root-transport` group exactly (test-transport
       # re-resolves 31 workspace crates but no dependency unit). The lower
       # partitions unify the dependencies differently and recompile ~100-200
-      # units against it, which costs nothing measurable here: `runtime`
-      # compiled in 28.5-29.6 min with every one of its 604 dependency units
-      # built from source and in 29.5 with a full-match cache of its own
-      # (runs 36087768140 and 36095356282), because on three cores the
-      # serial workspace chain plus the test targets are the whole path and
-      # the dependency units fill the slots beside it. A lineage for them
-      # was tried and removed on that evidence. Crate sources come from the
-      # pnpm store that setup-pnpm restores, not from this cache.
+      # units against it. A lineage for them was tried and removed when
+      # `runtime` compiled in 28.5-29.6 min cold and 29.5 with a full-match
+      # cache of its own (runs 36087768140 and 36095356282), but that entry
+      # was one of the empty ones explained at the debug-cli cache step, so
+      # the comparison measured two cold builds. Crate sources come from the
+      # pnpm store that setup-pnpm restores, not from this cache. The
+      # workspace roots, prefix and push-only save are explained there.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-test-full-${{ runner.os }}
-          save-if: ${{ matrix.group == 'root-suites' }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
+          save-if: ${{ github.event_name != 'pull_request' && matrix.group == 'root-suites' }}
           cache-on-failure: true
 
       # Every group job re-proves the cover and the grouping before it
@@ -534,11 +559,16 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # Workspace roots, prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-test-full-Linux-${{ runner.arch }}
-          save-if: ${{ matrix.group == 'root-journeys' }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
+          save-if: ${{ github.event_name != 'pull_request' && matrix.group == 'root-journeys' }}
           cache-on-failure: true
 
       # Every partition job re-proves the cover before it compiles anything:
@@ -862,12 +892,17 @@ jobs:
       # One dependency cache for the lane, as on Linux: `root-journeys`
       # resolves the widest graph, so its save covers the other root
       # partitions; the lower partitions recompile the dependency units they
-      # unify differently, beside their shorter chains.
+      # unify differently, beside their shorter chains. Workspace roots,
+      # prefix and push-only save: see the debug-cli step.
       - name: Cache Windows Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-test-full-windows-msvc-lld
-          save-if: ${{ matrix.partition == 'root-journeys' }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
+          save-if: ${{ github.event_name != 'pull_request' && matrix.partition == 'root-journeys' }}
           cache-on-failure: true
 
       # Every partition job re-proves the cover before it compiles anything,
@@ -997,10 +1032,16 @@ jobs:
 
       - uses: ./.github/actions/setup-pnpm
 
+      # Workspace roots, prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-clippy-full-${{ runner.os }}-${{ runner.arch }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
+          save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
 
       - name: Run blocking Clippy policy
@@ -1149,12 +1190,18 @@ jobs:
       # Dependencies only. The workspace crates are what a push changes, so
       # caching their release artifacts would re-save the tree every run for a
       # restore that hits nothing, against the repository's 10 GB budget that
-      # the test lanes' caches are already evicted from.
+      # the test lanes' caches are already evicted from. Workspace roots,
+      # prefix and push-only save: see the debug-cli step.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: ci-shipped-cli-${{ env.TARGET }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
           cache-workspace-crates: "false"
+          save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
 
       - name: Build the shipped binary

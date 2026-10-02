@@ -231,16 +231,25 @@
       "type": "string"
     },
     "AgentTaskFailureClass": {
-      "enum": [
-        "retryable",
-        "permanent",
-        "timeout",
-        "unavailable",
-        "denied",
-        "disconnected",
-        "malformed_output"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "retryable",
+            "permanent",
+            "timeout",
+            "unavailable",
+            "denied",
+            "disconnected",
+            "malformed_output"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "input_too_large",
+          "description": "The backend refused the request because it exceeds its input or\ncontext-window limit.",
+          "type": "string"
+        }
+      ]
     },
     "AgentTaskKind": {
       "enum": [
@@ -1563,6 +1572,26 @@
             "kind",
             "producer",
             "generation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The code graph's engine or catalog was released for memory and was\nstill warming again when the read's budget ran out;\n`retry_after_millis` is the measured warm-up it still needs.",
+          "properties": {
+            "kind": {
+              "const": "code_graph_rewarming",
+              "type": "string"
+            },
+            "retry_after_millis": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "retry_after_millis"
           ],
           "type": "object"
         },
@@ -3911,6 +3940,23 @@
           "type": "object"
         },
         {
+          "description": "The verified graph projection is installed, but the engine or catalog\nits reads need is not resident: it is still being built, or it was\nreleased for memory. Graph reads answer the retryable warming state\nand restore it.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "warming",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
           "description": "The verified graph projection is installed for interactive reads.",
           "properties": {
             "state": {
@@ -4205,6 +4251,16 @@
     },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
+        "mount_failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexMountFailureV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "note": {
           "type": "string"
         },
@@ -4252,6 +4308,22 @@
         "incompatible_generation_id",
         "incompatibilities",
         "serving"
+      ],
+      "type": "object"
+    },
+    "CodeIndexMountFailureV1": {
+      "description": "Safe operator-facing status for a failed code-index mount.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "remediation"
       ],
       "type": "object"
     },

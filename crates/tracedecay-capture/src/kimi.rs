@@ -214,7 +214,7 @@ fn append_current_tool_call(
         .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
     facts.push(CanonicalObservationFactV1::ToolInvocation {
-        invocation_id,
+        invocation_id: Some(invocation_id),
         name: name.to_owned(),
         arguments: event.get("args").cloned().unwrap_or(Value::Null),
     });

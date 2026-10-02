@@ -23,9 +23,6 @@ use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedSto
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-/// Canonical systemd user-unit name for the managed daemon.
-pub const SERVICE_NAME: &str = "tracedecay.service";
-
 pub use tracedecay_daemon_protocol::SOCKET_ENV;
 
 /// Explicit network boundary for the enrolled Remote Brain protocol over TLS.
@@ -90,7 +87,7 @@ pub use service::{
     installed_service_state, prepare_scoop_package_service, quiesce_installed_service_before_lease,
     refresh_installed_service_under_lease_with_state, restore_installed_service_after_update,
     restore_scoop_package_service, service_spec, service_spec_with_remote_tls, service_status,
-    socket_path_or_default, start_service, stop_service, uninstall_service,
+    socket_path_or_default, start_service, stop_service, systemd_unit_name, uninstall_service,
     unreachable_daemon_detail, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_unavailable_daemon_advice,

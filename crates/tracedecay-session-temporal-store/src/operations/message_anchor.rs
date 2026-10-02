@@ -299,7 +299,8 @@ fn projected_messages<'a>(
     let projection = derive_canonical_projection(observation)
         .map_err(|_| unavailable(attributed, "unverifiable_observation"))?;
     let projected = projection
-        .messages()
+        .message()
+        .into_iter()
         .map(|output| output.message().message_id.as_str())
         .filter(|message_id| wanted.contains(message_id))
         .collect::<BTreeSet<_>>();

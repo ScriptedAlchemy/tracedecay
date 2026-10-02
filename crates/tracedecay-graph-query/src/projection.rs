@@ -25,6 +25,13 @@ pub enum CodeGraphReadError {
     MissingRegistry,
     #[error("the exact project code graph is unavailable: {detail}")]
     Unavailable { detail: String },
+    /// The graph's released engine or catalog was still warming again when
+    /// the read's budget ran out; it needs `retry_after_millis` more.
+    #[error(
+        "the exact project code graph is warming again after a release; retry after \
+         {retry_after_millis}ms"
+    )]
+    Rewarming { retry_after_millis: u64 },
     /// The serving generation's graph is refused for that generation's
     /// lifetime; a retry answers the same until another generation seals.
     #[error("the exact project code graph is refused for this generation: {detail}")]
@@ -318,10 +325,20 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
                 retries_on_wake,
             },
         ),
+        // Route readers keep treating it as the retryable unavailable graph.
+        CodeGraphReadError::Rewarming { retry_after_millis } => {
+            TraceDecayError::project_route_with_detail(
+                "code-graph-unavailable",
+                true,
+                ApplicationProblemDetailV1::CodeGraphRewarming { retry_after_millis },
+            )
+        }
         error => TraceDecayError::ProjectRoute {
             reason_code: match &error {
                 CodeGraphReadError::MissingRegistry => "code-graph-registry-missing",
-                CodeGraphReadError::Unavailable { .. } => "code-graph-unavailable",
+                CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Rewarming { .. } => {
+                    "code-graph-unavailable"
+                }
                 CodeGraphReadError::Refused { .. } => "code-graph-refused",
                 CodeGraphReadError::Stale { .. } => "code-graph-stale",
                 CodeGraphReadError::Cancelled => "code-graph-cancelled",
@@ -368,6 +385,13 @@ pub fn code_graph_read_error_from_runtime(error: &TraceDecayError) -> Option<Cod
             cause: cause.clone(),
             remedy: remedy.clone(),
             retries_on_wake: *retries_on_wake,
+        });
+    }
+    if let Some(ApplicationProblemDetailV1::CodeGraphRewarming { retry_after_millis }) =
+        error.project_route_typed_detail()
+    {
+        return Some(CodeGraphReadError::Rewarming {
+            retry_after_millis: *retry_after_millis,
         });
     }
     let (reason_code, _retryable, detail) = error.project_route_context()?;

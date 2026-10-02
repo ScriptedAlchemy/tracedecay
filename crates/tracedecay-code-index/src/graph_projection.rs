@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,15 +17,13 @@ use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphGenerationManifestIdentity,
     GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
     GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId,
     GraphRelationKind, GraphServingEnginePin, GraphWatermark, MAX_VERIFIED_GENERATION_RELATIONS,
-    SourceGeneration, VerifiedGraphSnapshot,
+    NeverCancelled, SourceGeneration, VerifiedGraphSnapshot,
 };
 
 mod builder;
@@ -33,14 +32,15 @@ mod layered;
 mod reader;
 mod schema;
 mod traversal;
+mod warm_clock;
 
 pub use self::builder::build_sealed_code_graph_rows;
 pub(crate) use self::builder::{
     CodeGraphRowSampleV1, CodeGraphSampleFileV1, code_graph_symbol_bindings,
-    sample_code_graph_rows, unresolved_call_limitations,
+    emit_persisted_code_graph_page, sample_code_graph_rows, unresolved_call_limitations,
 };
 use self::builder::{ProductionCodeGraphInputs, build_projection};
-use self::interactive::InteractiveCatalogCache;
+use self::interactive::{CatalogResidency, InteractiveCatalogCache};
 pub use self::interactive::{
     CodeGraphCatalogReleaseV1, CodeGraphCensusV1, CodeGraphDegreeRankingV1,
     CodeGraphEdgeKindCountsV1, CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1,
@@ -60,6 +60,7 @@ use self::schema::{
     serialize, stable_identity,
 };
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
+use self::warm_clock::{WarmClock, WarmOwner};
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -359,6 +360,27 @@ pub struct CodeGraphProjectionStore {
     /// Why the last background re-warm failed, answered to readers until a
     /// later re-warm succeeds.
     rewarm_failure: Arc<Mutex<Option<String>>>,
+    /// Measured warm-ups of the engine and catalog, and the signal their
+    /// re-warms settle on.
+    warm_clock: Arc<WarmClock>,
+}
+
+/// A read's budget ran out while a released engine or catalog was still
+/// warming again; `retry_after` is the measured warm-up it still needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeGraphRewarmPendingV1 {
+    pub retry_after: Duration,
+}
+
+/// Whether the resident state an activated store's reads need is in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeGraphServingWarmthV1 {
+    Warm,
+    /// Reads answer the typed warming state for this reason until the
+    /// engine or catalog is resident again.
+    Warming(String),
+    /// Catalog reads fail with this error for the store's lifetime.
+    Failed(String),
 }
 
 /// Outcome of [`CodeGraphProjectionStore::release_serving_engine`].
@@ -393,15 +415,17 @@ impl CodeGraphProjectionStore {
         if snapshot.generation() != &expected {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
+        let warm_clock = Arc::new(WarmClock::default());
         Ok(Self {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
-            interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
+            interactive_catalog: Arc::new(InteractiveCatalogCache::new(Arc::clone(&warm_clock))),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
             rewarming: Arc::new(AtomicBool::new(false)),
             rewarm_failure: Arc::new(Mutex::new(None)),
+            warm_clock,
         })
     }
 
@@ -415,7 +439,10 @@ impl CodeGraphProjectionStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if pin.is_none() {
-            *pin = Some(self.snapshot.pin_serving_engine()?);
+            self.warm_clock.begin(WarmOwner::Engine);
+            let pinned = self.snapshot.pin_serving_engine();
+            self.warm_clock.settle(WarmOwner::Engine, pinned.is_ok());
+            *pin = Some(pinned?);
         }
         Ok(())
     }
@@ -439,9 +466,41 @@ impl CodeGraphProjectionStore {
     }
 
     /// Drop a ready interactive catalog; the next catalog read rebuilds it
-    /// from the durable projection.
+    /// from the durable projection in the background.
     pub fn release_interactive_catalog(&self) -> CodeGraphCatalogReleaseV1 {
         self.interactive_catalog.release()
+    }
+
+    /// What a graph read would find right now: warm, or the warming state it
+    /// would answer because the engine or the catalog is not resident.
+    pub fn serving_warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {
+        if self.snapshot.serving_engine_resident()? {
+            return self.interactive_catalog.warmth();
+        }
+        if !self.released.load(AtomicOrdering::Acquire) {
+            return Ok(CodeGraphServingWarmthV1::Warming(
+                "code graph engine is warming in the background".to_owned(),
+            ));
+        }
+        let failure = self
+            .rewarm_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Ok(CodeGraphServingWarmthV1::Warming(
+            match (failure, self.rewarming.load(AtomicOrdering::Acquire)) {
+                (_, true) => "code graph engine is re-warming in the background".to_owned(),
+                (Some(failure), false) => {
+                    format!(
+                        "code graph engine re-warm failed; the next graph read retries it: {failure}"
+                    )
+                }
+                (None, false) => {
+                    "code graph engine was released for memory; the next graph read re-warms it"
+                        .to_owned()
+                }
+            },
+        ))
     }
 
     /// Unpin the engine and close it if no reader holds it. The durable
@@ -496,6 +555,7 @@ impl CodeGraphProjectionStore {
         if self.rewarming.swap(true, AtomicOrdering::AcqRel) {
             return;
         }
+        self.warm_clock.begin(WarmOwner::Engine);
         let store = self.clone();
         let spawned = std::thread::Builder::new()
             .name("code-graph-rewarm".to_owned())
@@ -506,6 +566,14 @@ impl CodeGraphProjectionStore {
                     .map(|error| error.to_string());
                 if failure.is_none() {
                     store.released.store(false, AtomicOrdering::Release);
+                    // A catalog released beside the engine re-warms now, not
+                    // on the read after the engine is back.
+                    if let Ok(reader) = store.interactive_reader_with_cancellation(
+                        &store.generation,
+                        Arc::new(NeverCancelled),
+                    ) {
+                        reader.rewarm_released_catalog();
+                    }
                 }
                 *store
                     .rewarm_failure
@@ -519,7 +587,68 @@ impl CodeGraphProjectionStore {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
             self.rewarming.store(false, AtomicOrdering::Release);
+            self.warm_clock.settle(WarmOwner::Engine, false);
         }
+    }
+
+    /// Waits up to `budget` for a released engine or catalog to warm again,
+    /// starting its re-warm, so a read admitted during a re-warm that
+    /// finishes within its budget is served instead of refused. Returns at
+    /// once when nothing released is warming; the reader then answers the
+    /// store's state as before.
+    pub fn await_rewarm(&self, budget: Duration) -> Result<(), CodeGraphRewarmPendingV1> {
+        let started = Instant::now();
+        let mut woke = false;
+        loop {
+            let epoch = self.warm_clock.epoch();
+            let Some(pending) = self.rewarm_in_flight(woke) else {
+                return Ok(());
+            };
+            let left = budget.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Err(pending);
+            }
+            self.warm_clock.wait_past(epoch, left);
+            woke = true;
+        }
+    }
+
+    /// The re-warm a read would wait on, started if needed, with the
+    /// measured warm-up it still needs; `None` when no released owner is
+    /// warming. An engine still cold after a settled warm failed it, which
+    /// the reader answers.
+    fn rewarm_in_flight(&self, woke: bool) -> Option<CodeGraphRewarmPendingV1> {
+        let engine = match self.snapshot.serving_engine_resident() {
+            Ok(true) => None,
+            Ok(false) if woke || !self.released.load(AtomicOrdering::Acquire) => return None,
+            Ok(false) => {
+                self.rewarm_in_background();
+                Some(self.warm_clock.remaining(WarmOwner::Engine))
+            }
+            Err(_) => return None,
+        };
+        let catalog = match (self.interactive_catalog.residency(), engine) {
+            (CatalogResidency::Resident | CatalogResidency::Unreleased, None) => return None,
+            (CatalogResidency::Resident | CatalogResidency::Unreleased, Some(_)) => Duration::ZERO,
+            // The engine re-warm starts a released catalog's once it is back.
+            (CatalogResidency::Released, None) => {
+                self.interactive_reader_with_cancellation(
+                    &self.generation,
+                    Arc::new(NeverCancelled),
+                )
+                .ok()?
+                .rewarm_released_catalog();
+                self.warm_clock.remaining(WarmOwner::Catalog)
+            }
+            (CatalogResidency::Released | CatalogResidency::Rewarming, _) => {
+                self.warm_clock.remaining(WarmOwner::Catalog)
+            }
+        };
+        let engine = engine.unwrap_or_default();
+        Some(CodeGraphRewarmPendingV1 {
+            // A warm running past its last measurement still needs time.
+            retry_after: (engine + catalog).max(Duration::from_millis(1)),
+        })
     }
 
     pub fn evidence_reader(

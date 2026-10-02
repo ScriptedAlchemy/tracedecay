@@ -15,8 +15,8 @@ use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+    generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from `QBasic` source files using tree-sitter.
@@ -97,7 +97,7 @@ impl QBasicExtractor {
 
         state.node_stack.pop();
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
@@ -607,17 +607,6 @@ impl QBasicExtractor {
                     break;
                 }
             }
-        }
-    }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
         }
     }
 }

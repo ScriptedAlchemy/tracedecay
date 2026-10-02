@@ -6,15 +6,60 @@ use std::process::Command;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
+use super::unit_file::{systemd_unit_name, systemd_user_service_path};
 use super::{DaemonServiceState, LAUNCHD_LABEL, windows_task};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 /// All variants exist on every platform so that dispatch stays exhaustive.
 #[derive(Clone, Debug)]
 pub(super) enum ServiceRunner {
-    Systemd { systemctl: PathBuf },
-    Launchd { launchctl: PathBuf, id: PathBuf },
+    /// `systemctl` is `None` only from
+    /// [`ServiceRunner::current_for_installed_unit`]: the missing program is
+    /// reported when a unit operation first needs it.
+    Systemd {
+        systemctl: Option<PathBuf>,
+        unit: SystemdUnit,
+    },
+    Launchd {
+        launchctl: PathBuf,
+        id: PathBuf,
+    },
     WindowsTask,
+}
+
+/// The user unit a profile owns: its name and the file that profile installs.
+#[derive(Clone, Debug)]
+pub(super) struct SystemdUnit {
+    name: String,
+    path: PathBuf,
+}
+
+impl SystemdUnit {
+    fn of(profile: &ProfileRoot) -> Result<Self> {
+        Ok(Self {
+            name: systemd_unit_name(profile),
+            path: systemd_user_service_path(profile)?,
+        })
+    }
+
+    fn require_owned(
+        &self,
+        loaded: Option<PathBuf>,
+    ) -> std::result::Result<&str, ServiceStateError> {
+        if loaded
+            .as_deref()
+            .is_some_and(|loaded| same_unit_file(loaded, &self.path))
+        {
+            return Ok(&self.name);
+        }
+        Err(ServiceStateError::Failed(
+            TraceDecayError::ServiceUnitNotOwned {
+                unit: self.name.clone(),
+                owned: self.path.clone().into_boxed_path(),
+                loaded: loaded.map(PathBuf::into_boxed_path),
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,14 +84,17 @@ impl ServicePlatform {
 }
 
 impl ServiceRunner {
-    pub(super) fn current() -> Result<Self> {
+    pub(super) fn current(profile: &ProfileRoot) -> Result<Self> {
         let path_var = tracedecay_runtime_core::config::host_program_search_path();
         match ServicePlatform::current()? {
-            ServicePlatform::Systemd => Self::systemd(require_service_program_on_path(
-                "systemctl",
-                "systemd user service management",
-                path_var.as_deref(),
-            )?),
+            ServicePlatform::Systemd => Self::systemd(
+                require_service_program_on_path(
+                    "systemctl",
+                    "systemd user service management",
+                    path_var.as_deref(),
+                )?,
+                profile,
+            ),
             ServicePlatform::Launchd => Self::launchd(
                 require_service_program_on_path(
                     "launchctl",
@@ -63,13 +111,29 @@ impl ServiceRunner {
         }
     }
 
-    pub(super) fn systemd(systemctl: impl AsRef<Path>) -> Result<Self> {
+    /// [`Self::current`] for paths that consult the service manager only once
+    /// a unit is installed. A Linux host without systemd (a container, say)
+    /// has no managed unit, so its maintenance must not require `systemctl`.
+    pub(super) fn current_for_installed_unit(profile: &ProfileRoot) -> Result<Self> {
+        match Self::current(profile) {
+            Err(TraceDecayError::HostCliUnavailable { program, .. }) if program == "systemctl" => {
+                Ok(Self::Systemd {
+                    systemctl: None,
+                    unit: SystemdUnit::of(profile)?,
+                })
+            }
+            runner => runner,
+        }
+    }
+
+    pub(super) fn systemd(systemctl: impl AsRef<Path>, profile: &ProfileRoot) -> Result<Self> {
         Ok(Self::Systemd {
-            systemctl: required_service_program(
+            systemctl: Some(required_service_program(
                 "systemctl",
                 "systemd user service management",
                 systemctl.as_ref(),
-            )?,
+            )?),
+            unit: SystemdUnit::of(profile)?,
         })
     }
 
@@ -94,9 +158,14 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd { systemctl } => {
-                for arguments in systemd_install_command_plan(start) {
-                    run_systemctl(systemctl, &arguments)?;
+            // The unit file was just (re)written, so systemd must re-read it
+            // even under `--no-start`; otherwise a later `start` launches
+            // whatever stale definition systemd last loaded.
+            Self::Systemd { systemctl, unit } => {
+                run_systemctl(systemctl.as_deref(), &["daemon-reload"])?;
+                if start {
+                    let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
+                    run_systemctl(systemctl.as_deref(), &["enable", "--now", name])?;
                 }
                 Ok(())
             }
@@ -124,10 +193,11 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd { systemctl } => {
-                run_systemctl(systemctl, &["daemon-reload"])?;
+            Self::Systemd { systemctl, unit } => {
+                run_systemctl(systemctl.as_deref(), &["daemon-reload"])?;
                 if previous_state.is_running() {
-                    run_systemctl(systemctl, &["restart", crate::SERVICE_NAME])?;
+                    let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
+                    run_systemctl(systemctl.as_deref(), &["restart", name])?;
                 }
                 Ok(())
             }
@@ -155,14 +225,22 @@ impl ServiceRunner {
         socket_path: &Path,
     ) -> std::result::Result<DaemonServiceState, ServiceStateError> {
         match self {
-            Self::Systemd { systemctl } => {
-                let activity = systemctl_unit_query(systemctl, "is-active")?;
+            Self::Systemd { systemctl, unit } => {
+                // A mask resolves the unit to `/dev/null` whoever placed it;
+                // reporting it controls nothing, and every mutation still
+                // refuses it.
+                let loaded = loaded_systemd_unit_file(systemctl.as_deref(), unit)?;
+                if loaded.as_deref() == Some(Path::new("/dev/null")) {
+                    return Ok(DaemonServiceState::Masked);
+                }
+                unit.require_owned(loaded)?;
+                let activity = systemctl_unit_query(systemctl.as_deref(), unit, "is-active")?;
                 let running = match activity.as_str() {
                     "active" | "reloading" | "refreshing" => true,
                     "inactive" | "failed" | "activating" | "deactivating" | "maintenance" => false,
-                    _ => return Err(systemctl_unknown_state("is-active", &activity).into()),
+                    _ => return Err(systemctl_unknown_state(unit, "is-active", &activity).into()),
                 };
-                let enablement = systemctl_unit_query(systemctl, "is-enabled")?;
+                let enablement = systemctl_unit_query(systemctl.as_deref(), unit, "is-enabled")?;
                 if enablement.starts_with("masked") {
                     Ok(DaemonServiceState::Masked)
                 } else if running && enablement.starts_with("enabled") {
@@ -187,9 +265,11 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.before_uninstall")]
     pub(super) fn before_uninstall(&self, stop: bool, expected_version: &str) -> Result<()> {
         match self {
-            Self::Systemd { systemctl } => {
-                if stop {
-                    let _ = run_systemctl(systemctl, &["disable", "--now", crate::SERVICE_NAME]);
+            // Best effort: the unit file is removed either way, but a unit the
+            // profile does not own is never disabled on its behalf.
+            Self::Systemd { systemctl, unit } => {
+                if stop && let Ok(name) = owned_systemd_unit(systemctl.as_deref(), unit) {
+                    let _ = run_systemctl(systemctl.as_deref(), &["disable", "--now", name]);
                 }
                 Ok(())
             }
@@ -207,11 +287,13 @@ impl ServiceRunner {
         expected_version: &str,
     ) -> Result<()> {
         match self {
-            Self::Systemd { systemctl } => {
-                for arguments in systemd_start_command_plan() {
-                    run_systemctl(systemctl, &arguments)?;
-                }
-                Ok(())
+            // A `start` can follow a unit rewrite that never went through
+            // install on this boot, so reload first; the reload is idempotent
+            // when the unit on disk is unchanged.
+            Self::Systemd { systemctl, unit } => {
+                run_systemctl(systemctl.as_deref(), &["daemon-reload"])?;
+                let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
+                run_systemctl(systemctl.as_deref(), &["start", name])
             }
             Self::Launchd { launchctl, id } => {
                 let target = launchd_service_target(id)?;
@@ -230,7 +312,10 @@ impl ServiceRunner {
     #[hotpath::measure(label = "daemon.service.runner.stop")]
     pub(super) fn stop(&self, expected_version: &str) -> Result<()> {
         match self {
-            Self::Systemd { systemctl } => run_systemctl(systemctl, &["stop", crate::SERVICE_NAME]),
+            Self::Systemd { systemctl, unit } => {
+                let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
+                run_systemctl(systemctl.as_deref(), &["stop", name])
+            }
             Self::Launchd { launchctl, id } => launchd_stop(launchctl, id),
             Self::WindowsTask => windows_task::stop(expected_version),
         }
@@ -252,14 +337,15 @@ impl ServiceRunner {
             return Ok(());
         }
         match self {
-            Self::Systemd { systemctl } => {
-                run_systemctl(systemctl, &["daemon-reload"])?;
+            Self::Systemd { systemctl, unit } => {
+                run_systemctl(systemctl.as_deref(), &["daemon-reload"])?;
+                let name = owned_systemd_unit(systemctl.as_deref(), unit)?;
                 if previous_state.is_enabled() {
-                    run_systemctl(systemctl, &["enable", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl.as_deref(), &["enable", name])?;
                 } else {
-                    run_systemctl(systemctl, &["disable", crate::SERVICE_NAME])?;
+                    run_systemctl(systemctl.as_deref(), &["disable", name])?;
                 }
-                run_systemctl(systemctl, &["start", crate::SERVICE_NAME])?;
+                run_systemctl(systemctl.as_deref(), &["start", name])?;
                 // `systemctl start` reports the fork, not a serving daemon.
                 // Restore success must mean an authenticated daemon at the
                 // expected version answering from the installed unit's socket.
@@ -293,9 +379,9 @@ impl ServiceRunner {
 
     pub(super) fn after_uninstall(&self, stop: bool) {
         match self {
-            Self::Systemd { systemctl } => {
+            Self::Systemd { systemctl, .. } => {
                 if stop {
-                    let _ = run_systemctl(systemctl, &["daemon-reload"]);
+                    let _ = run_systemctl(systemctl.as_deref(), &["daemon-reload"]);
                 }
             }
             Self::Launchd { .. } | Self::WindowsTask => {}
@@ -304,9 +390,7 @@ impl ServiceRunner {
 
     pub(super) fn log_hint(&self, profile: &ProfileRoot) -> String {
         match self {
-            Self::Systemd { .. } => {
-                format!("journalctl --user -u {} -f", crate::SERVICE_NAME)
-            }
+            Self::Systemd { unit, .. } => format!("journalctl --user -u {} -f", unit.name),
             Self::Launchd { .. } => format!(
                 "tail -f \"{}\"",
                 profile.data_dir().join("daemon.err.log").display()
@@ -351,8 +435,13 @@ fn run_launchctl(launchctl: &Path, args: &[&str]) -> Result<std::process::Output
     Err(launchctl_failure(args, &output))
 }
 
-fn run_systemctl(systemctl: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new(systemctl)
+fn require_systemctl(systemctl: Option<&Path>) -> Result<&Path> {
+    systemctl
+        .ok_or_else(|| service_program_unavailable("systemctl", "systemd user service management"))
+}
+
+fn run_systemctl(systemctl: Option<&Path>, args: &[&str]) -> Result<()> {
+    let output = Command::new(require_systemctl(systemctl)?)
         .arg("--user")
         .args(args)
         .output()
@@ -514,11 +603,12 @@ impl From<ServiceStateError> for TraceDecayError {
 /// or disabled unit and when the user manager is unreachable; only the printed
 /// state tells them apart, so an empty answer is an error, not "stopped".
 fn systemctl_unit_query(
-    systemctl: &Path,
+    systemctl: Option<&Path>,
+    unit: &SystemdUnit,
     verb: &str,
 ) -> std::result::Result<String, ServiceStateError> {
-    let output = Command::new(systemctl)
-        .args(["--user", verb, crate::SERVICE_NAME])
+    let output = Command::new(require_systemctl(systemctl)?)
+        .args(["--user", verb, &unit.name])
         .output()
         .map_err(|error| {
             service_program_spawn_error("systemctl", "systemd service state", &error)
@@ -529,7 +619,7 @@ fn systemctl_unit_query(
             ServiceManagerUnreachable {
                 query: format!(
                     "systemctl --user {verb} {} reported no unit state ({}): {}",
-                    crate::SERVICE_NAME,
+                    unit.name,
                     output.status,
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
@@ -539,13 +629,68 @@ fn systemctl_unit_query(
     Ok(state)
 }
 
-fn systemctl_unknown_state(verb: &str, state: &str) -> TraceDecayError {
+fn systemctl_unknown_state(unit: &SystemdUnit, verb: &str, state: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
             "systemctl --user {verb} {} reported unrecognized unit state `{state}`",
-            crate::SERVICE_NAME
+            unit.name
         ),
     }
+}
+
+/// The user manager resolves a unit name through its own search path, never
+/// through the profile's config home, so a profile with an isolated home can
+/// name a unit the manager loads from somewhere else entirely. Every command
+/// that controls or reports the unit first proves the manager's loaded file
+/// is the one this profile installed.
+fn owned_systemd_unit<'unit>(
+    systemctl: Option<&Path>,
+    unit: &'unit SystemdUnit,
+) -> std::result::Result<&'unit str, ServiceStateError> {
+    let loaded = loaded_systemd_unit_file(systemctl, unit)?;
+    unit.require_owned(loaded)
+}
+
+/// The unit file the user manager loads for `unit`, or `None` when it finds
+/// none on its search path.
+fn loaded_systemd_unit_file(
+    systemctl: Option<&Path>,
+    unit: &SystemdUnit,
+) -> std::result::Result<Option<PathBuf>, ServiceStateError> {
+    let output = Command::new(require_systemctl(systemctl)?)
+        .args([
+            "--user",
+            "show",
+            "--property=FragmentPath",
+            "--value",
+            &unit.name,
+        ])
+        .output()
+        .map_err(|error| {
+            service_program_spawn_error("systemctl", "systemd unit ownership", &error)
+        })?;
+    if !output.status.success() {
+        return Err(ServiceStateError::ManagerUnreachable(
+            ServiceManagerUnreachable {
+                query: format!(
+                    "systemctl --user show --property=FragmentPath {} failed ({}): {}",
+                    unit.name,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            },
+        ));
+    }
+    let loaded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!loaded.is_empty()).then(|| PathBuf::from(loaded)))
+}
+
+fn same_unit_file(loaded: &Path, owned: &Path) -> bool {
+    loaded == owned
+        || matches!(
+            (std::fs::canonicalize(loaded), std::fs::canonicalize(owned)),
+            (Ok(loaded), Ok(owned)) if loaded == owned
+        )
 }
 
 fn service_program_spawn_error(
@@ -631,25 +776,6 @@ pub(super) fn retry_transient_bootstrap(
         sleep(backoff);
         backoff = (backoff * 2).min(TRANSIENT_BOOTSTRAP_MAX_BACKOFF);
     }
-}
-
-/// Commands that register a freshly written systemd unit. The caller has just
-/// (re)written the unit file, so systemd must re-read it even when the unit is
-/// not started now (`--no-start`); without the reload a later `start` launches
-/// whatever stale definition systemd last loaded.
-pub(super) fn systemd_install_command_plan(start: bool) -> Vec<Vec<&'static str>> {
-    let mut plan = vec![vec!["daemon-reload"]];
-    if start {
-        plan.push(vec!["enable", "--now", crate::SERVICE_NAME]);
-    }
-    plan
-}
-
-/// Commands that start the installed unit. A `start` can follow a unit
-/// rewrite that never went through install on this boot, so reload first;
-/// the reload is idempotent when the unit on disk is unchanged.
-pub(super) fn systemd_start_command_plan() -> Vec<Vec<&'static str>> {
-    vec![vec!["daemon-reload"], vec!["start", crate::SERVICE_NAME]]
 }
 
 /// Commands that (re)start the launchd agent. Booting the service out first

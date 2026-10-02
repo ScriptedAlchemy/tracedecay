@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Enforce rust-cache restore lineage on the hosted hotpath lanes.
 
+Repo-wide, every rust-cache step that builds this checkout must root its
+workspace at ``crates`` (see ``assert_vendored_workspace_roots``).
+
 Those lanes used to restore ``v0-rust-`` prefix matches (often another
 lockfile generation, or a kache-era blob) and then fail to overwrite
 rustc's read-only ``.rmeta`` files. The contract is: a unique shared-key
@@ -22,6 +25,8 @@ from rust_cache_lineage import PREFIX_KEY
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 DROP_SCRIPT = "scripts/drop-prefix-restored-rust-artifacts.sh"
+VENDORED_ROOT = "crates -> ../target"
+LOCKFILE_KEY_ROOT = ". -> target/rust-cache-lockfile-key"
 
 # job id → required shared-key. These lanes compile after a rust-cache restore
 # and previously inherited incompatible read-only compiler outputs.
@@ -39,7 +44,7 @@ HOSTED_COMPILER_LANES: dict[str, dict[str, str]] = {
 }
 
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
-RUST_CACHE_USES = re.compile(r"^\s+uses: Swatinem/rust-cache@", re.MULTILINE)
+RUST_CACHE_USES = re.compile(r"^[ \t]+(?:- )?uses: Swatinem/rust-cache@", re.MULTILINE)
 
 
 def fail(message: str) -> None:
@@ -82,7 +87,47 @@ def assert_hosted_job(workflow: str, job_id: str, shared_key: str, body: str) ->
         fail(f"{workflow}:{job_id} must drop target/ after a rust-cache prefix restore via {DROP_SCRIPT}")
 
 
+def rust_cache_steps(text: str) -> list[str]:
+    """Return the text of each rust-cache step (from its `- ` line to the next sibling)."""
+    lines = text.splitlines()
+    steps: list[str] = []
+    for match in RUST_CACHE_USES.finditer(text):
+        index = text.count("\n", 0, match.start())
+        while not lines[index].lstrip().startswith("- "):
+            index -= 1
+        indent = len(lines[index]) - len(lines[index].lstrip())
+        end = index + 1
+        while end < len(lines) and (
+            not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > indent
+        ):
+            end += 1
+        steps.append("\n".join(lines[index:end]))
+    return steps
+
+
+def assert_vendored_workspace_roots() -> None:
+    """Every rust-cache step that builds this checkout must root at crates/.
+
+    `.cargo/config.toml` vendors crates-io and git sources under `.pnpm/crates`
+    inside the repo. rust-cache keeps only packages outside the workspace
+    root, so the default `.` root deletes every dependency artifact and saves
+    empty entries. The second root contributes Cargo.lock to the key only.
+    """
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        if "actions/checkout@" not in text:
+            continue
+        for step in rust_cache_steps(text):
+            for root in (VENDORED_ROOT, LOCKFILE_KEY_ROOT):
+                if root not in step:
+                    fail(
+                        f"{path.name} rust-cache step must list workspace root {root!r} "
+                        "so vendored .pnpm/crates dependencies are cached"
+                    )
+
+
 def main() -> int:
+    assert_vendored_workspace_roots()
     seen_shared_keys: dict[str, str] = {}
     for filename, jobs in HOSTED_COMPILER_LANES.items():
         path = WORKFLOWS / filename

@@ -483,7 +483,7 @@ pub(super) fn accept_automation_temporal_outcome(
         | SessionRetrievalOutcome::Deleted => {
             AutomationTemporalRetrieval::Rejected("session_evidence_locked")
         }
-        SessionRetrievalOutcome::Unavailable => {
+        SessionRetrievalOutcome::Unavailable(_) => {
             AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
         }
         SessionRetrievalOutcome::ResetRequired => {

@@ -204,7 +204,36 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    assert_eq!(ingest["messages_upserted"], 2, "ingest: {ingest}");
+    assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
+    // Admission is the commit; `messages_upserted` counts only the projections
+    // this request drained, which the catch-up worker may take first.
+    assert_eq!(ingest["observations_committed"], 2, "ingest: {ingest}");
+    let envelope = answer_tool(
+        &fixture,
+        "tracedecay_message_search",
+        json!({
+            "provider": "cursor",
+            "query": "billing ingestion",
+            "require_fresh": false,
+        }),
+    )
+    .await;
+    let found = envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&envelope);
+    assert_eq!(found["status"], "ok", "message search: {found}");
+    let question = found["results"]
+        .as_array()
+        .and_then(|results| results.iter().find(|row| row["message"]["role"] == "user"))
+        .unwrap_or_else(|| panic!("ingested Cursor question in {found}"));
+    assert!(
+        question["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Where is billing ingestion?")),
+        "ingested Cursor question text: {question}"
+    );
+    assert_eq!(question["message"]["session_id"], "cursor-session");
+    assert_eq!(question["message"]["provider"], "cursor");
     assert_eq!(
         ingest["hint_outcomes"],
         json!({

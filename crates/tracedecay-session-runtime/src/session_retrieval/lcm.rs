@@ -28,7 +28,7 @@ use super::contract::{
 };
 use super::{
     APPLICATION_RETRIEVAL_MAX_BYTES, DaemonSessionRetrievalService, MESSAGE_SEARCH_MAX_BYTES,
-    message_search_digest, temporal_kernel_deadline,
+    message_search_digest, temporal_kernel_deadline, unavailable_reason,
 };
 
 struct LcmBindingWindow {
@@ -187,7 +187,8 @@ impl DaemonSessionRetrievalService {
             | SessionRetrievalUnavailableReason::RefreshWorkerStopped
             | SessionRetrievalUnavailableReason::TemporalStoreUnavailable
             | SessionRetrievalUnavailableReason::TemporalStoreReadFailed
-            | SessionRetrievalUnavailableReason::HydrationUnavailable => None,
+            | SessionRetrievalUnavailableReason::HydrationUnavailable
+            | SessionRetrievalUnavailableReason::TemporalKernelRefused => None,
         }
     }
 
@@ -844,10 +845,14 @@ fn describe_execution_error(
             }
         }
         SessionTemporalExecutionError::Unavailable
-        | SessionTemporalExecutionError::Empty { .. }
-        | SessionTemporalExecutionError::Kernel(_) => {
+        | SessionTemporalExecutionError::Empty { .. } => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+        SessionTemporalExecutionError::Kernel(_) => {
+            LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalKernelRefused,
             ))
         }
     }
@@ -888,10 +893,14 @@ fn expand_execution_error(
             retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag }),
         },
         SessionTemporalExecutionError::Unavailable
-        | SessionTemporalExecutionError::Empty { .. }
-        | SessionTemporalExecutionError::Kernel(_) => {
+        | SessionTemporalExecutionError::Empty { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+            ))
+        }
+        SessionTemporalExecutionError::Kernel(_) => {
+            LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalKernelRefused,
             ))
         }
     }
@@ -944,9 +953,10 @@ pub(super) fn describe_retrieval_outcome(
             lineage: Vec::new(),
             retrieval: LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted),
         },
-        SessionRetrievalOutcome::Unavailable
-        | SessionRetrievalOutcome::Complete { .. }
-        | SessionRetrievalOutcome::CompleteZero { .. } => {
+        SessionRetrievalOutcome::Unavailable(cause) => LcmDescribeServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::without_worker(unavailable_reason(cause)),
+        ),
+        SessionRetrievalOutcome::Complete { .. } | SessionRetrievalOutcome::CompleteZero { .. } => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))
@@ -1000,9 +1010,10 @@ pub(super) fn expand_retrieval_outcome(
             state: None,
             retrieval: LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted),
         },
-        SessionRetrievalOutcome::Unavailable
-        | SessionRetrievalOutcome::Complete { .. }
-        | SessionRetrievalOutcome::CompleteZero { .. } => {
+        SessionRetrievalOutcome::Unavailable(cause) => LcmExpandServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::without_worker(unavailable_reason(cause)),
+        ),
+        SessionRetrievalOutcome::Complete { .. } | SessionRetrievalOutcome::CompleteZero { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))

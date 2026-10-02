@@ -166,6 +166,9 @@ pub struct CodexDiscoveryHub {
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// A consumer was told to wait for a scan in progress; the next scan to
+    /// finish releases it.
+    scan_waited: bool,
     source_key: Option<CodexDiscoverySourceKey>,
     frontier: Option<CodexDiscoveryFrontier>,
     consumers: HashMap<String, CodexDiscoveryConsumerState>,
@@ -290,6 +293,42 @@ impl<'a> PendingTranscript<'a> {
             Some((hub, consumer, witness)) => hub.record_file_converged(consumer, path, witness),
             None => Ok(()),
         }
+    }
+
+    /// Whether admission consumed the whole settled file and left no tail.
+    /// An unsettled change time cannot prove that, so a later pass reads the
+    /// file again.
+    pub(crate) fn admission_settles(&self, source_deferred: bool, covered_through: u64) -> bool {
+        self.convergence
+            .is_some_and(|(_, _, witness)| !source_deferred && covered_through == witness.len)
+    }
+
+    /// Owned copy of the settled identity, so a caller can finish the file
+    /// after asynchronous admission without observing it again.
+    pub(crate) fn settled(&self) -> Option<SettledTranscript> {
+        self.convergence
+            .map(|(hub, consumer, witness)| SettledTranscript {
+                hub: hub.clone(),
+                consumer: consumer.to_owned(),
+                witness,
+            })
+    }
+}
+
+/// A file whose change time was already settled when this pass observed it.
+///
+/// Held across admission so the parent file can be finished once every
+/// source it names is covered, without a later pass opening it to decide.
+pub(crate) struct SettledTranscript {
+    hub: CodexDiscoveryHub,
+    consumer: String,
+    witness: SettledFileWitness,
+}
+
+impl SettledTranscript {
+    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
+        self.hub
+            .record_file_converged(&self.consumer, path, self.witness)
     }
 }
 
@@ -753,6 +792,7 @@ impl CodexDiscoveryHub {
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
                         hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     if index._scanner_memory.is_none() {
@@ -815,6 +855,7 @@ impl CodexDiscoveryHub {
                     }
                     if inner.discovery_scanning {
                         hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
@@ -845,8 +886,10 @@ impl CodexDiscoveryHub {
                     detail: "Codex discovery hub lock is poisoned",
                 }
             })?;
-            self.scan_released
-                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            if std::mem::take(&mut inner.scan_waited) {
+                self.scan_released
+                    .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            }
             let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;

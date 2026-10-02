@@ -224,6 +224,18 @@ mod tests {
         Ok(())
     }
 
+    /// Grammar symbol names outside ASCII keep their exact UTF-8 spelling, so
+    /// the node-kind table builds and round-trips them.
+    #[test]
+    #[cfg(all(feature = "lang-lean", feature = "lang-haskell"))]
+    fn non_ascii_grammar_node_kinds_round_trip_as_utf8() {
+        for name in ["\u{b7}", "\u{3bb}", "\u{2192}", "\u{2200}"] {
+            let id = super::grammar_kind_id(name)
+                .unwrap_or_else(|| panic!("grammar node kind {name:?} must be registered"));
+            assert_eq!(super::grammar_kind_name(id), Some(name));
+        }
+    }
+
     #[test]
     fn labeled_parser_preserves_the_extractor_lookup_error_context() {
         let error = super::parse_extractor_source_with_labeled_lookup(

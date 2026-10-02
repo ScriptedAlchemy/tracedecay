@@ -48,13 +48,28 @@ fn refresh_in_quiesced_window(
     super::combine_operation_and_restore("daemon service refresh", refreshed, restored)
 }
 
-/// The profile a service fixture under `dir` runs for: data under
-/// `dir/profile`, home `dir/home`, XDG config home `dir/config`.
+/// The profile a service fixture under `dir` runs for: the default profile
+/// of home `dir/home`, so its unit is `tracedecay.service`, with XDG config
+/// home `dir/config`.
 fn fixture_profile(dir: &std::path::Path) -> ProfileRoot {
-    ProfileRoot::new(dir.join("profile"))
-        .with_home(dir.join("home"))
-        .with_xdg_config_home(dir.join("config"))
+    ProfileRoot::under_home(dir.join("home")).with_xdg_config_home(dir.join("config"))
 }
+
+/// A fake `systemctl` script running `$body`, fronted by a user manager whose
+/// unit search path is the fixture's `config/systemd/user` beside the fake
+/// `bin/`: like systemd, it answers `show --property=FragmentPath` with the
+/// unit file it finds there, and with nothing for a unit it cannot find.
+#[cfg(target_os = "linux")]
+macro_rules! fake_systemctl {
+    ($body:literal) => {
+        concat!(
+            "#!/bin/sh\n[ \"$2\" = show ] && { unit=\"${0%/bin/systemctl}/config/systemd/user/$5\"; [ -e \"$unit\" ] && printf '%s\\n' \"$unit\"; exit 0; }\n",
+            $body
+        )
+    };
+}
+#[cfg(target_os = "linux")]
+pub(super) use fake_systemctl;
 
 /// A profile whose existing data directory is `data_dir`, so its default
 /// daemon socket is `data_dir/daemon.sock`.
@@ -184,14 +199,15 @@ impl FailingRestoreFixture {
         write_executable_script(
             &systemctl,
             bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = start ] && exit 7\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
         )
         .expect("fake systemctl");
-        let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+        let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+            .expect("fixture systemd runner");
 
-        let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+        let service_path = config_home.join("systemd/user").join("tracedecay.service");
         std::fs::create_dir_all(service_path.parent().expect("service parent"))
             .expect("service dir");
         std::fs::write(
@@ -906,14 +922,117 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
         "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let error = runner
         .service_state(&dir.path().join("daemon.sock"))
         .expect_err("an unreachable user manager has no unit state");
     let message = error.to_string();
-    assert!(message.contains("reported no unit state"), "{message}");
+    assert!(
+        message.contains("systemctl --user show --property=FragmentPath tracedecay.service failed"),
+        "{message}"
+    );
     assert!(message.contains("Failed to connect to bus"), "{message}");
+}
+
+/// The home's default profile keeps the established unit; any other data
+/// directory owns a unit named after a digest of that directory.
+#[test]
+fn a_profile_names_its_own_systemd_unit() {
+    assert_eq!(
+        super::systemd_unit_name(&ProfileRoot::under_home("/home/operator")),
+        "tracedecay.service"
+    );
+    assert_eq!(
+        super::systemd_unit_name(
+            &ProfileRoot::new("/srv/tracedecay-profile").with_home("/home/operator")
+        ),
+        "tracedecay-984068943a900df0.service"
+    );
+}
+
+/// An isolated home shares the account's user manager with the operator, and
+/// that manager loads `tracedecay.service` from the operator's config home.
+/// The isolated profile's install and stop must refuse that unit instead of
+/// driving the operator's daemon.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_isolated_home_never_controls_the_unit_the_manager_loads_from_elsewhere() {
+    let dir = TempDir::new().expect("temp dir");
+    let operator_unit = dir
+        .path()
+        .join("operator/.config/systemd/user/tracedecay.service");
+    std::fs::create_dir_all(operator_unit.parent().expect("operator unit dir"))
+        .expect("operator unit dir");
+    let operator_text = "[Service]\nExecStart=/operator/tracedecay daemon run\n";
+    std::fs::write(&operator_unit, operator_text).expect("operator unit");
+    let fake_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let log = dir.path().join("systemctl.log");
+    fake_service_program(
+        &fake_bin,
+        "systemctl",
+        &bake_script_paths(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n[ \"$2\" = show ] && { [ -e \"$OPERATOR_UNITS/$5\" ] && printf '%s\\n' \"$OPERATOR_UNITS/$5\"; exit 0; }\n[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+            &[
+                ("SYSTEMCTL_LOG", &log),
+                (
+                    "OPERATOR_UNITS",
+                    operator_unit.parent().expect("operator unit dir"),
+                ),
+            ],
+        ),
+    );
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
+    let isolated_home = dir.path().join("isolated");
+    let profile =
+        ProfileRoot::under_home(&isolated_home).with_xdg_config_home(isolated_home.join(".config"));
+    std::fs::create_dir_all(profile.data_dir()).expect("isolated data dir");
+    let isolated_unit = isolated_home.join(".config/systemd/user/tracedecay.service");
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: profile.data_dir().join("daemon.sock"),
+        data_dir_override: None,
+        profile: profile.clone(),
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
+    };
+
+    let install = super::install_service(&spec, true, TEST_BUILD_VERSION)
+        .expect_err("install must refuse the unit the manager loads from the operator's home");
+    let stop = super::stop_service(&profile, TEST_BUILD_VERSION)
+        .expect_err("stop must refuse the unit the manager loads from the operator's home");
+
+    for error in [install, stop] {
+        let tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned {
+            unit,
+            owned,
+            loaded,
+        } = error
+        else {
+            panic!("expected a typed ownership refusal, got: {error}");
+        };
+        assert_eq!(unit, "tracedecay.service");
+        assert_eq!(&*owned, isolated_unit.as_path());
+        assert_eq!(loaded.as_deref(), Some(operator_unit.as_path()));
+    }
+    let commands = std::fs::read_to_string(&log).expect("systemctl log");
+    let mut issued: Vec<&str> = commands.lines().collect();
+    issued.sort_unstable();
+    issued.dedup();
+    assert_eq!(
+        issued,
+        [
+            "--user daemon-reload",
+            "--user show --property=FragmentPath --value tracedecay.service",
+        ],
+        "only reloads and ownership queries may reach the shared manager, got:\n{commands}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&operator_unit).expect("operator unit"),
+        operator_text
+    );
 }
 
 /// A fake service-manager program on the fixture's private bin directory.
@@ -930,9 +1049,15 @@ fn enabled_service_runner(bin: &std::path::Path) -> ServiceRunner {
     let systemctl = fake_service_program(
         bin,
         "systemctl",
-        "#!/bin/sh\n[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+        fake_systemctl!(
+            "[ \"$2\" = is-active ] && echo active\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n"
+        ),
     );
-    ServiceRunner::systemd(&systemctl).expect("fixture systemd runner")
+    ServiceRunner::systemd(
+        &systemctl,
+        &fixture_profile(bin.parent().expect("fixture dir")),
+    )
+    .expect("fixture systemd runner")
 }
 
 /// launchd has no liveness query; an empty `print-disabled` leaves the agent
@@ -1052,6 +1177,29 @@ fn systemd_unit_declares_memory_high_max_and_swap_cap() {
             "the [Service] section must declare {line}, got:\n{unit}"
         );
     }
+}
+
+/// A non-default profile's unit runs that profile's daemon; only the home's
+/// default profile leaves the data directory to the daemon's own default.
+#[test]
+fn systemd_unit_runs_the_profile_that_installed_it() {
+    let render = |profile: ProfileRoot| {
+        super::service_spec(&profile, "/opt/tracedecay/bin/tracedecay", None)
+            .expect("service spec")
+            .render_systemd_user_unit()
+            .expect("systemd unit")
+    };
+
+    let isolated = render(ProfileRoot::new("/srv/trace%decay").with_home("/home/fixture"));
+    let default = render(ProfileRoot::under_home("/home/fixture"));
+
+    assert!(
+        isolated
+            .lines()
+            .any(|line| line == "Environment=\"TRACEDECAY_DATA_DIR=/srv/trace%%decay\""),
+        "{isolated}"
+    );
+    assert!(!default.contains("TRACEDECAY_DATA_DIR"), "{default}");
 }
 
 #[test]
@@ -1613,7 +1761,8 @@ fn refresh_installed_service_skips_missing_unit() {
     std::fs::create_dir_all(&home).expect("home dir");
     let systemctl = fake_bin.join("systemctl");
     write_executable_script(&systemctl, "#!/bin/sh\nexit 0\n").expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
     let spec = DaemonServiceSpec {
@@ -1625,7 +1774,7 @@ fn refresh_installed_service_skips_missing_unit() {
         memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
     };
 
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     let outcome = refresh_in_quiesced_window(runner, &spec).expect("refresh service");
 
     assert_eq!(outcome, None);
@@ -1654,6 +1803,42 @@ fn post_update_rejects_reachable_unmanaged_daemon() {
     assert!(error.to_string().contains("stop"));
 }
 
+/// A Linux host without systemd (a container) has no managed unit, so
+/// maintenance that only quiesces an installed unit must not need `systemctl`;
+/// a lifecycle command that drives the unit still reports it missing.
+#[cfg(target_os = "linux")]
+#[test]
+fn maintenance_without_an_installed_unit_does_not_need_systemctl() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("profile");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let profile = ProfileRoot::new(&data_dir).with_xdg_config_home(dir.path().join("config"));
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&empty_bin).expect("empty bin dir");
+    let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&empty_bin);
+
+    assert_eq!(
+        super::quiesce_installed_service_before_lease(&profile, TEST_BUILD_VERSION)
+            .expect("quiesce without a unit"),
+        DaemonServiceState::Missing
+    );
+    assert_eq!(
+        super::verify_installed_service_quiesced_under_lease(&profile)
+            .expect("verify without a unit"),
+        DaemonServiceState::Missing
+    );
+    let error = ServiceRunner::current_for_installed_unit(&profile)
+        .expect("deferred runner")
+        .stop(TEST_BUILD_VERSION)
+        .expect_err("driving the service manager still needs systemctl");
+    assert!(
+        error
+            .to_string()
+            .contains("host CLI `systemctl` is unavailable"),
+        "{error}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn refresh_installed_service_preserves_existing_socket_path() {
@@ -1670,16 +1855,17 @@ fn refresh_installed_service_preserves_existing_socket_path() {
     write_executable_script(
             &systemctl,
             bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log), ("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped)],
         ),
         )
         .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
 
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let custom_socket = dir.path().join("custom-tracedecay.sock");
     std::fs::write(
@@ -1775,15 +1961,16 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     write_executable_script(
         &systemctl,
         bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let custom_socket = dir.path().join("custom-tracedecay.sock");
     let original_unit = format!(
@@ -1847,15 +2034,16 @@ fn restore_after_update_does_not_activate_a_held_stopped_unit() {
     write_executable_script(
         &systemctl,
         bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let custom_socket = dir.path().join("custom-tracedecay.sock");
     let original_unit = format!(
@@ -1900,15 +2088,16 @@ fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
     write_executable_script(
         &systemctl,
         bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -1968,12 +2157,12 @@ fn restore_after_update_waits_for_authenticated_daemon_identity() {
     let systemctl = fake_bin.join("systemctl");
     write_executable_script(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+        fake_systemctl!("[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
     )
     .expect("fake systemctl");
     let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
     std::fs::write(
@@ -2033,14 +2222,14 @@ fn start_service_reloads_units_and_requires_authenticated_identity() {
     write_executable_script(
             &systemctl,
             bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ ! -f \"$TRACEDECAY_SYSTEMCTL_STARTED\" ] && { echo inactive; exit 3; }\n[ \"$2\" = start ] && : > \"$TRACEDECAY_SYSTEMCTL_STARTED\"\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log), ("TRACEDECAY_SYSTEMCTL_STARTED", &started)],
         ),
         )
         .expect("fake systemctl");
     let profile = fixture_profile(dir.path());
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
     std::fs::write(
@@ -2090,12 +2279,13 @@ fn wait_for_installed_service_state_rejects_identity_mismatch_at_the_deadline() 
     let systemctl = fake_bin.join("systemctl");
     write_executable_script(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+        fake_systemctl!("[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
     std::fs::write(
@@ -2145,12 +2335,13 @@ fn wait_for_installed_service_state_rejects_unresponsive_socket_at_the_deadline(
     let systemctl = fake_bin.join("systemctl");
     write_executable_script(
         &systemctl,
-        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+        fake_systemctl!("[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     let socket_path = dir.path().join("daemon.sock");
     std::fs::write(
@@ -2196,12 +2387,13 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
     write_executable_script(
         &systemctl,
         bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
     )
     .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     let profile = fixture_profile(dir.path());
 
@@ -2220,7 +2412,7 @@ fn restore_after_update_leaves_masked_and_missing_units_untouched() {
         "missing must not invoke systemctl"
     );
 
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -2258,14 +2450,15 @@ fn refresh_installed_service_preserves_stopped_state() {
     write_executable_script(
             &systemctl,
             bake_script_paths(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            fake_systemctl!("printf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && echo active\nexit 0\n"),
             &[("TRACEDECAY_SYSTEMCTL_LOG", &log)],
         ),
         )
         .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::fs::write(
         &service_path,
@@ -2301,10 +2494,11 @@ fn systemd_service_state_detects_runtime_mask() {
     let systemctl = fake_bin.join("systemctl");
     write_executable_script(
             &systemctl,
-            "#!/bin/sh\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
+            "#!/bin/sh\n[ \"$2\" = show ] && { echo /dev/null; exit 0; }\n[ \"$2\" = is-active ] && { echo inactive; exit 3; }\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\n[ \"$2\" = is-active ] && echo active\nexit 0\n",
         )
         .expect("fake systemctl");
-    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+    let runner = ServiceRunner::systemd(&systemctl, &fixture_profile(dir.path()))
+        .expect("fixture systemd runner");
 
     assert_eq!(
         runner
@@ -2326,7 +2520,7 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
     fake_service_program(&fake_bin, "systemctl", "#!/bin/sh\nexit 1\n");
     let _path_guard = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&fake_bin);
     let profile = fixture_profile(dir.path());
-    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    let service_path = config_home.join("systemd/user").join("tracedecay.service");
     std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
     std::os::unix::fs::symlink("/dev/null", &service_path).expect("mask service");
     let spec = DaemonServiceSpec {
@@ -2480,7 +2674,7 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
 
     let unit_dir = home.path().join(".config/systemd/user");
     std::fs::create_dir_all(&unit_dir).unwrap();
-    std::fs::write(unit_dir.join(crate::SERVICE_NAME), "[Service]\n").unwrap();
+    std::fs::write(unit_dir.join("tracedecay.service"), "[Service]\n").unwrap();
     assert_eq!(
         refusal(&profile),
         (
@@ -2488,14 +2682,14 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
                 socket: socket.display().to_string(),
                 named_by: None,
                 service_unit: tracedecay_domain::DaemonServiceUnitObservationV1::Installed {
-                    path: unit_dir.join(crate::SERVICE_NAME).display().to_string(),
+                    path: unit_dir.join("tracedecay.service").display().to_string(),
                     serves: socket.display().to_string(),
                 },
             },
             format!(
                 "TraceDecay daemon socket '{}' is not available. The managed TraceDecay daemon service is installed at '{}' and serves this socket; it may be intentionally held, and passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
                 socket.display(),
-                unit_dir.join(crate::SERVICE_NAME).display()
+                unit_dir.join("tracedecay.service").display()
             )
         )
     );

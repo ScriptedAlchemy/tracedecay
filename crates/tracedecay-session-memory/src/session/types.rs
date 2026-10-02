@@ -564,6 +564,20 @@ impl SessionRetrievalRequest {
     }
 }
 
+/// Why a retrieval has no answer. Each cause asks for a different remedy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalUnavailableCause {
+    /// No store, manifest, payload, or key authority exists for the request.
+    AuthorityAbsent,
+    /// A store read failed.
+    ReadFailed,
+    /// Candidates matched, but none of them hydrated.
+    HydrationUnavailable,
+    /// The kernel refused the admitted request, its cursor, or the projected
+    /// index it read: a defect in what was handed to it, not a missing store.
+    KernelRefused,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRetrievalOutcome<T> {
     Complete {
@@ -592,7 +606,7 @@ pub enum SessionRetrievalOutcome<T> {
     Redacted,
     Deleted,
     Denied,
-    Unavailable,
+    Unavailable(SessionRetrievalUnavailableCause),
     ResetRequired,
     CursorManifestLimitExceeded {
         kind: CursorManifestLimitKindV1,

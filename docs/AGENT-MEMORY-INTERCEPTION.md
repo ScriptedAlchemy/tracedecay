@@ -249,10 +249,10 @@ transcripts"), so Codex sessions also feed reflection.
 
 ### 3.4 Storage loop: session_reflector
 
-`crates/tracedecay-agent-hosts/src/automation/{runner,session_reflector,automatic_facts}.rs`:
+`crates/tracedecay-automation-runtime/src/automation/{runner,session_reflector,automatic_facts}.rs`:
 
 - Scheduler-driven task (`AgentTaskKind::SessionReflector`,
-  `crates/tracedecay-agent-hosts/src/automation/scheduler.rs:301`) gathers LCM session evidence, prompts an
+  `crates/tracedecay-automation-runtime/src/automation/scheduler.rs:797`) gathers LCM session evidence, prompts an
   automation backend (`build_session_reflector_prompt`), and validates
   returned **fact candidates** against evidence citations. Each candidate must
   cite raw messages, store ids, or summary nodes, and confidence remains
@@ -364,8 +364,8 @@ construction:
 - Wire a nudge into `doctor`/`memory_status` when transcripts accumulate but
   automation is disabled ("N sessions ingested, 0 reflected").
 
-Pointers: `crates/tracedecay-agent-hosts/src/automation/config.rs` (defaults/validation),
-`crates/tracedecay-agent-hosts/src/automation/runner.rs::run_session_reflector_with_backend`,
+Pointers: `crates/tracedecay-automation-runtime/src/automation/config.rs` (defaults/validation),
+`crates/tracedecay-automation-runtime/src/automation/runner/session_reflector.rs::run_session_reflector_with_backend`,
 dashboard curation UI (concurrent work in `dashboard/`, coordinate, don't
 touch).
 

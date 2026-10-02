@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_automation::backend::AgentTaskError;
 
 /// How to invoke `codex app-server` for one prompt.
 ///
@@ -60,9 +61,10 @@ pub struct Summary {
 }
 
 /// Runs one prompt to completion. Arguments are `(prompt, config,
-/// thread_source)`; the error is already rendered for an automation port
-/// failure.
-pub type RunPrompt = fn(&str, &SummaryConfig, &str, Option<&Value>) -> Result<Summary, String>;
+/// thread_source, response_schema)`; the error is the typed failure the
+/// app-server runtime observed.
+pub type RunPrompt =
+    fn(&str, &SummaryConfig, &str, Option<&Value>) -> Result<Summary, AgentTaskError>;
 
 static RUN_PROMPT: OnceLock<RunPrompt> = OnceLock::new();
 
@@ -80,11 +82,12 @@ pub fn run_prompt(
     config: &SummaryConfig,
     thread_source: &str,
     response_schema: Option<&Value>,
-) -> Result<Summary, String> {
+) -> Result<Summary, AgentTaskError> {
     let Some(run) = RUN_PROMPT.get() else {
-        return Err(
-            "codex app-server backend is unavailable: no prompt runner is registered".to_string(),
-        );
+        return Err(AgentTaskError::Unavailable {
+            reason: "codex app-server backend is unavailable: no prompt runner is registered"
+                .to_string(),
+        });
     };
     run(prompt, config, thread_source, response_schema)
 }

@@ -24,16 +24,6 @@ const RELEASED_UNSLUGGED_INDEX_MARKERS: [&str; 2] = [
     "<!-- TRACEDECAY MANAGED SKILLS START -->",
     "<!-- TRACEDECAY MANAGED SKILLS END -->",
 ];
-const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
-    SkillInstallTarget::Cursor,
-    SkillInstallTarget::Codex,
-    SkillInstallTarget::Claude,
-    SkillInstallTarget::Agents,
-    SkillInstallTarget::OpenCode,
-    SkillInstallTarget::Kimi,
-    SkillInstallTarget::Kiro,
-    SkillInstallTarget::Hermes,
-];
 
 pub use crate::automation::managed_skills::SkillInstallTarget;
 
@@ -255,22 +245,10 @@ pub fn export_prompt_skill_index(
     })
 }
 
-pub fn remove_prompt_skill_index(host_io: &HostIo, prompt_path: &Path) -> Result<()> {
-    remove_prompt_skill_indexes(host_io, prompt_path, None)
-}
-
 pub fn remove_prompt_skill_index_for_target(
     host_io: &HostIo,
     prompt_path: &Path,
     target: SkillInstallTarget,
-) -> Result<()> {
-    remove_prompt_skill_indexes(host_io, prompt_path, Some(target))
-}
-
-fn remove_prompt_skill_indexes(
-    host_io: &HostIo,
-    prompt_path: &Path,
-    target: Option<SkillInstallTarget>,
 ) -> Result<()> {
     let existing = match fs::read_to_string(prompt_path) {
         Ok(contents) => contents,
@@ -278,10 +256,7 @@ fn remove_prompt_skill_indexes(
         Err(err) => return Err(err.into()),
     };
     refuse_released_unslugged_index(prompt_path, &existing)?;
-    let updated = match target {
-        Some(target) => remove_marked_block_for_target(&existing, target)?,
-        None => remove_all_marked_blocks(&existing)?,
-    };
+    let updated = remove_marked_block_for_target(&existing, target)?;
     if updated == existing {
         return Ok(());
     }
@@ -425,22 +400,6 @@ fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) ->
         return Ok(remove_range(existing, start, end));
     }
     Ok(existing.to_string())
-}
-
-fn remove_all_marked_blocks(existing: &str) -> Result<String> {
-    let mut updated = existing.to_string();
-    for target in ALL_SKILL_INSTALL_TARGETS
-        .into_iter()
-        .filter(|target| target.writes_prompt_index())
-    {
-        let (start_marker, end_marker) = prompt_index_markers(target);
-        if let Some((start, end)) =
-            managed_block_range(&updated, target, &start_marker, &end_marker)?
-        {
-            updated = remove_range(&updated, start, end);
-        }
-    }
-    Ok(updated)
 }
 
 /// Finds a normal marker-delimited block, or a generated block whose start

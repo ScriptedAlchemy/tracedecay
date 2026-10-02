@@ -29,15 +29,16 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphProjectionIdentity, GraphReadMeter, GraphRelation,
-    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, RelationFanoutOverflow,
+    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, NeverCancelled, RelationFanoutOverflow,
     VerifiedGraphSnapshot,
 };
 
+use super::warm_clock::{WarmClock, WarmOwner};
 use super::{
     CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
-    CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1, code_edge_kind,
-    code_edge_kind_edge, compare_edges, edge_record, load_symbol_entity_record, load_symbol_record,
-    symbol_entity_id,
+    CodeGraphServingWarmthV1, CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1,
+    code_edge_kind, code_edge_kind_edge, compare_edges, edge_record, load_symbol_entity_record,
+    load_symbol_record, symbol_entity_id,
 };
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -69,10 +70,25 @@ enum InteractiveCatalogState {
         owner: Option<Arc<InteractiveCatalogBuildLease>>,
     },
     Ready(Arc<InteractiveCatalog>),
+    /// Given back for memory. The next catalog read starts a background
+    /// rebuild; no request thread pays for the scan.
+    Released,
     Failed(CodeGraphProjectionError),
 }
 
+const CATALOG_WARMING: &str = "code graph interactive catalog is warming in the background";
+const CATALOG_RELEASED: &str =
+    "code graph interactive catalog was released and is re-warming in the background";
+
 struct InteractiveCatalogBuildLease;
+
+/// The state a catalog build took over, restored when the build is cancelled.
+#[derive(Clone, Copy)]
+enum TakenOverCatalog {
+    Cold,
+    Released,
+    Background,
+}
 
 pub(super) struct InteractiveCatalogCache {
     state: RwLock<InteractiveCatalogState>,
@@ -84,6 +100,18 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    clock: Arc<WarmClock>,
+}
+
+/// What a catalog read would wait on, as [`InteractiveCatalogCache::residency`]
+/// reports it.
+pub(super) enum CatalogResidency {
+    Resident,
+    Released,
+    /// Warming again after a completed warm.
+    Rewarming,
+    /// Cold, failed, or on its first warm: the reader answers that state.
+    Unreleased,
 }
 
 /// Outcome of asking a store to give back its interactive catalog.
@@ -103,12 +131,31 @@ pub enum CodeGraphCatalogReleaseV1 {
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
 impl InteractiveCatalogCache {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(clock: Arc<WarmClock>) -> Self {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            clock,
+        }
+    }
+
+    pub(super) fn residency(&self) -> CatalogResidency {
+        let Ok(state) = self.state.read() else {
+            return CatalogResidency::Unreleased;
+        };
+        match &*state {
+            InteractiveCatalogState::Ready(_) => CatalogResidency::Resident,
+            InteractiveCatalogState::Released => CatalogResidency::Released,
+            InteractiveCatalogState::Warming { .. }
+                if self.clock.has_warmed(WarmOwner::Catalog) =>
+            {
+                CatalogResidency::Rewarming
+            }
+            InteractiveCatalogState::Cold
+            | InteractiveCatalogState::Warming { .. }
+            | InteractiveCatalogState::Failed(_) => CatalogResidency::Unreleased,
         }
     }
 
@@ -133,12 +180,30 @@ impl InteractiveCatalogCache {
         if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
             return CodeGraphCatalogReleaseV1::NotReady;
         }
-        *state = InteractiveCatalogState::Cold;
+        *state = InteractiveCatalogState::Released;
         CodeGraphCatalogReleaseV1::Released {
             bytes: self
                 .ready_bytes
                 .swap(0, std::sync::atomic::Ordering::AcqRel),
         }
+    }
+
+    pub(super) fn warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {
+        let state = self.state.read().map_err(|_| catalog_lock_poisoned())?;
+        Ok(match &*state {
+            InteractiveCatalogState::Ready(_) => CodeGraphServingWarmthV1::Warm,
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { .. } => {
+                CodeGraphServingWarmthV1::Warming(CATALOG_WARMING.to_owned())
+            }
+            InteractiveCatalogState::Released => CodeGraphServingWarmthV1::Warming(
+                "code graph interactive catalog was released for memory; the next graph read \
+                 re-warms it"
+                    .to_owned(),
+            ),
+            InteractiveCatalogState::Failed(error) => {
+                CodeGraphServingWarmthV1::Failed(error.to_string())
+            }
+        })
     }
 }
 
@@ -231,7 +296,7 @@ impl CodeGraphProjectionStore {
             .write()
             .map_err(|_| catalog_lock_poisoned())?;
         match &*state {
-            InteractiveCatalogState::Cold => {
+            InteractiveCatalogState::Cold | InteractiveCatalogState::Released => {
                 *state = InteractiveCatalogState::Warming { owner: None };
                 Ok(())
             }
@@ -422,6 +487,37 @@ impl CodeGraphInteractiveReader {
                         }
                         None => gaps.exact_target_unavailable = true,
                     }
+                }
+            }
+        }
+        Ok(gaps)
+    }
+
+    /// The kinds of unresolved call site the queried symbols themselves make:
+    /// calls whose target the seal could not bind are callees the graph
+    /// cannot list.
+    pub fn unresolved_callee_gaps(
+        &self,
+        sources: &[CodeGraphSymbolRefV1],
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<UnresolvedCallerGapsV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut gaps = UnresolvedCallerGapsV1::default();
+        for source in sources {
+            catalog::check_cancelled(cancellation.as_ref())?;
+            for call in catalog
+                .unresolved_sources_by_entity
+                .get(&source.0)
+                .and_then(|occurrence| catalog.symbols.get(occurrence))
+                .into_iter()
+                .flat_map(|symbol| &symbol.unresolved_calls)
+            {
+                match call.unmodeled_import {
+                    Some(shape) => {
+                        gaps.unmodeled_imports.insert(shape);
+                    }
+                    None => gaps.exact_target_unavailable = true,
                 }
             }
         }
@@ -1402,14 +1498,25 @@ impl CodeGraphInteractiveReader {
                 }
                 InteractiveCatalogState::Warming { .. } => {
                     return Err(CodeGraphProjectionError::Unavailable(
-                        "code graph interactive catalog is warming in the background".to_owned(),
+                        CATALOG_WARMING.to_owned(),
                     ));
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold => {}
+                InteractiveCatalogState::Released => {}
+                InteractiveCatalogState::Cold => {
+                    drop(state);
+                    return self.build_cold_catalog(cancellation);
+                }
             }
         }
-        self.warm_catalog(Arc::clone(&cancellation))?;
+        Err(self.rewarm_released_catalog())
+    }
+
+    fn build_cold_catalog(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Arc<InteractiveCatalog>, CodeGraphProjectionError> {
+        self.warm_catalog(cancellation)?;
         let state = self
             .catalog
             .state
@@ -1418,14 +1525,56 @@ impl CodeGraphInteractiveReader {
         match &*state {
             InteractiveCatalogState::Ready(catalog) => Ok(Arc::clone(catalog)),
             InteractiveCatalogState::Failed(error) => Err(error.clone()),
-            InteractiveCatalogState::Cold | InteractiveCatalogState::Warming { .. } => {
-                Err(CodeGraphProjectionError::Unavailable(
-                    "code graph interactive catalog is warming in the background".to_owned(),
+            InteractiveCatalogState::Cold
+            | InteractiveCatalogState::Released
+            | InteractiveCatalogState::Warming { .. } => Err(
+                CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned()),
+            ),
+        }
+    }
+
+    /// Start rebuilding a released catalog on a thread of its own and answer
+    /// the typed warming state. The rebuild answers to no request's
+    /// cancellation, so a short read cannot abandon it half-scanned.
+    pub(super) fn rewarm_released_catalog(&self) -> CodeGraphProjectionError {
+        let released = CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned());
+        {
+            let Ok(mut state) = self.catalog.state.write() else {
+                return catalog_lock_poisoned();
+            };
+            if !matches!(&*state, InteractiveCatalogState::Released) {
+                return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+            }
+            *state = InteractiveCatalogState::Warming { owner: None };
+        }
+        self.catalog.clock.begin(WarmOwner::Catalog);
+        let background = Self {
+            cancellation: Arc::new(NeverCancelled),
+            ..self.clone()
+        };
+        let spawned = std::thread::Builder::new()
+            .name("code-graph-catalog-rewarm".to_owned())
+            .spawn(move || {
+                // A failed build is recorded as the catalog's `Failed` state,
+                // which every later read and the serving status answer.
+                let _ = background.warm_catalog(Arc::new(NeverCancelled));
+            });
+        match spawned {
+            Ok(_) => released,
+            Err(error) => {
+                if let Ok(mut state) = self.catalog.state.write() {
+                    *state = InteractiveCatalogState::Released;
+                }
+                self.catalog.clock.settle(WarmOwner::Catalog, false);
+                CodeGraphProjectionError::Unavailable(format!(
+                    "code graph interactive catalog re-warm could not start: {error}"
                 ))
             }
         }
     }
 
+    /// The warm's wall time, from entry through any wait for the build gate,
+    /// is the catalog's measured warm-up when this call builds it.
     fn warm_catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1433,47 +1582,54 @@ impl CodeGraphInteractiveReader {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let _build = self
-            .catalog
-            .build
-            .lock()
-            .map_err(|_| catalog_lock_poisoned())?;
+        self.catalog.clock.begin(WarmOwner::Catalog);
+        let built = match self.catalog.build.lock() {
+            Ok(_build) => self.build_catalog_under_gate(cancellation),
+            Err(_) => Err(catalog_lock_poisoned()),
+        };
+        self.catalog
+            .clock
+            .settle(WarmOwner::Catalog, matches!(built, Ok(true)));
+        built.map(|_| ())
+    }
+
+    /// Builds and publishes the catalog unless one is ready; `Ok(true)` when
+    /// this call published it. The caller holds the build gate.
+    fn build_catalog_under_gate(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
         let build_lease = Arc::new(InteractiveCatalogBuildLease);
-        let background_owned = {
+        let taken_over = {
             let mut state = self
                 .catalog
                 .state
                 .write()
                 .map_err(|_| catalog_lock_poisoned())?;
-            match &*state {
+            let taken_over = match &*state {
                 InteractiveCatalogState::Ready(_) => {
                     if cancellation.is_cancelled() {
                         return Err(CodeGraphProjectionError::Cancelled);
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold => {
-                    *state = InteractiveCatalogState::Warming {
-                        owner: Some(Arc::clone(&build_lease)),
-                    };
-                    false
-                }
-                InteractiveCatalogState::Warming { owner: None } => {
-                    *state = InteractiveCatalogState::Warming {
-                        owner: Some(Arc::clone(&build_lease)),
-                    };
-                    true
-                }
+                InteractiveCatalogState::Cold => TakenOverCatalog::Cold,
+                InteractiveCatalogState::Released => TakenOverCatalog::Released,
+                InteractiveCatalogState::Warming { owner: None } => TakenOverCatalog::Background,
                 InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         "code graph interactive catalog warm already has an owner".to_owned(),
                     ));
                 }
-            }
+            };
+            *state = InteractiveCatalogState::Warming {
+                owner: Some(Arc::clone(&build_lease)),
+            };
+            taken_over
         };
         self.catalog
             .scan_builds
@@ -1520,15 +1676,17 @@ impl CodeGraphInteractiveReader {
                     std::sync::atomic::Ordering::Release,
                 );
                 *state = InteractiveCatalogState::Ready(catalog);
-                Ok(())
+                Ok(true)
             }
             Err(CodeGraphProjectionError::Cancelled) => {
                 // A background-marked build remains background-owned after
                 // cancellation, so a request cannot take over its full scan.
-                *state = if background_owned {
-                    InteractiveCatalogState::Warming { owner: None }
-                } else {
-                    InteractiveCatalogState::Cold
+                *state = match taken_over {
+                    TakenOverCatalog::Cold => InteractiveCatalogState::Cold,
+                    TakenOverCatalog::Released => InteractiveCatalogState::Released,
+                    TakenOverCatalog::Background => {
+                        InteractiveCatalogState::Warming { owner: None }
+                    }
                 };
                 Err(CodeGraphProjectionError::Cancelled)
             }

@@ -573,6 +573,7 @@ where
                 .push((index, symbol));
         }
     }
+    let mut receiver_gaps = HashSet::new();
     for (index, reference) in selected_references(files, selection) {
         let file = files[index].as_ref();
         if !is_typescript_family(file.extraction.language.as_str())
@@ -581,15 +582,26 @@ where
         {
             continue;
         }
-        if typescript_import_call_outcome(
+        match typescript_import_call_outcome(
             files,
             &by_simple_name,
             &typescript_modules,
             file,
             reference,
-        ) == Some(ImportBindingOutcomeV1::Unresolved)
-        {
-            unresolved.push(reference.clone());
+        ) {
+            Some(ImportBindingOutcomeV1::Unresolved) => unresolved.push(reference.clone()),
+            // A member call no import names is a receiver call nothing binds.
+            // It can only be a missing edge to a project symbol of that name,
+            // and one site per caller and name is the whole disclosure.
+            None => {
+                if let Some((_, member)) = reference.reference_name.rsplit_once('.')
+                    && by_simple_name.contains_key(member)
+                    && receiver_gaps.insert((&reference.from_occurrence, member))
+                {
+                    unresolved.push(reference.clone());
+                }
+            }
+            Some(_) => {}
         }
     }
     unresolved

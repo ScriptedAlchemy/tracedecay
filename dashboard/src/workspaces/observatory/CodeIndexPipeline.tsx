@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type {
   CodeIndexBuildProgressV1,
   CodeIndexFreshnessPayloadV1,
+  CodeIndexMountFailureV1,
   CodeIndexWorktreeFreshnessV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
@@ -21,7 +22,8 @@ export function CodeIndexPipeline({
   scopeKey: string;
 }) {
   const progress = useLatestCodeIndexProgress(result, scopeKey);
-  const worktrees = result?.outcome === 'envelope' ? result.envelope.payload.worktrees : [];
+  const payload = result?.outcome === 'envelope' ? result.envelope.payload : undefined;
+  const worktrees = payload?.worktrees ?? [];
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -42,7 +44,11 @@ export function CodeIndexPipeline({
       aria-label="Code-index pipeline"
     >
       <h2 className="td-legend">Code-index pipeline</h2>
-      <CodeIndexReadinessList worktrees={worktrees} />
+      {payload?.mount_failure ? (
+        <CodeIndexMountFailureNotice className="mt-2" failure={payload.mount_failure} />
+      ) : (
+        <CodeIndexReadinessList worktrees={worktrees} />
+      )}
       {worktrees.some((worktree) => worktree.restore_progress != null) ? (
         <div className="mt-2 flex flex-col gap-2">
           {worktrees.flatMap((worktree) =>
@@ -78,6 +84,22 @@ export function CodeIndexPipeline({
         </div>
       )}
     </section>
+  );
+}
+
+/** The daemon's safe sentence for a failed mount and the command that retries it. */
+export function CodeIndexMountFailureNotice({
+  failure,
+  className,
+}: {
+  failure: CodeIndexMountFailureV1;
+  className?: string;
+}) {
+  return (
+    <div className={className} data-code-index-mount-failure>
+      <p className="text-body text-state-error">{failure.message}</p>
+      <p className="text-sm text-text-secondary">{failure.remediation}</p>
+    </div>
   );
 }
 
@@ -126,6 +148,8 @@ export function graphServingLabel(
       return 'pending';
     case 'ready':
       return 'ready';
+    case 'warming':
+      return `warming · ${graph.reason}`;
     case 'refused':
       return `refused · ${graph.reason}`;
     case 'unavailable':

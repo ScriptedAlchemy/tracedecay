@@ -1119,14 +1119,18 @@ fn build_shared_jsonl_page_with_frame_limit(
         mut memory,
         cancellation,
     } = options;
+    // A gate admits only the first build of its path. A waiter rebuilds the
+    // same path when the producer's page failed or did not fit the
+    // process-global cache (pinned pages from concurrent tests fill it); a
+    // reusable gate would park that rebuild in a new barrier generation with
+    // no partners, forever.
     #[cfg(test)]
     let build_gate = {
         SHARED_JSONL_BUILD_GATES
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&path)
-            .cloned()
+            .remove(&path)
     };
     #[cfg(test)]
     let _build_guard = SharedJsonlBuildGuard::enter(&path);

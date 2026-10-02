@@ -71,7 +71,7 @@ async fn fence_install_reports_runtime_interruptions_as_typed_recovery_errors() 
         project_id: project_id.clone(),
         target_binding,
         authority_key: authority_key(&expected).expect("authority key"),
-        expected: current,
+        expected: Some(current),
         replacement,
         installed_at: UtcMicros(1),
     };

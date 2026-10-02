@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 use tracedecay_domain::BrainNodeId;
-use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
@@ -2581,15 +2580,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
     ) -> Arc<OnceLock<Arc<dyn RemoteRecoveryProjectLifecycle>>> {
         Arc::clone(&self.remote_recovery_project_lifecycle)
-    }
-
-    pub fn retain_hook_task<F, Fut>(&self, provider: &str, session_id: &str, operation: F) -> bool
-    where
-        F: FnOnce(ObservationCancellation) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.retained_hook_tasks
-            .retain(provider, session_id, operation)
     }
 }
 

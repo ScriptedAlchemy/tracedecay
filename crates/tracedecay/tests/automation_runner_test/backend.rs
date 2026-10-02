@@ -11,10 +11,11 @@ use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt;
 
 use tracedecay_automation_runtime::automation::backend::{
-    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    BackendRetryPolicy, CODEX_EXECUTABLE_UNCONFIGURED, CodexAppServerBackend,
-    agent_task_failure_disposition, backend_availability, classify_agent_task_error_message,
-    extract_json_object_prefix, run_agent_task_with_retry,
+    AgentTaskBackend, AgentTaskError, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest,
+    AgentTaskResponse, AgentTaskRetryAttempt, AgentTaskRetryReport, BackendRetryPolicy,
+    CODEX_EXECUTABLE_UNCONFIGURED, CodexAppServerBackend, agent_task_failure_disposition,
+    backend_availability, extract_json_object_prefix, run_agent_task_with_retry,
+    run_agent_task_with_retry_report,
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
@@ -189,77 +190,9 @@ fn rejects_non_object_and_prefix_text() {
 }
 
 #[test]
-fn classifies_backend_failures_for_retry_policy() {
-    for (message, expected, retryable) in [
-        (
-            "timed out waiting for codex app-server response",
-            AgentTaskFailureClass::Timeout,
-            true,
-        ),
-        (
-            "codex app-server backend executable 'codex' was not found",
-            AgentTaskFailureClass::Unavailable,
-            true,
-        ),
-        (
-            "config error: codex app-server closed stdout before completing",
-            AgentTaskFailureClass::Disconnected,
-            true,
-        ),
-        (
-            "json error: expected value at line 1 column 1",
-            AgentTaskFailureClass::MalformedOutput,
-            false,
-        ),
-        (
-            "codex app-server returned an empty summary",
-            AgentTaskFailureClass::MalformedOutput,
-            false,
-        ),
-        (
-            "temporarily unavailable, try again later",
-            AgentTaskFailureClass::Retryable,
-            true,
-        ),
-        (
-            "model refused the request because policy rejected the prompt",
-            AgentTaskFailureClass::Permanent,
-            false,
-        ),
-    ] {
-        let classification = classify_agent_task_error_message(message);
-        assert_eq!(classification, expected, "message: {message}");
-        assert_eq!(
-            classification.is_retryable(),
-            retryable,
-            "message: {message}"
-        );
-    }
-}
-
-#[test]
-fn failure_disposition_heals_stale_recorded_retryability() {
-    let disposition = agent_task_failure_disposition(
-        Some(AgentTaskFailureClass::Permanent),
-        Some(false),
-        Some("config error: codex app-server closed stdout before completing"),
-    );
-
-    assert_eq!(
-        disposition.classification,
-        Some(AgentTaskFailureClass::Disconnected)
-    );
-    assert_eq!(disposition.retryable, Some(true));
-    assert!(!disposition.is_non_retryable());
-}
-
-#[test]
 fn malformed_output_is_retryable_on_a_later_scheduled_run() {
-    let disposition = agent_task_failure_disposition(
-        Some(AgentTaskFailureClass::MalformedOutput),
-        Some(false),
-        Some("config error: automation backend output must include a ops array"),
-    );
+    let disposition =
+        agent_task_failure_disposition(Some(AgentTaskFailureClass::MalformedOutput), Some(false));
 
     assert_eq!(
         disposition.classification,
@@ -269,25 +202,104 @@ fn malformed_output_is_retryable_on_a_later_scheduled_run() {
     assert!(!disposition.is_non_retryable());
 }
 
-#[test]
-fn oversized_backend_input_is_retryable_after_request_bounding_changes() {
-    let error = "codex app-server turn failed: input_too_large: Input exceeds the maximum length of 1048576 characters";
-    let disposition = agent_task_failure_disposition(
-        Some(AgentTaskFailureClass::Permanent),
-        Some(false),
-        Some(error),
+/// Each reported Codex failure settles in the class its typed codes name,
+/// never the class its human-readable message happens to suggest: the
+/// `badRequest` turn mentions "not found" and the `unauthorized` turn
+/// mentions no denial at all.
+#[tokio::test]
+async fn codex_reported_failures_settle_by_their_typed_codes() {
+    register_runtime_ports();
+    let policy = BackendRetryPolicy::new(
+        3,
+        vec![Duration::ZERO, Duration::ZERO],
+        fake_codex_response_timeout(),
     );
+    let mut observed = Vec::new();
+    for behavior in [
+        "input_too_large",
+        "bad_request_not_found",
+        "unauthorized",
+        "rate_limited_then_json",
+        "stream_disconnected_then_json",
+    ] {
+        let fake = FakeCodexAppServer::new_with_behavior(behavior);
+        let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
+            codex_bin: fake.bin.clone(),
+            model: Some("configured-model".to_string()),
+            timeout: fake_codex_response_timeout(),
+        });
+        let request = AgentTaskRequest::new(
+            format!("run_{behavior}"),
+            AgentTaskKind::MemoryCurator,
+            "backend prompt".to_string(),
+            None,
+            json!({}),
+        );
+        let mut report = AgentTaskRetryReport::default();
+        let result = run_agent_task_with_retry_report(&backend, &request, &policy, &mut report)
+            .await
+            .map(|response| response.output_json);
+        observed.push((
+            behavior,
+            result.map_err(|error| error.failure_class()),
+            report.attempts().to_vec(),
+        ));
+    }
 
+    let failed = |class| AgentTaskRetryAttempt {
+        attempt: 1,
+        succeeded: false,
+        failure_classification: Some(class),
+        backoff_millis: 0,
+    };
+    let recovered = |class| {
+        vec![
+            failed(class),
+            AgentTaskRetryAttempt {
+                attempt: 2,
+                succeeded: true,
+                failure_classification: None,
+                backoff_millis: 0,
+            },
+        ]
+    };
     assert_eq!(
-        classify_agent_task_error_message(error),
-        AgentTaskFailureClass::Permanent,
-        "the same oversized request must not be retried immediately"
+        observed,
+        vec![
+            (
+                "input_too_large",
+                Err(AgentTaskFailureClass::InputTooLarge),
+                vec![failed(AgentTaskFailureClass::InputTooLarge)],
+            ),
+            (
+                "bad_request_not_found",
+                Err(AgentTaskFailureClass::Permanent),
+                vec![failed(AgentTaskFailureClass::Permanent)],
+            ),
+            (
+                "unauthorized",
+                Err(AgentTaskFailureClass::Denied),
+                vec![failed(AgentTaskFailureClass::Denied)],
+            ),
+            (
+                "rate_limited_then_json",
+                Ok(Some(json!({"ops": []}))),
+                recovered(AgentTaskFailureClass::Retryable),
+            ),
+            (
+                "stream_disconnected_then_json",
+                Ok(Some(json!({"ops": []}))),
+                recovered(AgentTaskFailureClass::Disconnected),
+            ),
+        ]
     );
+    let oversized =
+        agent_task_failure_disposition(Some(AgentTaskFailureClass::InputTooLarge), Some(false));
     assert_eq!(
-        disposition.classification,
-        Some(AgentTaskFailureClass::Retryable)
+        oversized.retryable,
+        Some(true),
+        "a later run bounds its request from fresh evidence"
     );
-    assert_eq!(disposition.retryable, Some(true));
 }
 
 #[test]
@@ -407,8 +419,10 @@ fn codex_app_server_backend_rejects_nested_schema_matching_json_object() {
     let (err, pid) =
         backend_error_for_behavior("json_wrapped_response", fake_codex_response_timeout());
 
+    assert_eq!(err.failure_class(), AgentTaskFailureClass::MalformedOutput);
     assert!(
-        err.contains("automation backend output must include a ops array"),
+        err.to_string()
+            .contains("automation backend output must include a ops array"),
         "unexpected error: {err}"
     );
     assert_process_gone(pid);
@@ -571,13 +585,11 @@ fn codex_app_server_backend_uses_configured_executable_model_when_unpinned() {
 fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
     let (err, pid) = backend_error_for_behavior("timeout", Duration::from_millis(300));
 
-    assert!(
-        err.contains("timed out waiting for codex app-server"),
-        "unexpected error: {err}"
-    );
     assert_eq!(
-        classify_agent_task_error_message(&err),
-        AgentTaskFailureClass::Timeout
+        err,
+        AgentTaskError::Timeout {
+            reason: "timed out waiting for codex app-server".to_owned(),
+        }
     );
     assert_process_gone(pid);
 }
@@ -586,13 +598,12 @@ fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
 fn codex_app_server_backend_propagates_malformed_json_errors_and_reaps_child() {
     let (err, pid) = backend_error_for_behavior("malformed", fake_codex_response_timeout());
 
-    assert!(
-        err.contains("expected ident") || err.contains("expected value"),
-        "unexpected error: {err}"
-    );
     assert_eq!(
-        classify_agent_task_error_message(&err),
-        AgentTaskFailureClass::MalformedOutput
+        err,
+        AgentTaskError::MalformedOutput {
+            reason: "codex app-server sent an unparsable frame: expected ident at line 1 column 2"
+                .to_owned(),
+        }
     );
     assert_process_gone(pid);
 }
@@ -601,13 +612,11 @@ fn codex_app_server_backend_propagates_malformed_json_errors_and_reaps_child() {
 fn codex_app_server_backend_propagates_empty_output_errors_and_reaps_child() {
     let (err, pid) = backend_error_for_behavior("empty", fake_codex_response_timeout());
 
-    assert!(
-        err.contains("codex app-server returned an empty summary"),
-        "unexpected error: {err}"
-    );
     assert_eq!(
-        classify_agent_task_error_message(&err),
-        AgentTaskFailureClass::MalformedOutput
+        err,
+        AgentTaskError::MalformedOutput {
+            reason: "codex app-server returned an empty summary".to_owned(),
+        }
     );
     assert_process_gone(pid);
 }
@@ -711,7 +720,7 @@ impl FakeCodexAppServer {
     }
 }
 
-fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
+fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (AgentTaskError, u32) {
     // The backend can time out and reap the child before a slow interpreter
     // runs its first line, so the pid comes from the spawn event, not from a
     // file the child may never write.
@@ -723,7 +732,10 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32
     (err, started.pid_of(&fake.bin))
 }
 
-fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeCodexAppServer) {
+fn run_backend_for_behavior(
+    behavior: &str,
+    timeout: Duration,
+) -> (AgentTaskError, FakeCodexAppServer) {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
@@ -738,7 +750,7 @@ fn run_backend_for_behavior(behavior: &str, timeout: Duration) -> (String, FakeC
         None,
         json!({}),
     );
-    let err = backend.run_task(&request).unwrap_err().to_string();
+    let err = backend.run_task(&request).unwrap_err();
     (err, fake)
 }
 
@@ -928,6 +940,39 @@ with open(log_path, "a", encoding="utf-8") as log:
                         error=dict(message="configured model is unsupported"),
                     )),
                 )), flush=True)
+            elif behavior == "input_too_large":
+                print(json.dumps(dict(
+                    id=msg.get("id"),
+                    error=dict(
+                        code=-32602,
+                        message="Input exceeds the maximum length of 1048576 characters.",
+                        data=dict(input_error_code="input_too_large", max_chars=1048576, actual_chars=1048577),
+                    ),
+                )), flush=True)
+            elif behavior in ("bad_request_not_found", "unauthorized"):
+                if behavior == "unauthorized":
+                    error = dict(message="Your session expired; sign in again.", codexErrorInfo="unauthorized")
+                else:
+                    error = dict(message="model 'configured-model' not found", codexErrorInfo="badRequest")
+                print(json.dumps(dict(
+                    method="turn/completed",
+                    params=dict(turn=dict(status="failed", error=error)),
+                )), flush=True)
+            elif behavior in ("rate_limited_then_json", "stream_disconnected_then_json"):
+                marker = log_path + ".failed-once"
+                if not os.path.exists(marker):
+                    open(marker, "w").close()
+                    if behavior == "rate_limited_then_json":
+                        info = "rateLimitExceeded"
+                    else:
+                        info = dict(responseStreamDisconnected=dict(httpStatusCode=None))
+                    print(json.dumps(dict(
+                        method="turn/completed",
+                        params=dict(turn=dict(status="failed", error=dict(message="please slow down", codexErrorInfo=info))),
+                    )), flush=True)
+                else:
+                    print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=json.dumps(dict(ops=[])), model="actual-model"))), flush=True)
+                    print(json.dumps(dict(method="turn/completed")), flush=True)
             elif behavior == "json_wrapped_response":
                 payload = json.dumps(dict(result=dict(ops=[])))
                 print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
@@ -965,15 +1010,15 @@ fn assert_process_gone(_pid: u32) {}
 struct FlakyBackend {
     calls: AtomicUsize,
     fail_until: usize,
-    fail_message: &'static str,
+    failure: AgentTaskError,
 }
 
 impl FlakyBackend {
-    fn new(fail_until: usize, fail_message: &'static str) -> Self {
+    fn new(fail_until: usize, failure: AgentTaskError) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             fail_until,
-            fail_message,
+            failure,
         }
     }
 
@@ -990,11 +1035,7 @@ impl AgentTaskBackend for FlakyBackend {
     {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.fail_until {
-            return Err(
-                tracedecay_automation::backend::AgentTaskError::from_backend_message(
-                    self.fail_message,
-                ),
-            );
+            return Err(self.failure.clone());
         }
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
@@ -1035,7 +1076,12 @@ fn instant_retry_policy(max_attempts: u32) -> BackendRetryPolicy {
 
 #[tokio::test]
 async fn retry_recovers_transient_backend_failure_on_second_attempt() {
-    let backend = FlakyBackend::new(1, "timed out waiting for codex app-server response");
+    let backend = FlakyBackend::new(
+        1,
+        AgentTaskError::Timeout {
+            reason: "timed out waiting for codex app-server response".to_owned(),
+        },
+    );
     let request = retry_test_request();
 
     let response = run_agent_task_with_retry(&backend, &request, &instant_retry_policy(3))
@@ -1051,7 +1097,12 @@ async fn retry_recovers_transient_backend_failure_on_second_attempt() {
 async fn retry_stops_after_exhausting_bounded_attempts() {
     // Always-transient failure with a generous budget: the helper should make
     // the first attempt plus two retries (3 total) then propagate the error.
-    let backend = FlakyBackend::new(usize::MAX, "closed stdout before completing");
+    let backend = FlakyBackend::new(
+        usize::MAX,
+        AgentTaskError::Disconnected {
+            reason: "closed stdout before completing".to_owned(),
+        },
+    );
     let request = retry_test_request();
 
     let err = run_agent_task_with_retry(&backend, &request, &instant_retry_policy(3))
@@ -1059,9 +1110,12 @@ async fn retry_stops_after_exhausting_bounded_attempts() {
         .expect_err("exhausted retries should propagate the final error");
 
     assert_eq!(backend.calls(), 3, "first attempt plus two bounded retries");
-    assert!(
-        err.to_string().contains("closed stdout before completing"),
-        "final error should propagate unchanged: {err}"
+    assert_eq!(
+        err,
+        AgentTaskError::Disconnected {
+            reason: "closed stdout before completing".to_owned(),
+        },
+        "final error should propagate unchanged"
     );
 }
 
@@ -1069,7 +1123,9 @@ async fn retry_stops_after_exhausting_bounded_attempts() {
 async fn retry_does_not_retry_non_transient_backend_failure() {
     let backend = FlakyBackend::new(
         usize::MAX,
-        "model refused the request because policy rejected the prompt",
+        AgentTaskError::Failed {
+            reason: "model refused the request because policy rejected the prompt".to_owned(),
+        },
     );
     let request = retry_test_request();
 
@@ -1077,10 +1133,7 @@ async fn retry_does_not_retry_non_transient_backend_failure() {
         .await
         .expect_err("permanent failure should not be retried");
 
-    assert_eq!(
-        classify_agent_task_error_message(&err.to_string()),
-        AgentTaskFailureClass::Permanent
-    );
+    assert_eq!(err.failure_class(), AgentTaskFailureClass::Permanent);
     assert_eq!(backend.calls(), 1, "non-transient failure must fail fast");
 }
 
@@ -1090,7 +1143,9 @@ async fn retry_respects_job_timeout_budget() {
     // 1s budget, so no retry may be attempted.
     let backend = FlakyBackend::new(
         usize::MAX,
-        "timed out waiting for codex app-server response",
+        AgentTaskError::Timeout {
+            reason: "timed out waiting for codex app-server response".to_owned(),
+        },
     );
     let request = retry_test_request();
     let policy = BackendRetryPolicy::new(3, vec![Duration::from_secs(10)], Duration::from_secs(1));

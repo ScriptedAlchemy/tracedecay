@@ -6,8 +6,8 @@ use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentHoldingV1,
-    ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ProcessSharedMemoryReservationV1,
+    ResidentHoldingV1, ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
     ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1,
     ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
     ResidentOwnersV1,
@@ -214,19 +214,30 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
     };
     let mut worktrees = vec![primary.worktree_id.clone(), secondary.worktree_id.clone()];
     worktrees.sort();
+    let alone_decoded = decoded(&alone);
+    let [(alone_worktrees, true, Some(alone_bytes))] = alone_decoded.as_slice() else {
+        panic!("one decoded owner must serve the primary worktree: {alone_decoded:?}");
+    };
+    assert_eq!(alone_worktrees, &vec![primary.worktree_id.clone()]);
+    assert_eq!(alone.measured_bytes, *alone_bytes);
+
+    let both_decoded = decoded(&both);
+    let [(both_worktrees, true, Some(both_bytes))] = both_decoded.as_slice() else {
+        panic!("one content-addressed decode must serve both worktrees: {both_decoded:?}");
+    };
     assert_eq!(
-        decoded(&alone),
-        [(vec![primary.worktree_id.clone()], true, Some(1_462_353))]
+        both_worktrees, &worktrees,
+        "one decode row must name both worktrees"
     );
-    assert_eq!(alone.measured_bytes, 1_462_353);
-    // Two copies would hold 2,924,706 bytes; the linked worktree adds only
-    // the manifest, lineage, and projection evidence it sealed itself.
-    assert_eq!(
-        decoded(&both),
-        [(worktrees, true, Some(1_849_469))],
-        "one decode row for one content, naming both worktrees"
+    assert_eq!(both.measured_bytes, *both_bytes);
+    assert!(
+        both_bytes > alone_bytes,
+        "the second owner still contributes its own manifest evidence"
     );
-    assert_eq!(both.measured_bytes, 1_849_469);
+    assert!(
+        *both_bytes < alone_bytes.saturating_mul(2),
+        "identical content must not retain two full decodes"
+    );
 
     let later = Instant::now() + IDLE_WINDOW;
     let released = owners.release_idle(later);
@@ -251,7 +262,7 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
             .iter()
             .map(|release| release.bytes.measured().unwrap_or(0))
             .sum::<u64>(),
-        1_849_469,
+        *both_bytes,
         "the two releases give back exactly what the shared row held"
     );
     let idle = owners.report(later);
@@ -685,6 +696,118 @@ async fn a_refresh_refused_by_the_ledger_publishes_when_the_blocking_reservation
     .expect("the dropped reservation is the refused refresh's retry");
     let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
     assert_eq!(seated.generation().manifest().generation_id, second);
+
+    registry.shutdown().await;
+}
+
+/// Issue #2907: a refresh refused for memory reads as one typed blocked
+/// state, the deferred advisory mount's "is a generation there" check (run on
+/// every worker transition) neither renews the decode's residency lease nor
+/// starts a pass, and the release the refusal waits on publishes the refresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its_decode() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    // A fixed process reading, so the held ledger refuses the refresh however
+    // much memory the tests beside this one hold.
+    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
+    let process = ProcessResidentSampleV1 {
+        resident_bytes: 256 * 1024 * 1024,
+        unreclaimable_bytes: 256 * 1024 * 1024,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    };
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(process)),
+        )),
+    ));
+    let (registry, scope) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let blocker = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-build");
+    let mut receipts = registry.subscribe_cadence_receipts();
+    let first = refresh_refused_for_memory(&registry, &fixture).await;
+    let blocked_reason = || async {
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted worktree freshness")
+            .parked
+            .and_then(|parked| parked.blocked_reason)
+    };
+    let Ok(blocked) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(reason) = blocked_reason().await {
+                return reason;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    else {
+        panic!(
+            "the refused refresh never read as a typed blocked state: {:?}",
+            registry.dashboard_freshness(fixture.path()).await
+        );
+    };
+    assert_eq!(
+        blocked,
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildBlockedReasonV1::ResidentMemory
+    );
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+
+    receipts.borrow_and_update();
+    let refused_at = Instant::now();
+    for _ in 0..20 {
+        assert!(
+            registry
+                .latest_feedback_generation_for_scope(fixture.path(), &scope)
+                .await
+                .is_none(),
+            "the stale served generation is not current feedback evidence"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !receipts.has_changed().unwrap(),
+        "a passive check cannot help a refresh waiting for memory, so no pass runs"
+    );
+    let idle_released = owners
+        .release_idle(refused_at + IDLE_WINDOW)
+        .into_iter()
+        .filter(|release| release.scope.worktree_id == scope.worktree_id)
+        .map(|release| release.kind)
+        .collect::<Vec<_>>();
+    assert!(
+        idle_released.contains(&ResidentOwnerKindV1::DecodedGeneration),
+        "the feedback checks renewed the decode's lease: released {idle_released:?}"
+    );
+
+    drop(blocker);
+    let second = tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_generation_change(&registry, fixture.path(), &first),
+    )
+    .await
+    .expect("the dropped reservation is the refused refresh's retry");
+    assert_eq!(
+        wait_for_live_complete_generation(&registry, fixture.path())
+            .await
+            .generation()
+            .manifest()
+            .generation_id,
+        second
+    );
+    assert_eq!(blocked_reason().await, None);
 
     registry.shutdown().await;
 }

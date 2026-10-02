@@ -63,7 +63,8 @@ pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 pub use config::registry_default_index_path_policy;
 
 pub use code_graph_seat::{
-    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+    CodeGraphBuildAdmissionV1, CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1,
+    CodeGraphSeatRuntimePortV1,
 };
 pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use code_index_scheduler::identity::resolved_scope_for_project;

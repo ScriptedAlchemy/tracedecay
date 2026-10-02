@@ -8,9 +8,11 @@
     not(feature = "alloc-jemalloc"),
     not(feature = "hotpath-alloc")
 ))]
-mod mimalloc_v3 {
+pub(crate) mod mimalloc_v3 {
+    use std::cell::Cell;
     use std::ffi::{c_int, c_void};
     use std::num::NonZeroUsize;
+    use std::sync::{Mutex, PoisonError};
 
     use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
@@ -59,7 +61,18 @@ mod mimalloc_v3 {
         fn mi_theap_collect(theap: *mut c_void, force: bool);
         // 3.3.2 declares `mi_theap_set_default` without defining it; this is
         // the definition its allocation path reads the default theap from.
+        // libmimalloc-sys compiles mimalloc as C++ for MSVC targets, so this
+        // internal (non-`extern "C"`) function carries its MSVC C++ name.
+        #[cfg_attr(
+            target_env = "msvc",
+            link_name = "?_mi_theap_default_set@@YAXPEAUmi_theap_s@@@Z"
+        )]
         fn _mi_theap_default_set(theap: *mut c_void);
+        fn _mi_is_main_thread() -> bool;
+        fn mi_thread_done();
+        // `src/prim/unix/prim.c`: stores `theap` in the pthread key whose
+        // destructor (`mi_pthread_done`) calls `_mi_thread_done` on it.
+        fn _mi_prim_thread_associate_default_theap(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,
             visit_blocks: bool,
@@ -148,7 +161,7 @@ mod mimalloc_v3 {
 
     unsafe extern "C" fn sqlite_shutdown(_: *mut c_void) {}
 
-    pub(super) fn install() {
+    pub(crate) fn install() {
         if let Err(message) = install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
             release,
             collect_calling_thread: collect,
@@ -187,7 +200,74 @@ mod mimalloc_v3 {
         NonZeroUsize::new(unsafe { mi_heap_new() } as usize)
     }
 
+    /// Held while an owner heap is deleted and while a thread that has a theap
+    /// of an owner heap frees its theaps. In 3.3.2 `mi_heap_delete` detaches
+    /// a theap from its heap while its exiting thread is still collecting it,
+    /// and that thread then dereferences the detached heap.
+    static OWNER_HEAP_TEARDOWN: Mutex<()> = Mutex::new(());
+
+    /// Frees the calling thread's theaps under [`OWNER_HEAP_TEARDOWN`]. Their
+    /// pages stay in their heaps, abandoned, so blocks stay valid and
+    /// charged; a later allocation on the thread re-initializes it. The main
+    /// thread's theaps outlive the process's exit.
+    fn free_thread_theaps() {
+        let _teardown = OWNER_HEAP_TEARDOWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: the thread is exiting and past its last owner heap scope.
+        unsafe {
+            if !_mi_is_main_thread() {
+                mi_thread_done();
+                // `mi_thread_done` frees the thread's main theap but leaves
+                // the pthread key (`_mi_heap_default_key`) pointing at it:
+                // it resets the default to `_mi_theap_empty`, which is not
+                // initialized, so the key is never re-associated. glibc runs
+                // TLS destructors (this one) before pthread key destructors,
+                // so `mi_pthread_done` would then dereference the freed
+                // theap. Hand it NULL instead, which it ignores.
+                _mi_prim_thread_associate_default_theap(std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Frees the exiting thread's theaps through [`free_thread_theaps`].
+    /// Rust thread-local destructors run before the pthread key destructor
+    /// that would otherwise free them unserialized; that one then finds the
+    /// thread already done.
+    struct OwnerHeapThreadExit;
+
+    impl Drop for OwnerHeapThreadExit {
+        fn drop(&mut self) {
+            free_thread_theaps();
+        }
+    }
+
+    thread_local! {
+        static OWNER_HEAP_THREAD_EXIT: OwnerHeapThreadExit = const { OwnerHeapThreadExit };
+        /// Owner heap scopes open on the thread. Has no destructor, so it
+        /// stays readable while the thread runs its thread-local destructors.
+        static OWNER_HEAP_SCOPES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Called before the calling thread gets a theap of an owner heap.
+    /// False once the thread's [`OwnerHeapThreadExit`] dropped, on a thread
+    /// running its later thread-local destructors.
+    fn serialize_thread_exit() -> bool {
+        OWNER_HEAP_THREAD_EXIT.try_with(|_| {}).is_ok()
+    }
+
+    /// Frees the theaps a thread got after its [`OwnerHeapThreadExit`]
+    /// dropped, which the pthread key destructor would free unserialized,
+    /// once no owner heap scope on it still uses them.
+    fn free_late_theaps(serialized: bool) {
+        if !serialized && OWNER_HEAP_SCOPES.get() == 0 {
+            free_thread_theaps();
+        }
+    }
+
     fn heap_enter(heap: NonZeroUsize) -> usize {
+        serialize_thread_exit();
+        OWNER_HEAP_SCOPES.set(OWNER_HEAP_SCOPES.get() + 1);
         // SAFETY: `heap` came from `mi_heap_new` and is not deleted while an
         // owner heap scope runs. v3 heaps allocate from any thread through
         // that thread's theap, which `mi_heap_theap` creates on first use.
@@ -211,6 +291,8 @@ mod mimalloc_v3 {
             mi_theap_collect(mi_theap_get_default(), false);
             _mi_theap_default_set(previous as *mut c_void);
         }
+        OWNER_HEAP_SCOPES.set(OWNER_HEAP_SCOPES.get() - 1);
+        free_late_theaps(serialize_thread_exit());
     }
 
     /// Granule both residency queries report in.
@@ -321,6 +403,7 @@ mod mimalloc_v3 {
     }
 
     fn heap_footprint(heap: NonZeroUsize) -> u64 {
+        let serialized = serialize_thread_exit();
         let heap = heap.get() as *mut c_void;
         let mut total = 0_u64;
         // SAFETY: the owner calls this once every thread that allocated into
@@ -331,209 +414,24 @@ mod mimalloc_v3 {
             mi_heap_collect(heap, true);
             mi_heap_visit_blocks(heap, false, add_resident, (&raw mut total).cast::<c_void>());
         }
+        free_late_theaps(serialized);
         total
     }
 
     fn heap_delete(heap: NonZeroUsize) {
-        // SAFETY: the owner heap is deleted once, when its owner dropped;
-        // `mi_heap_delete` frees its empty pages and moves live blocks to the
-        // main heap, so anything that escaped the owner stays valid.
+        let _teardown = OWNER_HEAP_TEARDOWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: the owner heap is deleted once, when its owner dropped, and
+        // no thread frees its theaps meanwhile; `mi_heap_delete` frees its
+        // empty pages and moves live blocks to the main heap, so anything
+        // that escaped the owner stays valid.
         unsafe { mi_heap_delete(heap.get() as *mut c_void) };
     }
 
-    #[cfg(test)]
-    mod tests {
-        use tracedecay_code_extraction::LanguageRegistry;
-        use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
-        use tracedecay_code_index::retained_parse::SharedRetainedParsePool;
-        use tracedecay_domain::RepositoryDirtyStateV1;
-        use tracedecay_domain::process_heap::OwnerHeapV1;
-        use tracedecay_domain::source_path_policy::IndexPathPolicyV1;
-        use tracedecay_domain::test_fixtures::id;
-
-        const BLOCKS: usize = 16 * 1024;
-        const BLOCK_BYTES: usize = 256;
-
-        fn blocks() -> Vec<Vec<u8>> {
-            (0..BLOCKS).map(|_| vec![7; BLOCK_BYTES]).collect()
-        }
-
-        /// An owner heap holds exactly what its scope allocated: its pages
-        /// cover the owner's blocks, nothing allocated outside the scope, and
-        /// none once the owner dropped. Blocks that outlive the heap stay
-        /// valid in the process heap.
-        #[test]
-        fn an_owner_heap_charges_its_own_pages_and_returns_them_whole() {
-            super::install();
-            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            let outside = blocks();
-            assert_eq!(heap.resident_bytes(), 0);
-
-            let owned = heap.scope(blocks);
-            let charged = heap.resident_bytes();
-            assert!(
-                (BLOCKS * BLOCK_BYTES) as u64 <= charged
-                    && charged <= (2 * BLOCKS * BLOCK_BYTES) as u64,
-                "the heap charges its {BLOCKS} blocks of {BLOCK_BYTES} B: {charged}"
-            );
-
-            drop(owned);
-            assert_eq!(heap.resident_bytes(), 0);
-
-            let escaped = heap.scope(|| Box::new([9_u8; BLOCK_BYTES]));
-            drop(heap);
-            assert_eq!(escaped[BLOCK_BYTES - 1], 9);
-            assert_eq!(outside.len(), BLOCKS);
-        }
-
-        /// Pages of an owner heap whose blocks another thread freed stay
-        /// charged to the worker that allocated them until that worker
-        /// collects them, which it does whenever it leaves the heap.
-        #[test]
-        fn leaving_an_owner_heap_returns_the_pages_other_threads_emptied() {
-            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
-            super::install();
-            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            let heap = &heap;
-            let (to_worker, work) = std::sync::mpsc::channel::<bool>();
-            let (to_main, built) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
-            std::thread::scope(|threads| {
-                threads.spawn(move || {
-                    for allocate in work {
-                        let blocks = heap.scope(|| if allocate { blocks() } else { Vec::new() });
-                        to_main.send(blocks).expect("the test receives");
-                    }
-                });
-                to_worker.send(true).expect("the worker runs");
-                drop(built.recv().expect("the worker's blocks"));
-                let stranded = heap.resident_bytes();
-                to_worker.send(false).expect("the worker runs");
-                assert!(built.recv().expect("an empty scope").is_empty());
-                let returned = heap.resident_bytes();
-                drop(to_worker);
-                assert!(
-                    stranded >= SMALL_PAGE_BYTES,
-                    "freed on another thread, blocks stay on the worker's pages: {stranded} B"
-                );
-                assert_eq!(
-                    returned, 0,
-                    "leaving the heap returns the pages they emptied"
-                );
-            });
-        }
-
-        /// A page built on freed, not yet purged memory holds that memory
-        /// resident past the blocks it has extended to, and its owner is
-        /// charged for it, never for more than its pages span.
-        #[test]
-        fn an_owner_heap_charges_the_freed_memory_its_pages_reuse() {
-            const SIZE_CLASSES: usize = 64;
-            const SMALL_PAGE_BYTES: u64 = 64 * 1024;
-            super::install();
-            let freed = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            drop(freed.scope(|| {
-                (0..32 * 1024)
-                    .map(|_| vec![7_u8; 1_000])
-                    .collect::<Vec<_>>()
-            }));
-            drop(freed);
-
-            let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            let kept = heap.scope(|| {
-                (1..=SIZE_CLASSES)
-                    .map(|class| vec![1_u8; class * 16])
-                    .collect::<Vec<_>>()
-            });
-            let charged = heap.resident_bytes();
-            let live: u64 = kept.iter().map(|block| block.len() as u64).sum();
-            let spanned = SIZE_CLASSES as u64 * SMALL_PAGE_BYTES;
-            assert!(
-                16 * live <= charged && charged <= spanned,
-                "pages holding {live} B on reused memory charge it, within the \
-                 {spanned} B their pages can span: {charged} B"
-            );
-            assert_eq!(kept.len(), SIZE_CLASSES);
-        }
-
-        /// Path matching keeps nothing in the matching thread's heap: the
-        /// glob sets' per-thread match caches outlive any one capture, and
-        /// left among its transient blocks they pin its pages.
-        #[test]
-        fn path_matching_leaves_no_blocks_in_the_matching_threads_heap() {
-            super::install();
-            let policy = IndexPathPolicyV1::new(
-                vec!["**/fixtures/**".to_owned(), "*.min.js".to_owned()],
-                vec!["src/kept/**".to_owned()],
-            )
-            .expect("valid patterns");
-            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            let excluded = probe.scope(|| {
-                (0..2_000)
-                    .filter(|index| {
-                        policy.excludes(&format!("src/m{index}/fixtures/case{index}/f{index}.rs"))
-                    })
-                    .count()
-            });
-            assert_eq!(excluded, 2_000);
-            assert_eq!(probe.resident_bytes(), 0);
-            assert!(!policy.excludes("src/kept/fixtures/case/f.rs"));
-        }
-
-        /// A retained parse charges the extraction it keeps. The retained
-        /// artifact shares its token streams with the extraction that built
-        /// it, so the extraction has to allocate in the pool's heap too.
-        #[test]
-        fn a_retained_parse_charges_the_extraction_it_keeps() {
-            super::install();
-            let source = (0..400)
-                .map(|index| {
-                    format!(
-                        "pub fn f{index}(a: u32, b: u32) -> u32 {{ let c = a * {index} + b; \
-                         if c > {index} {{ c - a }} else {{ b + c }} }}\n"
-                    )
-                })
-                .collect::<String>();
-            let registry = LanguageRegistry::new();
-            let extractor = registry
-                .extractor_for_file("src/lib.rs")
-                .expect("Rust extractor");
-            let identity = || ParseDocumentIdentity::Repository {
-                project_id: id("project.retained"),
-                repository_id: id("repository.retained"),
-                worktree_id: None,
-                reference: None,
-                commit: None,
-                tree: None,
-                dirty: RepositoryDirtyStateV1::Dirty,
-                logical_path: "src/lib.rs".to_owned(),
-            };
-            let held = |pool: &SharedRetainedParsePool| {
-                pool.holding()
-                    .and_then(|holding| holding.bytes)
-                    .expect("an owner-heap measurement")
-            };
-            let parsed = SharedRetainedParsePool::default();
-            parsed.parse(identity(), "rust", &source).expect("parse");
-            let extracted = SharedRetainedParsePool::default();
-            let probe = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
-            let edited = format!("{source}pub fn edited() -> u32 {{ 3 }}\n");
-            for source in [&source, &edited] {
-                let (_, extraction) = probe.scope(|| {
-                    extracted
-                        .parse_and_extract_artifact(identity(), "rust", source, extractor)
-                        .expect("extraction")
-                });
-                assert!(!extraction.artifact.clone_bodies.is_empty());
-            }
-            let (parsed, extracted, outside) =
-                (held(&parsed), held(&extracted), probe.resident_bytes());
-            assert!(
-                extracted > parsed,
-                "the pool charges the artifact it keeps: {extracted} B vs {parsed} B parsed only"
-            );
-            assert_eq!(outside, 0, "the extracting thread keeps none of it");
-        }
-    }
+    // The owner-heap tests live in `tests/process_allocator_heaps.rs`: every
+    // binary that calls `route_c_libraries` must own its process, so no
+    // allocation-sweeping test may share one with it.
 }
 
 /// Route the C libraries to the process allocator and install its release

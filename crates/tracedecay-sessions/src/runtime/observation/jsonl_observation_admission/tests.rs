@@ -365,11 +365,6 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
     .expect("same-key demand registered its waiter before producer abort");
 
     drop(pin);
-    super::SHARED_JSONL_BUILD_GATES
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-        .lock()
-        .unwrap()
-        .remove(&path);
     tokio::task::spawn_blocking(move || build_gate.wait())
         .await
         .expect("release aborted build gate");
@@ -513,7 +508,9 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
         std::fs::write(&path, &encoded).expect("parallel JSONL fixture");
         paths.push(path);
     }
-    let _pin = super::pin_shared_jsonl_paths(&paths);
+    // No pin: `workers` pinned pages would fill the process-global page cache
+    // and make concurrent tests' cache-hit assertions fail. The cache's
+    // `workers` page cap bounds retained bytes with or without pins.
     let observed_builds = super::SharedJsonlBuildObserver::for_paths(&paths);
     let build_gate = std::sync::Arc::new(std::sync::Barrier::new(path_count));
     {

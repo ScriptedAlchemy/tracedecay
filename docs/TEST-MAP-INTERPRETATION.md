@@ -9,10 +9,7 @@
 
 This guide explains what the two tools actually measure, where they are known to
 undercount, and how to read a risk report without overstating coverage
-certainty. For the *why* behind the calibration (root-cause audit and the
-heuristic design), see
-[`TEST-MAP-AUDIT.md`](./archive/TEST-MAP-AUDIT.md) and
-[`TEST-MAP-CALIBRATION-DESIGN.md`](./TEST-MAP-CALIBRATION-DESIGN.md).
+certainty.
 
 ---
 
@@ -171,10 +168,5 @@ Read the report top-down:
 
 ## 5. Related
 
-- [`TEST-MAP-AUDIT.md`](./archive/TEST-MAP-AUDIT.md), root-cause audit of the original
-  shallow-attribution signal.
-- [`TEST-MAP-CALIBRATION-DESIGN.md`](./TEST-MAP-CALIBRATION-DESIGN.md), the
-  heuristic design (H1 closure + H5 bucketing shipped;
-  H2 trait/impl, H3 public-API, H4 CLI-entry designed, not yet shipped).
 - `/// skip-test-coverage` docstring convention, marks genuinely-untestable
   functions so they leave the risk view cleanly (see the User Guide).

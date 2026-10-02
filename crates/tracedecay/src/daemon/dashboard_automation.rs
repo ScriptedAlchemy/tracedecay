@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_automation::managed_skills::validate_skill_id;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
 use tracedecay_automation_runtime::automation::config::{
@@ -13,9 +12,9 @@ use tracedecay_automation_runtime::automation::config::{
 };
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
-    ManagedSkill, ManagedSkillExt, apply_managed_skill_update, archive_managed_skill,
-    disable_managed_skill, load_managed_skill, managed_skill_dir, preview_managed_skill_update,
-    restore_managed_skill, save_managed_skill,
+    ManagedSkill, ManagedSkillExt, ManagedSkillReadError, apply_managed_skill_update,
+    archive_managed_skill, disable_managed_skill, load_managed_skill, managed_skill_dir,
+    preview_managed_skill_update, restore_managed_skill, save_managed_skill,
 };
 use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
@@ -565,22 +564,17 @@ async fn load_exact_managed_skill(
     profile_root: &Path,
     id: &str,
 ) -> DashboardAutomationResult<ManagedSkill> {
-    validate_skill_id(id).map_err(automation_invalid)?;
-    let record_path = managed_skill_dir(profile_root, id)
-        .map_err(automation_invalid)?
-        .join("skill.json");
-    if !record_path.is_file() {
-        return Err(DashboardAutomationAuthorityErrorV1::NotFound {
-            detail: format!("managed skill '{id}' was not found"),
-        });
-    }
-    match load_managed_skill(profile_root, id).await {
-        Ok(skill) => Ok(skill),
-        Err(_) if !record_path.is_file() => Err(DashboardAutomationAuthorityErrorV1::NotFound {
-            detail: format!("managed skill '{id}' was not found"),
-        }),
-        Err(error) => Err(automation_failed(error)),
-    }
+    load_managed_skill(profile_root, id)
+        .await
+        .map_err(|error| match error {
+            ManagedSkillReadError::InvalidId(error) => automation_invalid(error),
+            ManagedSkillReadError::NotFound { id } => {
+                DashboardAutomationAuthorityErrorV1::NotFound {
+                    detail: format!("managed skill '{id}' was not found"),
+                }
+            }
+            ManagedSkillReadError::Failed(error) => automation_failed(error),
+        })
 }
 
 fn managed_skill_lifecycle_error(
