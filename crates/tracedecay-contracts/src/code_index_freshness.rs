@@ -382,6 +382,10 @@ pub enum CodeIndexFreshnessCoverageV1 {
     PartialSourceVerification,
     PartialUnverifiedRestore,
     PartialHookHintOverflow,
+    /// The sealed generation is fresh for every source it can index, and
+    /// [`CodeIndexWorktreeFreshnessV1::omitted_sources`] names the sources it
+    /// cannot. Waiting cannot change it.
+    PartialOmittedSources,
 }
 
 impl CodeIndexFreshnessCoverageV1 {
@@ -395,6 +399,7 @@ impl CodeIndexFreshnessCoverageV1 {
             Self::PartialSourceVerification => "partial_source_verification",
             Self::PartialUnverifiedRestore => "partial_unverified_restore",
             Self::PartialHookHintOverflow => "partial_hook_hint_overflow",
+            Self::PartialOmittedSources => "partial_omitted_sources",
         }
     }
 
@@ -408,8 +413,16 @@ impl CodeIndexFreshnessCoverageV1 {
             "partial_source_verification" => Some(Self::PartialSourceVerification),
             "partial_unverified_restore" => Some(Self::PartialUnverifiedRestore),
             "partial_hook_hint_overflow" => Some(Self::PartialHookHintOverflow),
+            "partial_omitted_sources" => Some(Self::PartialOmittedSources),
             _ => None,
         }
+    }
+
+    /// Whether the read covers every source the sealed snapshot can index.
+    /// Omitted sources are a property of the source tree, not of the read.
+    #[must_use]
+    pub const fn covers_indexable_sources(self) -> bool {
+        matches!(self, Self::Complete | Self::PartialOmittedSources)
     }
 }
 
@@ -434,6 +447,8 @@ pub struct CodeIndexFreshnessLadderInputsV1<'a> {
     pub parked: Option<&'a CodeIndexConvergenceParkedV1>,
     pub source_verified: Option<bool>,
     pub hook_hint_count: Option<u64>,
+    /// Whether the serving snapshot omits any source it captured.
+    pub sources_omitted: bool,
 }
 
 /// The ladder plus the two fields that must stay consistent with it.
@@ -482,7 +497,11 @@ impl CodeIndexFreshnessLadderV1 {
         } else if source_unverified {
             CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore
         } else if inputs.hook_hint_count.is_some() {
-            CodeIndexFreshnessCoverageV1::Complete
+            if inputs.sources_omitted {
+                CodeIndexFreshnessCoverageV1::PartialOmittedSources
+            } else {
+                CodeIndexFreshnessCoverageV1::Complete
+            }
         } else {
             CodeIndexFreshnessCoverageV1::PartialHookHintOverflow
         };
@@ -561,6 +580,10 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub hook_hint_count: Option<u64>,
     /// Whether this read covers the complete mounted scheduler state.
     pub coverage: CodeIndexFreshnessCoverageV1,
+    /// Sources the serving snapshot captured but does not index, when any.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted_sources: Option<CodeIndexOmittedSourcesV1>,
     /// Latest committed progress for the active generation, if one is mounted.
     pub progress: Option<CodeIndexBuildProgressV1>,
     /// Bounded immutable-artifact restore work currently in flight. This is
@@ -577,6 +600,71 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_recovery: Option<CodeIndexGenerationRecoveryV1>,
+}
+
+/// Most omitted sources one freshness read lists; `count` carries the total.
+pub const CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT: usize = 16;
+
+/// Sources a sealed snapshot captured but does not index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexOmittedSourcesV1 {
+    /// Every omitted source in the snapshot.
+    pub count: u64,
+    /// The first omitted sources in Git path order, at most
+    /// [`CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT`].
+    pub sources: Vec<CodeIndexOmittedSourceV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CodeIndexOmittedSourceV1 {
+    /// The exact Git path bytes, which need not be UTF-8.
+    pub git_path_bytes: Vec<u8>,
+    /// `git_path_bytes` decoded for display, invalid UTF-8 replaced.
+    pub display_path: String,
+    pub reason: CodeIndexSourceOmissionReasonV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CodeIndexSourceOmissionReasonV1 {
+    /// No logical path can carry the Git path: not UTF-8, a backslash, a
+    /// control character, or leading or trailing whitespace.
+    UnrepresentablePath,
+    /// The privacy boundary withheld the file's bytes.
+    PrivacyWithheld { detail: String },
+}
+
+impl CodeIndexOmittedSourcesV1 {
+    /// The projection of one sealed snapshot's omitted sources, `None` when
+    /// it omits none.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &tracedecay_domain::SanitizedCodeSnapshotV1) -> Option<Self> {
+        if snapshot.omitted_sources.is_empty() {
+            return None;
+        }
+        Some(Self {
+            count: snapshot.omitted_sources.len() as u64,
+            sources: snapshot
+                .omitted_sources
+                .iter()
+                .take(CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT)
+                .map(|source| CodeIndexOmittedSourceV1 {
+                    git_path_bytes: source.git_path.clone(),
+                    display_path: String::from_utf8_lossy(&source.git_path).into_owned(),
+                    reason: match &source.reason {
+                        tracedecay_domain::CodeSourceOmissionReasonV1::UnrepresentablePath => {
+                            CodeIndexSourceOmissionReasonV1::UnrepresentablePath
+                        }
+                        tracedecay_domain::CodeSourceOmissionReasonV1::PrivacyWithheld {
+                            detail,
+                        } => CodeIndexSourceOmissionReasonV1::PrivacyWithheld {
+                            detail: detail.clone(),
+                        },
+                    },
+                })
+                .collect(),
+        })
+    }
 }
 
 /// A freshness read failed. Distinct from an unmounted route, which is `Ok(None)`.
@@ -673,7 +761,7 @@ impl CodeIndexWorktreeFreshnessV1 {
     #[must_use]
     pub fn is_authoritative(&self) -> bool {
         self.latest_generation_id.is_some()
-            && self.coverage == CodeIndexFreshnessCoverageV1::Complete
+            && self.coverage.covers_indexable_sources()
             && self.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
     }
 
@@ -933,6 +1021,7 @@ mod tests {
             parked: None,
             source_verified: Some(true),
             hook_hint_count: Some(0),
+            sources_omitted: false,
         }
     }
 
@@ -963,6 +1052,7 @@ mod tests {
             CodeIndexFreshnessCoverageV1::PartialSourceVerification,
             CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore,
             CodeIndexFreshnessCoverageV1::PartialHookHintOverflow,
+            CodeIndexFreshnessCoverageV1::PartialOmittedSources,
         ] {
             assert_eq!(
                 CodeIndexFreshnessCoverageV1::from_wire(coverage.as_str()),
@@ -981,6 +1071,43 @@ mod tests {
         assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Fresh);
         assert!(!observed.rebuild_in_flight);
         assert_eq!(observed.coverage, CodeIndexFreshnessCoverageV1::Complete);
+    }
+
+    /// A source no generation can index makes coverage partial, but waiting
+    /// for `fresh` still ends: no later generation could index it either.
+    #[test]
+    fn omitted_sources_are_partial_coverage_that_still_reaches_fresh() {
+        let observed = ladder(CodeIndexFreshnessLadderInputsV1 {
+            sources_omitted: true,
+            ..settled()
+        });
+        assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(
+            observed.coverage,
+            CodeIndexFreshnessCoverageV1::PartialOmittedSources
+        );
+        let freshness = CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(observed.staleness_state),
+            coverage: observed.coverage,
+            ..Default::default()
+        };
+        assert_eq!(
+            freshness.readiness(CodeIndexReadinessTargetV1::Fresh),
+            CodeIndexReadinessV1::Reached
+        );
+
+        let refreshing = ladder(CodeIndexFreshnessLadderInputsV1 {
+            ready: false,
+            refresh_in_flight: true,
+            sources_omitted: true,
+            ..settled()
+        });
+        assert_eq!(
+            refreshing.coverage,
+            CodeIndexFreshnessCoverageV1::PartialRefreshInProgress
+        );
     }
 
     #[test]
@@ -1090,6 +1217,7 @@ mod tests {
             source_verified: Some(true),
             hook_hint_count: Some(0),
             source_change_pending: false,
+            sources_omitted: false,
         });
         assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
         assert!(!observed.rebuild_in_flight);
@@ -1114,6 +1242,7 @@ mod tests {
             source_verified: Some(true),
             hook_hint_count: Some(0),
             source_change_pending: false,
+            sources_omitted: false,
         });
         assert_eq!(observed.staleness_state, CodeIndexStalenessStateV1::Parked);
         assert!(observed.rebuild_in_flight);
