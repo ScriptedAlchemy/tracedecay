@@ -228,6 +228,7 @@ fn admission_failure(error: CodeIndexIgnoredDependencyAdmissionErrorV1) -> Primi
                 kind: PrimitiveFailureKind::Unavailable,
                 code: detail.code().to_owned(),
                 message: detail.message(),
+                detail: None,
             }
         }
     }
@@ -242,5 +243,6 @@ fn failure(
         kind,
         code: code.to_owned(),
         message: message.to_owned(),
+        detail: None,
     }
 }

@@ -1500,6 +1500,9 @@ export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<["denied", "mal
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("code_graph_rewarming"),
+  retry_after_millis: z.number().int().safe().min(0),
+}).strict(), z.object({
   kind: z.literal("daemon_unreachable"),
   named_by: z.string().nullable(),
   service_unit: z.lazy(() => DaemonServiceUnitObservationV1Schema),

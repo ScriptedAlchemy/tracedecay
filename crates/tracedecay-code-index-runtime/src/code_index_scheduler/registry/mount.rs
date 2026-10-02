@@ -38,6 +38,7 @@ use super::{
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1,
+    CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1,
     CONVERGENCE_PARK_STORE_RELEASE_WAIT_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
@@ -1936,17 +1937,20 @@ impl CodeIndexSchedulerRegistryV1 {
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let replay_passes = Arc::clone(&worker_reconcile_in_progress);
                     let replay_binding = tokio::task::spawn_blocking(move || {
-                        Self::lock_scheduler_for_graph_step(
+                        let scheduler = Self::lock_scheduler_for_graph_step(
                             &replay_scheduler,
                             &shutting_down,
                             &replay_passes,
                         )?
-                        .1
-                        .code_graph_replay_binding(&generation_id)
+                        .1;
+                        Ok::<_, CodeIndexSchedulerErrorV1>((
+                            scheduler.code_graph_replay_binding(&generation_id)?,
+                            scheduler.names_active_publication(&generation_id)?,
+                        ))
                     })
                     .await;
                     match replay_binding {
-                        Ok(Ok(replay_binding)) => {
+                        Ok(Ok((replay_binding, retained_names_active_publication))) => {
                             match worker_graph_activation
                                 .recover_verified_head(
                                     &worker_project_id,
@@ -1983,12 +1987,24 @@ impl CodeIndexSchedulerRegistryV1 {
                                     );
                                 }
                                 Ok(false) => {}
+                                Err(error)
+                                    if graph_head_belongs_to_another_generation(&error)
+                                        && retained_names_active_publication =>
+                                {
+                                    // The durable pointer names this manifest, so the head is
+                                    // older and this generation's graph publication stopped
+                                    // before seating; resume it from its sealed segments.
+                                    tracing::info!(
+                                        event = "code_index_graph_head_recovery_resumes_publication",
+                                        error = %error,
+                                        "durable publication names the retained manifest; resume \
+                                         its interrupted graph publication"
+                                    );
+                                }
                                 Err(error) if graph_head_belongs_to_another_generation(&error) => {
-                                    // The head is a different generation. Falling
-                                    // through into a cold replay discards the
-                                    // in-flight successor that owns it. Leave
-                                    // that generation's own publish to seat its
-                                    // graph, and do not retry this manifest.
+                                    // A newer generation owns the durable pointer. Falling
+                                    // through into a cold replay discards the in-flight successor
+                                    // that owns the head; do not retry this manifest.
                                     prepare_graph = false;
                                     graph_head_conflict_generation = Some(recovered_generation);
                                     pass_waits_for_store_release = true;
@@ -3098,9 +3114,21 @@ impl CodeIndexSchedulerRegistryV1 {
                     &result,
                     Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
                 );
+                let waited_for_memory = worker_residency.refresh_waits_for_memory();
                 worker_residency.set_refresh_waits_for_memory(refused_for_memory);
-                if refused_for_memory {
+                if let Ok((Err(error), _, _)) = &result
+                    && refused_for_memory
+                {
+                    park_convergence(
+                        &worker_convergence_park,
+                        error.to_string(),
+                        CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1,
+                        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                        true,
+                    );
                     worker_residency.yield_serving_graph_to_refresh(&worker_resident_owners);
+                } else if waited_for_memory {
+                    clear_graph_resident_memory_park(&worker_convergence_park);
                 }
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
@@ -3206,6 +3234,17 @@ impl CodeIndexSchedulerRegistryV1 {
                                         remediation,
                                     } => Some((reason, remediation)),
                                 }
+                            } else if refused_for_memory {
+                                if !waited_for_memory {
+                                    tracing::warn!(
+                                        event = "code_index_refresh_waiting_for_memory",
+                                        path = "background_worker",
+                                        trigger = trigger.label(),
+                                        error = %error,
+                                        "code-index refresh refused for resident memory; the served generation stays stale until memory is given back"
+                                    );
+                                }
+                                None
                             } else {
                                 tracing::warn!(
                                     event = "code_index_reconcile_failed",

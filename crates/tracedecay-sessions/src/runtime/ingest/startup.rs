@@ -73,6 +73,8 @@ const STARTUP_USER_INGEST_COOLDOWN: std::time::Duration = std::time::Duration::f
 #[derive(Default)]
 struct StartupUserIngestState {
     running: bool,
+    /// A pass was turned away as `Running` while this sweep held the claim.
+    refused_while_running: bool,
     last_completed: Option<std::time::Instant>,
 }
 
@@ -118,6 +120,7 @@ impl StartupUserIngestGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = ingests.entry(profile_root.clone()).or_default();
         if state.running {
+            state.refused_while_running = true;
             return StartupUserIngestClaim::Running;
         }
         if state
@@ -147,8 +150,13 @@ impl Drop for StartupUserIngestGuard {
         if self.completed {
             state.last_completed = Some(std::time::Instant::now());
         }
+        // Only a pass this sweep turned away waits on its release; the sweep's
+        // own pass must not wake the retry of its own refusal.
+        let refused = std::mem::take(&mut state.refused_while_running);
         drop(ingests);
-        STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        if refused {
+            STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        }
     }
 }
 

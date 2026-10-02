@@ -989,6 +989,11 @@ fn canonical_message_fields_for(
         }));
     }
 
+    // The observation's one row renders its first fact with text. A record
+    // whose renderable facts are all empty (a compaction without a summary, a
+    // subagent session start) still projects that first fact: the row carries
+    // the session and its relations.
+    let mut first_empty = None;
     for fact in facts {
         if matches!(
             fact,
@@ -1084,11 +1089,12 @@ fn canonical_message_fields_for(
             | CanonicalObservationFactV1::Unknown { .. } => continue,
         };
         if fields.text.is_empty() {
+            first_empty.get_or_insert(fields);
             continue;
         }
         return Ok(Some(fields));
     }
-    Ok(None)
+    Ok(first_empty)
 }
 
 pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {

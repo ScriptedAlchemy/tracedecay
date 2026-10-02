@@ -878,6 +878,25 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
         )]
     );
 
+    // A workflow-only observation stands as its own row only when its facts
+    // carry every query term; "release follow-up" lacks "alpha".
+    let partial_terms = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(FIXTURE_PROVIDER, Some("user"), "follow alpha", 2)
+        .await
+        .expect("search terms split across unrelated observations")
+        .into_iter()
+        .map(|hit| (hit.message.kind.unwrap_or_default(), hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial_terms,
+        [(
+            "message".to_owned(),
+            "release summary repeats release task alpha\n\nrelease task beta".to_owned(),
+        )]
+    );
+
     let workflow_only = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database")

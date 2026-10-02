@@ -64,6 +64,10 @@ pub enum ApplicationProblemDetailV1 {
         producer: String,
         generation: Option<String>,
     },
+    /// The code graph's engine or catalog was released for memory and was
+    /// still warming again when the read's budget ran out;
+    /// `retry_after_millis` is the measured warm-up it still needs.
+    CodeGraphRewarming { retry_after_millis: u64 },
     /// No TraceDecay daemon accepts connections on `socket`. `named_by` is
     /// the environment variable that chose the socket, when one did;
     /// `service_unit` is what this client observed of the managed service.
@@ -145,6 +149,15 @@ impl ApplicationProblemDetailV1 {
         })
     }
 
+    /// The delay this detail measured for an `after_delay` retry, when it
+    /// knows a better one than the canonical default.
+    pub const fn retry_after_millis(&self) -> Option<u64> {
+        match self {
+            Self::CodeGraphRewarming { retry_after_millis } => Some(*retry_after_millis),
+            _ => None,
+        }
+    }
+
     /// Stable diagnostic code of the problem this detail names.
     pub const fn code(&self) -> &'static str {
         match self {
@@ -156,6 +169,7 @@ impl ApplicationProblemDetailV1 {
             Self::ResetRequired { .. } => "application.reset-required",
             Self::DiagnosticsUnsupported { .. } => "application.diagnostics.unsupported",
             Self::DiagnosticsPending { .. } => "application.diagnostics.pending",
+            Self::CodeGraphRewarming { .. } => "application.code-graph.rewarming",
             Self::DaemonUnreachable { .. } => "daemon.unreachable",
         }
     }
@@ -229,6 +243,10 @@ impl ApplicationProblemDetailV1 {
                      a complete generation. Retry shortly."
                 )
             }
+            Self::CodeGraphRewarming { retry_after_millis } => format!(
+                "The project's code graph was released for memory and is warming again; retry \
+                 after {retry_after_millis}ms."
+            ),
             Self::DaemonUnreachable {
                 socket,
                 named_by,
@@ -328,6 +346,9 @@ impl ApplicationProblemDetailV1 {
                     generation.clone().unwrap_or_else(|| "none".to_owned()),
                 ),
             ],
+            Self::CodeGraphRewarming { retry_after_millis } => {
+                vec![("Retry after", format!("{retry_after_millis}ms"))]
+            }
             // The unbounded sentence names the socket, the variable that chose
             // it, and the observed unit together with the next step.
             Self::DaemonUnreachable {

@@ -773,6 +773,11 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "code_index_parked",
             parked.to_string(),
         ),
+        rewarming @ CodeGraphReadError::Rewarming { .. } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_authority_unavailable",
+            rewarming.to_string(),
+        ),
     }
 }
 
