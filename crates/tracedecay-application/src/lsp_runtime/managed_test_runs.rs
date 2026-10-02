@@ -106,7 +106,11 @@ impl ManagedTestRunProjection {
         }
     }
 
-    #[hotpath::measure(label = "usecases.lsp.test_run.store_expansion")]
+    #[tracing::instrument(
+        name = "usecases.lsp.test_run.store_expansion",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn store_expansion(
         &self,
         root: &AdmittedRoot,
@@ -187,7 +191,7 @@ impl LspTestRunProjectionPort for ManagedTestRunProjection {
         document_content_digest: Option<ContentDigest>,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         let projection = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let mut scope = match projection
                     .project
@@ -357,7 +361,7 @@ impl LspTestRunProjectionPort for ManagedTestRunProjection {
                     },
                 }
             },
-            label = "usecases.lsp.test_run.snapshot"
+            tracing::trace_span!("usecases.lsp.test_run.snapshot"),
         ))
     }
 
@@ -369,7 +373,7 @@ impl LspTestRunProjectionPort for ManagedTestRunProjection {
         self.expand_stored(root, stored_record)
     }
 
-    #[hotpath::measure(label = "usecases.lsp.test_run.poll_changes")]
+    #[tracing::instrument(name = "usecases.lsp.test_run.poll_changes", level = "trace", skip_all)]
     fn poll_changes(
         &self,
         root: &AdmittedRoot,
@@ -438,7 +442,7 @@ impl ManagedTestRunProjection {
         drop(refreshing);
         let projection = self.clone();
         let root = root.clone();
-        self.runtime.spawn(hotpath::future!(
+        self.runtime.spawn(tracing::Instrument::instrument(
             async move {
                 projection.refresh(&root).await;
                 projection
@@ -447,7 +451,7 @@ impl ManagedTestRunProjection {
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(root.uri());
             },
-            label = "usecases.lsp.test_run.refresh"
+            tracing::trace_span!("usecases.lsp.test_run.refresh"),
         ));
     }
 
@@ -510,7 +514,7 @@ impl ManagedTestRunProjection {
         stored_record: String,
     ) -> LspRuntimeFuture<ContextExpansionOutcome> {
         let projection = self.clone();
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let Ok(record) =
                     serde_json::from_str::<StoredLspTestRunExpansionV1>(&stored_record)
@@ -646,7 +650,7 @@ impl ManagedTestRunProjection {
                     next_retrieval_handle,
                 ))
             },
-            label = "usecases.lsp.test_run.expand"
+            tracing::trace_span!("usecases.lsp.test_run.expand"),
         ))
     }
 }

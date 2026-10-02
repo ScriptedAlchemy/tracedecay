@@ -185,7 +185,7 @@ const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
 fn observe_cancel(is_cancelled: &dyn Fn() -> bool) -> bool {
     let cancelled = is_cancelled();
     if cancelled {
-        crate::hotpath_observe::retention_cancelled();
+        crate::observe::retention_cancelled();
     }
     cancelled
 }
@@ -403,8 +403,8 @@ pub(crate) fn retain_bounded_generation_index_accounted(
             survives
         });
     }
-    hotpath::gauge!("code_index.retention.generation_index.accounting_visits")
-        .set(accounting_visits);
+    metrics::gauge!("code_index.retention.generation_index.accounting_visits")
+        .set((accounting_visits) as f64);
     GenerationIndexRetentionSweepV1 {
         removed: original_len.saturating_sub(entries.len()),
         accounting_visits,
@@ -933,7 +933,7 @@ fn unpublished_store_plan(
 ///
 /// Full verification checks `is_cancelled` between bounded read chunks, so
 /// shutdown never waits for every byte in a multi-GiB store.
-#[hotpath::measure(label = "usecases.retention.prepare")]
+#[tracing::instrument(name = "usecases.retention.prepare", level = "trace", skip_all)]
 pub fn prepare_next_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1016,7 +1016,7 @@ pub fn prepare_next_code_generation_retention_cancellable(
     )
 }
 
-#[hotpath::measure(label = "usecases.retention.plan")]
+#[tracing::instrument(name = "usecases.retention.plan", level = "trace", skip_all)]
 fn plan_code_generation_retention_with_verification_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -1029,7 +1029,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
     }
     if transaction_path(store_root).exists() || text_artifact_transaction_path(store_root).exists()
     {
-        crate::hotpath_observe::retention_recovery_pending();
+        crate::observe::retention_recovery_pending();
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "code-generation retention recovery is pending".to_owned(),
         ));
@@ -1265,7 +1265,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
             .map(|candidate| candidate.size_bytes)
             .sum::<u64>(),
     );
-    crate::hotpath_observe::retention_plan(
+    crate::observe::retention_plan(
         collectable_generations
             .len()
             .saturating_add(text_artifact_inventory.candidates.len()),
@@ -1313,7 +1313,7 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         if (self.is_cancelled)() {
             self.cancelled = true;
-            crate::hotpath_observe::retention_cancelled();
+            crate::observe::retention_cancelled();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "generation segment mark cancelled",
@@ -1321,7 +1321,7 @@ impl Read for CancellableGenerationManifestReaderV1<'_> {
         }
         let read = self.file.read(buffer)?;
         self.hasher.update(&buffer[..read]);
-        crate::hotpath_observe::retention_inspected(read as u64);
+        crate::observe::retention_inspected(read as u64);
         Ok(read)
     }
 }
@@ -1332,7 +1332,11 @@ impl CancellableGenerationManifestReaderV1<'_> {
     }
 }
 
-#[hotpath::measure(label = "usecases.retention.segment_mark_sweep")]
+#[tracing::instrument(
+    name = "usecases.retention.segment_mark_sweep",
+    level = "trace",
+    skip_all
+)]
 fn sweep_unreferenced_generation_segments(
     store_root: &Path,
     graph_replay_pool_root: Option<&Path>,
@@ -1649,7 +1653,7 @@ pub fn execute_code_generation_retention(
 /// shutdown must be able to stop that full-file read before any candidate is
 /// renamed or any deletion receipt is published. Existing callers retain the
 /// non-cancellable wrapper above until their control path is wired through.
-#[hotpath::measure(label = "usecases.retention.execute")]
+#[tracing::instrument(name = "usecases.retention.execute", level = "trace", skip_all)]
 pub fn execute_code_generation_retention_cancellable(
     store_root: &Path,
     plan: CodeGenerationRetentionPlanV1,
@@ -1691,7 +1695,7 @@ pub fn execute_code_generation_retention_cancellable(
     }
     if transaction_path(store_root).exists() || text_artifact_transaction_path(store_root).exists()
     {
-        crate::hotpath_observe::retention_recovery_pending();
+        crate::observe::retention_recovery_pending();
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "code-generation retention recovery is pending".to_owned(),
         ));
@@ -1857,8 +1861,8 @@ pub fn execute_code_generation_retention_cancellable(
                 .unwrap_or(0),
         )
         .saturating_add(reclaimed_segment_bytes);
-    crate::hotpath_observe::retention_reclaimed(reclaimed_bytes);
-    crate::hotpath_observe::retention_recovery_idle();
+    crate::observe::retention_reclaimed(reclaimed_bytes);
+    crate::observe::retention_recovery_idle();
 
     Ok(CodeGenerationRetentionReportV1 {
         plan,
@@ -1888,14 +1892,14 @@ fn recover_code_generation_retention(
 /// a successful maintenance pass. Recovery is journaled, so a cancellation
 /// before either transaction family starts leaves the durable journal for the
 /// next attempt rather than clearing partial evidence.
-#[hotpath::measure(label = "usecases.retention.recover")]
+#[tracing::instrument(name = "usecases.retention.recover", level = "trace", skip_all)]
 fn recover_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    crate::hotpath_observe::retention_recovery_running();
+    crate::observe::retention_recovery_running();
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1928,7 +1932,7 @@ fn recover_code_generation_retention_cancellable(
         &graph_replay_release::queued_release_receipt_digests(store_root)?,
     )?;
     receipt_store::prune_receipts(store_root, &TEXT_ARTIFACT_RECEIPT_STORE, &BTreeSet::new())?;
-    crate::hotpath_observe::retention_recovery_idle();
+    crate::observe::retention_recovery_idle();
     Ok(())
 }
 
@@ -1952,7 +1956,7 @@ pub fn run_code_generation_retention(
 /// Plan, recover, and apply with one cancellation authority. The old wrapper
 /// preserves current callers while daemon maintenance is integrated with this
 /// control boundary.
-#[hotpath::measure(label = "usecases.retention.run")]
+#[tracing::instrument(name = "usecases.retention.run", level = "trace", skip_all)]
 fn run_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,

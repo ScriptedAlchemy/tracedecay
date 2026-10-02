@@ -327,7 +327,6 @@ impl CodeGraphProjectionStore {
 }
 
 impl CodeGraphInteractiveReader {
-    #[hotpath::skip]
     pub(super) fn assemble(
         generation: CodeGenerationId,
         projection: GraphProjectionIdentity,
@@ -347,7 +346,6 @@ impl CodeGraphInteractiveReader {
         }
     }
 
-    #[hotpath::skip]
     pub fn generation(&self) -> &CodeGenerationId {
         &self.generation
     }
@@ -1460,7 +1458,6 @@ impl CodeGraphInteractiveReader {
         })
     }
 
-    #[hotpath::skip]
     fn read_cancellation(
         &self,
         request: Arc<dyn GraphCancellation>,
@@ -1475,7 +1472,6 @@ impl CodeGraphInteractiveReader {
         Ok(cancellation)
     }
 
-    #[hotpath::skip]
     fn catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1636,16 +1632,19 @@ impl CodeGraphInteractiveReader {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         // Built in a heap of its own, the catalog's pages hold nothing else,
         // are charged as the catalog's, and return whole when it is dropped.
-        let (built, heap) = hotpath::measure_block!("code_graph.catalog.build", {
-            OwnerHeapV1::build(|| {
-                catalog::build_interactive_catalog(
-                    &self.snapshot,
-                    &self.projection,
-                    self.projection_node_count,
-                    Arc::clone(&cancellation),
-                )
-            })
-        });
+        let (built, heap) = {
+            let _span = tracing::trace_span!("code_graph.catalog.build").entered();
+            {
+                OwnerHeapV1::build(|| {
+                    catalog::build_interactive_catalog(
+                        &self.snapshot,
+                        &self.projection,
+                        self.projection_node_count,
+                        Arc::clone(&cancellation),
+                    )
+                })
+            }
+        };
         let result = built.and_then(|mut catalog| {
             if cancellation.is_cancelled() {
                 Err(CodeGraphProjectionError::Cancelled)

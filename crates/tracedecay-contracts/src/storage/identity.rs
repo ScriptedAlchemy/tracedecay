@@ -37,14 +37,12 @@ impl StorageByteSizeV1 {
     pub const ZERO: Self = Self(0);
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn get(self) -> u64 {
         self.0
     }
 
     /// Saturating difference, never underflowing below zero bytes.
     #[must_use]
-    #[hotpath::skip]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
     }
@@ -73,7 +71,6 @@ impl FreePageRatioV1 {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn as_f64(self) -> f64 {
         self.0
     }

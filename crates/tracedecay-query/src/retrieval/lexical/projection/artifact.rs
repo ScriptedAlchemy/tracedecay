@@ -279,8 +279,10 @@ fn open_builder_connection(
             "SQLite granted {effective_sorter_workers} lexical sorter workers above the canonical {requested_sorter_workers} auxiliary-worker bound"
         )));
     }
-    hotpath::gauge!("query.artifact.sqlite_sorter_workers.requested").set(requested_sorter_workers);
-    hotpath::gauge!("query.artifact.sqlite_sorter_workers.effective").set(effective_sorter_workers);
+    metrics::gauge!("query.artifact.sqlite_sorter_workers.requested")
+        .set((requested_sorter_workers) as f64);
+    metrics::gauge!("query.artifact.sqlite_sorter_workers.effective")
+        .set((effective_sorter_workers) as f64);
     let modeled_reservation_bytes = tracedecay_code_index::parallelism::worker_reservation_bytes(
         effective_sorter_workers.saturating_add(1),
     );
@@ -295,9 +297,10 @@ fn open_builder_connection(
             if temp_store_file { "FILE" } else { "MEMORY" },
         )
         .map_err(sqlite_error)?;
-    hotpath::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes")
-        .set(modeled_reservation_bytes);
-    hotpath::gauge!("query.artifact.sqlite_sorter.temp_store_file").set(u64::from(temp_store_file));
+    metrics::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes")
+        .set((modeled_reservation_bytes) as f64);
+    metrics::gauge!("query.artifact.sqlite_sorter.temp_store_file")
+        .set((u64::from(temp_store_file)) as f64);
     Ok(connection)
 }
 
@@ -313,10 +316,10 @@ fn enter_resumable_journal(
 fn leave_resumable_journal(
     connection: &rusqlite::Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    hotpath::measure_block!(
-        "query.artifact.staging.journal_fold",
+    {
+        let _span = tracing::trace_span!("query.artifact.staging.journal_fold").entered();
         set_journal_mode(connection, "delete")
-    )
+    }
 }
 
 fn set_journal_mode(
@@ -395,7 +398,7 @@ fn with_builder_sorter_cpu_admission<T>(
     operation: impl FnOnce() -> T,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
     let admitted_units = builder_sorter_cpu_units(connection)?;
-    hotpath::gauge!("query.artifact.sqlite_sorter.admitted_cpu_units").set(admitted_units);
+    metrics::gauge!("query.artifact.sqlite_sorter.admitted_cpu_units").set((admitted_units) as f64);
     Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
 }
 

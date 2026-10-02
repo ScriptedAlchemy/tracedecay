@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 use crate::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
 };
-use crate::profiled_lock::ProfiledMutex;
+use std::sync::Mutex as ProfiledMutex;
 
 pub struct SnapshotConnection {
     pub(super) connection: Arc<ProfiledMutex<Connection>>,
@@ -17,14 +17,10 @@ impl SnapshotConnection {
         let connection = Connection::open_with_flags(path, flags)
             .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
         Ok(Self {
-            connection: Arc::new(hotpath::mutex!(
-                Mutex::new(connection),
-                label = "runtime_core.db.snapshot.connection"
-            )),
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
@@ -32,7 +28,6 @@ impl SnapshotConnection {
         Executor::execute(self, sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
@@ -40,14 +35,12 @@ impl SnapshotConnection {
         QueryExecutor::query(self, sql, params).await
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         Executor::execute_batch(self, sql).await
     }
 }
 
 impl QueryExecutor for SnapshotConnection {
-    #[hotpath::skip]
     async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
@@ -89,7 +82,6 @@ impl QueryExecutor for SnapshotConnection {
 }
 
 impl Executor for SnapshotConnection {
-    #[hotpath::skip]
     async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
@@ -114,7 +106,6 @@ impl Executor for SnapshotConnection {
         .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
     }
 
-    #[hotpath::skip]
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();

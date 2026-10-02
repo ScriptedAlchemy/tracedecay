@@ -1,6 +1,6 @@
 //! Daemon-free, deterministic indexing benchmark entrypoint.
 //!
-//! This is the profiled workload for `.github/workflows/hotpath-profile.yml`.
+//! This is the profiled indexing workload. It drives the real production
 //! It drives the real production indexing pipeline over a committed fixture
 //! corpus and nothing else:
 //!
@@ -42,10 +42,6 @@
 //! wall time differs. The run asserts the sealed state digest is stable
 //! across the two paging strategies it exercises, so a nondeterminism
 //! regression fails the workload instead of quietly skewing the profile.
-//!
-//! With the `hotpath` feature off every macro is a no-op and the guard is
-//! not compiled: the binary runs the identical workload, prints the identical
-//! summary, and writes no report.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -122,16 +118,6 @@ const INCREMENT_SEALED_AT: i64 = 1_700_000_060_000_000;
 const REFRESH_SEALED_AT: i64 = 1_700_000_120_000_000;
 
 fn main() -> ExitCode {
-    #[cfg(feature = "hotpath")]
-    configure_hotpath();
-
-    // Declared first so it drops last: the exit report must observe every
-    // measured span, including the scratch-directory teardown below. Nothing
-    // in this binary may call `std::process::exit`, which would skip the drop
-    // and silently produce no report.
-    #[cfg(feature = "hotpath")]
-    let _hotpath = hotpath::HotpathGuardBuilder::new("tracedecay-index-bench").build();
-
     let options = match Options::parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
         Ok(None) => {
@@ -157,42 +143,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Two guard defaults this workload has to override, both set before the
-/// guard exists. Every `set_var` here is sound for the same reason: this runs
-/// as the first statement of `main`, before the guard, the rayon pool, or any
-/// other thread exists.
-#[cfg(feature = "hotpath")]
-fn configure_hotpath() {
-    // 1. Hotpath binds a localhost metrics server on guard construction.
-    //    This workload is specified to open no socket at all, and a bound
-    //    port also collides when the head and base profiles of one job
-    //    overlap, so the server is off unless an operator asked for it.
-    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
-        unsafe {
-            std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        }
-    }
-
-    // 2. Without an output path the guard prints its report to stdout on
-    //    drop. Stdout here carries the machine-read workload summary, so an
-    //    appended table would corrupt it - the same rule `tracedecay`'s own
-    //    entrypoint applies to its protocol streams. Reports are therefore
-    //    off unless a usable destination file was named.
-    let has_output_path = std::env::var_os(HOTPATH_OUTPUT_PATH_ENV)
-        .is_some_and(|path| path.to_str().is_some_and(|path| !path.is_empty()));
-    if !has_output_path {
-        unsafe {
-            std::env::set_var(HOTPATH_OUTPUT_FORMAT_ENV, "none");
-            std::env::remove_var(HOTPATH_OUTPUT_PATH_ENV);
-        }
-    }
-}
-
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_PATH_ENV: &str = "HOTPATH_OUTPUT_PATH";
-#[cfg(feature = "hotpath")]
-const HOTPATH_OUTPUT_FORMAT_ENV: &str = "HOTPATH_OUTPUT_FORMAT";
-
 const USAGE: &str = "\
 usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--clone-envelope]
 
@@ -202,11 +152,7 @@ usage: tracedecay-index-bench [--corpus DIR] [--replicas N] [--clone-envelope]
   --replicas N   index the corpus N times under distinct logical path
                  prefixes (default: $TRACEDECAY_INDEX_BENCH_REPLICAS, else 1)
   --clone-envelope  measure one-body refresh and clone query behavior
-  -h, --help     print this message
-
-Profiling: build with `--features hotpath` and set HOTPATH_OUTPUT_FORMAT and
-HOTPATH_OUTPUT_PATH. With the feature off the workload is identical and no
-report is written.";
+  -h, --help     print this message";
 
 struct Options {
     corpus_root: PathBuf,

@@ -83,7 +83,6 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    #[hotpath::skip]
     pub(super) async fn new(repetition: usize) -> Self {
         let temp = benchmark_tempdir("pipeline-");
         let home = temp.path().join("home");
@@ -118,7 +117,6 @@ impl Fixture {
         ClaudeSource::with_home(&self.home).for_user_scope(Some(session_id.to_string()), Vec::new())
     }
 
-    #[hotpath::skip]
     pub(super) async fn ingest(&self, source: &ClaudeSource) -> ClaudeObservationIngestStats {
         let admission = self.runtime.facade();
         ingest_source_with_observations_with_admission(
@@ -133,7 +131,6 @@ impl Fixture {
         .expect("run production observation pipeline")
     }
 
-    #[hotpath::skip]
     pub(super) async fn replay(&self) -> Vec<StoredObservation> {
         self.replay_after(0, RECORDS_PER_REPETITION + 1).await
     }
@@ -144,7 +141,6 @@ impl Fixture {
             .expect("measure registered profile database storage")
     }
 
-    #[hotpath::skip]
     async fn replay_after(&self, after_sequence: u64, limit: usize) -> Vec<StoredObservation> {
         self.runtime
             .replay_observations(
@@ -156,7 +152,6 @@ impl Fixture {
             .expect("replay committed benchmark observations")
     }
 
-    #[hotpath::skip]
     pub(super) async fn verify_committed_state(&self, observations: &[StoredObservation]) {
         assert_eq!(observations.len(), RECORDS_PER_REPETITION);
         let expected_session_id = self
@@ -204,7 +199,6 @@ impl Fixture {
         self.verify_projector_only_current_writes().await;
     }
 
-    #[hotpath::skip]
     async fn verify_projector_only_current_writes(&self) {
         let snapshot = self
             .runtime
@@ -409,7 +403,6 @@ struct ProviderFixture {
 }
 
 impl ProviderFixture {
-    #[hotpath::skip]
     async fn new(kind: ProviderKind, repetition: usize) -> Self {
         let temp = benchmark_tempdir("provider-");
         let home = temp.path().join("home");
@@ -468,7 +461,6 @@ impl ProviderFixture {
             .expect("measure registered provider database storage")
     }
 
-    #[hotpath::skip]
     async fn parse_native_fixture(&self) -> usize {
         match self.kind {
             ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Cursor => {
@@ -510,7 +502,6 @@ impl ProviderFixture {
         }
     }
 
-    #[hotpath::skip]
     async fn ingest(&self) -> u64 {
         let scope = self.scope();
         let cancellation = ObservationCancellation::default();
@@ -621,12 +612,10 @@ impl ProviderFixture {
         adapter_work + projection.projected
     }
 
-    #[hotpath::skip]
     async fn replay(&self) -> Vec<StoredObservation> {
         self.replay_after(0, PROVIDER_REPLAY_LIMIT).await
     }
 
-    #[hotpath::skip]
     async fn replay_after(&self, sequence: u64, limit: usize) -> Vec<StoredObservation> {
         self.runtime
             .replay_observations(
@@ -723,7 +712,6 @@ impl ProviderSamples {
         }
     }
 
-    #[hotpath::skip]
     async fn measure_turn(&mut self, repetition: usize, fixture_id: usize) {
         let fixture = ProviderFixture::new(self.kind, fixture_id).await;
         let parse = PhaseSnapshot::start(fixture.database_storage_bytes());

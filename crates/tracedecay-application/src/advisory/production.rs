@@ -88,7 +88,7 @@ pub enum AdvisoryProductionOpenErrorV1 {
 
 /// Constructs every registrar authority that can be derived from existing
 /// project runtime components. No fixture or adapter-local source is accepted.
-#[hotpath::measure(label = "usecases.advisory.open_production")]
+#[tracing::instrument(name = "usecases.advisory.open_production", level = "trace", skip_all)]
 pub fn open_advisory_production_authorities(
     input: AdvisoryProductionOpenV1,
 ) -> Result<AdvisoryProductionAuthoritiesV1, AdvisoryProductionOpenErrorV1> {

@@ -228,7 +228,6 @@ impl StoreRuntimeRegistry {
     /// `generation_id` identifies the generation this lease publishes; it does
     /// not select the namespace, so two generations of one scope resolve to the
     /// same projection and supersede one another there.
-    #[hotpath::skip]
     pub async fn retain_code_graph_store(
         &self,
         project_key: StoreRuntimeKey,
@@ -246,7 +245,7 @@ impl StoreRuntimeRegistry {
         }))
     }
 
-    #[hotpath::measure(label = "runtime_core.registry.graph_retain")]
+    #[tracing::instrument(name = "runtime_core.registry.graph_retain", level = "trace", skip_all)]
     pub async fn retain_graph_store(
         &self,
         key: StoreRuntimeKey,
@@ -371,7 +370,6 @@ impl StoreRuntimeRegistry {
     /// with the daemon so Store retirement can reclassify only this exact map
     /// owner. Ordinary graph work must still obtain its own
     /// [`CanonicalGraphStoreLeaseV1`] through [`Self::retain_graph_store`].
-    #[hotpath::skip]
     pub async fn attach_graph_store_owner(
         &self,
         key: StoreRuntimeKey,

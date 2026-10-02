@@ -33,7 +33,7 @@ pub struct SourceReadOutput {
     pub context: Option<Value>,
 }
 
-#[hotpath::measure(label = "usecases.context.read_source", future = true)]
+#[tracing::instrument(name = "usecases.context.read_source", level = "trace", skip_all)]
 pub async fn read_source(
     project_root: &Path,
     database: &Database,
@@ -97,8 +97,8 @@ pub async fn read_source(
         });
     }
 
-    let body = hotpath::measure_block!(
-        "usecases.context.source_read.render",
+    let body = {
+        let _span = tracing::trace_span!("usecases.context.source_read.render").entered();
         match mode {
             ReadMode::Full => tracedecay_runtime_core::sync::read_source_file(&absolute_path)
                 .map_err(|error| TraceDecayError::Config {
@@ -132,8 +132,8 @@ pub async fn read_source(
                 message: format!("cannot render signatures for '{file}': {error}"),
             })?,
         }
-    );
-    hotpath::gauge!("usecases.context.source_read.bytes").inc(body.len() as f64);
+    };
+    metrics::gauge!("usecases.context.source_read.bytes").increment(body.len() as f64);
     let context = source_symbol_context(
         reader,
         cancellation,
@@ -171,7 +171,11 @@ pub async fn read_source(
     })
 }
 
-#[hotpath::measure(label = "usecases.context.resolve_indexed_source")]
+#[tracing::instrument(
+    name = "usecases.context.resolve_indexed_source",
+    level = "trace",
+    skip_all
+)]
 pub fn resolve_indexed_source_file(
     project_root: &Path,
     reader: &CodeGraphInteractiveReader,
@@ -240,10 +244,10 @@ fn source_symbol_context(
     if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
         return Ok(None);
     }
-    hotpath::measure_block!(
-        "usecases.context.source_read.symbol_context",
+    {
+        let _span = tracing::trace_span!("usecases.context.source_read.symbol_context").entered();
         render_symbol_context(reader, cancellation, display_file, line_range).map(Some)
-    )
+    }
 }
 
 fn relative_source_key(path: &Path) -> Result<Option<String>> {

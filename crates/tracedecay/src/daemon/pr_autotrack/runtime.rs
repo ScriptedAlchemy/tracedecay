@@ -33,7 +33,6 @@ impl PrAutotrackTask {
         self.cancellation.clone()
     }
 
-    #[hotpath::skip]
     pub(crate) async fn shutdown(self) {
         self.cancellation.cancel();
         if let Err(error) = self.task.await {
@@ -57,11 +56,11 @@ pub(crate) fn spawn_with_administration(
 ) -> PrAutotrackTask {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(hotpath::future!(
+    let task = tokio::spawn(tracing::Instrument::instrument(
         async move {
             run(administration, schedulers, task_cancellation).await;
         },
-        label = "daemon.pr_autotrack.loop"
+        tracing::trace_span!("daemon.pr_autotrack.loop"),
     ));
     PrAutotrackTask { cancellation, task }
 }
@@ -94,7 +93,7 @@ async fn run(
     }
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.tick", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.tick", level = "trace", skip_all)]
 async fn tick(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
@@ -182,7 +181,7 @@ async fn retained_project_graph(
         .find(|graph| graph.project_root() == canonical)
 }
 
-#[hotpath::measure(label = "daemon.pr_autotrack.poll", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.poll", level = "trace", skip_all)]
 async fn poll_project(
     repo_root: PathBuf,
     administration: &StoreAdministration,
@@ -204,7 +203,7 @@ async fn poll_project(
         Ok(Ok(discovery)) => {
             // Sweep volume: every PR head this poll examined, including the
             // fork heads it refused to track.
-            hotpath::gauge!("daemon.pr_autotrack.prs_examined").inc(
+            metrics::gauge!("daemon.pr_autotrack.prs_examined").increment(
                 discovery
                     .open
                     .len()
@@ -264,7 +263,7 @@ async fn poll_project(
 
 /// Tears down all managed PR state for a project whose `auto_track_pr_branches`
 /// is now disabled.
-#[hotpath::measure(label = "daemon.pr_autotrack.teardown", future = true)]
+#[tracing::instrument(name = "daemon.pr_autotrack.teardown", level = "trace", skip_all)]
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,

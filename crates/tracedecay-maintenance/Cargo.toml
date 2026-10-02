@@ -19,7 +19,7 @@ test-helpers = [
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-hotpath.workspace = true
+metrics.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,6 +40,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
+tracing = "0.1"
 [dev-dependencies]
 filetime = "0.2"
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", features = ["test-helpers"] }

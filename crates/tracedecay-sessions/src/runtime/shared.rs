@@ -18,7 +18,7 @@ use tracedecay_runtime_core::git_discovery::{
 
 pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 
-type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
+type ProfiledMutex<T> = std::sync::Mutex<T>;
 
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
@@ -34,17 +34,14 @@ pub struct SqliteReadConn {
 impl SqliteReadConn {
     pub fn new(conn: rusqlite::Connection) -> Self {
         Self {
-            inner: Arc::new(hotpath::mutex!(
-                Mutex::new(conn),
-                label = "sessions.shared.sqlite_conn"
-            )),
+            inner: Arc::new(Mutex::new(conn)),
         }
     }
 
     /// Runs `body` against the connection on a blocking thread. Returns `None`
     /// only if the blocking task itself fails (cancellation/panic), which
     /// callers degrade to the same outcome as any SQL error.
-    #[hotpath::measure(label = "sessions.shared.sqlite_with", future = true)]
+    #[tracing::instrument(name = "sessions.shared.sqlite_with", level = "trace", skip_all)]
     pub async fn with<T, F>(&self, body: F) -> Option<T>
     where
         T: Send + 'static,
@@ -92,7 +89,7 @@ where
         .flatten()
 }
 
-#[hotpath::measure(label = "sessions.shared.read_new_rows_sync")]
+#[tracing::instrument(name = "sessions.shared.read_new_rows_sync", level = "trace", skip_all)]
 fn read_new_rows_sync<T>(
     conn: &rusqlite::Connection,
     select_sql: &str,
@@ -304,7 +301,7 @@ impl ProjectRootMatcher {
         Self::new_with_identity_resolver(project_root, discover_repository_identity_cli_first)
     }
 
-    #[hotpath::measure(label = "sessions.shared.matcher_new")]
+    #[tracing::instrument(name = "sessions.shared.matcher_new", level = "trace", skip_all)]
     pub fn new_with_identity_resolver(
         project_root: &Path,
         identity_resolver: GitIdentityResolver,
@@ -352,7 +349,7 @@ impl ProjectRootMatcher {
         })
     }
 
-    #[hotpath::measure(label = "sessions.shared.membership_resolve")]
+    #[tracing::instrument(name = "sessions.shared.membership_resolve", level = "trace", skip_all)]
     fn contains_uncached_with(
         &self,
         path: &Path,
@@ -662,7 +659,7 @@ pub fn one_line_truncated(text: &str, max: usize) -> String {
 
 /// Return lossless storage text plus tool names discovered in either structured
 /// content blocks or a sibling `tool_calls` field.
-#[hotpath::measure(label = "sessions.shared.content_storage")]
+#[tracing::instrument(name = "sessions.shared.content_storage", level = "trace", skip_all)]
 pub fn content_storage_text_and_tools(
     content: &Value,
     tool_calls: Option<&Value>,
@@ -703,7 +700,6 @@ pub struct TranscriptLocationMetadataKeys {
 }
 
 impl TranscriptLocationMetadataKeys {
-    #[hotpath::skip]
     pub const fn new(cwd: &'static str, worktree: &'static str, provenance: &'static str) -> Self {
         Self {
             cwd,

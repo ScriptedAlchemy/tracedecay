@@ -6,7 +6,7 @@ use tracedecay_domain::RelationEdgeKindV1;
 const MAX_GINI_SYMBOLS: usize = 500_000;
 const MAX_GINI_RELATIONS: usize = 2_000_000;
 
-#[hotpath::measure(label = "mcp.health.gini.total")]
+#[tracing::instrument(name = "mcp.health.gini.total", level = "trace", skip_all)]
 pub async fn compute_gini(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -18,13 +18,14 @@ pub async fn compute_gini(
     let limit = request.limit.map_or(10, |v| v.min(100) as usize);
     let path_prefix = request.path.as_deref().or(scope_prefix);
 
-    let (named_values, incomplete_complexity_symbols) = hotpath::measure_block!(
-        "mcp.health.gini.graph",
+    let (named_values, incomplete_complexity_symbols) = {
+        let _span = tracing::trace_span!("mcp.health.gini.graph").entered();
         verified_gini_values(graph, metric, scope, path_prefix)?
-    );
+    };
 
-    let (gini, interpretation, total_items, outliers) =
-        hotpath::measure_block!("mcp.health.gini.compute", {
+    let (gini, interpretation, total_items, outliers) = {
+        let _span = tracing::trace_span!("mcp.health.gini.compute").entered();
+        {
             let values: Vec<f64> = named_values.iter().map(|(_, v)| *v).collect();
             let gini = gini_coefficient(&values);
             let interpretation = gini_label(gini);
@@ -51,7 +52,8 @@ pub async fn compute_gini(
                 })
                 .collect();
             (gini, interpretation, total_items, outliers)
-        });
+        }
+    };
 
     Ok(graph_tool_completion(
         GraphToolResultV1::Gini(GiniResultV1 {
@@ -241,7 +243,7 @@ fn verified_gini_member_values(
     Ok(members.into_values().collect())
 }
 
-#[hotpath::measure(label = "mcp.health.dependency_depth.total")]
+#[tracing::instrument(name = "mcp.health.dependency_depth.total", level = "trace", skip_all)]
 pub async fn compute_dependency_depth(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -252,30 +254,33 @@ pub async fn compute_dependency_depth(
     let limit = request.limit.map_or(10, |v| v.min(100) as usize);
     let path_prefix = request.path.as_deref().or(scope_prefix);
 
-    let adj = hotpath::future!(
+    let adj = tracing::Instrument::instrument(
         graph.build_file_adjacency(path_prefix),
-        label = "mcp.health.dependency_depth.graph"
+        tracing::trace_span!("mcp.health.dependency_depth.graph"),
     )
     .await?;
 
-    let result = hotpath::measure_block!("mcp.health.dependency_depth.compute", {
-        let result = dependency_depth(&adj, limit);
-        let score = depth_score(result.max_depth, result.ideal_depth);
-        DependencyDepthResultV1 {
-            max_depth: result.max_depth as u64,
-            ideal_depth: result.ideal_depth as u64,
-            depth_score: (score * 10000.0).round() / 10000.0,
-            chains: result
-                .chains
-                .into_iter()
-                .map(|chain| DependencyDepthChainV1 {
-                    file: chain.file,
-                    depth: chain.depth as u64,
-                    chain: chain.chain,
-                })
-                .collect(),
+    let result = {
+        let _span = tracing::trace_span!("mcp.health.dependency_depth.compute").entered();
+        {
+            let result = dependency_depth(&adj, limit);
+            let score = depth_score(result.max_depth, result.ideal_depth);
+            DependencyDepthResultV1 {
+                max_depth: result.max_depth as u64,
+                ideal_depth: result.ideal_depth as u64,
+                depth_score: (score * 10000.0).round() / 10000.0,
+                chains: result
+                    .chains
+                    .into_iter()
+                    .map(|chain| DependencyDepthChainV1 {
+                        file: chain.file,
+                        depth: chain.depth as u64,
+                        chain: chain.chain,
+                    })
+                    .collect(),
+            }
         }
-    });
+    };
 
     Ok(graph_tool_completion(
         GraphToolResultV1::DependencyDepth(result),
@@ -283,7 +288,7 @@ pub async fn compute_dependency_depth(
     ))
 }
 
-#[hotpath::measure(label = "mcp.health.health.total")]
+#[tracing::instrument(name = "mcp.health.health.total", level = "trace", skip_all)]
 pub async fn compute_health(
     graph: &VerifiedGraphQuery,
     args: Value,
@@ -292,9 +297,9 @@ pub async fn compute_health(
     let request: HealthSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_health")?;
     let path_prefix = request.path.as_deref().or(scope_prefix);
 
-    let snap = hotpath::future!(
+    let snap = tracing::Instrument::instrument(
         graph.verified_health_snapshot(path_prefix),
-        label = "mcp.health.health.graph"
+        tracing::trace_span!("mcp.health.health.graph"),
     )
     .await?;
 

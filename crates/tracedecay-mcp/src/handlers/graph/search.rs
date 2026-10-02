@@ -141,7 +141,7 @@ fn search_coverage(coverage: &CodeIndexSearchCoverageV1) -> SearchCoverageV1 {
 }
 
 /// Computes one `tracedecay_search` page on the graph-tool owner's side.
-#[hotpath::measure(label = "mcp.graph.search.total")]
+#[tracing::instrument(name = "mcp.graph.search.total", level = "trace", skip_all)]
 pub async fn compute_search<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
@@ -230,15 +230,15 @@ where
                 // graph activation has already advanced to its successor.
                 let graph = graph?;
                 preserve_complete_search_after_lazy_admission(
-                    hotpath::future!(
+                    tracing::Instrument::instrument(
                         dependency_hints::admit_verified_ignored_dependency(
                             ctx,
                             ignored_dependency_admission,
                             &graph,
                             query,
-                            scope_prefix
+                            scope_prefix,
                         ),
-                        label = "mcp.graph.search.admit"
+                        tracing::trace_span!("mcp.graph.search.admit"),
                     )
                     .await,
                 )?;
@@ -260,43 +260,46 @@ where
                     })
                     .map(|display| display.path.as_str()),
             );
-            hotpath::measure_block!("mcp.graph.search.graph", {
-                for ranked in &complete.ordered_candidates {
-                    let anchor = ranked.candidate.anchor_id.as_str();
-                    let mut node_id = if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
-                        Some(graph_occurrence_id(anchor)?.as_str().to_owned())
-                    } else {
-                        None
-                    };
-                    let display = complete.display_by_anchor.get(&ranked.candidate.anchor_id);
-                    let display_unavailable = match display {
-                        Some(_) => None,
-                        None => complete
-                            .display_unavailable_by_anchor
-                            .get(&ranked.candidate.anchor_id)
-                            .copied(),
-                    };
-                    if include_graph_node_ids
-                        && node_id.is_none()
-                        && let Some(display) = display
-                    {
-                        node_id = graph_evidence.node_id_for(display);
+            {
+                let _span = tracing::trace_span!("mcp.graph.search.graph").entered();
+                {
+                    for ranked in &complete.ordered_candidates {
+                        let anchor = ranked.candidate.anchor_id.as_str();
+                        let mut node_id = if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
+                            Some(graph_occurrence_id(anchor)?.as_str().to_owned())
+                        } else {
+                            None
+                        };
+                        let display = complete.display_by_anchor.get(&ranked.candidate.anchor_id);
+                        let display_unavailable = match display {
+                            Some(_) => None,
+                            None => complete
+                                .display_unavailable_by_anchor
+                                .get(&ranked.candidate.anchor_id)
+                                .copied(),
+                        };
+                        if include_graph_node_ids
+                            && node_id.is_none()
+                            && let Some(display) = display
+                        {
+                            node_id = graph_evidence.node_id_for(display);
+                        }
+                        results.push(SearchResultRowV1 {
+                            candidate: ranked.candidate.clone(),
+                            final_ordinal: ranked.final_ordinal,
+                            node_id,
+                            display: display.map(|display| SearchResultDisplayV1 {
+                                name: display.name.clone(),
+                                qualified_name: display.qualified_name.clone(),
+                                kind: display.kind.clone(),
+                                path: display.path.clone(),
+                            }),
+                            display_unavailable,
+                            lexical_routes: None,
+                        });
                     }
-                    results.push(SearchResultRowV1 {
-                        candidate: ranked.candidate.clone(),
-                        final_ordinal: ranked.final_ordinal,
-                        node_id,
-                        display: display.map(|display| SearchResultDisplayV1 {
-                            name: display.name.clone(),
-                            qualified_name: display.qualified_name.clone(),
-                            kind: display.kind.clone(),
-                            path: display.path.clone(),
-                        }),
-                        display_unavailable,
-                        lexical_routes: None,
-                    });
                 }
-            });
+            };
             let result_count = results.len();
             let (lexical_routes, lexical_anchors) =
                 lexical_routing::route_evidence(&mut results, &complete.lexical_routes);

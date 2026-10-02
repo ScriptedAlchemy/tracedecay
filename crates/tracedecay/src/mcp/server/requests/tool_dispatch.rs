@@ -7,7 +7,6 @@ use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_
 use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
-    #[hotpath::skip]
     pub(super) async fn route_tool_arguments(
         &self,
         id: &Value,
@@ -104,7 +103,6 @@ impl McpServer {
     // literals that cannot fail to parse; this entry point exists only for
     // the test transport.
     #[cfg_attr(not(test), allow(clippy::expect_used))]
-    #[hotpath::skip]
     pub async fn call_tool_for_test(
         &self,
         tool_name: &str,
@@ -158,7 +156,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::measure(label = "mcp.server.tools_call.dispatch", future = true)]
+    #[tracing::instrument(name = "mcp.server.tools_call.dispatch", level = "trace", skip_all)]
     pub(super) async fn dispatch_routed_tool_call(
         &self,
         tool_name: &str,
@@ -224,7 +222,6 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "Tool dispatch is one registry match onto the owning handler future."
@@ -351,10 +348,11 @@ impl McpServer {
                     Err(error) => Err(error),
                 },
                 ReadFlightClaim::Follower(follower) => match follower.wait().await {
-                    Some(result) => Ok(hotpath::measure_block!(
-                        "mcp.server.read_coalescing.result_clone",
+                    Some(result) => Ok({
+                        let _span = tracing::trace_span!("mcp.server.read_coalescing.result_clone")
+                            .entered();
                         (*result).clone()
-                    )),
+                    }),
                     None => dispatch.await,
                 },
             }

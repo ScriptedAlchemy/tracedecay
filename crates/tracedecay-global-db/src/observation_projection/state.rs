@@ -225,9 +225,10 @@ pub(crate) struct RearmedProjectionRetries {
 /// statement or transaction scales with the queue, and foreground writes
 /// interleave between batches. Rows queued after the walk starts belong to
 /// this mount and are left alone.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.rearm_retries"
+#[tracing::instrument(
+    name = "global_db.observation_projection.rearm_retries",
+    level = "trace",
+    skip_all
 )]
 pub(crate) async fn rearm_queued_projection_retries(
     database: &Database,
@@ -256,9 +257,10 @@ pub(crate) async fn rearm_queued_projection_retries(
 
 /// Re-arms the next `batch_rows` deferred rows after `after_rowid` in one
 /// writer transaction and returns the last rowid it covered.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.rearm_retries.batch"
+#[tracing::instrument(
+    name = "global_db.observation_projection.rearm_retries.batch",
+    level = "trace",
+    skip_all
 )]
 async fn rearm_projection_retry_batch(
     database: &Database,
@@ -1140,9 +1142,10 @@ fn output_authority_batch_sql() -> String {
 ///
 /// Keys are deduplicated by the caller's [`BTreeSet`], so one requested key
 /// never multiplies a group's `COUNT(*)` through the `json_each` join.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_state.batch.authority")
+#[tracing::instrument(
+    name = "global_db.observation_state.batch.authority",
+    level = "trace",
+    skip_all
 )]
 pub(in super::super) async fn read_output_authorities(
     conn: &impl QueryExecutor,
@@ -1209,9 +1212,10 @@ pub(in super::super) async fn read_output_authorities(
 /// projection is the same value [`message_projection`] would re-derive from the
 /// same connection, so it is reused instead of re-queried. Any other owner
 /// re-derives exactly as before.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_state.verify.resolved_authority")
+#[tracing::instrument(
+    name = "global_db.observation_state.verify.resolved_authority",
+    level = "trace",
+    skip_all
 )]
 pub(in super::super) async fn resolve_output_projection(
     conn: &impl QueryExecutor,

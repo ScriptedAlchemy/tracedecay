@@ -235,7 +235,7 @@ impl BoundedHookOrchestratorV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.service.hooks.admit")]
+    #[tracing::instrument(name = "daemon.service.hooks.admit", level = "trace", skip_all)]
     pub fn admit(&self, mut request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
         let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
             return HookOrchestrationAdmissionV1::Unavailable;
@@ -384,7 +384,6 @@ impl BoundedHookOrchestratorV1 {
         HookOrchestrationAdmissionV1::Enqueued
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) -> bool {
         let (tasks, mut clean) = {
             let mut task_owner = self
@@ -721,7 +720,6 @@ impl RegisteredWorkRuntime {
         self.workflow_census_observation_recovery.cancel();
     }
 
-    #[hotpath::skip]
     pub async fn shut_down_background_recovery(&self) {
         self.cancel_background_recovery();
         if let Some(recovery) = &self.workflow_fan_out_recovery {
@@ -883,7 +881,6 @@ struct LspLeaseTask {
 }
 
 impl LspLeaseTask {
-    #[hotpath::skip]
     async fn stop(self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
         self.handle
@@ -928,7 +925,6 @@ pub struct LspLeaseTaskRegistry {
 }
 
 impl LspLeaseTaskRegistry {
-    #[hotpath::skip]
     pub async fn start<F>(
         self: &Arc<Self>,
         session_id: LspSessionId,
@@ -1003,7 +999,6 @@ impl LspLeaseTaskRegistry {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn cancel(&self, session_id: &LspSessionId) -> Result<(), DaemonInvocationProblem> {
         self.stop_generation(session_id, None).await
     }
@@ -1012,7 +1007,6 @@ impl LspLeaseTaskRegistry {
         self.take_generation(session_id, Some(generation));
     }
 
-    #[hotpath::skip]
     async fn stop_generation(
         &self,
         session_id: &LspSessionId,
@@ -1042,7 +1036,6 @@ impl LspLeaseTaskRegistry {
         matches.then(|| state.tasks.remove(session_id)).flatten()
     }
 
-    #[hotpath::skip]
     pub async fn shutdown(&self) -> Result<(), DaemonInvocationProblem> {
         let tasks = {
             let mut state = match self.state.lock() {

@@ -262,12 +262,11 @@ where
         + WorkProductOwnerAuthorizationPortV1
         + WorkProductAttemptAdmissionPortV1,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
 
-    #[hotpath::measure(label = "application.work.attempt.start")]
+    #[tracing::instrument(name = "application.work.attempt.start", level = "trace", skip_all)]
     pub fn start_against_registered_topology(
         &self,
         context: &RequestContext,

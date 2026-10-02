@@ -14,10 +14,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate.
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 
 # Integration fixture surface: `HostAdmissionTestRuntimeV1`, the registered
 # database scaffolding it owns, and the explicit `TraceDecay::*_for_test`
@@ -57,7 +53,6 @@ test-transport = [
 ]
 
 [dependencies]
-hotpath = { workspace = true, features = ["tokio"] }
 # Only the `test-helpers` LCM fixture opens a raw connection.
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"], optional = true }
 serde_json = "1"

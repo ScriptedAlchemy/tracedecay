@@ -96,7 +96,7 @@ fn automatic_fact_receipt(receipt: &ProjectMemoryAutomaticFactReceiptV1) -> Auto
 
 /// Serve one `tracedecay_admin_project` request for the project's owner.
 /// The profile's automation reconcile is the daemon's profile owner's.
-#[hotpath::measure(future = true, label = "mcp.admin.project.total")]
+#[tracing::instrument(name = "mcp.admin.project.total", level = "trace", skip_all)]
 pub async fn compute_admin_project(
     cg: &TraceDecay,
     request: AdminProjectSurfaceRequestV1,

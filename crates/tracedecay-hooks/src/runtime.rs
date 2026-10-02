@@ -159,7 +159,7 @@ pub trait AsyncHookAdmissionPortV1 {
 /// Validate exact daemon-issued scope before yielding to asynchronous local
 /// admission. This function performs no search, model, command, store-open, or
 /// external-network work.
-#[hotpath::measure(label = "hooks.runtime.admit_async", future = true)]
+#[tracing::instrument(name = "hooks.runtime.admit_async", level = "trace", skip_all)]
 pub async fn admit_async_exact_scope(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -212,7 +212,7 @@ pub struct HookSynchronousResultV1 {
 /// hook dispatch cost as felt by the host. The completion mix is what tells
 /// apart a healthy hook path from one that is quietly missing its budget or
 /// falling back to replay.
-#[hotpath::measure(label = "hooks.runtime.finish_synchronous")]
+#[tracing::instrument(name = "hooks.runtime.finish_synchronous", level = "trace", skip_all)]
 pub fn finish_synchronous_hook(
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
@@ -259,9 +259,8 @@ pub fn finish_synchronous_hook(
         deadline_exceeded,
     );
 
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!(match immediate_state {
+        metrics::gauge!(match immediate_state {
             HookImmediateAdmissionStateV1::Accepted => "hooks.admission.immediate.accepted",
             HookImmediateAdmissionStateV1::CatchupRequired => {
                 "hooks.admission.immediate.catchup_required"
@@ -272,8 +271,8 @@ pub fn finish_synchronous_hook(
                 "hooks.admission.immediate.backpressured"
             }
         })
-        .inc(1);
-        hotpath::gauge!(match guidance {
+        .increment(1);
+        metrics::gauge!(match guidance {
             HookGuidanceDispositionV1::Rendered => "hooks.guidance.rendered",
             HookGuidanceDispositionV1::NotReady => "hooks.guidance.not_ready",
             HookGuidanceDispositionV1::Paused => "hooks.guidance.paused",
@@ -282,9 +281,9 @@ pub fn finish_synchronous_hook(
             HookGuidanceDispositionV1::Invalid => "hooks.guidance.invalid",
             HookGuidanceDispositionV1::DeadlineExceeded => "hooks.guidance.deadline_exceeded",
         })
-        .inc(1);
+        .increment(1);
         if deadline_exceeded {
-            hotpath::gauge!("hooks.synchronous.deadline_exceeded").inc(1);
+            metrics::gauge!("hooks.synchronous.deadline_exceeded").increment(1);
         }
     }
 
@@ -373,17 +372,20 @@ const fn admit_rollback_revision(
     Ok(())
 }
 
-#[cfg(feature = "hotpath")]
 fn record_feedback_outcome(outcome: HookFeedbackDeliveryOutcomeV1) {
-    hotpath::gauge!(match outcome {
+    metrics::gauge!(match outcome {
         HookFeedbackDeliveryOutcomeV1::Delivered => "hooks.feedback.delivered",
         HookFeedbackDeliveryOutcomeV1::Duplicate => "hooks.feedback.duplicate",
         HookFeedbackDeliveryOutcomeV1::Unavailable => "hooks.feedback.unavailable",
     })
-    .inc(1);
+    .increment(1);
 }
 
-#[hotpath::measure(label = "hooks.runtime.deliver_feedback_rollback")]
+#[tracing::instrument(
+    name = "hooks.runtime.deliver_feedback_rollback",
+    level = "trace",
+    skip_all
+)]
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
@@ -394,7 +396,7 @@ where
 {
     admit_rollback_revision(rollback)?;
     let outcome = port.deliver_hook_v2(feedback);
-    #[cfg(feature = "hotpath")]
+
     record_feedback_outcome(outcome);
     Ok(outcome)
 }
@@ -429,7 +431,7 @@ where
 {
     admit_rollback_revision(rollback)?;
     let outcome = port.deliver_hook_v2(envelope, feedback, deadline).await;
-    #[cfg(feature = "hotpath")]
+
     record_feedback_outcome(outcome);
     Ok(outcome)
 }
@@ -469,7 +471,7 @@ const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
 /// budget remains, so an over-budget or foreign-scope hook can never surface
 /// another scope's feedback. Acknowledgement failure withholds nothing already
 /// earned: the outcome is reported so callers can record it truthfully.
-#[hotpath::measure(label = "hooks.runtime.deliver_feedback", future = true)]
+#[tracing::instrument(name = "hooks.runtime.deliver_feedback", level = "trace", skip_all)]
 pub async fn deliver_hook_feedback<T, P>(
     envelope: &HookEventEnvelopeV2,
     receipt: &HookAdmissionReceiptV1,

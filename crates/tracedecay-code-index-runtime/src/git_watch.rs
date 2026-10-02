@@ -54,8 +54,8 @@ use crate::ports::{
 };
 pub(crate) use tracedecay_runtime_core::logging::log_daemon_event;
 
-pub type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
-pub type ProfiledTokioMutex<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+pub type ProfiledStdMutex<T> = std::sync::Mutex<T>;
+pub type ProfiledTokioMutex<T> = tokio::sync::Mutex<T>;
 
 mod admission;
 mod backstop;
@@ -226,31 +226,13 @@ impl GitWatcher {
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 enabled,
                 ambient_home,
-                admission: hotpath::mutex!(
-                    std::sync::Mutex::new(()),
-                    label = "daemon.git.watch.admission"
-                ),
-                projects: hotpath::mutex!(
-                    tokio::sync::Mutex::new(HashMap::new()),
-                    label = "daemon.git.watch.projects"
-                ),
-                identity_retries: hotpath::mutex!(
-                    std::sync::Mutex::new(HashMap::new()),
-                    label = "daemon.git.watch.identity_retries"
-                ),
-                overflow: hotpath::mutex!(
-                    std::sync::Mutex::new(overflow::OverflowRoster::default()),
-                    label = "daemon.git.watch.overflow_roster"
-                ),
-                backstop_task: hotpath::mutex!(
-                    tokio::sync::Mutex::new(None),
-                    label = "daemon.git.watch.backstop_task"
-                ),
+                admission: std::sync::Mutex::new(()),
+                projects: tokio::sync::Mutex::new(HashMap::new()),
+                identity_retries: std::sync::Mutex::new(HashMap::new()),
+                overflow: std::sync::Mutex::new(overflow::OverflowRoster::default()),
+                backstop_task: tokio::sync::Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
-                shutdown_completion: hotpath::mutex!(
-                    tokio::sync::Mutex::new(None),
-                    label = "daemon.git.watch.shutdown_completion"
-                ),
+                shutdown_completion: tokio::sync::Mutex::new(None),
                 #[cfg(test)]
                 repository_publication_probe: ownership::PublicationRaceProbe::default(),
                 #[cfg(test)]
@@ -330,7 +312,7 @@ impl GitWatcher {
     ///
     /// Called once from `run_foreground_unix` after the engine is built. Safe to
     /// call on a disabled watcher (no-op).
-    #[hotpath::measure(label = "daemon.git.watch.spawn", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.spawn", level = "trace", skip_all)]
     pub async fn spawn(&self) -> GitWatcherStart {
         if !self.inner.enabled {
             return GitWatcherStart::Disabled;
@@ -354,11 +336,11 @@ impl GitWatcher {
         #[cfg(test)]
         self.inner.spawn_publication_probe.block_if_armed();
         let watcher = self.clone();
-        let handle = tokio::spawn(hotpath::future!(
+        let handle = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 backstop::run(watcher).await;
             },
-            label = "daemon.git.watch.backstop"
+            tracing::trace_span!("daemon.git.watch.backstop"),
         ));
         *retained = Some(handle);
         #[cfg(test)]
@@ -367,7 +349,7 @@ impl GitWatcher {
     }
 
     /// Stops every watcher-owned task and joins it before database shutdown.
-    #[hotpath::measure(label = "daemon.git.watch.shutdown", future = true)]
+    #[tracing::instrument(name = "daemon.git.watch.shutdown", level = "trace", skip_all)]
     pub async fn shutdown(&self) -> GitWatcherShutdownOutcome {
         if !self.inner.enabled {
             return GitWatcherShutdownOutcome::default();
@@ -508,7 +490,7 @@ fn watch_status_reason(
 /// Supervises one repository's watch task: on panic, restart with capped
 /// exponential backoff so a transient watcher failure never permanently drops a
 /// project (the backstop still covers it in the meantime).
-#[hotpath::measure(label = "daemon.git.watch.supervise", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.supervise", level = "trace", skip_all)]
 async fn supervise_repository(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let mut backoff = Duration::from_millis(500);
     let cancellation = state.cancellation(&inner.cancellation);
@@ -541,7 +523,7 @@ async fn supervise_repository(inner: Arc<GitWatcherInner>, state: Arc<WatchState
 /// One repository event loop. The watcher is rebuilt when another linked
 /// worktree registers so its per-worktree operation-marker directory joins the
 /// same small metadata watch set.
-#[hotpath::measure(label = "daemon.git.watch.repository", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.repository", level = "trace", skip_all)]
 async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let cancellation = state.cancellation(&inner.cancellation);
     loop {
@@ -847,7 +829,7 @@ fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: StdInst
     cancellation.is_cancelled() || StdInstant::now() >= deadline
 }
 
-#[hotpath::measure(label = "daemon.git.watch.operation_scan")]
+#[tracing::instrument(name = "daemon.git.watch.operation_scan", level = "trace", skip_all)]
 fn operation_state_blocking(
     state: &WatchState,
     max_worktrees: usize,
@@ -907,7 +889,7 @@ fn operation_state(state: &WatchState, max_worktrees: usize) -> OperationState {
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.operation", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.operation", level = "trace", skip_all)]
 async fn observe_operation_state(
     state: Arc<WatchState>,
     cancellation: WatchCancellation,
@@ -949,7 +931,7 @@ async fn observe_operation_state(
 /// scheduler owns exact source revision resolution, gix status,
 /// changed-candidate evidence, generation assembly, and its short CAS
 /// publication; this watcher owns none of those authorities.
-#[hotpath::measure(label = "daemon.git.watch.freshness", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.freshness", level = "trace", skip_all)]
 async fn request_freshness_for_repository(
     inner: &GitWatcherInner,
     state: &Arc<WatchState>,
@@ -1115,7 +1097,7 @@ fn retain_freshness_retry(state: &WatchState, affected_roots: Option<BTreeSet<Pa
 /// (e.g. ENOSPC). A fixed cadence is deliberate: filesystem mtimes cannot
 /// faithfully summarize loose-ref content changes, while the scheduler's gix
 /// reconciliation can.
-#[hotpath::measure(label = "daemon.git.watch.degraded", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.degraded", level = "trace", skip_all)]
 async fn degraded_poll_loop(
     inner: &Arc<GitWatcherInner>,
     state: &Arc<WatchState>,

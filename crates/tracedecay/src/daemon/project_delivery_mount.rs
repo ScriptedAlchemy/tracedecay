@@ -5,7 +5,7 @@ use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
-#[hotpath::measure(label = "daemon.project.mount", future = true)]
+#[tracing::instrument(name = "daemon.project.mount", level = "trace", skip_all)]
 pub(super) async fn ensure_project_delivery_settlement(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -35,7 +35,7 @@ pub(super) async fn ensure_project_delivery_settlement(
         .map_err(|error| {
             // Fail-closed mount outcome; successes are already counted by the
             // enclosing measure span.
-            hotpath::gauge!("daemon.project.mount.failed").inc(1.0);
+            metrics::gauge!("daemon.project.mount.failed").increment(1.0);
             TraceDecayError::Config {
                 message: format!(
                     "project-open observability producer registration failed: {error}"

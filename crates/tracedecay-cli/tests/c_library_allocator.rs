@@ -7,8 +7,7 @@
 #![cfg(all(
     target_os = "linux",
     target_env = "gnu",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
+    not(feature = "alloc-jemalloc")
 ))]
 
 #[path = "../src/process_allocator.rs"]

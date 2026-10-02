@@ -198,14 +198,14 @@ impl RetainedAutomationExecutionPortV1 for AssembledRetainedAutomation {
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
         Box::pin(async move {
             let cg = self.cg.read().await.clone();
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 execute_retained_memory_curator(
                     cg.as_ref(),
                     &self.invocation_service,
                     &context,
-                    request
+                    request,
                 ),
-                label = "daemon.retained.automation.curate"
+                tracing::trace_span!("daemon.retained.automation.curate"),
             )
             .await
         })

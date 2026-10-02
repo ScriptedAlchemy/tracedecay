@@ -31,7 +31,6 @@ mod journal_tests;
 /// Admits the retained request, resolves the memory owner, and hands those
 /// authorities to the runtime settlement kernel.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::skip]
 pub async fn prepare(
     invocation: &DaemonInvocationService,
     memory: &TraceDecay,

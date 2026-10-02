@@ -59,7 +59,7 @@ pub(super) fn parse_branch_add_request(
     })
 }
 
-#[hotpath::measure(label = "daemon.branch_add.response", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.response", level = "trace", skip_all)]
 pub(super) async fn branch_add_response(
     administration: &StoreAdministration,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
@@ -142,7 +142,11 @@ pub(super) async fn branch_add_response(
 /// Production branch-add journey: activate the requested linked worktree,
 /// then ask the code-index runtime to seal its exact generation and provenance.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.activate_and_track", future = true)]
+#[tracing::instrument(
+    name = "daemon.branch_add.activate_and_track",
+    level = "trace",
+    skip_all
+)]
 async fn activate_and_track_manual_branch(
     administration: &StoreAdministration,
     project_root: &Path,
@@ -269,7 +273,7 @@ async fn activate_and_track_manual_branch(
 /// missing session mount or cursor key must not retract it. The exact branch
 /// read falls back to borrowing a peer authority when this could not run.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.query_authority", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.query_authority", level = "trace", skip_all)]
 async fn mount_published_branch_query_authority(
     registries: Option<&(super::branch_admin::SharedSessionRuntimeRegistries, PathBuf)>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -345,7 +349,7 @@ async fn mount_published_branch_query_authority(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.branch_add.owner", future = true)]
+#[tracing::instrument(name = "daemon.branch_add.owner", level = "trace", skip_all)]
 pub(super) async fn activate_and_track_manual_branch_owned(
     project_root: std::path::PathBuf,
     graph: Arc<tracedecay_project::project::TraceDecay>,

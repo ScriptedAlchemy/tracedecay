@@ -641,9 +641,10 @@ impl ProjectContextScoutAddressRegistryV1 {
     /// Advances the exact control address to the committed configuration pin.
     /// The opaque address is preserved so response-loss retry reaches the
     /// durable configuration receipt instead of requiring a new host event.
-    #[hotpath::measure(
-        label = "context_scout_advance_control_address",
-        impl_type = "ProjectContextScoutAddressRegistryV1"
+    #[tracing::instrument(
+        name = "context_scout_advance_control_address",
+        level = "trace",
+        skip_all
     )]
     pub async fn advance_control_exact_address(
         &self,
@@ -708,10 +709,7 @@ impl ProjectContextScoutAddressRegistryV1 {
 
     // The shared decode/validate funnel behind every resolve and authorize
     // operation on the durable address ledger.
-    #[hotpath::measure(
-        label = "context_scout_address_ledger_read",
-        impl_type = "ProjectContextScoutAddressRegistryV1"
-    )]
+    #[tracing::instrument(name = "context_scout_address_ledger_read", level = "trace", skip_all)]
     async fn read_ledger(&self) -> Result<Option<StoredContextScoutAddressLedgerV1>, ()> {
         let encoded = self
             .database
@@ -796,10 +794,7 @@ where
         }
     }
 
-    #[hotpath::measure(
-        label = "context_scout_bind_and_assemble",
-        impl_type = "ContextScoutCanonicalInputAssemblerV1"
-    )]
+    #[tracing::instrument(name = "context_scout_bind_and_assemble", level = "trace", skip_all)]
     pub async fn bind_and_assemble(
         &self,
         hook: &AdmittedContextScoutHookV1,

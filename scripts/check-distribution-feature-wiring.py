@@ -21,33 +21,11 @@ import tomllib
 
 REQUIRED_ROOT_FEATURES = {
     "full",
-    "hotpath",
-    "hotpath-alloc",
-    "hotpath-cpu",
-    "hotpath-mcp",
     "token-counting",
     "test-transport",
 }
 REQUIRED_CLI_FEATURE_MEMBERS = {
     "production": {"tracedecay/production"},
-    "hotpath": {
-        "dep:regex",
-        "tracedecay/hotpath",
-        "hotpath/hotpath",
-        "hotpath/tokio",
-        "hotpath/ureq-3",
-    },
-    "hotpath-alloc": {
-        "hotpath",
-        "tracedecay/hotpath-alloc",
-        "hotpath/hotpath-alloc",
-    },
-    "hotpath-cpu": {
-        "hotpath",
-        "tracedecay/hotpath-cpu",
-        "hotpath/hotpath-cpu",
-    },
-    "hotpath-mcp": {"hotpath", "hotpath/hotpath-mcp"},
 }
 
 
@@ -222,7 +200,7 @@ def validate(
     for feature, expected in REQUIRED_CLI_FEATURE_MEMBERS.items():
         members = cli_features.get(feature)
         # Extra crate passthroughs are allowed; the contract is the required
-        # Hotpath/release members, not an exhaustive crate inventory.
+        # release members, not an exhaustive crate inventory.
         if not isinstance(members, list) or not expected.issubset(members):
             raise SystemExit(
                 f"distribution acceptance: tracedecay-cli {feature} must enable "

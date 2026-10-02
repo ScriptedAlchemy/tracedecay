@@ -16,8 +16,8 @@ doctest = false
 test-helpers = []
 
 [dependencies]
-hotpath.workspace = true
 tokio = { version = "1", features = ["io-util"] }
 
+tracing = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

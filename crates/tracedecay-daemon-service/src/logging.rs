@@ -300,7 +300,11 @@ fn unquote(s: &str) -> String {
 /// `daemon.err.log` on macOS. Returns an empty map when no log source is
 /// readable (the doctor treats that as "no watcher telemetry available").
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.logging.watcher_events")]
+#[tracing::instrument(
+    name = "daemon.engine.logging.watcher_events",
+    level = "trace",
+    skip_all
+)]
 pub fn recent_watcher_events(
     profile: &ProfileRoot,
     max_lines: usize,
@@ -318,7 +322,7 @@ pub fn recent_watcher_events(
 
 /// Best-effort read of the tail of the daemon log across service runners.
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.logging.read_tail")]
+#[tracing::instrument(name = "daemon.engine.logging.read_tail", level = "trace", skip_all)]
 fn read_daemon_log_tail(profile: &ProfileRoot, max_lines: usize) -> String {
     // macOS launchd: a plain err-log file next to the data dir.
     let err_log = profile.data_dir().join("daemon.err.log");

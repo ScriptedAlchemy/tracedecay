@@ -16,7 +16,7 @@ use crate::tools::render::Md;
 
 use super::verified::indexed_files;
 
-#[hotpath::measure(future = true, label = "mcp.info.files.total")]
+#[tracing::instrument(name = "mcp.info.files.total", level = "trace", skip_all)]
 pub async fn compute_files(
     graph: &VerifiedGraphQuery,
     request: FilesSurfaceRequestV1,
@@ -24,9 +24,9 @@ pub async fn compute_files(
     worktree_omitted_sources: Option<CodeIndexOmittedSourcesV1>,
 ) -> Result<GraphToolCompletionV1> {
     let project_root = graph.project_root()?;
-    let mut files = hotpath::future!(
+    let mut files = tracing::Instrument::instrument(
         indexed_files(project_root, graph),
-        label = "mcp.info.files.census"
+        tracing::trace_span!("mcp.info.files.census"),
     )
     .await?;
 

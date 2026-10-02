@@ -60,7 +60,6 @@ const MAX_MOVE_CALLERS: usize = 100_000;
 ///
 /// `update_references` is reserved for a future version; in v1 caller
 /// references are never auto-edited, the exact change rides in the hints.
-#[hotpath::skip]
 pub(crate) async fn move_symbol(
     project_root: &Path,
     graph: SourceEditGraphReadV1,
@@ -423,7 +422,6 @@ fn resolve_dest_rel(project_root: &Path, dest_file: &str) -> Result<String> {
 /// Dependency analysis for the moved body: same-file symbols and source
 /// `use`-imports the body references that will no longer resolve at the
 /// destination. Produces auto-insertable imports plus hints for the rest.
-#[hotpath::skip]
 async fn analyze_dependencies(
     target: &EditSymbolV1,
     graph: &SourceEditGraphReadV1,
@@ -600,7 +598,6 @@ async fn analyze_dependencies(
 /// whether the caller shared the source module (unqualified call, needs a
 /// `use` for the new module) or referenced it via another module (path/use
 /// now points at the old location).
-#[hotpath::skip]
 async fn caller_hints(
     graph: &SourceEditGraphReadV1,
     target: &EditSymbolV1,
@@ -689,7 +686,6 @@ async fn caller_hints(
 
 /// Hint when the destination file's module is not declared anywhere in the
 /// crate. Existing-but-unlinked files need the same hint as fresh files.
-#[hotpath::skip]
 async fn module_missing_hint(project_root: &Path, dest_rel: &str) -> Option<MoveHint> {
     let stem = module_stem(dest_rel)?;
     if module_declared(project_root, dest_rel, &stem) {

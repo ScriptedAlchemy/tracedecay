@@ -101,15 +101,16 @@ fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&s
 /// Projects one queued observation through the guarded registered database
 /// client. The transaction remains bound to that client for its whole life;
 /// no physical engine handle escapes the runtime boundary.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.project"
+#[tracing::instrument(
+    name = "global_db.observation_projection.persist.project",
+    level = "trace",
+    skip_all
 )]
 pub async fn project_observation(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-    crate::hotpath_observe::record_transaction_rows(1);
+    crate::observe::record_transaction_rows(1);
     let transaction = database
         .begin_write_transaction("begin projection transaction")
         .await
@@ -189,9 +190,10 @@ pub async fn project_observation(
 /// gate. Any per-item error rolls the whole window back and surfaces the
 /// error, so callers fall back to per-item draining whose durable retry and
 /// skip dispositions stay authoritative for failures.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.project_window"
+#[tracing::instrument(
+    name = "global_db.observation_projection.persist.project_window",
+    level = "trace",
+    skip_all
 )]
 pub async fn project_queued_observations(
     database: &Database,
@@ -232,7 +234,7 @@ pub async fn project_queued_observations(
         }
     }
     let has_more = projection_queue_has_items(&transaction).await?;
-    crate::hotpath_observe::record_transaction_rows(items.len() as u64);
+    crate::observe::record_transaction_rows(items.len() as u64);
     transaction
         .commit()
         .await
@@ -367,9 +369,10 @@ async fn persist_projection_rejection_on_database(
         .map_err(|error| storage("commit projection rejection transaction", error))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.rebuild"
+#[tracing::instrument(
+    name = "global_db.observation_projection.persist.rebuild",
+    level = "trace",
+    skip_all
 )]
 pub async fn rebuild_projection(
     database: &Database,
@@ -384,9 +387,10 @@ pub async fn rebuild_projection(
 /// transaction. Once a generation exists, later calls resume its frozen
 /// frontier instead of replacing it with a moving committed frontier. Each
 /// invocation performs only the ordinary bounded rebuild step budget.
-#[hotpath::measure(
-    future = true,
-    label = "global_db.observation_projection.persist.converge"
+#[tracing::instrument(
+    name = "global_db.observation_projection.persist.converge",
+    level = "trace",
+    skip_all
 )]
 pub async fn converge_projection_predecessor(
     database: &Database,
@@ -990,7 +994,6 @@ enum CollisionGuardedWrite<'a> {
 }
 
 impl CollisionGuardedWrite<'_> {
-    #[hotpath::skip]
     async fn run(
         &self,
         conn: &impl Executor,
@@ -1222,7 +1225,6 @@ impl RebuildState {
         }
     }
 
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Aliasing => "aliasing",

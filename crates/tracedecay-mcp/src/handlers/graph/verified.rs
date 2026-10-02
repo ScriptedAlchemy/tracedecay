@@ -52,7 +52,7 @@ pub fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
     })
 }
 
-#[hotpath::measure(label = "mcp.graph.nodes_addressed")]
+#[tracing::instrument(name = "mcp.graph.nodes_addressed", level = "trace", skip_all)]
 pub fn nodes_addressed_by_selector(
     graph: &VerifiedGraphQuery,
     selector: &SymbolSelectorSurfaceRequestV1,
@@ -151,7 +151,7 @@ pub struct VerifiedNeighbor {
     pub depth: usize,
 }
 
-#[hotpath::measure(label = "mcp.graph.neighbors")]
+#[tracing::instrument(name = "mcp.graph.neighbors", level = "trace", skip_all)]
 pub fn traverse_verified_neighbors(
     graph: &VerifiedGraphQuery,
     seed: SymbolOccurrenceId,

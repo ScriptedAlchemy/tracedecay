@@ -95,9 +95,7 @@ pub struct GraphRelationTarget {
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let result = self.database.traverse(request)?;
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(result)
     }
 
@@ -371,7 +369,7 @@ fn ordered_relation_ids(
 ) -> Result<Arc<[GraphRelationId]>, GraphDbError> {
     let key = AdjacencyIndexKey::new(namespace, start, incoming, relation_kinds);
     if let Some(ids) = adjacency_ids.get(&key)? {
-        crate::hotpath_observe::record_adjacency_index_hit();
+        crate::observe::record_adjacency_index_hit();
         if let RelationIdIndexMode::Refuse { remaining, budget } = mode
             && ids.len() > remaining
         {
@@ -390,7 +388,7 @@ fn ordered_relation_ids(
         label_keys_cache,
         mode,
     )?;
-    crate::hotpath_observe::record_adjacency_index_build();
+    crate::observe::record_adjacency_index_build();
     adjacency_ids.insert(key, Arc::<[GraphRelationId]>::from(collected))
 }
 
@@ -482,7 +480,11 @@ fn relation_projection_cached(
 /// exceed the budget (without walking the remaining edges).
 /// [`RelationFanoutOverflow::Truncate`] stops and returns the prefix.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "graph_db.compact.directed_relations")]
+#[tracing::instrument(
+    name = "graph_db.compact.directed_relations",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn directed_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -637,7 +639,7 @@ fn projection_relation_projection(
     GraphProjection::new(store, spec)
 }
 
-#[hotpath::measure(label = "graph_db.compact.native_outgoing")]
+#[tracing::instrument(name = "graph_db.compact.native_outgoing", level = "trace", skip_all)]
 fn native_outgoing_traversal(
     store: &dyn GraphStore,
     owners: &dyn GraphStore,
@@ -842,7 +844,7 @@ enum NativeTraversalStop {
     Error(GraphDbError),
 }
 
-#[hotpath::measure(label = "graph_db.compact.directional")]
+#[tracing::instrument(name = "graph_db.compact.directional", level = "trace", skip_all)]
 fn directional_traversal(
     store: &dyn GraphStore,
     owners: &dyn GraphStore,

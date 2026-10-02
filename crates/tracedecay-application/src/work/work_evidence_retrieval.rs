@@ -204,7 +204,7 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
         request: WorkTaskSessionRequestV1,
         reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
     ) -> WorkTaskSessionFuture<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let continuation_binding = task_session_continuation_binding(&request)?;
                 if let Some(continuation) = &request.continuation {
@@ -296,7 +296,7 @@ impl WorkTaskSessionPortV1 for WorkTaskSessionEvidenceRetrievalV1 {
                     .await;
                 task_session_evidence(&request, &continuation_binding, outcome, &selector)
             },
-            label = "daemon.session_retrieval.evidence"
+            tracing::trace_span!("daemon.session_retrieval.evidence"),
         ))
     }
 }

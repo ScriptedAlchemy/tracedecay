@@ -14,14 +14,14 @@ const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Exclusive-locks `file`, waiting until `deadline`.
 /// A lock taken after the deadline is released and the call times out.
-#[hotpath::measure(label = "private_fs.lock.admission")]
+#[tracing::instrument(name = "private_fs.lock.admission", level = "trace", skip_all)]
 pub fn lock_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
     admit_until(file, deadline, File::try_lock)
 }
 
 /// Shared-locks `file`, waiting until `deadline` for any exclusive holder.
 /// A lock taken after the deadline is released and the call times out.
-#[hotpath::measure(label = "private_fs.lock.shared_admission")]
+#[tracing::instrument(name = "private_fs.lock.shared_admission", level = "trace", skip_all)]
 pub fn lock_shared_until(file: &File, deadline: Instant) -> Result<(), LockAdmissionError> {
     admit_until(file, deadline, File::try_lock_shared)
 }

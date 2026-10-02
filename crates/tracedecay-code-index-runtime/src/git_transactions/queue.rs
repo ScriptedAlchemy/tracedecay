@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -59,10 +59,7 @@ const MAX_PENDING_REPOSITORY_MUTATIONS: usize = 64;
 impl Default for RepositoryMutationQueue {
     fn default() -> Self {
         Self {
-            gates: hotpath::mutex!(
-                Mutex::new(BTreeMap::new()),
-                label = "daemon.git.tx.mutation_gates"
-            ),
+            gates: Mutex::new(BTreeMap::new()),
             pending: AtomicUsize::new(0),
             capacity: MAX_PENDING_REPOSITORY_MUTATIONS,
         }
@@ -83,10 +80,7 @@ impl RepositoryMutationQueue {
     #[cfg(test)]
     pub fn with_capacity_for_test(capacity: usize) -> Self {
         Self {
-            gates: hotpath::mutex!(
-                Mutex::new(BTreeMap::new()),
-                label = "daemon.git.tx.mutation_gates"
-            ),
+            gates: Mutex::new(BTreeMap::new()),
             pending: AtomicUsize::new(0),
             capacity,
         }
@@ -106,7 +100,7 @@ impl RepositoryMutationQueue {
     /// therefore must only publish a proven-no-change outcome. This lets
     /// callers durably record cancellation without waiting behind unrelated
     /// native work.
-    #[hotpath::measure(label = "daemon.git.tx.queue")]
+    #[tracing::instrument(name = "daemon.git.tx.queue", level = "trace", skip_all)]
     pub fn with_repository_cancellable<T>(
         &self,
         repository_id: &RepositoryId,

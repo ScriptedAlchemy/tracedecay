@@ -94,7 +94,7 @@ pub(crate) struct AutomationJobsPayloadV1 {
     count: usize,
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.list", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.list", level = "trace", skip_all)]
 pub async fn list(
     State(state): State<DashboardState>,
 ) -> std::result::Result<Json<AutomationJobsPayloadV1>, JsonError> {
@@ -107,7 +107,7 @@ pub async fn list(
     }))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.create", level = "trace", skip_all)]
 pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
         .map_err(|err| json_error(StatusCode::BAD_REQUEST, format!("invalid job: {err}")))?;
@@ -160,7 +160,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
     Ok(Json(json!({ "job": job })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.view", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.view", level = "trace", skip_all)]
 pub async fn view(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -169,7 +169,7 @@ pub async fn view(
     Ok(Json(json!({ "job": job })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.update", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.update", level = "trace", skip_all)]
 pub async fn update(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -242,7 +242,7 @@ pub async fn update(
     Ok(Json(json!({ "job": updated })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.delete", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.delete", level = "trace", skip_all)]
 pub async fn delete(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
@@ -274,7 +274,7 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": job_id })))
 }
 
-#[hotpath::measure(label = "dashboard_api.jobs.run", future = true)]
+#[tracing::instrument(name = "dashboard_api.jobs.run", level = "trace", skip_all)]
 pub async fn run(
     State(state): State<DashboardState>,
     Extension(control): Extension<DashboardHttpRequestControlV1>,

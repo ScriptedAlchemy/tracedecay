@@ -55,7 +55,6 @@ impl StoreRuntimeRegistryConfig {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub(crate) const fn project_code_open_runtime_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
@@ -77,12 +76,10 @@ impl StoreRuntimeRegistryConfig {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub(super) const fn project_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
 
-    #[hotpath::skip]
     pub(super) const fn eviction_idle(self) -> Duration {
         self.eviction_idle
     }
@@ -241,7 +238,7 @@ impl StoreRuntimeRegistry {
         }
         drop(state);
         drop(evicting);
-        hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
+        metrics::gauge!("runtime_core.registry.runtimes_ready").decrement(1.0);
         outcome
     }
 }

@@ -320,7 +320,11 @@ pub async fn execute_registered_collection(
         .await
 }
 
-#[hotpath::measure(label = "maintenance.orphan_stores.collect_registered", future = true)]
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.collect_registered",
+    level = "trace",
+    skip_all
+)]
 pub(crate) async fn execute_registered_collection_controlled(
     db: &RegisteredGlobalDb,
     plan: &CollectionPlan,
@@ -870,9 +874,10 @@ pub(crate) async fn execute_unregistered_collection(
     .await
 }
 
-#[hotpath::measure(
-    label = "maintenance.orphan_stores.collect_unregistered",
-    future = true
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.collect_unregistered",
+    level = "trace",
+    skip_all
 )]
 pub(crate) async fn execute_unregistered_collection_controlled(
     db: &RegisteredGlobalDb,

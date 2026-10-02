@@ -56,7 +56,7 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     Value::Object(arguments)
 }
 
-#[hotpath::measure(label = "cli.sessions.dispatch", future = true)]
+#[tracing::instrument(name = "cli.sessions.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_sessions_action(
     profile: &ProfileRoot,
     action: SessionsAction,
@@ -88,16 +88,16 @@ pub(crate) async fn handle_sessions_action(
             since,
             limit_sessions,
         } => {
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 run_git_sync(
                     profile,
                     project_id,
                     project_path,
                     since,
                     limit_sessions,
-                    dry_run
+                    dry_run,
                 ),
-                label = "cli.sessions.git_sync"
+                tracing::trace_span!("cli.sessions.git_sync"),
             )
             .await?;
         }
@@ -113,7 +113,7 @@ pub(crate) async fn handle_sessions_action(
     Ok(())
 }
 
-#[hotpath::measure(label = "cli.sessions.import", future = true)]
+#[tracing::instrument(name = "cli.sessions.import", level = "trace", skip_all)]
 async fn handle_sessions_import(
     profile: &ProfileRoot,
     project_id: Option<String>,
@@ -129,7 +129,7 @@ async fn handle_sessions_import(
     await_session_sync_completion(profile, &project_path, "session import", outcome).await
 }
 
-#[hotpath::measure(label = "cli.sessions.search", future = true)]
+#[tracing::instrument(name = "cli.sessions.search", level = "trace", skip_all)]
 async fn handle_sessions_search(
     profile: &ProfileRoot,
     args: SessionsSearchArgs,
@@ -207,7 +207,7 @@ impl SessionsSearchReport {
     }
 }
 
-#[hotpath::measure(label = "cli.sessions.unfinished", future = true)]
+#[tracing::instrument(name = "cli.sessions.unfinished", level = "trace", skip_all)]
 async fn handle_sessions_unfinished(
     profile: &ProfileRoot,
     limit: usize,

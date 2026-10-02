@@ -263,12 +263,10 @@ impl TemporalParticipantGeneration {
         &self.source_id
     }
 
-    #[hotpath::skip]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
-    #[hotpath::skip]
     pub const fn watermarks(&self) -> TemporalWatermarks {
         TemporalWatermarks {
             generation: self.generation,
@@ -279,7 +277,6 @@ impl TemporalParticipantGeneration {
         }
     }
 
-    #[hotpath::skip]
     pub const fn graph_watermark(&self) -> u64 {
         self.graph_watermark
     }
@@ -292,13 +289,11 @@ impl TemporalParticipantGeneration {
         &self.authorization_digest
     }
 
-    #[hotpath::skip]
     pub const fn authorization(&self) -> TemporalParticipantAuthorization {
         self.authorization
     }
 
     /// Snapshot authority is independent from per-source lifecycle state.
-    #[hotpath::skip]
     pub const fn is_authorized_for_snapshot(&self) -> bool {
         matches!(
             self.authorization,
@@ -306,7 +301,6 @@ impl TemporalParticipantGeneration {
         )
     }
 
-    #[hotpath::skip]
     pub const fn access(&self) -> TemporalSourceAccess {
         self.access
     }
@@ -654,7 +648,6 @@ impl TemporalExecutionSnapshot {
         Ok(self)
     }
 
-    #[hotpath::skip]
     pub const fn authorization(&self) -> ValidatedAuthorization {
         self.authorization
     }
@@ -767,7 +760,6 @@ impl TemporalExecutionSnapshot {
         self.participants.source_coverage(self.temporal_mode())
     }
 
-    #[hotpath::skip]
     pub const fn has_authoritative_participant_manifest(&self) -> bool {
         self.participant_manifest_authoritative
     }
@@ -796,17 +788,14 @@ impl TemporalExecutionSnapshot {
         self.request.access_digest()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.request.temporal_mode()
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.request.grain()
     }
 
-    #[hotpath::skip]
     pub const fn watermarks(&self) -> TemporalWatermarks {
         self.watermarks
     }

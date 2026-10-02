@@ -105,7 +105,11 @@ impl BranchPublicationContextV1 {
     }
 
     /// Seal and publish the exact generation currently mounted for a branch worktree.
-    #[hotpath::measure(label = "daemon.code_index.branch_publication.track", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_publication.track",
+        level = "trace",
+        skip_all
+    )]
     pub async fn track_exact_worktree_branch(
         &self,
         schedulers: &CodeIndexSchedulerRegistryV1,
@@ -325,9 +329,10 @@ impl BranchPublicationContextV1 {
     }
 
     /// Capture the exact Git identity for a mounted branch worktree.
-    #[hotpath::measure(
-        label = "daemon.code_index.branch_publication.capture_source",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.branch_publication.capture_source",
+        level = "trace",
+        skip_all
     )]
     pub(super) async fn capture_exact_branch_source(
         &self,

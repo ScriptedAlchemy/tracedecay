@@ -18,7 +18,11 @@ use super::profile_retained::{authority_problem, profile_session_scope};
 const PROFILE_CONFIGURATION_ACTOR: &str = "actor.tracedecay-daemon.profile";
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.profile_configuration.invoke", future = true)]
+#[tracing::instrument(
+    name = "daemon.profile_configuration.invoke",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn invoke_profile_configuration(
     store_administration: &StoreAdministration,
     request_id: String,

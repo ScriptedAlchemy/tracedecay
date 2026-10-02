@@ -131,7 +131,7 @@ impl HostBundleWriterV1 {
 
     /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
     /// mutations, then execute them, putting every touched path back on failure.
-    #[hotpath::measure(label = "hosts.agent.host_bundle.execute")]
+    #[tracing::instrument(name = "hosts.agent.host_bundle.execute", level = "trace", skip_all)]
     pub fn execute(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -632,7 +632,11 @@ impl HostBundleWriterV1 {
         Ok(receipt)
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.receipt_persist")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.receipt_persist",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn write_receipt(
         &self,
         receipt: &HostBundleInstallReceiptV1,
@@ -668,7 +672,11 @@ impl HostBundleWriterV1 {
         Ok(receipt)
     }
 
-    #[hotpath::measure(label = "hosts.agent.host_bundle.component_set_receipt_persist")]
+    #[tracing::instrument(
+        name = "hosts.agent.host_bundle.component_set_receipt_persist",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn write_component_set_receipt(
         &self,
         receipt: &HostComponentSetReceiptV1,

@@ -671,7 +671,7 @@ pub(crate) async fn drop_empty_session_temporal_schema(
 }
 
 /// Installs the final schema into a store already proven fresh by admission.
-#[hotpath::measure(future = true, label = "session_temporal.schema.install")]
+#[tracing::instrument(name = "session_temporal.schema.install", level = "trace", skip_all)]
 pub(crate) async fn install_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {

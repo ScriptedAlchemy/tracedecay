@@ -31,8 +31,8 @@ pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
 mod extraction_artifact;
-pub(crate) mod hotpath_observe;
 pub mod incremental;
+pub(crate) mod observe;
 pub mod parsed_extraction;
 pub mod source_mask;
 pub(crate) mod traversal;
@@ -321,7 +321,7 @@ pub trait LanguageExtractor: Send + Sync {
     /// document. A grammar that fails to load or parse yields an artifact
     /// carrying only that error.
     fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
+        crate::observe::measure_extract_file(
             self.language_name(),
             source.len(),
             || {
@@ -351,7 +351,7 @@ pub trait LanguageExtractor: Send + Sync {
                     }),
                 }
             },
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+            crate::observe::ExtractOutputCounts::from_artifact,
         )
     }
 }
@@ -503,7 +503,7 @@ impl LanguageRegistry {
                 .map(|&index| self.extractors[index].as_ref())
         });
         if extractor.is_none() {
-            crate::hotpath_observe::record_dispatch_no_extractor();
+            crate::observe::record_dispatch_no_extractor();
         }
         extractor
     }

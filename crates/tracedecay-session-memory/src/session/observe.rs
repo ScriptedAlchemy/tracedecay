@@ -1,8 +1,8 @@
-//! Opt-in hotpath gauges owned by session retrieval.
+//! Metrics gauges owned by session retrieval.
 //!
 //! Keys are static capability names. Never pass model inputs, paths, or
 //! generation identifiers as labels. Every macro expands to a no-op unless
-//! this crate's `hotpath` feature is selected.
+//! the `metrics` recorder is installed.
 
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
@@ -12,55 +12,55 @@ use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 pub(crate) fn session_retrieval_budget_stage(stage: SessionRetrievalBudgetStageV1) {
     match stage {
         SessionRetrievalBudgetStageV1::RequestResultLimit => {
-            hotpath::gauge!("session.retrieval.budget.request_results").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_results").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RequestHydrationLimit => {
-            hotpath::gauge!("session.retrieval.budget.request_hydration_items").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_hydration_items").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RequestContextBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_context_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_context_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RequestCandidateBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_candidate_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_candidate_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RequestRecordBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_record_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_record_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RequestHydrationBytes => {
-            hotpath::gauge!("session.retrieval.budget.request_hydration_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.request_hydration_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::EstimatorVersionMismatch => {
-            hotpath::gauge!("session.retrieval.budget.estimator_version").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.estimator_version").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
-            hotpath::gauge!("session.retrieval.budget.execution_work").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.execution_work").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
-            hotpath::gauge!("session.retrieval.budget.candidate_read").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.candidate_read").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::RecordReadExhausted => {
-            hotpath::gauge!("session.retrieval.budget.record_read").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.record_read").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
-            hotpath::gauge!("session.retrieval.budget.kernel_results").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.kernel_results").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::CursorManifestLimit => {
-            hotpath::gauge!("session.retrieval.budget.cursor_manifest").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.cursor_manifest").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
-            hotpath::gauge!("session.retrieval.budget.manifest_participants").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.manifest_participants").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes => {
-            hotpath::gauge!("session.retrieval.budget.manifest_canonical_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.manifest_canonical_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::HydrationBytes => {
-            hotpath::gauge!("session.retrieval.budget.hydration_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.hydration_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::ContextBytes => {
-            hotpath::gauge!("session.retrieval.budget.context_bytes").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.context_bytes").increment(1.0);
         }
         SessionRetrievalBudgetStageV1::ContextTokens => {
-            hotpath::gauge!("session.retrieval.budget.context_tokens").inc(1.0);
+            metrics::gauge!("session.retrieval.budget.context_tokens").increment(1.0);
         }
     }
 }

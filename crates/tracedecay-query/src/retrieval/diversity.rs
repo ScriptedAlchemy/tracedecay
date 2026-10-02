@@ -35,7 +35,7 @@ pub struct DiversityDecisionV1 {
 pub struct DeterministicDiversity;
 
 impl DeterministicDiversity {
-    #[hotpath::measure(label = "query.diversity.apply")]
+    #[tracing::instrument(name = "query.diversity.apply", level = "trace", skip_all)]
     pub fn apply_caps(
         &self,
         policy: &DiversityPolicy,
@@ -71,9 +71,9 @@ impl DeterministicDiversity {
                 final_ordinal: ordinal as u32,
             })
             .collect::<Vec<_>>();
-        hotpath::gauge!("query.diversity.candidates").set(candidate_count);
-        hotpath::gauge!("query.diversity.results").set(ranked.len());
-        hotpath::gauge!("query.diversity.capped").set(decisions.len());
+        metrics::gauge!("query.diversity.candidates").set((candidate_count) as f64);
+        metrics::gauge!("query.diversity.results").set((ranked.len()) as f64);
+        metrics::gauge!("query.diversity.capped").set((decisions.len()) as f64);
         Ok((ranked, decisions))
     }
 }

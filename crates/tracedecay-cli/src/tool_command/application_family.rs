@@ -59,7 +59,7 @@ impl FamilyTool {
 
 /// Run one Work, Workflow, or multi-root tool and print the tool result its
 /// MCP call returns.
-#[hotpath::measure(label = "cli.tool.application_family", future = true)]
+#[tracing::instrument(name = "cli.tool.application_family", level = "trace", skip_all)]
 pub(super) async fn dispatch_cli_family_tool(
     profile: &ProfileRoot,
     tool: FamilyTool,

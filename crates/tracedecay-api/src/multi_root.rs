@@ -96,27 +96,31 @@ async fn dispatch<O>(
 where
     O: MultiRootApplicationOwner,
 {
-    let request = match hotpath::measure_block!("api.http.admission", {
-        match body {
-            Ok(Json(body)) => Ok(MultiRootHttpRequest {
-                operation,
-                request_id,
-                controls,
-                body,
-            }),
-            Err(_) => Err(invalid_request_response(
-                request_id,
-                "multi_root.invalid_body",
-                "The multi-root request body is invalid or exceeds the configured limit",
-            )),
+    let match_result = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        {
+            match body {
+                Ok(Json(body)) => Ok(MultiRootHttpRequest {
+                    operation,
+                    request_id,
+                    controls,
+                    body,
+                }),
+                Err(_) => Err(invalid_request_response(
+                    request_id,
+                    "multi_root.invalid_body",
+                    "The multi-root request body is invalid or exceeds the configured limit",
+                )),
+            }
         }
-    }) {
+    };
+    let request = match match_result {
         Ok(request) => request,
         Err(response) => return response,
     };
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move { owner.invoke_multi_root(request).await },
-        label = "api.http.handler"
+        tracing::trace_span!("api.http.handler"),
     )
     .await
 }

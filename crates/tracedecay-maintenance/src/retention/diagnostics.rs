@@ -40,7 +40,11 @@ fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
 
 /// Reads the configured session-retention backlog without acquiring a writer
 /// or turning incomplete coverage into a healthy empty result.
-#[hotpath::measure(label = "maintenance.diagnostics.session_retention", future = true)]
+#[tracing::instrument(
+    name = "maintenance.diagnostics.session_retention",
+    level = "trace",
+    skip_all
+)]
 pub async fn collect_session_retention_findings(
     sessions: &RegisteredGlobalDb,
     retention: &LcmRetentionConfig,
@@ -72,8 +76,8 @@ pub async fn collect_session_retention_findings(
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    hotpath::gauge!("maintenance.diagnostics.session_retention_records_total")
-        .inc(records.len() as u64);
+    metrics::gauge!("maintenance.diagnostics.session_retention_records_total")
+        .increment((records.len() as u64) as f64);
     let mut findings = Vec::with_capacity(records.len());
     for record in records {
         let Ok(finding) =
@@ -92,7 +96,11 @@ pub struct ProfileStorageFindingsV1 {
     pub incident_debris: DoctorStorageFamilyReadV1,
 }
 
-#[hotpath::measure(label = "maintenance.diagnostics.profile_storage", future = true)]
+#[tracing::instrument(
+    name = "maintenance.diagnostics.profile_storage",
+    level = "trace",
+    skip_all
+)]
 pub async fn collect_profile_storage_findings(
     global_db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -102,10 +110,8 @@ pub async fn collect_profile_storage_findings(
 ) -> ProfileStorageFindingsV1 {
     let scan_root = profile_root.join("projects");
     let permitted = tokio::task::spawn_blocking(move || {
-        hotpath::measure_block!(
-            "maintenance.diagnostics.profile_scan",
-            permits_synchronous_exhaustive_scan(&scan_root)
-        )
+        let _span = tracing::trace_span!("maintenance.diagnostics.profile_scan").entered();
+        permits_synchronous_exhaustive_scan(&scan_root)
     })
     .await
     .is_ok_and(|permitted| permitted);
@@ -190,8 +196,9 @@ async fn collect_unregistered_store_findings(
     let Ok(report) = report else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    hotpath::gauge!("maintenance.diagnostics.unregistered_stores_total")
-        .inc((report.plan.collect.len() + report.plan.retained_immature.len()) as u64);
+    metrics::gauge!("maintenance.diagnostics.unregistered_stores_total").increment(
+        ((report.plan.collect.len() + report.plan.retained_immature.len()) as u64) as f64,
+    );
     storage_family_read(
         report
             .plan

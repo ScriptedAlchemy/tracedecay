@@ -86,7 +86,7 @@ fn artifact_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 /// Publishes a profile-sharded store into the global registry.
-#[hotpath::measure(label = "lifecycle.register_project_store", future = true)]
+#[tracing::instrument(name = "lifecycle.register_project_store", level = "trace", skip_all)]
 pub async fn register_project_store(
     global_db: &RegisteredGlobalDb,
     project_root: &Path,
@@ -102,8 +102,9 @@ pub async fn register_project_store(
     let store_relpath = profile_relative(&profile_root, &store_layout.data_root)
         .ok_or_else(|| registry_registration_error("store root is outside its profile"))?;
 
-    let (meta, git_common_dir, primary_root, git_remote_url, digest) =
-        hotpath::measure_block!("lifecycle.register_project_store.digest", {
+    let (meta, git_common_dir, primary_root, git_remote_url, digest) = {
+        let _span = tracing::trace_span!("lifecycle.register_project_store.digest").entered();
+        {
             let meta = branch_meta::load_branch_meta(&store_layout.data_root);
             // Registering without the git common dir leaves the row unreachable
             // by repository identity, so the next first touch from a sibling
@@ -148,12 +149,13 @@ pub async fn register_project_store(
                 artifact_mtimes,
             };
             (meta, git_common_dir, primary_root, git_remote_url, digest)
-        });
+        }
+    };
     let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
     let registration_root = primary_root.as_deref().unwrap_or(project_root);
 
     if cached_registration_is_current(global_db, project_id, &digest, registration_root).await? {
-        hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
+        metrics::gauge!("lifecycle.register_project_store.cached_total").increment(1.0);
         return Ok(());
     }
 
@@ -161,7 +163,7 @@ pub async fn register_project_store(
     // Re-check under the write lock: a concurrent writable open may have
     // just registered the same digest while we were computing ours.
     if cached_registration_is_current(global_db, project_id, &digest, registration_root).await? {
-        hotpath::gauge!("lifecycle.register_project_store.cached_total").inc(1u64);
+        metrics::gauge!("lifecycle.register_project_store.cached_total").increment(1.0);
         return Ok(());
     }
 
@@ -306,7 +308,7 @@ pub async fn register_project_store(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_id.to_string(), digest);
-    hotpath::gauge!("lifecycle.register_project_store.write_total").inc(1u64);
+    metrics::gauge!("lifecycle.register_project_store.write_total").increment(1.0);
     Ok(())
 }
 

@@ -132,7 +132,7 @@ fn path_looks_like_test(path: &str) -> bool {
         || path.ends_with("Test.java")
 }
 
-#[hotpath::measure(future = true, label = "mcp.analysis.unsafe_patterns.total")]
+#[tracing::instrument(name = "mcp.analysis.unsafe_patterns.total", level = "trace", skip_all)]
 pub(super) async fn compute_unsafe_patterns(
     project_root: &Path,
     graph: &VerifiedGraphQuery,
@@ -149,20 +149,23 @@ pub(super) async fn compute_unsafe_patterns(
     let exclude_tests = request.exclude_tests.unwrap_or(false);
     let limit = request.limit.map_or(200, |v| v.min(2000) as usize);
 
-    let symbols_by_file = hotpath::measure_block!("mcp.analysis.unsafe_patterns.graph", {
-        let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
-        for symbol in verified_analysis_symbols(graph, path)? {
+    let symbols_by_file = {
+        let _span = tracing::trace_span!("mcp.analysis.unsafe_patterns.graph").entered();
+        {
+            let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+            for symbol in verified_analysis_symbols(graph, path)? {
+                symbols_by_file
+                    .entry(symbol.path.clone())
+                    .or_default()
+                    .push(symbol);
+            }
             symbols_by_file
-                .entry(symbol.path.clone())
-                .or_default()
-                .push(symbol);
         }
-        symbols_by_file
-    });
+    };
     // Graph phase is done. The source walk reads and masks candidate files, so
     // it belongs on a blocking worker like the sibling analysis scans.
     let scan_project_root = project_root.to_path_buf();
-    let (matches, by_kind, touched, omissions) = hotpath::future!(
+    let (matches, by_kind, touched, omissions) = tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
@@ -277,7 +280,7 @@ pub(super) async fn compute_unsafe_patterns(
             }
             Ok((matches, by_kind, touched, omissions))
         }),
-        label = "mcp.analysis.unsafe_patterns.scan"
+        tracing::trace_span!("mcp.analysis.unsafe_patterns.scan"),
     )
     .await
     .map_err(|join_error| TraceDecayError::Config {

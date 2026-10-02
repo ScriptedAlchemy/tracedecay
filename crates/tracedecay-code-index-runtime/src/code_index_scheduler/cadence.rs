@@ -282,7 +282,6 @@ impl CodeIndexCadenceTelemetryV1 {
     );
 
     pub fn record(&mut self, receipt: CodeIndexEventToReadyReceiptV1) {
-        #[cfg(feature = "hotpath")]
         observe_receipt(&receipt);
         if let CodeIndexCadenceOutcomeV1::Published {
             generation_id,
@@ -402,35 +401,34 @@ impl CodeIndexCadenceTelemetryV1 {
 /// woke the worker and whether the pass published or proved a no-op. Both
 /// reason sets are closed enums, so the keys stay static; per-receipt latency
 /// stays in the ring's truthful percentile model rather than a profiler gauge.
-#[cfg(feature = "hotpath")]
 fn observe_receipt(receipt: &CodeIndexEventToReadyReceiptV1) {
     match receipt.trigger {
         CodeIndexCadenceTriggerV1::Mount => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.mount_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.mount_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::HookHint => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.hook_hint_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.hook_hint_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::Overflow => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.overflow_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.overflow_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::GitWatcher => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.git_watcher_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.git_watcher_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::QueryAdmission => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.query_admission_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.query_admission_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::BusyFollowUp => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.busy_follow_up_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.busy_follow_up_total").increment(1.0);
         }
         CodeIndexCadenceTriggerV1::MemoryHeadroom => {
-            hotpath::gauge!("daemon.code_index.cadence.wake.memory_headroom_total").inc(1_u64);
+            metrics::gauge!("daemon.code_index.cadence.wake.memory_headroom_total").increment(1.0);
         }
     }
     if receipt.is_noop() {
-        hotpath::gauge!("daemon.code_index.cadence.reconcile.noop_total").inc(1_u64);
+        metrics::gauge!("daemon.code_index.cadence.reconcile.noop_total").increment(1.0);
     } else {
-        hotpath::gauge!("daemon.code_index.cadence.reconcile.published_total").inc(1_u64);
+        metrics::gauge!("daemon.code_index.cadence.reconcile.published_total").increment(1.0);
     }
 }
 

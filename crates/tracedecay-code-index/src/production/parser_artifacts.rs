@@ -9,7 +9,7 @@ use crate::retained_parse::SharedRetainedParsePool;
 use super::{CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "code_index.extract.parser_artifact")]
+#[tracing::instrument(name = "code_index.extract.parser_artifact", level = "trace", skip_all)]
 pub(super) fn parse_for_indexing(
     retained_parses: &SharedRetainedParsePool,
     retain_parse: bool,

@@ -61,7 +61,7 @@ const PRICING_DIFF: &str = "\
 --- src/pricing.rs
 @@ -5,14 +5,14 @@
  }
- 
+
  /// Grand total in cents.
 -pub fn compute_grand_total(items: &[LineItem]) -> u64 {
 -    let mut total = 0u64;

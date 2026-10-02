@@ -29,7 +29,7 @@ use crate::handlers::support::{decode_primitive_request, unique_file_paths};
 const UNMOUNTED_FILES_DEFAULT_LIMIT: usize = 200;
 const UNMOUNTED_FILES_MAX_LIMIT: usize = 2_000;
 
-#[hotpath::measure(future = true, label = "mcp.analysis.unmounted_files.total")]
+#[tracing::instrument(name = "mcp.analysis.unmounted_files.total", level = "trace", skip_all)]
 pub(super) async fn compute_unmounted_files(
     project_root: &Path,
     path_policy: &IndexPathPolicyV1,
@@ -51,9 +51,9 @@ pub(super) async fn compute_unmounted_files(
     // The walk reads every candidate source file, so it runs on a blocking
     // worker rather than holding the async dispatch thread through thousands
     // of synchronous reads.
-    let audit = hotpath::future!(
+    let audit = tracing::Instrument::instrument(
         tokio::task::spawn_blocking(move || audit_project(&scan_project_root, &scan_path_policy)),
-        label = "mcp.analysis.unmounted_files.scan"
+        tracing::trace_span!("mcp.analysis.unmounted_files.scan"),
     )
     .await
     .map_err(|error| TraceDecayError::Config {

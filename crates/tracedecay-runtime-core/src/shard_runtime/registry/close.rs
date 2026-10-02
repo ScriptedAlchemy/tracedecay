@@ -36,7 +36,6 @@ impl ClosedStoreRuntime {
         &self.path
     }
 
-    #[hotpath::skip]
     pub const fn opened_file_identity(&self) -> u64 {
         self.opened_file_identity
     }
@@ -59,7 +58,11 @@ impl StoreRuntimeRegistry {
     /// so they close concurrently and the shutdown waits for the slowest
     /// checkpoint rather than their sum. Returns the number of runtimes
     /// closed.
-    #[hotpath::measure(label = "runtime_core.registry.close_idle_for_shutdown", future = true)]
+    #[tracing::instrument(
+        name = "runtime_core.registry.close_idle_for_shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
         self.cancel_and_join_opens_for_shutdown().await;
         let (reservations, reserve_failure) = {
@@ -129,7 +132,7 @@ impl StoreRuntimeRegistry {
         first_failure.map_or(Ok(closed), Err)
     }
 
-    #[hotpath::measure(label = "runtime_core.registry.close_path")]
+    #[tracing::instrument(name = "runtime_core.registry.close_path", level = "trace", skip_all)]
     pub async fn close_path(
         &self,
         path: &Path,
@@ -170,7 +173,6 @@ impl StoreRuntimeRegistry {
     /// The caller retains only the binding and originating authority. Any
     /// issued database facade, direct runtime reference, or client lease
     /// refuses the close before physical admission is fenced.
-    #[hotpath::skip]
     pub async fn close_exact(
         &self,
         expected: &StoreRuntimeBindingV1,
@@ -182,7 +184,6 @@ impl StoreRuntimeRegistry {
 
     /// Closes an exact retained runtime after the canonical path has already
     /// advanced to another inode under an exclusive recovery authority.
-    #[hotpath::skip]
     pub async fn close_exact_stale_attachment(
         &self,
         expected: &StoreRuntimeBindingV1,
@@ -197,7 +198,7 @@ impl StoreRuntimeRegistry {
         .await
     }
 
-    #[hotpath::measure(label = "runtime_core.registry.close_exact")]
+    #[tracing::instrument(name = "runtime_core.registry.close_exact", level = "trace", skip_all)]
     async fn close_exact_with_opened_identity(
         &self,
         expected: &StoreRuntimeBindingV1,
@@ -490,7 +491,7 @@ impl StoreRuntimeRegistry {
         };
         drop(state);
         drop(evicting);
-        hotpath::gauge!("runtime_core.registry.runtimes_ready").dec(1.0);
+        metrics::gauge!("runtime_core.registry.runtimes_ready").decrement(1.0);
         Ok(proof)
     }
 }

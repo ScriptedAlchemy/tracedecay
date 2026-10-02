@@ -175,10 +175,7 @@ where
     /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
     /// server notifications remain queued until a typed daemon-session
     /// transport acknowledges delivery to the bridge.
-    #[hotpath::measure(
-        label = "lsp_protocol_handle_payload",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_handle_payload", level = "trace", skip_all)]
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         self.prepare_payload_dispatch(now_ms);
         self.handle_prepared_payload(payload, now_ms)
@@ -208,10 +205,10 @@ where
                 closed: false,
             };
         }
-        let Ok(value) = hotpath::measure_block!(
-            "lsp.rpc.payload_json_parse",
+        let Ok(value) = ({
+            let _span = tracing::trace_span!("lsp.rpc.payload_json_parse").entered();
             serde_json::from_slice::<Value>(payload)
-        ) else {
+        }) else {
             self.enqueue_value(error_response(
                 Value::Null,
                 RpcFailure {
@@ -353,10 +350,7 @@ where
             }
         }
     }
-    #[hotpath::measure(
-        label = "lsp_protocol_did_open",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_did_open", level = "trace", skip_all)]
     pub(crate) fn handle_did_open(
         &mut self,
         params: &Value,
@@ -404,10 +398,7 @@ where
         Ok(())
     }
 
-    #[hotpath::measure(
-        label = "lsp_protocol_did_change",
-        impl_type = "DaemonLspProtocolSession"
-    )]
+    #[tracing::instrument(name = "lsp_protocol_did_change", level = "trace", skip_all)]
     pub(crate) fn handle_did_change(
         &mut self,
         params: &Value,

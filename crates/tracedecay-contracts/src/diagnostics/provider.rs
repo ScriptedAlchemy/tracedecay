@@ -58,7 +58,6 @@ impl ProviderSourceIdentity {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub const fn is_overlay(&self) -> bool {
         matches!(self, Self::SessionOverlay { .. })
     }
@@ -283,7 +282,6 @@ impl DiagnosticProviderIdentity {
         Ok(canonical_sha256(&(PROVIDER_IDENTITY_DIGEST_DOMAIN, self))?)
     }
 
-    #[hotpath::skip]
     pub const fn is_overlay(&self) -> bool {
         self.source.is_overlay()
     }
@@ -515,7 +513,6 @@ pub enum DiagnosticProviderState {
 impl DiagnosticProviderState {
     /// Feedback cycles consume the one canonical provider-state taxonomy
     /// rather than inventing a diagnostic-specific empty-result convention.
-    #[hotpath::skip]
     pub const fn feedback_state(self) -> ProviderEvaluationStateV1 {
         match self {
             Self::SupportedComplete => ProviderEvaluationStateV1::SupportedCompletedComplete,

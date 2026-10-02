@@ -244,7 +244,7 @@ pub fn run_rmcp_connection_pipeline<'a>(
             .map_err(|error| format!("bind benchmark RMCP broker listener: {error}"))?;
 
         // Read-only dispatch classification consults this process-global
-        // catalog before its first route. Warm it outside the Hotpath guard so
+        // catalog before its first route. Warm it outside the measured span so
         // the selected dispatch allocation reports steady-state connection
         // work. Cold catalog construction is intentionally outside this
         // scope and is measured separately with process profiling.

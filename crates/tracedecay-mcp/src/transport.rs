@@ -113,11 +113,8 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
 /// The frame accumulator lives in the reader, not in the `read_line` future, so
 /// a read dropped by a lost `tokio::select!` race resumes rather than truncating
 /// the frame. See [`tracedecay_framing::BoundedLineReader`].
-/// `hotpath::io!` returns its argument untouched without the profiling backend
-/// and an `InstrumentedIo` wrapper with it, and that backend is selected on the
-/// hotpath dependency, not on this crate's feature. Erasing the half behind a
-/// trait object keeps one shape for both, so no feature combination can put the
-/// stored type and the macro's result out of step.
+/// Erasing the half behind a trait object keeps one stored type whether or
+/// not an instrumentation wrapper sits on it.
 type ProfiledStdin = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type ProfiledStdout = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
@@ -133,12 +130,9 @@ impl Default for StdioTransport {
     fn default() -> Self {
         Self {
             reader: tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(
-                Box::new(hotpath::io!(tokio::io::stdin(), label = "mcp.server.stdin")),
+                Box::new(tokio::io::stdin()),
             )),
-            writer: Box::new(hotpath::io!(
-                tokio::io::stdout(),
-                label = "mcp.server.stdout"
-            )),
+            writer: Box::new(tokio::io::stdout()),
         }
     }
 }
@@ -150,7 +144,7 @@ impl StdioTransport {
 }
 
 impl McpTransport for StdioTransport {
-    #[hotpath::measure(label = "mcp.server.read", future = true)]
+    #[tracing::instrument(name = "mcp.server.read", level = "trace", skip_all)]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         self.reader.read_mcp_line().await
     }
@@ -300,7 +294,7 @@ impl McpDuplexTransport for ChannelTransport {
 /// full payload bytes. When a bounded leading prefix safely yields a JSON-RPC
 /// request `id`, the error correlates to that ID as `InvalidRequest`; otherwise
 /// it uses `ParseError` with a null ID (JSON-RPC 2.0 parse-error semantics).
-#[hotpath::measure(label = "mcp.server.write_oversized", future = true)]
+#[tracing::instrument(name = "mcp.server.write_oversized", level = "trace", skip_all)]
 pub async fn write_wire_oversized_rejection(
     transport: &mut impl McpTransport,
     error: &std::io::Error,

@@ -150,9 +150,10 @@ impl HostAdmissionSpool {
 
         let (mut quarantine, mut quarantine_report) =
             TerminalQuarantine::open(quarantine_path, bounds)?;
-        let mut scan = hotpath::measure_block!("usecases.admission.scan", {
+        let mut scan = {
+            let _span = tracing::trace_span!("usecases.admission.scan").entered();
             scan_records(&records_path, bounds, &quarantine)
-        })?;
+        }?;
         // Complete frames of a published append intent were issued even
         // though `next_seq` does not count them yet.
         let issued_next_seq = meta
@@ -332,7 +333,7 @@ impl HostAdmissionSpool {
             .map(|(source, payload)| self.plan_append(&mut batch, source, payload))
             .collect::<Vec<_>>();
         if batch.records > 0 {
-            hotpath::gauge!("usecases.admission.batch_records").set(batch.records);
+            metrics::gauge!("usecases.admission.batch_records").set((batch.records) as f64);
             if let Err(error) = self.publish_batch(&batch) {
                 self.append_recovery_required = true;
                 return planned
@@ -629,39 +630,46 @@ impl HostAdmissionSpool {
         self.ensure_mutations_allowed()?;
         self.publish_meta()?;
         if self.pending.is_empty() {
-            hotpath::measure_block!("usecases.admission.compact", {
+            {
+                let _span = tracing::trace_span!("usecases.admission.compact").entered();
                 truncate_file(&self.records_path, 0)
-            })?;
+            }?;
             self.pending_bytes = 0;
             self.physical_len = 0;
             self.cleanup_pending = false;
             return Ok(());
         }
-        let rebuilt = hotpath::measure_block!("usecases.admission.compact", {
-            with_owned_temp_publish(
-                &self.records_path,
-                "compact",
-                "host admission spool",
-                |output| {
-                    let mut rebuilt = Vec::with_capacity(self.pending.len());
-                    let mut offset = 0u64;
-                    for record in &self.pending {
-                        let frame =
-                            encode_frame(record.seq, record.source.as_bytes(), &record.payload)?;
-                        output.write_all(&frame).map_err(io_error)?;
-                        rebuilt.push(SpoolRecord {
-                            seq: record.seq,
-                            source: record.source.clone(),
-                            payload: record.payload.clone(),
-                            file_offset: offset,
-                            framed_len: frame.len(),
-                        });
-                        offset += frame.len() as u64;
-                    }
-                    Ok(rebuilt)
-                },
-            )
-        })?;
+        let rebuilt = {
+            let _span = tracing::trace_span!("usecases.admission.compact").entered();
+            {
+                with_owned_temp_publish(
+                    &self.records_path,
+                    "compact",
+                    "host admission spool",
+                    |output| {
+                        let mut rebuilt = Vec::with_capacity(self.pending.len());
+                        let mut offset = 0u64;
+                        for record in &self.pending {
+                            let frame = encode_frame(
+                                record.seq,
+                                record.source.as_bytes(),
+                                &record.payload,
+                            )?;
+                            output.write_all(&frame).map_err(io_error)?;
+                            rebuilt.push(SpoolRecord {
+                                seq: record.seq,
+                                source: record.source.clone(),
+                                payload: record.payload.clone(),
+                                file_offset: offset,
+                                framed_len: frame.len(),
+                            });
+                            offset += frame.len() as u64;
+                        }
+                        Ok(rebuilt)
+                    },
+                )
+            }
+        }?;
         self.pending = rebuilt;
         self.pending_bytes = self.pending.iter().map(|record| record.framed_len).sum();
         self.physical_len = self.pending_bytes as u64;

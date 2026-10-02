@@ -15,7 +15,7 @@ use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 /// The transport never carries an actor, recipient, queue state, or stack
 /// payload: the daemon mints a context from the admitted project route and
 /// the runtime settles only that context actor's durable host-pending row.
-#[hotpath::measure(label = "daemon.service.github_stack.expand")]
+#[tracing::instrument(name = "daemon.service.github_stack.expand", level = "trace", skip_all)]
 pub(super) fn execute_github_stack_signal_expand(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,

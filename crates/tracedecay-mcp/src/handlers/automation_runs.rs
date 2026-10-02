@@ -38,7 +38,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-#[hotpath::measure(label = "mcp.automation.run_list.total")]
+#[tracing::instrument(name = "mcp.automation.run_list.total", level = "trace", skip_all)]
 pub async fn compute_run_list(
     dashboard_root: &Path,
     args: &Value,
@@ -51,9 +51,9 @@ pub async fn compute_run_list(
             "invalid arguments for tracedecay_automation_run_list: limit must be between 1 and {AUTOMATION_RUN_LIST_MAX_LIMIT}"
         )));
     }
-    let page = hotpath::future!(
+    let page = tracing::Instrument::instrument(
         load_run_records_page(dashboard_root, limit as usize),
-        label = "mcp.automation.run_list.load"
+        tracing::trace_span!("mcp.automation.run_list.load"),
     )
     .await
     .map_err(|error| ledger_unavailable("list", error))?;
@@ -82,7 +82,7 @@ pub async fn compute_run_list(
     ))
 }
 
-#[hotpath::measure(label = "mcp.automation.run_view.total")]
+#[tracing::instrument(name = "mcp.automation.run_view.total", level = "trace", skip_all)]
 pub async fn compute_run_view(
     dashboard_root: &Path,
     args: &Value,
@@ -94,9 +94,9 @@ pub async fn compute_run_view(
             "invalid arguments for tracedecay_automation_run_view: run_id must not be empty",
         ));
     }
-    let run = hotpath::future!(
+    let run = tracing::Instrument::instrument(
         find_run_record(dashboard_root, &request.run_id),
-        label = "mcp.automation.run_view.load"
+        tracing::trace_span!("mcp.automation.run_view.load"),
     )
     .await
     .map_err(|error| ledger_unavailable("view", error))?
@@ -113,7 +113,7 @@ pub async fn compute_run_view(
     ))
 }
 
-#[hotpath::measure(label = "mcp.automation.artifact_view.total")]
+#[tracing::instrument(name = "mcp.automation.artifact_view.total", level = "trace", skip_all)]
 pub async fn compute_run_artifact_view(
     dashboard_root: &Path,
     args: &Value,
@@ -122,9 +122,9 @@ pub async fn compute_run_artifact_view(
         decode_primitive_request(args, "tracedecay_automation_run_artifact_view")?;
     let run_id = request.run_id.as_str();
     let kind = request.kind.as_str();
-    let record = hotpath::future!(
+    let record = tracing::Instrument::instrument(
         find_run_record(dashboard_root, run_id),
-        label = "mcp.automation.artifact_view.load"
+        tracing::trace_span!("mcp.automation.artifact_view.load"),
     )
     .await?
     .ok_or_else(|| TraceDecayError::not_found(format!("automation run not found: {run_id}")))?;
@@ -138,9 +138,9 @@ pub async fn compute_run_artifact_view(
                 "automation run artifact not found: {run_id}/{kind}"
             ))
         })?;
-    let payload = hotpath::future!(
+    let payload = tracing::Instrument::instrument(
         read_run_artifact_payload(dashboard_root, &record.run_id, &artifact),
-        label = "mcp.automation.artifact_view.read"
+        tracing::trace_span!("mcp.automation.artifact_view.read"),
     )
     .await?;
     Ok(graph_tool_completion(

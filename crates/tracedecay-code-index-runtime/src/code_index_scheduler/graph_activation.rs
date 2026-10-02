@@ -338,7 +338,6 @@ pub enum CodeGraphActivationPolicyV1 {
 }
 
 impl CodeGraphActivationPolicyV1 {
-    #[hotpath::skip]
     pub const fn from_enabled(enabled: bool) -> Self {
         if enabled {
             Self::Enabled
@@ -347,7 +346,6 @@ impl CodeGraphActivationPolicyV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
@@ -391,7 +389,11 @@ impl CodeGraphActivationAuthorityV1 {
     /// its durable verified head. `Ok(false)` is an explicit abstention for
     /// non-persistent or disabled authorities; every persistent mismatch is a
     /// typed error so the scheduler can retain pending coverage and replay.
-    #[hotpath::measure(future = true, label = "code_graph.activation.recover_verified_head")]
+    #[tracing::instrument(
+        name = "code_graph.activation.recover_verified_head",
+        level = "trace",
+        skip_all
+    )]
     pub async fn recover_verified_head(
         &self,
         project_id: &ProjectId,
@@ -456,7 +458,7 @@ impl CodeGraphActivationAuthorityV1 {
                 ..
             } => {
                 let generation_id = latest.metadata().manifest().generation_id.clone();
-                let retained = hotpath::future!(
+                let retained = tracing::Instrument::instrument(
                     runtime.retain_code_graph_runtime(
                         project_id.clone(),
                         repository_id.clone(),
@@ -466,7 +468,7 @@ impl CodeGraphActivationAuthorityV1 {
                         Arc::clone(project_database),
                         replay_binding,
                     ),
-                    label = "code_graph.activation.recover_head.retain_runtime"
+                    tracing::trace_span!("code_graph.activation.recover_head.retain_runtime"),
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
@@ -513,7 +515,11 @@ impl CodeGraphActivationAuthorityV1 {
     /// the activation that follows recovers the head this published instead
     /// of building it. `Ok(false)` abstains for a refused policy or a
     /// non-persistent authority.
-    #[hotpath::measure(future = true, label = "code_graph.activation.publish_sealed")]
+    #[tracing::instrument(
+        name = "code_graph.activation.publish_sealed",
+        level = "trace",
+        skip_all
+    )]
     pub async fn publish_sealed_graph(
         &self,
         project_id: &ProjectId,
@@ -534,7 +540,7 @@ impl CodeGraphActivationAuthorityV1 {
                 seated,
                 ..
             } => {
-                let retained = hotpath::future!(
+                let retained = tracing::Instrument::instrument(
                     runtime.retain_code_graph_runtime(
                         project_id.clone(),
                         repository_id.clone(),
@@ -544,7 +550,7 @@ impl CodeGraphActivationAuthorityV1 {
                         Arc::clone(project_database),
                         replay_binding,
                     ),
-                    label = "code_graph.activation.publish_sealed.retain_runtime"
+                    tracing::trace_span!("code_graph.activation.publish_sealed.retain_runtime"),
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
@@ -570,7 +576,7 @@ impl CodeGraphActivationAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(future = true, label = "code_graph.activation.total")]
+    #[tracing::instrument(name = "code_graph.activation.total", level = "trace", skip_all)]
     pub async fn activate(
         &self,
         project_id: &ProjectId,
@@ -598,7 +604,7 @@ impl CodeGraphActivationAuthorityV1 {
                 ..
             } => {
                 let generation_id = latest.generation().manifest().generation_id.clone();
-                let retained = hotpath::future!(
+                let retained = tracing::Instrument::instrument(
                     runtime.retain_code_graph_runtime(
                         project_id.clone(),
                         repository_id.clone(),
@@ -608,7 +614,7 @@ impl CodeGraphActivationAuthorityV1 {
                         Arc::clone(project_database),
                         replay_binding,
                     ),
-                    label = "code_graph.activation.retain_runtime"
+                    tracing::trace_span!("code_graph.activation.retain_runtime"),
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
@@ -753,7 +759,7 @@ struct PendingInteractiveCatalogWarmV1 {
 }
 
 impl PendingInteractiveCatalogWarmV1 {
-    #[hotpath::measure(label = "code_graph.catalog.background_warm")]
+    #[tracing::instrument(name = "code_graph.catalog.background_warm", level = "trace", skip_all)]
     fn run(self) -> Result<(), CodeGraphProjectionError> {
         self.store
             .warm_interactive_catalog_with_cancellation(self.cancellation)
@@ -761,7 +767,11 @@ impl PendingInteractiveCatalogWarmV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    #[hotpath::measure(label = "code_graph.activation.persistent_generation")]
+    #[tracing::instrument(
+        name = "code_graph.activation.persistent_generation",
+        level = "trace",
+        skip_all
+    )]
     fn activate_persistent_graph_generation(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
@@ -769,15 +779,16 @@ impl LatestCodeTextGenerationV1 {
         require_current_head: bool,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.metadata().manifest().generation_id.clone();
-        let snapshot = hotpath::measure_block!(
-            "code_graph.activation.validate_verified_head",
+        let snapshot = {
+            let _span =
+                tracing::trace_span!("code_graph.activation.validate_verified_head").entered();
             if require_current_head {
                 retained.recover_verified_snapshot_from_head(Arc::clone(&cancellation))
             } else {
                 retained.recover_verified_generation(Arc::clone(&cancellation))
             }
             .map_err(CodeGraphProjectionError::from)
-        )?;
+        }?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
@@ -786,16 +797,20 @@ impl LatestCodeTextGenerationV1 {
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
         store.mark_interactive_catalog_warming()?;
         store.warm_serving_engine()?;
-        let reader = hotpath::measure_block!("code_graph.activation.head_evidence_reader", {
-            store.evidence_reader_with_cancellation(
-                &generation_id,
-                Some(self.metadata().snapshot().repository.clone()),
-                self.source_freshness().map_err(|error| {
-                    CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
-                })?,
-                Arc::clone(&graph_cancellation),
-            )
-        })?;
+        let reader = {
+            let _span =
+                tracing::trace_span!("code_graph.activation.head_evidence_reader").entered();
+            {
+                store.evidence_reader_with_cancellation(
+                    &generation_id,
+                    Some(self.metadata().snapshot().repository.clone()),
+                    self.source_freshness().map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                    })?,
+                    Arc::clone(&graph_cancellation),
+                )
+            }
+        }?;
         self.install_graph_serving(
             reader,
             Some(Arc::clone(&store)),
@@ -812,7 +827,7 @@ impl LatestCodeTextGenerationV1 {
 }
 
 impl LatestCompleteCodeIndexV1 {
-    #[hotpath::measure(label = "code_graph.activation.persistent")]
+    #[tracing::instrument(name = "code_graph.activation.persistent", level = "trace", skip_all)]
     fn activate_persistent_graph(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
@@ -820,8 +835,9 @@ impl LatestCompleteCodeIndexV1 {
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let authority = retained.authority();
-        let snapshot = hotpath::measure_block!(
-            "code_graph.activation.publish_verified_snapshot",
+        let snapshot = {
+            let _span =
+                tracing::trace_span!("code_graph.activation.publish_verified_snapshot").entered();
             retained
                 .publish_verified_snapshot(Arc::clone(&cancellation))
                 .map_err(CodeGraphProjectionError::from)
@@ -836,7 +852,7 @@ impl LatestCompleteCodeIndexV1 {
                     }
                     refuse_spent_publication_budget(&self.text, error);
                 })
-        )?;
+        }?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
@@ -848,16 +864,19 @@ impl LatestCompleteCodeIndexV1 {
         // state while the catalog is derived from it in the background.
         store.mark_interactive_catalog_warming()?;
         store.warm_serving_engine()?;
-        let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
-            store.evidence_reader_with_cancellation(
-                &generation_id,
-                Some(self.generation.snapshot().repository.clone()),
-                self.source_freshness().map_err(|error| {
-                    CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
-                })?,
-                Arc::clone(&graph_cancellation),
-            )
-        })?;
+        let reader = {
+            let _span = tracing::trace_span!("code_graph.activation.evidence_reader").entered();
+            {
+                store.evidence_reader_with_cancellation(
+                    &generation_id,
+                    Some(self.generation.snapshot().repository.clone()),
+                    self.source_freshness().map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                    })?,
+                    Arc::clone(&graph_cancellation),
+                )
+            }
+        }?;
         self.install_graph_serving(
             reader,
             Some(Arc::clone(&store)),

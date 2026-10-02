@@ -127,7 +127,6 @@ impl<S> WorkArtifactHydrationService<S>
 where
     S: WorkAttemptEvidenceReadPort,
 {
-    #[hotpath::skip]
     pub const fn new(attempts: S) -> Self {
         Self { attempts }
     }
@@ -141,7 +140,7 @@ where
     /// stale, a scope with no Work at all is the explicit `Absent` state,
     /// and an authorized scope with no attempts is an explicit zero-complete
     /// page.
-    #[hotpath::measure(label = "application.work.artifact.hydrate")]
+    #[tracing::instrument(name = "application.work.artifact.hydrate", level = "trace", skip_all)]
     pub fn hydrate(
         &self,
         context: &RequestContext,
@@ -163,10 +162,11 @@ where
         // Two distinct resources hide inside one hydration: the topology
         // resolution against the graph publication mount and the evidence
         // page read against attempt storage. Phase spans keep them apart.
-        let topology_state = hotpath::measure_block!(
-            "application.work.artifact.hydrate.topology",
+        let topology_state = {
+            let _span =
+                tracing::trace_span!("application.work.artifact.hydrate.topology").entered();
             topology(&authority)
-        )?;
+        }?;
         let binding = match topology_state {
             WorkAttemptTopologyStateV1::Absent => {
                 return if paging.has_cursor() {
@@ -182,15 +182,17 @@ where
         if !paging.resumes_under(&binding.generation) {
             return Err(stale_cursor_problem());
         }
-        let page = hotpath::measure_block!(
-            "application.work.artifact.hydrate.page_read",
+        let page = {
+            let _span =
+                tracing::trace_span!("application.work.artifact.hydrate.page_read").entered();
             self.attempts
                 .evidence_page(&authority, paging.start_after(), request.page_size)
-        )
+        }
         .map_err(storage_problem)?;
-        #[cfg(feature = "hotpath")]
+
         {
-            hotpath::gauge!("application.work.artifact.hydrate.rows").set(page.rows.len() as u64);
+            metrics::gauge!("application.work.artifact.hydrate.rows")
+                .set((page.rows.len() as u64) as f64);
             // Declared artifact bytes on the page, from the durable
             // references. This read never materializes payloads, so declared
             // bytes are the only truthful byte figure it can report.
@@ -200,7 +202,8 @@ where
                 .flat_map(|row| &row.artifacts)
                 .map(WorkArtifactRefV1::byte_length)
                 .fold(0u64, u64::saturating_add);
-            hotpath::gauge!("application.work.artifact.hydrate.declared_bytes").set(declared_bytes);
+            metrics::gauge!("application.work.artifact.hydrate.declared_bytes")
+                .set((declared_bytes) as f64);
         }
         let returned = u32::try_from(page.rows.len())
             .ok()

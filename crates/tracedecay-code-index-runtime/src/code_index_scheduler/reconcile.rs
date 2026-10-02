@@ -1017,10 +1017,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
             text_projection_failed: Arc::new(AtomicBool::new(false)),
             text_control: GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
-            text_progress_state: Arc::new(hotpath::mutex!(
-                Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                label = "query.artifact.progress.historical_state"
-            )),
+            text_progress_state: Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new())),
             text_progress_slot: Arc::new(RwLock::new(progress_slot)),
             restore_progress: Arc::new(RwLock::new(None)),
             text_progress_owner_epoch,
@@ -1035,10 +1032,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
                 &self.project_id,
                 &self.worktree_id,
             ),
-            preopened_source: Arc::new(hotpath::mutex!(
-                Mutex::new(None),
-                label = "query.artifact.preopened_historical_source"
-            )),
+            preopened_source: Arc::new(Mutex::new(None)),
             publication_binding: None,
         }
     }
@@ -1167,7 +1161,11 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
 
     /// Load an exact durable code generation even after a newer capture has
     /// superseded every process-local retained slot.
-    #[hotpath::measure(label = "daemon.code_index.historical.published_generation")]
+    #[tracing::instrument(
+        name = "daemon.code_index.historical.published_generation",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn published_generation(
         &self,
         generation_id: &CodeGenerationId,
@@ -1181,7 +1179,11 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
     /// through the retained publication clone. A sealed binding is an
     /// immutable pointer-file read, so it stays answerable while a reconcile
     /// owns the scheduler mutex for its whole pass.
-    #[hotpath::measure(label = "daemon.code_index.historical.replay_binding")]
+    #[tracing::instrument(
+        name = "daemon.code_index.historical.replay_binding",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn sealed_replay_binding(
         &self,
         generation_id: &CodeGenerationId,
@@ -1316,10 +1318,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             ignored_source_admissions: Vec::new(),
             ignored_roster_refusal_requires_rebuild: false,
             refused_ignored_source_paths: BTreeSet::new(),
-            query_owners: hotpath::mutex!(
-                Mutex::new(None),
-                label = "daemon.code_index.serving_caches"
-            ),
+            query_owners: Mutex::new(None),
             build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
             progress_daemon_incarnation: 1,
             progress_producer_incarnation: 1,
@@ -1379,7 +1378,6 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     #[cfg(test)]
-    #[hotpath::skip]
     pub const fn progress_incarnations_for_test(&self) -> (u64, u64) {
         (
             self.progress_daemon_incarnation,
@@ -1646,7 +1644,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         hints.overflow();
     }
 
-    #[hotpath::measure(label = "code_index.generation.compatibility_observe")]
+    #[tracing::instrument(
+        name = "code_index.generation.compatibility_observe",
+        level = "trace",
+        skip_all
+    )]
     fn observe_generation_compatibility(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -2585,17 +2587,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             digest: ManifestDigest::new(entry.state_digest.clone()).ok()?,
             size_bytes: entry.size_bytes,
         };
-        let text_progress_owner_epoch = hotpath::measure_block!(
-            "query.artifact.progress.publish",
+        let text_progress_owner_epoch = {
+            let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
             self.build_progress
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .replace_generation(generation_id.clone())
-        );
-        let text_progress_state = Arc::new(hotpath::mutex!(
-            Mutex::new(CodeIndexBuildProgressStateV1::new()),
-            label = "query.artifact.progress.retained_state"
-        ));
+        };
+        let text_progress_state = Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new()));
         let text_control = GenerationTextControlV1::new(Arc::clone(&self.shutting_down));
         let text_artifact_store = DaemonCodeTextArtifactStoreV1::bind(
             &self.store_root,
@@ -2729,10 +2728,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 text_progress_daemon_incarnation: self.progress_daemon_incarnation,
                 text_progress_producer_incarnation: self.progress_producer_incarnation,
                 text_artifact_store,
-                preopened_source: Arc::new(hotpath::mutex!(
-                    Mutex::new(preopened_source),
-                    label = "query.artifact.preopened_retained_source"
-                )),
+                preopened_source: Arc::new(Mutex::new(preopened_source)),
                 publication_binding: Some(Arc::new(DurableActiveSealedGenerationBindingV1 {
                     generation_id,
                     generation_file: pointer.generation_file,
@@ -2827,7 +2823,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Retained-owner activation entry point. Foreground reads never call this.
-    #[hotpath::measure(label = "code_index.reconcile.pass")]
+    #[tracing::instrument(name = "code_index.reconcile.pass", level = "trace", skip_all)]
     pub fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
@@ -2843,7 +2839,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.reconcile_now()
     }
 
-    #[hotpath::measure(label = "daemon.code_index.reconcile.pass")]
+    #[tracing::instrument(name = "daemon.code_index.reconcile.pass", level = "trace", skip_all)]
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
@@ -3512,12 +3508,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self.identity
     }
 
-    #[hotpath::skip]
     pub fn last_reconciled_at_micros(&self) -> Option<i64> {
         self.freshness_fence.last_reconciled_at_micros()
     }
 
-    #[hotpath::skip]
     pub fn verified_against_source(&self) -> bool {
         self.freshness_fence.verified_against_source()
     }
@@ -3666,22 +3660,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                             text.text_progress_owner_epoch,
                         )
                     } else {
-                        let progress_epoch = hotpath::measure_block!(
-                            "query.artifact.progress.publish",
+                        let progress_epoch = {
+                            let _span =
+                                tracing::trace_span!("query.artifact.progress.publish").entered();
                             self.build_progress
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .replace_generation(generation_id.clone())
-                        );
+                        };
                         (
                             Arc::new(RwLock::new(None)),
                             Arc::new(CodeTextProjectionStateV1::new()),
                             Arc::new(AtomicBool::new(false)),
                             GenerationTextControlV1::new(Arc::clone(&self.shutting_down)),
-                            Arc::new(hotpath::mutex!(
-                                Mutex::new(CodeIndexBuildProgressStateV1::new()),
-                                label = "query.artifact.progress.published_state"
-                            )),
+                            Arc::new(Mutex::new(CodeIndexBuildProgressStateV1::new())),
                             progress_epoch,
                         )
                     };
@@ -3737,10 +3729,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &self.project_id,
                     &self.worktree_id,
                 ),
-                preopened_source: Arc::new(hotpath::mutex!(
-                    Mutex::new(None),
-                    label = "query.artifact.preopened_published_source"
-                )),
+                preopened_source: Arc::new(Mutex::new(None)),
                 publication_binding: None,
             });
         LatestCompleteCodeIndexV1 {
@@ -3882,7 +3871,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
-    #[hotpath::measure(label = "code_index.capture.authoritative_snapshot")]
+    #[tracing::instrument(
+        name = "code_index.capture.authoritative_snapshot",
+        level = "trace",
+        skip_all
+    )]
     pub(super) fn capture_authoritative_snapshot(
         &self,
         control: Option<&dyn CodeIndexExecutionControlV1>,

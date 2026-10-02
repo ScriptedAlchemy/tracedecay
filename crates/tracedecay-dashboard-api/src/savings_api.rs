@@ -815,7 +815,7 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
-#[hotpath::measure(label = "dashboard_api.savings.overview", future = true)]
+#[tracing::instrument(name = "dashboard_api.savings.overview", level = "trace", skip_all)]
 pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<SavingsOverviewPayloadV1>>> {
@@ -927,7 +927,7 @@ pub async fn overview(
 pub async fn costs(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<CostsReadModelV1>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let model = costs_model(&state).await;
             let metrics = model.usage.iter().chain(&model.estimated_cost);
@@ -953,7 +953,7 @@ pub async fn costs(
             };
             Json(envelope)
         },
-        label = "dashboard_api.savings.costs"
+        tracing::trace_span!("dashboard_api.savings.costs"),
     )
     .await
 }
@@ -1138,7 +1138,7 @@ fn models_read_failed(range: Option<&str>, error: String) -> SavingsModelsPayloa
 /// provider-usage cost grouped by exact provider/model, day, provider, and
 /// provider/day. Every dollar figure comes from the same pricing projection
 /// `/api/costs` serves; unpriced usage keeps its counts and gets no price.
-#[hotpath::measure(label = "dashboard_api.savings.models", future = true)]
+#[tracing::instrument(name = "dashboard_api.savings.models", level = "trace", skip_all)]
 pub async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,

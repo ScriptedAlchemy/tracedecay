@@ -8,7 +8,6 @@ use tracedecay_daemon_service::{
 use super::*;
 
 impl DaemonInvocationState {
-    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "Per-project invocation is one payload match including direct multi-root routes."

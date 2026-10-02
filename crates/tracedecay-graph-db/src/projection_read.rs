@@ -89,7 +89,7 @@ pub struct GraphProjectionTelemetry {
 }
 
 impl GraphDb {
-    #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.projection.read", level = "trace", skip_all)]
     pub fn read_projection(
         &self,
         request: GraphProjectionReadRequest,
@@ -98,14 +98,12 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let page = read_projection(self, database, request)?;
-        crate::hotpath_observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(page)
     }
 
-    #[hotpath::measure(label = "graph_db.projection.telemetry", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.projection.telemetry", level = "trace", skip_all)]
     pub fn projection_telemetry(
         &self,
         request: GraphProjectionTelemetryRequest,
@@ -115,16 +113,14 @@ impl GraphDb {
         self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let telemetry = projection_telemetry(self, database, request)?;
         if let Some(telemetry) = &telemetry {
-            crate::hotpath_observe::record_counts(
+            crate::observe::record_counts(
                 usize::try_from(telemetry.entity_count).unwrap_or(usize::MAX),
                 usize::try_from(telemetry.relation_count).unwrap_or(usize::MAX),
                 0,
                 0,
             );
         }
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(telemetry)
     }
 }
@@ -135,9 +131,7 @@ impl GraphSnapshot {
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         let page = self.database.read_projection(request)?;
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(page)
     }
 
@@ -146,9 +140,7 @@ impl GraphSnapshot {
         request: GraphProjectionTelemetryRequest,
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         let telemetry = self.database.projection_telemetry(request)?;
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Snapshot,
-        );
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Snapshot);
         Ok(telemetry)
     }
 }
@@ -361,7 +353,11 @@ fn authenticate_relation_cursor(
 /// O(N^2) catalog warm, this used to run. See
 /// [`crate::projection_identity_index`]. A projection too large to index falls
 /// back to the bounded streaming scan below.
-#[hotpath::measure(label = "graph_db.projection.identity_index.seek")]
+#[tracing::instrument(
+    name = "graph_db.projection.identity_index.seek",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn query_identity_page(
     handle: &GraphDb,
     database: &GrafeoDB,

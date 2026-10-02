@@ -28,9 +28,10 @@ impl DaemonContextScoutRuntimeRegistrar {
         }
     }
 
-    #[hotpath::measure(
-        label = "daemon.service.context_scout.open_and_register",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.service.context_scout.open_and_register",
+        level = "trace",
+        skip_all
     )]
     pub async fn open_and_register(
         &self,
@@ -54,7 +55,6 @@ impl DaemonContextScoutRuntimeRegistrar {
         Ok(registry)
     }
 
-    #[hotpath::skip]
     pub async fn get(
         &self,
         profile_id: &UserProfileId,

@@ -139,7 +139,7 @@ impl PreparedRefresh {
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_collect_refresh", impl_type = "PreparedRefresh")]
+    #[tracing::instrument(name = "lsp_analyzer_collect_refresh", level = "trace", skip_all)]
     pub async fn collect_diagnostics_with_timeouts(
         self,
         timeouts: LspRefreshTimeouts,
@@ -210,7 +210,7 @@ impl PreparedRefresh {
     }
 }
 
-#[hotpath::measure(label = "lsp_analyzer_collect_batch")]
+#[tracing::instrument(name = "lsp_analyzer_collect_batch", level = "trace", skip_all)]
 async fn collect_refresh_batch(
     ordinal: usize,
     batch: RefreshBatch,

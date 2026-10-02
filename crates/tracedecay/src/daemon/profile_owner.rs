@@ -52,7 +52,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 
 /// Serve one profile-owner request from the daemon's pinned profile.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.profile_owner.invoke", future = true)]
+#[tracing::instrument(name = "daemon.profile_owner.invoke", level = "trace", skip_all)]
 pub(super) async fn invoke_profile_owner_operation(
     store_administration: &StoreAdministration,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,

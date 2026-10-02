@@ -206,7 +206,6 @@ pub struct RetainedSurfaceServiceV1<'a> {
 }
 
 impl<'a> RetainedSurfaceServiceV1<'a> {
-    #[hotpath::skip]
     pub const fn new(ports: RetainedSurfacePortsV1<'a>) -> Self {
         Self { ports }
     }

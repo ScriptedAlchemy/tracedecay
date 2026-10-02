@@ -543,7 +543,7 @@ impl StdioLspClient {
     /// Sends one standard semantic request and returns its standard JSON
     /// result after matching the JSON-RPC correlation id. Notifications and
     /// stale responses from a cancelled request are deliberately ignored.
-    #[hotpath::measure(label = "lsp_analyzer_semantic_request", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_semantic_request", level = "trace", skip_all)]
     pub async fn semantic_request(
         &mut self,
         request: LspSemanticRequest,
@@ -670,7 +670,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_document_symbols", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_document_symbols", level = "trace", skip_all)]
     pub async fn document_symbols(
         &mut self,
         params: DocumentSymbolParams,
@@ -681,7 +681,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_workspace_symbols", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_workspace_symbols", level = "trace", skip_all)]
     pub async fn workspace_symbols(
         &mut self,
         params: WorkspaceSymbolParams,
@@ -772,7 +772,7 @@ impl StdioLspClient {
             .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_request_json", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_request_json", level = "trace", skip_all)]
     async fn request_json<R>(
         &mut self,
         params: R::Params,
@@ -792,7 +792,7 @@ impl StdioLspClient {
         })
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_request", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_request", level = "trace", skip_all)]
     async fn request<R>(
         &mut self,
         params: R::Params,
@@ -881,7 +881,7 @@ impl StdioLspClient {
         .await
     }
 
-    #[hotpath::measure(label = "lsp_analyzer_client_refresh", impl_type = "StdioLspClient")]
+    #[tracing::instrument(name = "lsp_analyzer_client_refresh", level = "trace", skip_all)]
     pub async fn collect_document_diagnostics(
         &mut self,
         project_root: &Path,
@@ -1175,7 +1175,7 @@ async fn wait_for_initialize(
 
 /// Send phase of one analyzer round-trip: JSON encoding plus the framed
 /// stdin write, including any backpressure wait, bounded by `timeout`.
-#[hotpath::measure(label = "lsp.analyzer.request_write")]
+#[tracing::instrument(name = "lsp.analyzer.request_write", level = "trace", skip_all)]
 async fn write_message_with_timeout(
     stdin: &mut FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
     value: Value,
@@ -1264,7 +1264,7 @@ fn cancel_request_message(request_id: u64) -> Value {
 /// Wait phase of one analyzer round-trip: the futures lane separates time
 /// suspended on analyzer stdout from poll (frame-decode) time, which a wall
 /// span alone cannot distinguish.
-#[hotpath::measure(label = "lsp.analyzer.response_wait", future = true)]
+#[tracing::instrument(name = "lsp.analyzer.response_wait", level = "trace", skip_all)]
 async fn read_message_until(
     reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     deadline: tokio::time::Instant,
@@ -1278,7 +1278,7 @@ async fn read_message_until(
     }
 }
 
-#[hotpath::measure(label = "lsp.analyzer.response_parse")]
+#[tracing::instrument(name = "lsp.analyzer.response_parse", level = "trace", skip_all)]
 fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
     serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
         message: format!("failed to parse LSP message: {e}"),

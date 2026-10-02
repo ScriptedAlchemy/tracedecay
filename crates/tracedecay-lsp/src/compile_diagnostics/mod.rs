@@ -86,7 +86,7 @@ pub trait Driver {
 /// Run every detected driver against `project_root` and return the merged
 /// diagnostic list. Drivers are run sequentially; any driver-level error
 /// is propagated immediately. Empty when no driver detects the project.
-#[hotpath::measure(label = "compile_diagnostics.run_all", future = true)]
+#[tracing::instrument(name = "compile_diagnostics.run_all", level = "trace", skip_all)]
 pub async fn run_all(project_root: &Path, scope: &Scope) -> Result<Vec<Diagnostic>> {
     let drivers: Vec<Box<dyn Driver + Send + Sync>> = vec![
         Box::new(rust::CargoDriver),
@@ -142,7 +142,7 @@ pub fn rust_diagnostics_target_dir(project_root: &Path) -> PathBuf {
 /// the child keeps running after this process would normally reap it (stdio is
 /// discarded and it is intentionally NOT `kill_on_drop`, unlike the foreground
 /// driver, so it survives the request that started it).
-#[hotpath::measure(label = "compile_diagnostics.prewarm")]
+#[tracing::instrument(name = "compile_diagnostics.prewarm", level = "trace", skip_all)]
 pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
     let target_dir = rust::target_dir_for(project_root);
     if let Some(parent) = target_dir.parent() {

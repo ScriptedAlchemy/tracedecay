@@ -420,10 +420,10 @@ enum RegisteredSchemaAdmission {
 /// The classification and installation phases below each run behind a heap
 /// boundary so the admission futures that await them embed only a pointer:
 /// every authority's admission check descends through its own contract
-/// validation, and with the `hotpath` feature each measured `async fn` on the
+/// validation, and with instrumentation each measured `async fn` on the
 /// path adds three more wrapper layers, so nesting the phase state machines
 /// inside the attach chain overflowed rustc's layout query depth limit.
-#[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
+#[tracing::instrument(name = "global_db.schema.query.classify", level = "trace", skip_all)]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
@@ -580,7 +580,7 @@ async fn validate_admitted_authority_schema(
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
-#[hotpath::measure(future = true, label = "global_db.schema.persist.admission")]
+#[tracing::instrument(name = "global_db.schema.persist.admission", level = "trace", skip_all)]
 pub async fn ensure_registered_schema_for_admission(
     installation: &RegisteredSchemaInstallationV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaConvergence> {
@@ -650,7 +650,7 @@ pub async fn ensure_registered_schema_for_admission(
 /// this stage runs only for stores classified fresh or exactly current.
 ///
 /// Heap boundary: see [`classify_registered_schema_admission`].
-#[hotpath::measure(future = true, label = "global_db.schema.persist.install")]
+#[tracing::instrument(name = "global_db.schema.persist.install", level = "trace", skip_all)]
 async fn install_registered_schema_stages(
     transaction: &(impl Executor + Sync),
     configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
@@ -812,7 +812,7 @@ async fn install_registered_schema_stage_sequence(
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
-    crate::hotpath_observe::record_transaction_rows(1);
+    crate::observe::record_transaction_rows(1);
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
@@ -1003,7 +1003,7 @@ async fn install_registered_schema_stage_sequence(
 /// project-path passes were all one-time legacy upgrades and have been removed.
 /// Existing daemon stores also build the LCM status indexes here, after
 /// admission, before the authority invariant audit pages historical rows.
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge")]
+#[tracing::instrument(name = "global_db.schema.persist.converge", level = "trace", skip_all)]
 pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
@@ -1046,7 +1046,11 @@ async fn converge_migration_batches(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_invariants")]
+#[tracing::instrument(
+    name = "global_db.schema.persist.converge_invariants",
+    level = "trace",
+    skip_all
+)]
 async fn converge_registered_schema_on(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
@@ -1072,7 +1076,11 @@ async fn converge_registered_schema_on(
 /// sweep, mirroring
 /// [`ensure_registered_schema_for_admission`]. An untampered store resumes
 /// from its plausible checkpoint and pays only the bounded suffix audit.
-#[hotpath::measure(future = true, label = "global_db.schema.persist.converge_attached")]
+#[tracing::instrument(
+    name = "global_db.schema.persist.converge_attached",
+    level = "trace",
+    skip_all
+)]
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -1119,7 +1127,7 @@ pub async fn converge_attached_registered_schema(
 /// transaction back and fails typed, so the store keeps exactly its prior
 /// schema. Once committed, the idempotent index builds and validation run to
 /// completion.
-#[hotpath::measure(future = true, label = "global_db.schema.persist.attach")]
+#[tracing::instrument(name = "global_db.schema.persist.attach", level = "trace", skip_all)]
 pub(crate) async fn ensure_attached_registered_schema(
     database: &Database,
     cancellation: &CancellationToken,

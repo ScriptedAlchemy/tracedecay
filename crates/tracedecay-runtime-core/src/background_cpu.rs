@@ -102,7 +102,6 @@ impl ProcessBackgroundCpuV1 {
     }
 
     #[must_use]
-    #[hotpath::skip]
     pub const fn width(&self) -> NonZeroUsize {
         self.width
     }
@@ -312,9 +311,10 @@ impl ProcessBackgroundCpuV1 {
 }
 
 fn record_state(state: &BackgroundCpuStateV1, width: NonZeroUsize) {
-    hotpath::gauge!("runtime_core.background_cpu.width").set(width.get());
-    hotpath::gauge!("runtime_core.background_cpu.active_units").set(state.active_units);
-    hotpath::gauge!("runtime_core.background_cpu.waiting_work_units").set(waiting_units(state));
+    metrics::gauge!("runtime_core.background_cpu.width").set((width.get()) as f64);
+    metrics::gauge!("runtime_core.background_cpu.active_units").set((state.active_units) as f64);
+    metrics::gauge!("runtime_core.background_cpu.waiting_work_units")
+        .set((waiting_units(state)) as f64);
 }
 
 fn waiting_units(state: &BackgroundCpuStateV1) -> usize {

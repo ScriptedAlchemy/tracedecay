@@ -10,7 +10,7 @@ use tracedecay_runtime_core::lifecycle_lease::{
 };
 use tracedecay_runtime_core::text::format_bytes;
 
-#[hotpath::measure(label = "cli.profile_storage.dispatch", future = true)]
+#[tracing::instrument(name = "cli.profile_storage.dispatch", level = "trace", skip_all)]
 pub(crate) async fn handle_profile_storage_action(
     profile: &ProfileRoot,
     action: ProfileStorageAction,
@@ -312,7 +312,7 @@ async fn brokered_storage_report(
     for _ in 0..MAX_PAGES {
         // One entry per page: the call count exposes how many pages a report
         // walked, which is what makes a slow storage report diagnosable.
-        let request = hotpath::future!(
+        let request = tracing::Instrument::instrument(
             super::daemon::admin_cli_result(
                 profile,
                 None,
@@ -323,7 +323,7 @@ async fn brokered_storage_report(
                     limit: PAGE_LIMIT,
                 },
             ),
-            label = "cli.profile_storage.report_page"
+            tracing::trace_span!("cli.profile_storage.report_page"),
         );
         let result = tokio::time::timeout(Duration::from_secs(10), request)
             .await

@@ -113,7 +113,7 @@ pub(crate) struct RoutedRmcpReplay {
     pub(crate) initialize_route: Option<InitializeRouteMetadata>,
 }
 
-#[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
+#[tracing::instrument(name = "daemon.engine.transport.rmcp", level = "trace", skip_all)]
 pub(crate) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
@@ -187,7 +187,7 @@ fn serve_routed_rmcp_connection_inner(
         let result = tokio::select! {
             result = &mut waiting => result,
             () = lifecycle.wait_for_draining() => {
-                hotpath::measure_block!("daemon.engine.transport.cancel", cancellation.cancel());
+                { let _span = tracing::trace_span!("daemon.engine.transport.cancel").entered(); cancellation.cancel() };
                 waiting.await
             }
         };
@@ -344,7 +344,7 @@ async fn write_refusal_and_drain(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     refusal: &tracedecay_daemon_protocol::DaemonHandshakeRefusal,
 ) {
-    hotpath::gauge!("daemon.engine.handshake.refused").inc(1_u64);
+    metrics::gauge!("daemon.engine.handshake.refused").increment(1.0);
     log_daemon_event(
         "daemon_handshake_refused",
         &[
@@ -525,7 +525,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn attempts(
         self,
         service: &DaemonInvocationService,
@@ -686,10 +685,10 @@ async fn write_daemon_delivery_ack_response(
     transport: &mut impl McpTransport,
     response: &tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse,
 ) -> Result<()> {
-    let payload = hotpath::measure_block!(
-        "daemon.engine.transport.serialize",
+    let payload = {
+        let _span = tracing::trace_span!("daemon.engine.transport.serialize").entered();
         serde_json::to_string(response)
-    )?;
+    }?;
     transport.write_line(&payload).await?;
     transport.write_line("\n").await?;
     transport.flush().await?;
@@ -743,7 +742,11 @@ where
     }
 }
 
-#[hotpath::measure(label = "daemon.engine.transport.await_owner", future = true)]
+#[tracing::instrument(
+    name = "daemon.engine.transport.await_owner",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn await_project_owner_or_disconnect<T: Send>(
     transport: &mut (impl McpTransport + Send),
     open: impl std::future::Future<Output = Result<T>> + Send,
@@ -851,7 +854,7 @@ async fn await_project_owner_for_first_request<T: Send>(
 }
 
 #[cfg(unix)]
-#[hotpath::measure(label = "daemon.engine.transport.broker", future = true)]
+#[tracing::instrument(name = "daemon.engine.transport.broker", level = "trace", skip_all)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
@@ -1078,7 +1081,7 @@ async fn serve_retained_invocation_connection(
     let service = engine.invocation.service.clone();
     let lifecycle = engine.lifecycle.clone();
     // Keep the retained invocation loop out of the broker connection
-    // future's inline state. With Hotpath enabled the surrounding
+    // future's inline state. With instrumentation the surrounding
     // transport wrapper is polled on Tokio's ordinary worker stack;
     // embedding this loop there makes construction alone exceed that
     // stack before the first request can be served.
@@ -1237,13 +1240,17 @@ fn serve_broker_socket_client_inner(
                         first_request.raw(),
                     )
                 {
-                    hotpath::measure_block!("daemon.engine.transport.cancel", {
-                        engine
-                            .invocation
-                            .service
-                            .request_cancellations()
-                            .cancel(cancellation.target_request_id());
-                    });
+                    {
+                        let _span =
+                            tracing::trace_span!("daemon.engine.transport.cancel").entered();
+                        {
+                            engine
+                                .invocation
+                                .service
+                                .request_cancellations()
+                                .cancel(cancellation.target_request_id());
+                        }
+                    };
                     drop(setup_activity);
                     return Ok(None);
                 }
@@ -1679,7 +1686,7 @@ pub(super) async fn serve_windows_broker_client_with_class(
 #[cfg(any(not(unix), test))]
 // The foreground portable broker supplies one daemon-generation invocation state.
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.engine.transport.dispatch", future = true)]
+#[tracing::instrument(name = "daemon.engine.transport.dispatch", level = "trace", skip_all)]
 pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     stream: BrokerStream,
     auth_token: &str,
@@ -1771,12 +1778,15 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             first_request.raw(),
         )
     {
-        hotpath::measure_block!("daemon.engine.transport.cancel", {
-            invocation
-                .service
-                .request_cancellations()
-                .cancel(cancellation.target_request_id());
-        });
+        {
+            let _span = tracing::trace_span!("daemon.engine.transport.cancel").entered();
+            {
+                invocation
+                    .service
+                    .request_cancellations()
+                    .cancel(cancellation.target_request_id());
+            }
+        };
         drop(setup_activity);
         return Ok(());
     }

@@ -226,7 +226,7 @@ struct HintCounts {
 pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             // These reads are independent of one another; run them concurrently. The
             // hint/usage/diagnostics summaries then share the one durable-event fetch.
@@ -314,7 +314,7 @@ pub async fn overview(
                 ))
             }
         },
-        label = "dashboard_api.analytics.overview"
+        tracing::trace_span!("dashboard_api.analytics.overview"),
     )
     .await
 }
@@ -324,7 +324,7 @@ pub async fn overview(
 pub async fn observatory(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<ObservatoryReadModelV1>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let model = observatory_model(&state).await;
             let known = model
@@ -351,7 +351,7 @@ pub async fn observatory(
             };
             Json(envelope)
         },
-        label = "dashboard_api.analytics.observatory"
+        tracing::trace_span!("dashboard_api.analytics.observatory"),
     )
     .await
 }
@@ -461,7 +461,7 @@ pub(super) fn managed_agent_label_for_session(
 pub async fn agents(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             match agent_usage_summary(&state.host_io, state.lcm_db.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
@@ -484,7 +484,7 @@ pub async fn agents(
                 )),
             }
         },
-        label = "dashboard_api.analytics.agents"
+        tracing::trace_span!("dashboard_api.analytics.agents"),
     )
     .await
 }
@@ -779,7 +779,7 @@ async fn subagent_tree_reading(
 pub async fn subagent_tree(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let usage_scope =
                 state
@@ -831,7 +831,7 @@ pub async fn subagent_tree(
                 )),
             }
         },
-        label = "dashboard_api.analytics.subagent_tree"
+        tracing::trace_span!("dashboard_api.analytics.subagent_tree"),
     )
     .await
 }
@@ -840,7 +840,7 @@ pub async fn subagent_tree(
 pub async fn hints(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
             let project_id = RegisteredGlobalDb::canonical_project_key(&state.project_root);
@@ -879,7 +879,7 @@ pub async fn hints(
             };
             Json(envelope)
         },
-        label = "dashboard_api.analytics.hints"
+        tracing::trace_span!("dashboard_api.analytics.hints"),
     )
     .await
 }
@@ -888,7 +888,7 @@ pub async fn hints(
 pub async fn usage(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
             match usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
@@ -928,7 +928,7 @@ pub async fn usage(
                 )),
             }
         },
-        label = "dashboard_api.analytics.usage"
+        tracing::trace_span!("dashboard_api.analytics.usage"),
     )
     .await
 }
@@ -937,7 +937,7 @@ pub async fn usage(
 pub async fn diagnostics(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
             let payload = match typed_diagnostics_summary(&state, durable_events.as_deref()).await {
@@ -983,7 +983,7 @@ pub async fn diagnostics(
                 Some(payload),
             ))
         },
-        label = "dashboard_api.analytics.diagnostics"
+        tracing::trace_span!("dashboard_api.analytics.diagnostics"),
     )
     .await
 }
@@ -992,7 +992,7 @@ pub async fn diagnostics(
 pub async fn underused(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             match underused_tool_families(state.lcm_db.as_deref()).await {
                 Ok(Some(families)) => {
@@ -1030,7 +1030,7 @@ pub async fn underused(
                 )),
             }
         },
-        label = "dashboard_api.analytics.underused"
+        tracing::trace_span!("dashboard_api.analytics.underused"),
     )
     .await
 }

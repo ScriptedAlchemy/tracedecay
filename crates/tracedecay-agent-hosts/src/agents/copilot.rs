@@ -341,7 +341,7 @@ fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
 ///
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
-#[hotpath::measure(label = "copilot_mcp_install")]
+#[tracing::instrument(name = "copilot_mcp_install", level = "trace", skip_all)]
 fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
     let config_path = copilot_cli_mcp_config_path(home);
     let previous_registration =

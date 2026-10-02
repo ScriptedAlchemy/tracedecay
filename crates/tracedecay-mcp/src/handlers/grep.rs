@@ -56,7 +56,7 @@ fn grep_match(hit: GrepSearchHit) -> GrepMatchV1 {
     }
 }
 
-#[hotpath::measure(future = true, label = "mcp.search.grep.total")]
+#[tracing::instrument(name = "mcp.search.grep.total", level = "trace", skip_all)]
 pub async fn compute_grep(
     project_root: &Path,
     path_policy: &IndexPathPolicyV1,
@@ -91,7 +91,7 @@ pub async fn compute_grep(
         context_lines,
         max_results,
     };
-    let scan = hotpath::future!(
+    let scan = tracing::Instrument::instrument(
         run_bounded_search(
             "tracedecay_grep",
             pattern,
@@ -106,7 +106,7 @@ pub async fn compute_grep(
                 })
             },
         ),
-        label = "mcp.search.grep.scan"
+        tracing::trace_span!("mcp.search.grep.scan"),
     )
     .await?;
 
@@ -153,19 +153,19 @@ pub fn render_grep(
     result: &GrepSearchResultV1,
 ) -> Result<ToolResult> {
     let value = serde_json::to_value(result)?;
-    let text = hotpath::measure_block!(
-        "mcp.search.grep.render",
-        render::finalize(response_handle_root, args, &value, || render_grep_md(
-            result
-        ))
-    );
+    let text = {
+        let _span = tracing::trace_span!("mcp.search.grep.render").entered();
+        render::finalize(response_handle_root, args, &value, || {
+            render_grep_md(result)
+        })
+    };
     // Grep aggregates more raw content than any other search tool; the encoded
     // payload size explains transport pressure that timing alone cannot.
-    hotpath::gauge!("mcp.search.grep.response_bytes").set(text.len());
+    metrics::gauge!("mcp.search.grep.response_bytes").set((text.len()) as f64);
     Ok(text_tool_result(&text, Vec::new()))
 }
 
-#[hotpath::measure]
+#[tracing::instrument(level = "trace", skip_all)]
 fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepMatchV1]) -> Result<()> {
     let paths = hits
         .iter()
@@ -224,7 +224,7 @@ fn enrich_hits_from_graph(graph: &VerifiedGraphQuery, hits: &mut [GrepMatchV1]) 
     Ok(())
 }
 
-#[hotpath::measure]
+#[tracing::instrument(level = "trace", skip_all)]
 fn graph_enrichment(
     hits: &[GrepMatchV1],
     error: Option<&TraceDecayError>,
@@ -249,7 +249,7 @@ fn graph_enrichment(
     }
 }
 
-#[hotpath::measure]
+#[tracing::instrument(level = "trace", skip_all)]
 fn grep_metadata(
     lines_examined: usize,
     returned: usize,

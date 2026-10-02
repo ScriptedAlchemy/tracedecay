@@ -21,7 +21,6 @@ pub fn opt_i64(value: Option<i64>) -> Value {
 }
 
 impl Value {
-    #[hotpath::skip]
     pub(super) const fn kind(&self) -> &'static str {
         match self {
             Self::Null => "null",

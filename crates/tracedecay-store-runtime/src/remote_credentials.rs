@@ -159,7 +159,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
     /// `Unconfigured` is returned only when the optional remote plane has no
     /// listener and no registered node; `Unavailable` only when a mounted
     /// authority genuinely cannot be read.
-    #[hotpath::measure(label = "daemon.remote.operational_status")]
+    #[tracing::instrument(name = "daemon.remote.operational_status", level = "trace", skip_all)]
     pub fn operational_status(&self) -> RemoteOperationalStatusReadV1 {
         let now = tracedecay_contracts::clock::now_micros();
         if !self.accepting.load(Ordering::Acquire) {
@@ -233,7 +233,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
         }
     }
 
-    #[hotpath::measure(label = "daemon.remote.register_storage")]
+    #[tracing::instrument(name = "daemon.remote.register_storage", level = "trace", skip_all)]
     pub fn register_storage(
         &self,
         node_id: BrainNodeId,
@@ -426,7 +426,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
 }
 
 impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialAuthorityV1 {
-    #[hotpath::measure(label = "daemon.remote.credential_lookup")]
+    #[tracing::instrument(name = "daemon.remote.credential_lookup", level = "trace", skip_all)]
     fn credential_by_fingerprint(
         &self,
         class: RemoteCredentialClassV1,

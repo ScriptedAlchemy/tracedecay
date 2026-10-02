@@ -9,12 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
-# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 test-helpers = []
 eval-helpers = []
 
@@ -68,7 +63,7 @@ grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
 base64 = "0.22"
 hex = "0.4"
-hotpath.workspace = true
+metrics.workspace = true
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }

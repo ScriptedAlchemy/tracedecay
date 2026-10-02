@@ -138,10 +138,10 @@ impl GitWatcherShutdownOutcome {
             return;
         };
         let kind = if error.is_cancelled() {
-            hotpath::gauge!("daemon.git.watch.task_failures.cancelled_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.task_failures.cancelled_total").increment(1.0);
             GitWatcherTaskFailureKind::Cancelled
         } else {
-            hotpath::gauge!("daemon.git.watch.task_failures.panicked_total").inc(1_u64);
+            metrics::gauge!("daemon.git.watch.task_failures.panicked_total").increment(1.0);
             GitWatcherTaskFailureKind::Panicked
         };
         log_daemon_event(
@@ -155,7 +155,7 @@ impl GitWatcherShutdownOutcome {
     }
 
     fn record_timeout(&mut self, owner: GitWatcherTaskOwner) {
-        hotpath::gauge!("daemon.git.watch.task_failures.timed_out_total").inc(1_u64);
+        metrics::gauge!("daemon.git.watch.task_failures.timed_out_total").increment(1.0);
         log_daemon_event(
             "git_watch_task_join_failed",
             &[
@@ -186,7 +186,7 @@ async fn join_before(
     }
 }
 
-#[hotpath::measure(label = "daemon.git.watch.join", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.join", level = "trace", skip_all)]
 pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdownOutcome {
     let mut outcome = GitWatcherShutdownOutcome::default();
     let deadline = tokio::time::Instant::now() + GIT_OBSERVATION_BUDGET;
@@ -221,7 +221,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         let mut projects = inner.projects.lock().await;
         projects.drain().map(|(_, state)| state).collect()
     };
-    hotpath::gauge!("daemon.git.watch.repositories.watched").set(0_u64);
+    metrics::gauge!("daemon.git.watch.repositories.watched").set((0_u64) as f64);
     for state in states {
         state.retire();
         if let Some(handle) = state.take_task() {
@@ -237,7 +237,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
     outcome
 }
 
-#[hotpath::measure(label = "daemon.git.watch.retire", future = true)]
+#[tracing::instrument(name = "daemon.git.watch.retire", level = "trace", skip_all)]
 pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
     let mut projects = inner.projects.lock().await;
     let candidates = projects.keys().cloned().collect::<Vec<_>>();
@@ -268,8 +268,9 @@ pub async fn retire_missing_repository_owners(inner: &Arc<GitWatcherInner>) {
         }
     }
     if !retired.is_empty() {
-        hotpath::gauge!("daemon.git.watch.repositories.retired_total").inc(retired.len());
-        hotpath::gauge!("daemon.git.watch.repositories.watched").set(projects.len());
+        metrics::gauge!("daemon.git.watch.repositories.retired_total")
+            .increment((retired.len()) as f64);
+        metrics::gauge!("daemon.git.watch.repositories.watched").set((projects.len()) as f64);
     }
     drop(projects);
     for state in retired {

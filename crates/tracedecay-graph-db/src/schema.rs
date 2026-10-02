@@ -668,7 +668,7 @@ pub(crate) fn decode_relation_identity(
     edge: &Edge,
     namespace: &GraphNamespace,
 ) -> Result<DecodedRelationIdentity, GraphDbError> {
-    crate::hotpath_observe::record_relation_identity_decode();
+    crate::observe::record_relation_identity_decode();
     let stored_namespace =
         required_string(edge.get_property(NAMESPACE_PROPERTY), "relation namespace")?;
     if stored_namespace != namespace.as_str() {
@@ -752,7 +752,7 @@ pub(crate) fn edge_relation_identity(
 pub(crate) fn decode_graph_properties(
     properties: impl IntoIterator<Item = (impl AsRef<str>, Value)>,
 ) -> Result<BTreeMap<GraphPropertyName, GraphProperty>, GraphDbError> {
-    crate::hotpath_observe::record_property_decode();
+    crate::observe::record_property_decode();
     let mut decoded = BTreeMap::new();
     let mut decoded_bytes = 0usize;
     for (key, value) in properties {
@@ -898,9 +898,9 @@ pub(crate) fn has_native_label(node: &Node, label: &str) -> bool {
 /// Falls back to `label` when nothing matches so a caller that feeds this to a
 /// `ProjectionSpec` still filters: an empty label set there means *no filter*,
 /// which would silently widen the projection to the whole store.
-#[hotpath::measure(label = "graph_db.schema.label_keys")]
+#[tracing::instrument(name = "graph_db.schema.label_keys", level = "trace", skip_all)]
 pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
-    crate::hotpath_observe::record_label_universe_scan();
+    crate::observe::record_label_universe_scan();
     let keys: Vec<String> = store
         .all_labels()
         .into_iter()
@@ -915,7 +915,7 @@ pub(crate) fn label_keys(store: &dyn GraphStore, label: &str) -> Vec<String> {
 /// Every node carrying `label`, across whichever key the store files it under.
 ///
 /// Each node belongs to exactly one label table, so the union needs no dedupe.
-#[hotpath::measure(label = "graph_db.schema.nodes_with_label")]
+#[tracing::instrument(name = "graph_db.schema.nodes_with_label", level = "trace", skip_all)]
 pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeId> {
     let keys = label_keys(store, label);
     if let [only] = keys.as_slice() {
@@ -927,7 +927,11 @@ pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeI
 }
 
 /// How many nodes carry `label`. See [`nodes_with_label`].
-#[hotpath::measure(label = "graph_db.schema.nodes_with_label_count")]
+#[tracing::instrument(
+    name = "graph_db.schema.nodes_with_label_count",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn nodes_with_label_count(store: &dyn GraphStore, label: &str) -> usize {
     label_keys(store, label)
         .iter()

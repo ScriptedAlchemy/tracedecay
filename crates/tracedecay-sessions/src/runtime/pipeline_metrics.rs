@@ -1,8 +1,8 @@
-//! Bounded session-pipeline metrics backed by Hotpath.
+//! Bounded session-pipeline metrics on the `metrics` facade.
 //!
-//! Labels are static enumerated names only. Gauges compile to no-ops when the
-//! `hotpath` feature is off. Counts stay exact; do not put paths, session IDs,
-//! or query text in names or values.
+//! Labels are static enumerated names only. Gauges drop when no recorder is
+//! installed. Counts stay exact; do not put paths, session IDs, or query text
+//! in names or values.
 
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -63,28 +63,21 @@ impl JsonlIoAccounting {
 
 #[inline]
 pub(crate) fn add(name: &'static str, delta: u64) {
-    #[cfg(feature = "hotpath")]
     {
         if delta == 0 {
             return;
         }
-        hotpath::gauge!(name).inc(delta);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
+        metrics::gauge!(name).increment((delta) as f64);
+    };
 }
 
 #[inline(always)]
 fn add_usize(name: &'static str, delta: usize) {
-    #[cfg(feature = "hotpath")]
     add(name, u64::try_from(delta).unwrap_or(u64::MAX));
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
 }
 
 #[inline(always)]
 pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting, change: Option<JsonlChangeKind>) {
-    #[cfg(feature = "hotpath")]
     {
         add(
             "sessions.jsonl.identity_window_bytes",
@@ -108,13 +101,10 @@ pub(crate) fn record_jsonl_io(io: &JsonlIoAccounting, change: Option<JsonlChange
             Some(JsonlChangeKind::Appended) => add("sessions.jsonl.files.appended", 1),
             Some(JsonlChangeKind::Rewritten) => add("sessions.jsonl.files.rewritten", 1),
         }
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (io, change);
+    };
 }
 
 #[inline(always)]
-#[cfg(feature = "hotpath")]
 pub(crate) fn record_discovery_files(considered: u64, selected: u64, metadata_bytes: u64) {
     add("sessions.discovery.files.considered", considered);
     add("sessions.discovery.files.selected", selected);
@@ -137,14 +127,11 @@ pub(crate) fn record_dir_enumerated() {
 
 #[inline(always)]
 pub(crate) fn record_sweep_outcome(complete: bool) {
-    #[cfg(feature = "hotpath")]
     if complete {
         add("sessions.discovery.sweep.complete", 1);
     } else {
         add("sessions.discovery.sweep.truncated", 1);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = complete;
 }
 
 /// One scan discarded because the file changed under it.
@@ -229,7 +216,6 @@ pub(crate) fn record_admission_progress(
     frames_refused: u64,
     frames_persisted: u64,
 ) {
-    #[cfg(feature = "hotpath")]
     {
         add("sessions.jsonl.frames.decoded", frames_decoded);
         add("sessions.jsonl.frames.accepted", frames_accepted);
@@ -240,16 +226,7 @@ pub(crate) fn record_admission_progress(
         );
         add("sessions.jsonl.frames.refused", frames_refused);
         add("sessions.jsonl.frames.persisted", frames_persisted);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (
-        frames_decoded,
-        frames_rejected_before_decode,
-        frames_accepted,
-        frames_skipped,
-        frames_refused,
-        frames_persisted,
-    );
+    };
 }
 
 #[inline(always)]
@@ -260,12 +237,9 @@ pub(crate) fn record_git_backfill(sessions_scanned: usize, spans_written: usize)
 
 #[inline(always)]
 pub(crate) fn record_historical_ingest(complete: bool) {
-    #[cfg(feature = "hotpath")]
     if complete {
         add("sessions.ingest.historical.complete", 1);
     } else {
         add("sessions.ingest.historical.truncated", 1);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = complete;
 }

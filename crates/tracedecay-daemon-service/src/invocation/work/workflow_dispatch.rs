@@ -30,7 +30,7 @@ use super::workflow_run_control::{
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.workflow.execute", future = true)]
+#[tracing::instrument(name = "daemon.service.workflow.execute", level = "trace", skip_all)]
 pub(crate) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
@@ -113,7 +113,9 @@ pub(crate) async fn execute_workflow_application(
 
     match request {
         WorkflowApplicationInvocation::RegisterDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.register_definition", {
+            let _span =
+                tracing::trace_span!("daemon.service.workflow.register_definition").entered();
+            {
                 let prepared =
                     match prepare_workflow_definition_registration(&context, request.definition) {
                         Ok(definition) => WorkflowEffectPreparedV1::register_definition(
@@ -145,71 +147,76 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.activate_definition", {
-                // Catalog and environment-pin admission reject before the
-                // lifecycle command is journaled; a denial is the same canonical
-                // problem effect every other refused mutation records. Run
-                // admission compares the same environment pins, so activation
-                // must refuse here rather than publish an Active definition no
-                // run could ever start.
-                let admitted = services
-                    .definitions()
-                    .admit_activation(&request.definition_id, request.definition_version)
-                    .map_err(workflow_coordination_problem)
-                    .and_then(|()| {
-                        let definition = services
-                            .definitions()
-                            .get(&request.definition_id, request.definition_version)
-                            .map_err(workflow_coordination_problem)?;
-                        admit_workflow_environment_pins(&registered, &definition).map_err(
-                            |diagnostic| {
-                                ApplicationProblem::invalid_request(
-                                    diagnostic.code,
-                                    diagnostic.message,
-                                )
+            {
+                let _span =
+                    tracing::trace_span!("daemon.service.workflow.activate_definition").entered();
+                {
+                    // Catalog and environment-pin admission reject before the
+                    // lifecycle command is journaled; a denial is the same canonical
+                    // problem effect every other refused mutation records. Run
+                    // admission compares the same environment pins, so activation
+                    // must refuse here rather than publish an Active definition no
+                    // run could ever start.
+                    let admitted = services
+                        .definitions()
+                        .admit_activation(&request.definition_id, request.definition_version)
+                        .map_err(workflow_coordination_problem)
+                        .and_then(|()| {
+                            let definition = services
+                                .definitions()
+                                .get(&request.definition_id, request.definition_version)
+                                .map_err(workflow_coordination_problem)?;
+                            admit_workflow_environment_pins(&registered, &definition).map_err(
+                                |diagnostic| {
+                                    ApplicationProblem::invalid_request(
+                                        diagnostic.code,
+                                        diagnostic.message,
+                                    )
+                                },
+                            )
+                        });
+                    let prepared = match admitted {
+                        Ok(()) => WorkflowEffectPreparedV1::activate_definition(
+                            input_digest.clone(),
+                            WorkflowDefinitionLifecycleCommand {
+                                definition_id: request.definition_id,
+                                definition_version: request.definition_version,
+                                operation: WorkflowLifecycleOperation::Activate,
+                                expected_revision: request.expected_revision,
+                                transitioned_at: observed_at,
                             },
-                        )
-                    });
-                let prepared = match admitted {
-                    Ok(()) => WorkflowEffectPreparedV1::activate_definition(
-                        input_digest.clone(),
-                        WorkflowDefinitionLifecycleCommand {
-                            definition_id: request.definition_id,
-                            definition_version: request.definition_version,
-                            operation: WorkflowLifecycleOperation::Activate,
-                            expected_revision: request.expected_revision,
-                            transitioned_at: observed_at,
+                        ),
+                        Err(problem) => match prepared_refusal(&input_digest, problem) {
+                            Ok(prepared) => prepared,
+                            Err(problem) => {
+                                return DaemonInvocationResponse::application_problem(
+                                    request_id, problem,
+                                );
+                            }
                         },
-                    ),
-                    Err(problem) => match prepared_refusal(&input_digest, problem) {
-                        Ok(prepared) => prepared,
-                        Err(problem) => {
-                            return DaemonInvocationResponse::application_problem(
-                                request_id, problem,
-                            );
-                        }
-                    },
-                };
-                execute_journaled_workflow_effect(
-                    &registered,
-                    services.effects(),
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                )
-            })
+                    };
+                    execute_journaled_workflow_effect(
+                        &registered,
+                        services.effects(),
+                        request_id,
+                        &context,
+                        canonical_request_id,
+                        operation_key,
+                        use_case,
+                        input_digest,
+                        prepared,
+                        observed_at,
+                        deadline,
+                    )
+                }
+            }
         }
         WorkflowApplicationInvocation::RetireDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.retire_definition", {
+            let _span = tracing::trace_span!("daemon.service.workflow.retire_definition").entered();
+            {
                 let prepared = WorkflowEffectPreparedV1::retire_definition(
                     input_digest.clone(),
                     WorkflowDefinitionLifecycleCommand {
@@ -233,10 +240,11 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::RejectDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.reject_definition", {
+            let _span = tracing::trace_span!("daemon.service.workflow.reject_definition").entered();
+            {
                 let prepared = WorkflowEffectPreparedV1::reject_definition(
                     input_digest.clone(),
                     WorkflowDefinitionLifecycleCommand {
@@ -260,10 +268,12 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::ValidateDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.validate_definition", {
+            let _span =
+                tracing::trace_span!("daemon.service.workflow.validate_definition").entered();
+            {
                 let validation = services.definitions().validate(request.definition);
                 if let Ok(validated) = &validation
                     && let Err(diagnostic) =
@@ -287,10 +297,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::ValidateDefinition,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::GetDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.get_definition", {
+            let _span = tracing::trace_span!("daemon.service.workflow.get_definition").entered();
+            {
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -307,10 +318,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::GetDefinition,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::ListDefinitions(_) => {
-            hotpath::measure_block!("daemon.service.workflow.list_definitions", {
+            let _span = tracing::trace_span!("daemon.service.workflow.list_definitions").entered();
+            {
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -327,10 +339,12 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::ListDefinitions,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::DefinitionHistory(request) => {
-            hotpath::measure_block!("daemon.service.workflow.definition_history", {
+            let _span =
+                tracing::trace_span!("daemon.service.workflow.definition_history").entered();
+            {
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -347,10 +361,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::DefinitionHistory,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::DiffDefinition(request) => {
-            hotpath::measure_block!("daemon.service.workflow.diff_definition", {
+            let _span = tracing::trace_span!("daemon.service.workflow.diff_definition").entered();
+            {
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -371,10 +386,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::DiffDefinition,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::HandoffIssue(request) => {
-            hotpath::measure_block!("daemon.service.workflow.handoff_issue", {
+            let _span = tracing::trace_span!("daemon.service.workflow.handoff_issue").entered();
+            {
                 if let Err(problem) = resolve_handoff_scope(&services, &request.scope) {
                     return DaemonInvocationResponse::application_problem(request_id, problem);
                 }
@@ -414,10 +430,11 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::HandoffRedeem(request) => {
-            hotpath::measure_block!("daemon.service.workflow.handoff_redeem", {
+            let _span = tracing::trace_span!("daemon.service.workflow.handoff_redeem").entered();
+            {
                 let scope = request.expected_scope;
                 let prepared = match TaskHandoffToken::new(request.secret)
                     .and_then(|token| prepare_task_handoff_redeem(&context, &token, &scope))
@@ -452,10 +469,11 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::StartRun(request) => {
-            hotpath::measure_block!("daemon.service.workflow.start_run", {
+            let _span = tracing::trace_span!("daemon.service.workflow.start_run").entered();
+            {
                 let result = start_workflow_run(
                     &registered,
                     &services,
@@ -480,10 +498,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::StartRun,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::PauseRun(request) => {
-            hotpath::measure_block!("daemon.service.workflow.pause_run", {
+            let _span = tracing::trace_span!("daemon.service.workflow.pause_run").entered();
+            {
                 let result = apply_workflow_run_command(
                     &services,
                     &request.run_id,
@@ -524,10 +543,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::PauseRun,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::ResumeRun(request) => {
-            hotpath::measure_block!("daemon.service.workflow.resume_run", {
+            let _span = tracing::trace_span!("daemon.service.workflow.resume_run").entered();
+            {
                 let result = apply_workflow_run_command(
                     &services,
                     &request.run_id,
@@ -569,10 +589,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::ResumeRun,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::CancelRun(request) => {
-            hotpath::measure_block!("daemon.service.workflow.cancel_run", {
+            let _span = tracing::trace_span!("daemon.service.workflow.cancel_run").entered();
+            {
                 let result = cancel_workflow_run(
                     &registered,
                     &services,
@@ -597,10 +618,11 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::CancelRun,
                 )
-            })
+            }
         }
         WorkflowApplicationInvocation::GetRun(request) => {
-            hotpath::measure_block!("daemon.service.workflow.get_run", {
+            let _span = tracing::trace_span!("daemon.service.workflow.get_run").entered();
+            {
                 complete_workflow_read(
                     &registered,
                     request_id,
@@ -615,7 +637,7 @@ pub(crate) async fn execute_workflow_application(
                     deadline,
                     WorkflowApplicationOutcome::GetRun,
                 )
-            })
+            }
         }
     }
 }

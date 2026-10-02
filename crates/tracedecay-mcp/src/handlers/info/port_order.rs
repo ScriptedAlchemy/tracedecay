@@ -27,7 +27,7 @@ struct PortOrderSymbol<'a> {
     start_line: u32,
 }
 
-#[hotpath::measure(label = "mcp.info.port_order.total")]
+#[tracing::instrument(name = "mcp.info.port_order.total", level = "trace", skip_all)]
 pub async fn compute_port_order(
     graph: &VerifiedGraphQuery,
     args: Value,
@@ -58,10 +58,10 @@ pub async fn compute_port_order(
         });
     }
 
-    let summaries = hotpath::measure_block!(
-        "mcp.info.port_order.symbols",
+    let summaries = {
+        let _span = tracing::trace_span!("mcp.info.port_order.symbols").entered();
         symbols_in_dir(graph, &request.source_dir, &kinds)?
-    );
+    };
     let nodes = summaries
         .iter()
         .map(|symbol| {
@@ -100,8 +100,8 @@ pub async fn compute_port_order(
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
-    let edges = hotpath::measure_block!(
-        "mcp.info.port_order.edges",
+    let edges = {
+        let _span = tracing::trace_span!("mcp.info.port_order.edges").entered();
         graph.edges_among(
             &occurrences,
             &[
@@ -112,10 +112,10 @@ pub async fn compute_port_order(
             ],
             INFO_RELATION_LIMIT,
         )?
-    );
+    };
 
-    let (levels, emitted, cycles, dep_graph) = hotpath::measure_block!(
-        "mcp.info.port_order.compute",
+    let (levels, emitted, cycles, dep_graph) = {
+        let _span = tracing::trace_span!("mcp.info.port_order.compute").entered();
         {
             // Build adjacency list and in-degree map for Kahn's algorithm.
             // Edge direction: source depends on target (source calls/uses target),
@@ -354,7 +354,7 @@ pub async fn compute_port_order(
 
             (levels, emitted, cycles, dep_graph)
         }
-    );
+    };
 
     let result_levels = levels
         .iter()

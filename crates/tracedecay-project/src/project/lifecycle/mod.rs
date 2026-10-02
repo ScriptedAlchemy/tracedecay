@@ -107,7 +107,6 @@ impl TraceDecay {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     async fn standalone_test_runtime(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -155,7 +154,6 @@ impl TraceDecay {
     /// `test-transport` builds route [`Self::init_with_options`] here; every
     /// other test build names this constructor explicitly.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn init_with_options_for_test(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -172,7 +170,6 @@ impl TraceDecay {
     /// [`Self::open_with_options`] through the shared registered test runtime;
     /// see [`Self::init_with_options_for_test`].
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn open_with_options_for_test(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -189,7 +186,6 @@ impl TraceDecay {
     /// [`Self::open_read_only_with_options`] through the shared registered
     /// test runtime; see [`Self::init_with_options_for_test`].
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn open_read_only_with_options_for_test(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -203,7 +199,7 @@ impl TraceDecay {
         Ok(graph)
     }
 
-    #[hotpath::measure(label = "lifecycle.mount_project_graph", future = true)]
+    #[tracing::instrument(name = "lifecycle.mount_project_graph", level = "trace", skip_all)]
     pub(super) async fn mount_project_graph(
         runtime: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
@@ -233,12 +229,10 @@ impl TraceDecay {
     /// Initializes a new `TraceDecay` project at the given root.
     ///
     /// Initializes the graph and its durable configuration revision.
-    #[hotpath::skip]
     pub async fn init(project_root: &Path) -> Result<Self> {
         Self::init_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
 
-    #[hotpath::skip]
     pub async fn init_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -269,7 +263,7 @@ impl TraceDecay {
     /// still mounts configuration and session storage through the canonical
     /// registered runtime; the lease only replaces daemon ownership during
     /// this bounded maintenance operation.
-    #[hotpath::measure(label = "lifecycle.init.exclusive", future = true)]
+    #[tracing::instrument(name = "lifecycle.init.exclusive", level = "trace", skip_all)]
     pub async fn init_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -322,7 +316,6 @@ impl TraceDecay {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn init_test_fixture_with_registered_runtime(
         profile_root: &Path,
         project_root: &Path,
@@ -357,7 +350,7 @@ impl TraceDecay {
         Ok((graph, runtime))
     }
 
-    #[hotpath::measure(label = "lifecycle.init.registered", future = true)]
+    #[tracing::instrument(name = "lifecycle.init.registered", level = "trace", skip_all)]
     pub async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -448,7 +441,6 @@ impl TraceDecay {
         &self.db
     }
 
-    #[hotpath::skip]
     async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
         let connection = db.read_connection();
         let mut rows = connection
@@ -474,7 +466,6 @@ impl TraceDecay {
         }
     }
 
-    #[hotpath::skip]
     async fn ensure_database_schema_current(db: &Database) -> Result<()> {
         let current = Self::schema_version(db, "ensure_schema_current").await?;
         let supported = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
@@ -498,12 +489,10 @@ impl TraceDecay {
     /// provenance. Registered open admits only the exact final relational
     /// schema; code-index activation and reconciliation happen after open
     /// through the daemon-owned scheduler.
-    #[hotpath::skip]
     pub async fn open(project_root: &Path) -> Result<Self> {
         Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
 
-    #[hotpath::skip]
     pub async fn open_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -529,7 +518,7 @@ impl TraceDecay {
 
     /// Opens an initialized project through the canonical registered runtime
     /// while the caller holds the exact profile's exclusive maintenance lease.
-    #[hotpath::measure(label = "lifecycle.open.exclusive", future = true)]
+    #[tracing::instrument(name = "lifecycle.open.exclusive", level = "trace", skip_all)]
     pub async fn open_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -573,7 +562,7 @@ impl TraceDecay {
         .await
     }
 
-    #[hotpath::measure(label = "lifecycle.open.registered", future = true)]
+    #[tracing::instrument(name = "lifecycle.open.registered", level = "trace", skip_all)]
     pub async fn open_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -698,7 +687,6 @@ impl TraceDecay {
     /// sentinels, clear markers, or rewrite corrupted DBs. It is intended for
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
-    #[hotpath::skip]
     pub async fn open_read_only_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -723,7 +711,7 @@ impl TraceDecay {
     }
 
     #[cfg(not(any(test, feature = "test-transport")))]
-    #[hotpath::measure(label = "lifecycle.open_read_only.exclusive", future = true)]
+    #[tracing::instrument(name = "lifecycle.open_read_only.exclusive", level = "trace", skip_all)]
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -768,7 +756,11 @@ impl TraceDecay {
         .await
     }
 
-    #[hotpath::measure(label = "lifecycle.open_read_only.registered", future = true)]
+    #[tracing::instrument(
+        name = "lifecycle.open_read_only.registered",
+        level = "trace",
+        skip_all
+    )]
     pub async fn open_read_only_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,

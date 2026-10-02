@@ -166,7 +166,7 @@ impl AgentIntegration for VibeIntegration {
         ))
     }
 
-    #[hotpath::measure(label = "vibe_component_install")]
+    #[tracing::instrument(name = "vibe_component_install", level = "trace", skip_all)]
     fn activate_deployed_host_component_registration(
         &self,
         components: &[HostComponentV1],

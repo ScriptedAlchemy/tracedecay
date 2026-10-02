@@ -33,7 +33,6 @@ impl WriterCheckpointController {
         })
     }
 
-    #[hotpath::skip]
     pub(crate) const fn hard_drain_required(&self) -> bool {
         self.hard_drain_required
     }
@@ -193,7 +192,7 @@ impl WriterCheckpointController {
         let report = match self.driver.checkpoint(mode) {
             Ok(report) => report,
             Err(error) => {
-                crate::hotpath_observe::record_checkpoint_error(
+                crate::observe::record_checkpoint_error(
                     checkpoint_attribution(mode),
                     started.elapsed(),
                 );
@@ -201,7 +200,7 @@ impl WriterCheckpointController {
             }
         };
         let elapsed = started.elapsed();
-        crate::hotpath_observe::record_checkpoint(
+        crate::observe::record_checkpoint(
             checkpoint_attribution(mode),
             elapsed,
             report.complete(),
@@ -272,10 +271,10 @@ pub(super) fn checkpoint_decision(
     )
 }
 
-fn checkpoint_attribution(mode: CheckpointMode) -> crate::hotpath_observe::CheckpointAttribution {
+fn checkpoint_attribution(mode: CheckpointMode) -> crate::observe::CheckpointAttribution {
     match mode {
-        CheckpointMode::Passive => crate::hotpath_observe::CheckpointAttribution::Passive,
-        CheckpointMode::Restart => crate::hotpath_observe::CheckpointAttribution::Restart,
-        CheckpointMode::Truncate => crate::hotpath_observe::CheckpointAttribution::Truncate,
+        CheckpointMode::Passive => crate::observe::CheckpointAttribution::Passive,
+        CheckpointMode::Restart => crate::observe::CheckpointAttribution::Restart,
+        CheckpointMode::Truncate => crate::observe::CheckpointAttribution::Truncate,
     }
 }

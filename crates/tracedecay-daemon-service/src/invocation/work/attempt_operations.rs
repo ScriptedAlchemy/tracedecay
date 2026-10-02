@@ -103,7 +103,7 @@ fn synthesis_source_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.start_attempt")]
+#[tracing::instrument(name = "daemon.service.work.start_attempt", level = "trace", skip_all)]
 pub(super) fn start_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -172,7 +172,7 @@ pub(super) fn start_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.synthesize")]
+#[tracing::instrument(name = "daemon.service.work.synthesize", level = "trace", skip_all)]
 pub(super) fn synthesize(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -243,7 +243,7 @@ pub(super) fn synthesize(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.attempt_status")]
+#[tracing::instrument(name = "daemon.service.work.attempt_status", level = "trace", skip_all)]
 pub(super) fn attempt_status(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -273,7 +273,7 @@ pub(super) fn attempt_status(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.cancel_attempt")]
+#[tracing::instrument(name = "daemon.service.work.cancel_attempt", level = "trace", skip_all)]
 pub(super) fn cancel_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
@@ -308,7 +308,7 @@ pub(super) fn cancel_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.retry_attempt")]
+#[tracing::instrument(name = "daemon.service.work.retry_attempt", level = "trace", skip_all)]
 pub(super) fn retry_attempt(
     registered: &RegisteredWorkRuntime,
     _services: &RegisteredWorkApplicationServicesV1,
@@ -432,7 +432,11 @@ fn workflow_retry_rebind(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.service.work.resume_attempts")]
+#[tracing::instrument(
+    name = "daemon.service.work.resume_attempts",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn resume_attempts(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,

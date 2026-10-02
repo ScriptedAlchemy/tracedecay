@@ -32,12 +32,10 @@ pub enum MemoryConnection<'a> {
 }
 
 impl<'a> MemoryConnection<'a> {
-    #[hotpath::skip]
     pub const fn runtime(connection: &'a engine::Connection) -> Self {
         Self::Runtime(connection)
     }
 
-    #[hotpath::skip]
     pub const fn transaction(transaction: &'a MemoryTransaction) -> Self {
         Self::Transaction(transaction)
     }
@@ -60,7 +58,6 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -79,7 +76,6 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         match self {
             Self::Runtime(connection) => connection.execute_batch(sql).await.map_err(Into::into),
@@ -87,7 +83,6 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    #[hotpath::skip]
     pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
@@ -108,7 +103,6 @@ pub enum MemoryTransaction {
 }
 
 impl MemoryTransaction {
-    #[hotpath::skip]
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
@@ -122,7 +116,6 @@ impl MemoryTransaction {
         }
     }
 
-    #[hotpath::skip]
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -136,21 +129,18 @@ impl MemoryTransaction {
         }
     }
 
-    #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.execute_batch(sql).await.map_err(Into::into),
         }
     }
 
-    #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.commit().await.map_err(Into::into),
         }
     }
 
-    #[hotpath::skip]
     pub async fn rollback(self) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.rollback().await.map_err(Into::into),

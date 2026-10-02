@@ -532,7 +532,7 @@ async fn released_anchors_aged(
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
-#[hotpath::measure(future = true, label = "global_db.observation.retention")]
+#[tracing::instrument(name = "global_db.observation.retention", level = "trace", skip_all)]
 pub async fn run_observation_retention(
     database: &Database,
     generation: Option<&str>,
@@ -540,7 +540,7 @@ pub async fn run_observation_retention(
     mode: RetentionMode,
     now: UtcMicros,
 ) -> Result<ObservationRetentionReport> {
-    crate::hotpath_observe::record_snapshot_admissions(1);
+    crate::observe::record_snapshot_admissions(1);
     let reader = database.read_connection();
     let freelist_before = pragma_u64(&reader, "freelist_count").await?;
     let page_count_before = pragma_u64(&reader, "page_count").await?;
@@ -593,7 +593,11 @@ pub async fn run_observation_retention(
     Ok(report)
 }
 
-#[hotpath::measure(future = true, label = "global_db.observation.retention.persist")]
+#[tracing::instrument(
+    name = "global_db.observation.retention.persist",
+    level = "trace",
+    skip_all
+)]
 async fn commit_transaction(transaction: DatabaseWriteTransaction<'_>) -> Result<()> {
     transaction.commit().await.map_err(db_error)
 }

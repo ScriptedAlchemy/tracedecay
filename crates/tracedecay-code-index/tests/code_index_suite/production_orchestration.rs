@@ -628,9 +628,9 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
 }
 
 /// Carry-forward rematerialize already succeeds for unchanged files, including
-/// after restore. `code_index_reused_parses` is the matching hotpath success
+/// after restore. `code_index_reused_parses` is the matching measured success
 /// event (`add_reused_parses(1)`); these extract counts are the readable
-/// re-extract dual on the default (non-hotpath) path. No carry-forward miss
+/// re-extract dual on the default path. No carry-forward miss
 /// to fix, this locks the counter floor so a later fallback would fail.
 #[test]
 fn unchanged_increment_does_not_reextract_carried_files() {

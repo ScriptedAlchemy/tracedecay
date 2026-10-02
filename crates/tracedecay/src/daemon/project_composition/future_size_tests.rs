@@ -145,22 +145,18 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
 }
 
 /// The composition entry holds only borrowed inputs and boxed phase futures.
-/// Measured: 1,248 B in an ordinary build, 2,648 B under `--features hotpath`
+/// Measured: 1,248 B in an ordinary build, 2,648 B with instrumentation
 /// (every measured async fn there embeds its body a second time). The boxed
 /// `_inner` it replaced was 6,648 B / 21,200 B behind a 104 B / 424 B shell.
 const COMPOSITION_ENTRY_CEILING: usize = 4 * 1024;
 
 /// Every phase owns its temporaries and awaits at most one wide leaf at a
 /// time. Measured maxima: 21,200 B (`mount_full_server_owners`, ordinary
-/// build) and 175,424 B (the same phase under `--features hotpath`). The
+/// build) and 175,424 B (the same phase with instrumentation). The
 /// next-widest phases are `construct_full_server` (7,208 B) and `open_graph`
 /// (6,200 B); the background-CPU authority handle costs its phase well under
 /// 128 B.
-const PHASE_CEILING: usize = if cfg!(feature = "hotpath") {
-    256 * 1024
-} else {
-    32 * 1024
-};
+const PHASE_CEILING: usize = if false { 256 * 1024 } else { 32 * 1024 };
 
 #[test]
 fn project_open_future_sizes() {
@@ -202,21 +198,27 @@ mod measured_body {
     use std::mem::size_of_val;
 
     macro_rules! measured_chain {
-    ($leaf:ident, $one:ident, $two:ident, $three:ident; $($options:tt)*) => {
-        #[hotpath::measure($($options)*)]
-        async fn $leaf() -> usize {
-            let data = [1_u8; 1024];
-            std::future::pending::<()>().await;
-            std::hint::black_box(data).len()
-        }
-        #[hotpath::measure($($options)*)]
-        async fn $one() -> usize { $leaf().await }
-        #[hotpath::measure($($options)*)]
-        async fn $two() -> usize { $one().await }
-        #[hotpath::measure($($options)*)]
-        async fn $three() -> usize { $two().await }
-    };
-}
+        ($leaf:ident, $one:ident, $two:ident, $three:ident; $($options:tt)*) => {
+            #[tracing::instrument(level = "trace", skip_all)]
+            async fn $leaf() -> usize {
+                let data = [1_u8; 1024];
+                std::future::pending::<()>().await;
+                std::hint::black_box(data).len()
+            }
+            #[tracing::instrument(level = "trace", skip_all)]
+            async fn $one() -> usize {
+                $leaf().await
+            }
+            #[tracing::instrument(level = "trace", skip_all)]
+            async fn $two() -> usize {
+                $one().await
+            }
+            #[tracing::instrument(level = "trace", skip_all)]
+            async fn $three() -> usize {
+                $two().await
+            }
+        };
+    }
 
     measured_chain!(timing_leaf, timing_one, timing_two, timing_three;);
     measured_chain!(logged_leaf, logged_one, logged_two, logged_three; log = true);
@@ -245,7 +247,7 @@ mod measured_body {
         }
     }
 
-    #[hotpath::measure(future = true, log = true)]
+    #[tracing::instrument(level = "trace", skip_all, ret)]
     async fn cancellable(drops: &std::sync::atomic::AtomicUsize) {
         let _drop = DropCount(drops);
         std::future::pending::<()>().await;

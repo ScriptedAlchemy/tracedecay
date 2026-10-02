@@ -32,7 +32,7 @@ fn daemon_observability_producer_identity(
 }
 
 impl DaemonInvocationService {
-    #[hotpath::measure(label = "daemon.service.observability.mount", future = true)]
+    #[tracing::instrument(name = "daemon.service.observability.mount", level = "trace", skip_all)]
     pub async fn mount_observability_producer(
         &self,
         project_root: PathBuf,
@@ -83,7 +83,7 @@ impl DaemonInvocationService {
                     // root of an already-mounted store attaches an alias to
                     // the incumbent owners instead of starting a second
                     // recorder for the same store.
-                    hotpath::measure_block!("daemon.service.observability.acquire", {
+                    { let _span = tracing::trace_span!("daemon.service.observability.acquire").entered(); {
                     self.store_observability
                         .acquire_or_start(
                             &database,
@@ -128,7 +128,7 @@ impl DaemonInvocationService {
                                 }
                             }
                         })
-                    })
+                    } }
                 },
             )
             .await?;
@@ -139,7 +139,6 @@ impl DaemonInvocationService {
             })
     }
 
-    #[hotpath::skip]
     pub async fn observability_producer(
         &self,
         project_root: Option<&Path>,
@@ -193,7 +192,6 @@ impl DaemonInvocationService {
             })
     }
 
-    #[hotpath::skip]
     pub async fn delivery_settlement_authority(
         &self,
         project_root: Option<&Path>,
@@ -212,7 +210,6 @@ impl DaemonInvocationService {
             .await)
     }
 
-    #[hotpath::skip]
     pub async fn delivery_settlement_recorder(
         &self,
         project_root: Option<&Path>,
@@ -228,7 +225,6 @@ impl DaemonInvocationService {
     /// Resolve the durable workflow owner for an exact Work attempt without
     /// widening response-path reads to every run. The production `SQLite` port
     /// answers this through the run journal primary key.
-    #[hotpath::skip]
     pub async fn work_fan_out_binding(
         &self,
         project_root: Option<&Path>,

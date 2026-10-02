@@ -281,9 +281,14 @@ pub(super) async fn deliver_job_output(
                         message: format!("failed to open job output: {error}"),
                     })
                 })?;
-            hotpath::measure_block!("automation.job_delivery.write_file", {
-                file.write_all(response.output_text.as_bytes()).await
-            })
+            {
+                use tracing::Instrument as _;
+                {
+                    file.write_all(response.output_text.as_bytes())
+                        .instrument(tracing::trace_span!("automation.job_delivery.write_file"))
+                        .await
+                }
+            }
             .map_err(|_| {
                 indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
             })?;

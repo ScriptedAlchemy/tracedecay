@@ -67,7 +67,7 @@ impl WriterTelemetry {
             snapshot.queue.queued_operations = snapshot.queue.queued_operations.saturating_add(1);
             snapshot.queue.queued_bytes = snapshot.queue.queued_bytes.saturating_add(bytes);
         });
-        crate::hotpath_observe::record_writer_queue_admitted(bytes);
+        crate::observe::record_writer_queue_admitted(bytes);
     }
 
     pub(crate) fn shed(&self) {
@@ -87,7 +87,7 @@ impl WriterTelemetry {
             state.snapshot.queue.queued_bytes =
                 state.snapshot.queue.queued_bytes.saturating_sub(bytes);
         });
-        crate::hotpath_observe::record_writer_queue_released(operations, bytes);
+        crate::observe::record_writer_queue_released(operations, bytes);
     }
 
     pub(crate) fn completed(
@@ -233,7 +233,7 @@ impl WriterTelemetry {
                 .bytes_decoded
                 .saturating_add(metrics.lock_work.bytes_decoded);
         });
-        crate::hotpath_observe::record_writer_transaction(metrics.rows, metrics.lock_held_micros);
+        crate::observe::record_writer_transaction(metrics.rows, metrics.lock_held_micros);
     }
 
     pub(crate) fn checkpoint(&self, sample: WalCheckpointSample) {
@@ -262,7 +262,7 @@ impl WriterTelemetry {
             state.snapshot.wal.hard_retry_wakes =
                 state.snapshot.wal.hard_retry_wakes.saturating_add(1);
         });
-        crate::hotpath_observe::record_checkpoint_hard_retry_wake();
+        crate::observe::record_checkpoint_hard_retry_wake();
     }
 
     pub(crate) fn exact_sql_command(
@@ -294,7 +294,7 @@ impl WriterTelemetry {
                 .bytes_decoded
                 .saturating_add(lock_work.bytes_decoded);
         });
-        crate::hotpath_observe::record_writer_transaction(rows, elapsed_micros);
+        crate::observe::record_writer_transaction(rows, elapsed_micros);
     }
 
     pub(crate) fn fault_unsettled(&self) {
@@ -312,7 +312,7 @@ impl WriterTelemetry {
             state.snapshot.error_events =
                 state.snapshot.error_events.saturating_add(unsettled.max(1));
         });
-        crate::hotpath_observe::record_writer_queue_released(
+        crate::observe::record_writer_queue_released(
             released.queued_operations,
             released.queued_bytes,
         );

@@ -3,13 +3,13 @@ use super::*;
 /// Applies one source commit against the caller's previously read state. The
 /// caller is responsible for placing this operation inside its authoritative
 /// database transaction.
-#[hotpath::measure(label = "store.external_source.apply_commit")]
+#[tracing::instrument(name = "store.external_source.apply_commit", level = "trace", skip_all)]
 pub fn apply_source_commit(
     current: Option<&SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     let outcome = reduce_source_commit(current.cloned(), commit);
-    crate::hotpath_observe::record_source_commit_outcome(&outcome);
+    crate::observe::record_source_commit_outcome(&outcome);
     outcome
 }
 
@@ -17,17 +17,25 @@ pub fn apply_source_commit(
 ///
 /// This preserves [`apply_source_commit`]'s validation and CAS semantics while
 /// allowing the current-object maps to advance in place.
-#[hotpath::measure(label = "store.external_source.apply_commit_owned")]
+#[tracing::instrument(
+    name = "store.external_source.apply_commit_owned",
+    level = "trace",
+    skip_all
+)]
 pub fn apply_source_commit_owned(
     current: Option<SourceStoreStateV1>,
     commit: SourceCommitV1,
 ) -> SourceStoreResult<SourceCommitApplyOutcomeV1> {
     let outcome = reduce_source_commit(current, commit);
-    crate::hotpath_observe::record_source_commit_outcome(&outcome);
+    crate::observe::record_source_commit_outcome(&outcome);
     outcome
 }
 
-#[hotpath::measure(label = "store.external_source.reduce_commit")]
+#[tracing::instrument(
+    name = "store.external_source.reduce_commit",
+    level = "trace",
+    skip_all
+)]
 fn reduce_source_commit(
     current: Option<SourceStoreStateV1>,
     commit: SourceCommitV1,
@@ -147,7 +155,11 @@ fn reduce_source_commit(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "store.external_source.apply_object_mutation")]
+#[tracing::instrument(
+    name = "store.external_source.apply_object_mutation",
+    level = "trace",
+    skip_all
+)]
 fn apply_object_mutation(
     commit: &SourceCommitV1,
     mutation: SourceObjectMutationV1,
@@ -188,7 +200,11 @@ fn apply_object_mutation(
     Ok(())
 }
 
-#[hotpath::measure(label = "store.external_source.validate_transition")]
+#[tracing::instrument(
+    name = "store.external_source.validate_transition",
+    level = "trace",
+    skip_all
+)]
 fn validate_transition(
     prior: Option<&SourceObjectObservationV1>,
     mutation: &SourceObjectMutationV1,
@@ -219,7 +235,11 @@ fn validate_transition(
     }
 }
 
-#[hotpath::measure(label = "store.external_source.absence_tombstone")]
+#[tracing::instrument(
+    name = "store.external_source.absence_tombstone",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn absence_tombstone(
     binding: SourceBindingIdentityV1,
     completion: &SourceSnapshotCompletionV1,

@@ -16,7 +16,7 @@ use crate::tool_errors::cursor_refusal;
 
 use super::graph_tool_completion;
 
-#[hotpath::measure(label = "mcp.graph.similar.total")]
+#[tracing::instrument(name = "mcp.graph.similar.total", level = "trace", skip_all)]
 pub async fn compute_similar(
     ctx: &McpToolContext<'_>,
     args: Value,
@@ -216,7 +216,7 @@ fn clone_lane_unavailable_error(
     }
 }
 
-#[hotpath::measure(label = "mcp.graph.redundancy.total")]
+#[tracing::instrument(name = "mcp.graph.redundancy.total", level = "trace", skip_all)]
 pub async fn compute_redundancy(
     ctx: &McpToolContext<'_>,
     args: Value,

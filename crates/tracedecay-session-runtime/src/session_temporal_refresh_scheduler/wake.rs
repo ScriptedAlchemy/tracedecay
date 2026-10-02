@@ -73,7 +73,6 @@ impl SessionTemporalRefreshWorkerStatus {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub const fn is_available(self) -> bool {
         self.unavailable_reason.is_none()
     }
@@ -216,7 +215,7 @@ impl SessionTemporalRefreshWakeState {
     pub fn take_dirty(&self) -> bool {
         let dirty = self.dirty.swap(false, Ordering::AcqRel);
         if dirty {
-            hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(-1.0);
+            metrics::gauge!("session_temporal_refresh_projection_dirty").increment(-1.0);
         }
         dirty
     }
@@ -224,7 +223,7 @@ impl SessionTemporalRefreshWakeState {
     pub fn take_historical_dirty(&self) -> bool {
         let dirty = self.historical_dirty.swap(false, Ordering::AcqRel);
         if dirty {
-            hotpath::gauge!("session_temporal_refresh_history_dirty").inc(-1.0);
+            metrics::gauge!("session_temporal_refresh_history_dirty").increment(-1.0);
         }
         dirty
     }
@@ -352,14 +351,14 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn requeue_projection(&self) {
         if !self.dirty.swap(true, Ordering::AcqRel) {
-            hotpath::gauge!("session_temporal_refresh_projection_dirty").inc(1.0);
+            metrics::gauge!("session_temporal_refresh_projection_dirty").increment(1.0);
         }
         self.mark_converging();
     }
 
     pub fn wake_history(&self) {
         if !self.historical_dirty.swap(true, Ordering::AcqRel) {
-            hotpath::gauge!("session_temporal_refresh_history_dirty").inc(1.0);
+            metrics::gauge!("session_temporal_refresh_history_dirty").increment(1.0);
         }
         self.mark_converging();
         self.wake.notify_one();
@@ -404,13 +403,13 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn mark_worker_busy(&self) {
         if !self.busy.swap(true, Ordering::AcqRel) {
-            hotpath::gauge!("session_temporal_refresh_workers_busy").inc(1.0);
+            metrics::gauge!("session_temporal_refresh_workers_busy").increment(1.0);
         }
     }
 
     pub fn mark_worker_idle(&self) {
         if self.busy.swap(false, Ordering::AcqRel) {
-            hotpath::gauge!("session_temporal_refresh_workers_busy").inc(-1.0);
+            metrics::gauge!("session_temporal_refresh_workers_busy").increment(-1.0);
         }
     }
 
@@ -445,7 +444,7 @@ impl SessionTemporalRefreshWakeState {
 
     pub fn update_history_retry_state(&self, pending: bool) {
         if self.history_retry_pending.swap(pending, Ordering::AcqRel) != pending {
-            hotpath::gauge!("session_temporal_refresh_history_retrying").inc(if pending {
+            metrics::gauge!("session_temporal_refresh_history_retrying").increment(if pending {
                 1.0
             } else {
                 -1.0
@@ -482,19 +481,19 @@ impl SessionTemporalRefreshWakeState {
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
         match outcome {
             SessionHistoricalIngestOutcome::Complete => {
-                hotpath::gauge!("session_temporal_refresh_history_complete").inc(1.0);
+                metrics::gauge!("session_temporal_refresh_history_complete").increment(1.0);
             }
             SessionHistoricalIngestOutcome::Pending { .. } => {
-                hotpath::gauge!("session_temporal_refresh_history_pending").inc(1.0);
+                metrics::gauge!("session_temporal_refresh_history_pending").increment(1.0);
             }
             SessionHistoricalIngestOutcome::Retryable { .. } => {
-                hotpath::gauge!("session_temporal_refresh_history_retryable").inc(1.0);
+                metrics::gauge!("session_temporal_refresh_history_retryable").increment(1.0);
             }
             SessionHistoricalIngestOutcome::Blocked { .. } => {
-                hotpath::gauge!("session_temporal_refresh_history_blocked").inc(1.0);
+                metrics::gauge!("session_temporal_refresh_history_blocked").increment(1.0);
             }
             SessionHistoricalIngestOutcome::Cancelled => {
-                hotpath::gauge!("session_temporal_refresh_history_cancelled").inc(1.0);
+                metrics::gauge!("session_temporal_refresh_history_cancelled").increment(1.0);
             }
         }
         let state = match outcome {
@@ -560,8 +559,8 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if telemetry.depths_published {
-            hotpath::gauge!("session_temporal_refresh_durable_depth")
-                .inc(bounded_depth(backlog) - bounded_depth(telemetry.durable_backlog));
+            metrics::gauge!("session_temporal_refresh_durable_depth")
+                .increment(bounded_depth(backlog) - bounded_depth(telemetry.durable_backlog));
         }
         telemetry.durable_backlog = backlog;
     }
@@ -579,8 +578,8 @@ impl SessionTemporalRefreshWakeState {
             telemetry.last_progress_at_unix_micros = Some(micros);
         }
         if telemetry.depths_published {
-            hotpath::gauge!("session_temporal_refresh_durable_depth")
-                .inc(bounded_depth(durable_backlog) - bounded_depth(previous));
+            metrics::gauge!("session_temporal_refresh_durable_depth")
+                .increment(bounded_depth(durable_backlog) - bounded_depth(previous));
         }
     }
 
@@ -590,8 +589,8 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if telemetry.depths_published {
-            hotpath::gauge!("session_temporal_refresh_queue_depth")
-                .inc(bounded_depth(backlog) - bounded_depth(telemetry.queued_backlog));
+            metrics::gauge!("session_temporal_refresh_queue_depth")
+                .increment(bounded_depth(backlog) - bounded_depth(telemetry.queued_backlog));
         }
         telemetry.queued_backlog = backlog;
     }
@@ -725,10 +724,10 @@ impl SessionTemporalRefreshWakeState {
         if !telemetry.depths_published {
             return;
         }
-        hotpath::gauge!("session_temporal_refresh_queue_depth")
-            .inc(-bounded_depth(telemetry.queued_backlog));
-        hotpath::gauge!("session_temporal_refresh_durable_depth")
-            .inc(-bounded_depth(telemetry.durable_backlog));
+        metrics::gauge!("session_temporal_refresh_queue_depth")
+            .increment(-bounded_depth(telemetry.queued_backlog));
+        metrics::gauge!("session_temporal_refresh_durable_depth")
+            .increment(-bounded_depth(telemetry.durable_backlog));
         telemetry.depths_published = false;
     }
 
@@ -736,7 +735,6 @@ impl SessionTemporalRefreshWakeState {
         self.completion_control.clone()
     }
 
-    #[hotpath::skip]
     pub async fn wait_for_cancellation(&self) {
         loop {
             let notified = self.cancellation.notified();
@@ -1010,7 +1008,6 @@ impl SessionTemporalRefreshWake {
     /// before the mutating tool returns so Hermes `sync_turn` → `lcm_grep`
     /// stays available on the same route without inventing stores or weakening
     /// empty/unavailable semantics.
-    #[hotpath::skip]
     pub async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         let Some(state) = self.target() else {
             return false;
@@ -1019,9 +1016,9 @@ impl SessionTemporalRefreshWake {
         state.wake();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let idle = hotpath::future!(
+            let idle = tracing::Instrument::instrument(
                 enabled_idle_notification(&state),
-                label = "daemon.scheduler.session_temporal.idle_wait"
+                tracing::trace_span!("daemon.scheduler.session_temporal.idle_wait"),
             );
             let pass_count = state.pass_count.load(Ordering::Acquire);
             let busy = state.busy.load(Ordering::Acquire);
@@ -1048,7 +1045,6 @@ impl SessionTemporalRefreshWake {
     /// pass is historical convergence: a large Codex home does not finish it
     /// before the import deadline. The pass has not run when this returns, so
     /// `Scheduled` is never evidence that sources are admitted.
-    #[hotpath::skip]
     pub(crate) fn schedule_historical_admission(&self) -> HistoricalAdmissionView {
         let Some(state) = self.target() else {
             return HistoricalAdmissionView::Unavailable;

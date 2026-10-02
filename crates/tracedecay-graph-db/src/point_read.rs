@@ -7,7 +7,7 @@ use crate::{
 };
 
 impl GraphDb {
-    #[hotpath::measure(label = "graph_db.read.entity", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.read.entity", level = "trace", skip_all)]
     pub fn entity(
         &self,
         namespace: &GraphNamespace,
@@ -26,14 +26,12 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        crate::hotpath_observe::record_counts(usize::from(entity.is_some()), 0, 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_counts(usize::from(entity.is_some()), 0, 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(entity.map(|stored| stored.entity))
     }
 
-    #[hotpath::measure(label = "graph_db.read.relation", impl_type = "GraphDb")]
+    #[tracing::instrument(name = "graph_db.read.relation", level = "trace", skip_all)]
     pub fn relation(
         &self,
         namespace: &GraphNamespace,
@@ -52,10 +50,8 @@ impl GraphDb {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        crate::hotpath_observe::record_counts(0, usize::from(relation.is_some()), 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
+        crate::observe::record_counts(0, usize::from(relation.is_some()), 0, 0);
+        crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
         Ok(relation.map(|stored| stored.relation))
     }
 }

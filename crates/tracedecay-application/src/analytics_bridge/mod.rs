@@ -114,7 +114,7 @@ pub fn hook_import_sources(
 // Takes the source list by value: a borrowed slice iterator held across the
 // per-source awaits trips rustc's higher-ranked Send leak check when this
 // future runs inside a spawned startup catch-up task.
-#[hotpath::measure(label = "usecases.analytics.import", future = true)]
+#[tracing::instrument(name = "usecases.analytics.import", level = "trace", skip_all)]
 pub async fn import_hook_analytics(
     gdb: &RegisteredGlobalDb,
     sources: Vec<HookImportSource>,
@@ -128,7 +128,7 @@ pub async fn import_hook_analytics(
 
 /// Resolves the hook JSONL sources for `project_root` and imports them,
 /// returning the JSON outcome shape the admin CLI and dashboard report.
-#[hotpath::measure(label = "usecases.analytics.sync", future = true)]
+#[tracing::instrument(name = "usecases.analytics.sync", level = "trace", skip_all)]
 pub async fn analytics_sync_with_db(
     gdb: &RegisteredGlobalDb,
     profile_root: &Path,

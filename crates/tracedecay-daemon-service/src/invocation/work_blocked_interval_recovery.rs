@@ -113,7 +113,6 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
         self.inner.cancellation.cancel();
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
         self.cancel();
         let task = self

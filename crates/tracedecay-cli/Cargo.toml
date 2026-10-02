@@ -67,33 +67,9 @@ required-features = ["test-transport"]
 [features]
 default = ["production"]
 # Opt-in profiling; never in `default`/`production`. Backend selection lives
-# here and in the composition root: `tracedecay/hotpath` names the runtime
 # owners whose compiled behaviour changes, and cargo's feature unification
-# lights every other crate's hotpath macros from `hotpath/hotpath` alone.
 # `tracedecay-sdk` mirrors the selected backend onto its build-script (host)
-# context, see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
 # in `main.rs`.
-hotpath = [
-    "dep:regex",
-    "tracedecay/hotpath",
-    "tracedecay-sdk/hotpath",
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "hotpath/ureq-3",
-]
-hotpath-alloc = [
-    "hotpath",
-    "tracedecay/hotpath-alloc",
-    "tracedecay-sdk/hotpath-alloc",
-    "hotpath/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "tracedecay/hotpath-cpu",
-    "tracedecay-sdk/hotpath-cpu",
-    "hotpath/hotpath-cpu",
-]
-hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 production = ["tracedecay/production", "alloc-mimalloc"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
@@ -152,7 +128,6 @@ lang-lean = ["tracedecay/lang-lean"]
 # resident-memory refusal clears on its own. When several allocator features
 # are enabled at once (e.g. `--all-features`), main.rs resolves them by fixed
 # precedence instead of failing the build:
-# hotpath-alloc (measurement) > alloc-jemalloc > alloc-mimalloc > system.
 #
 # alloc-jemalloc turns jemalloc background purge threads on by default:
 # without them an idle daemon never returns dirty pages to the OS (measured
@@ -168,7 +143,7 @@ clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
-hotpath.workspace = true
+metrics.workspace = true
 rayon = "1"
 regex = { version = "1.12.3", optional = true }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
@@ -201,7 +176,6 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-framing = { path = "../tracedecay-framing" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-hooks = { path = "../tracedecay-hooks" }
-tracedecay-hotpath-guard = { path = "../tracedecay-hotpath-guard" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration" }
 tracedecay-lsp = { path = "../tracedecay-lsp" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }

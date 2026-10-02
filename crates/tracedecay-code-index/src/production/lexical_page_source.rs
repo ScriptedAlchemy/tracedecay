@@ -1320,7 +1320,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
 
     /// Restore a cursor while preserving the one incompatibility that permits
     /// a derived staging artifact to be superseded and rebuilt.
-    #[hotpath::measure(label = "code_index.restore.cursor")]
+    #[tracing::instrument(name = "code_index.restore.cursor", level = "trace", skip_all)]
     pub fn restore_cursor_classified(
         &mut self,
         cursor: &VerifiedSealedLexicalCursorV1,
@@ -1509,7 +1509,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             .saturating_add(source_bytes)
     }
 
-    #[hotpath::measure(label = "code_index.restore.page")]
+    #[tracing::instrument(name = "code_index.restore.page", level = "trace", skip_all)]
     pub fn next_page(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1536,7 +1536,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 if let Err(error) = admit(&staged.page) {
                     return Ok(Err(error));
                 }
-                crate::hotpath_observe::record_pages(staged.cursor.next_page_ordinal());
+                crate::observe::record_pages(staged.cursor.next_page_ordinal());
                 self.accept_cursor(staged.cursor);
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
@@ -1565,76 +1565,79 @@ impl VerifiedSealedLexicalPageSourceV1 {
         bounds: VerifiedSealedLexicalPageBatchBoundsV1,
         admit: impl FnOnce(&[VerifiedSealedLexicalPageV1]) -> Result<NonZeroUsize, E>,
     ) -> Result<Result<VerifiedSealedLexicalPageBatchReadV1, E>, CodeIndexProductionErrorV1> {
-        let staged = hotpath::measure_block!("code_index.lexical_source.batch_stage", {
-            (|| {
-                let mut pages = Vec::new();
-                pages
-                    .try_reserve_exact(bounds.maximum_pages())
-                    .map_err(|error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed lexical page batch reservation failed: {error}"
-                        ))
-                    })?;
-                let retained_page_slots = pages
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<VerifiedSealedLexicalPageV1>())
-                    .ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed lexical page batch reservation overflowed".to_owned(),
-                        )
-                    })?;
-                if retained_page_slots > bounds.maximum_retained_bytes()
-                    || retained_page_slots < bounds.page_slot_bytes()
-                {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "sealed lexical page batch reservation exceeds its retained-byte bound"
-                            .to_owned(),
-                    ));
-                }
+        let staged = {
+            let _span = tracing::trace_span!("code_index.lexical_source.batch_stage").entered();
+            {
+                (|| {
+                    let mut pages = Vec::new();
+                    pages
+                        .try_reserve_exact(bounds.maximum_pages())
+                        .map_err(|error| {
+                            CodeIndexProductionErrorV1::Contract(format!(
+                                "sealed lexical page batch reservation failed: {error}"
+                            ))
+                        })?;
+                    let retained_page_slots = pages
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<VerifiedSealedLexicalPageV1>())
+                        .ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed lexical page batch reservation overflowed".to_owned(),
+                            )
+                        })?;
+                    if retained_page_slots > bounds.maximum_retained_bytes()
+                        || retained_page_slots < bounds.page_slot_bytes()
+                    {
+                        return Err(CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical page batch reservation exceeds its retained-byte bound"
+                                .to_owned(),
+                        ));
+                    }
 
-                let mut working_cursor = self.cursor.clone();
-                let mut retained_bytes = retained_page_slots;
-                let mut completion = None;
-                while pages.len() < bounds.maximum_pages() {
-                    match self.stage_next_page_at(&working_cursor, control)? {
-                        StagedSealedLexicalPageReadV1::Page(staged) => {
-                            let next_retained_bytes = retained_bytes
-                                .checked_add(staged.page.retained_owned_bytes())
-                                .ok_or_else(|| {
-                                    CodeIndexProductionErrorV1::Contract(
-                                        "sealed lexical page batch retained bytes overflowed"
-                                            .to_owned(),
-                                    )
-                                })?;
-                            if next_retained_bytes > bounds.maximum_retained_bytes() {
-                                if pages.is_empty() {
-                                    return Err(CodeIndexProductionErrorV1::Contract(
+                    let mut working_cursor = self.cursor.clone();
+                    let mut retained_bytes = retained_page_slots;
+                    let mut completion = None;
+                    while pages.len() < bounds.maximum_pages() {
+                        match self.stage_next_page_at(&working_cursor, control)? {
+                            StagedSealedLexicalPageReadV1::Page(staged) => {
+                                let next_retained_bytes = retained_bytes
+                                    .checked_add(staged.page.retained_owned_bytes())
+                                    .ok_or_else(|| {
+                                        CodeIndexProductionErrorV1::Contract(
+                                            "sealed lexical page batch retained bytes overflowed"
+                                                .to_owned(),
+                                        )
+                                    })?;
+                                if next_retained_bytes > bounds.maximum_retained_bytes() {
+                                    if pages.is_empty() {
+                                        return Err(CodeIndexProductionErrorV1::Contract(
                                         "one sealed lexical page exceeds the batch retained-byte bound"
                                             .to_owned(),
                                     ));
+                                    }
+                                    break;
+                                }
+                                retained_bytes = next_retained_bytes;
+                                working_cursor = staged.cursor;
+                                pages.push(staged.page);
+                            }
+                            StagedSealedLexicalPageReadV1::Complete { receipt, cursor } => {
+                                if pages.is_empty() {
+                                    completion = Some((receipt, cursor));
                                 }
                                 break;
                             }
-                            retained_bytes = next_retained_bytes;
-                            working_cursor = staged.cursor;
-                            pages.push(staged.page);
-                        }
-                        StagedSealedLexicalPageReadV1::Complete { receipt, cursor } => {
-                            if pages.is_empty() {
-                                completion = Some((receipt, cursor));
-                            }
-                            break;
                         }
                     }
-                }
 
-                Ok(if let Some((receipt, cursor)) = completion {
-                    StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor }
-                } else {
-                    StagedSealedLexicalPageBatchReadV1::Pages(pages)
-                })
-            })()
-        })?;
+                    Ok(if let Some((receipt, cursor)) = completion {
+                        StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor }
+                    } else {
+                        StagedSealedLexicalPageBatchReadV1::Pages(pages)
+                    })
+                })()
+            }
+        }?;
 
         match staged {
             StagedSealedLexicalPageBatchReadV1::Complete { receipt, cursor } => {
@@ -1655,7 +1658,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
                 }
                 let accepted_cursor = pages[accepted_page_count - 1].next_cursor().clone();
                 pages.truncate(accepted_page_count);
-                crate::hotpath_observe::record_pages(accepted_cursor.next_page_ordinal());
+                crate::observe::record_pages(accepted_cursor.next_page_ordinal());
                 self.accept_cursor(accepted_cursor);
                 Ok(Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)))
             }
@@ -1983,7 +1986,11 @@ impl VerifiedSealedLexicalPageSourceV1 {
         self.fill_admitted_window(file_offset, control)
     }
 
-    #[hotpath::measure(label = "code_index.restore.partitioned_window")]
+    #[tracing::instrument(
+        name = "code_index.restore.partitioned_window",
+        level = "trace",
+        skip_all
+    )]
     fn fill_admitted_window(
         &mut self,
         file_offset: u64,
@@ -2208,114 +2215,127 @@ fn admit_validated_file_parts(
     next_file_offset: u64,
     _control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!("code_index.restore.file_admit", {
-        artifacts
-            .validate()
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        artifacts
-            .validate_generation_import_authority(extraction)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        artifacts
-            .validate_generation_clone_authority(authority, extraction, snapshot_digest)
-            .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        let document = &artifacts.chunks.document;
-        if extraction.file_occurrence_id != document.file_occurrence_id
-            || extraction.content_digest != document.content_digest
-            || authority.content_digest != document.content_digest
-            || artifacts
-                .chunks
-                .chunks
-                .iter()
-                .any(|chunk| chunk.anchor.generation_id != extraction.generation_id)
+    {
+        let _span = tracing::trace_span!("code_index.restore.file_admit").entered();
         {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical extraction authority does not match its admitted document"
-                    .to_owned(),
-            ));
-        }
-        let mut symbol_displays = BTreeMap::new();
-        for symbol in &artifacts.symbols {
-            let display = VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref());
-            if symbol_displays
-                .insert(symbol.occurrence.clone(), display)
-                .is_some()
+            artifacts
+                .validate()
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            artifacts
+                .validate_generation_import_authority(extraction)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            artifacts
+                .validate_generation_clone_authority(authority, extraction, snapshot_digest)
+                .map_err(CodeIndexProductionErrorV1::Chunk)?;
+            let document = &artifacts.chunks.document;
+            if extraction.file_occurrence_id != document.file_occurrence_id
+                || extraction.content_digest != document.content_digest
+                || authority.content_digest != document.content_digest
+                || artifacts
+                    .chunks
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.anchor.generation_id != extraction.generation_id)
             {
                 return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file contains duplicate symbol display identities".to_owned(),
+                    "sealed lexical extraction authority does not match its admitted document"
+                        .to_owned(),
                 ));
             }
-        }
-        let imports = artifacts.imports.clone();
-        let clone_bodies = artifacts.clone_bodies.clone();
-        let chunks = hotpath::measure_block!(
-            "code_index.restore.file_admit.exact_admission",
-            exact_authority
-                .admit_all(artifacts.chunks.chunks.clone())
-                .map_err(CodeIndexProductionErrorV1::Chunk)
-        )?;
-        let (serialized_chunks, serialized_displays, serialized_imports, serialized_clone_bodies) =
-            hotpath::measure_block!("code_index.restore.file_admit.serialize", {
-                let mut serialized_chunks = Vec::with_capacity(chunks.len());
-                let mut serialized_displays = Vec::with_capacity(chunks.len());
-                let mut staging = Vec::new();
-                for chunk in &chunks {
-                    serialized_chunks.push(serialize_page_row(
-                        chunk.chunk(),
-                        &mut staging,
-                        "sealed lexical chunk serialization failed",
-                    )?);
-                    let display = symbol_display_for_chunk(chunk.chunk(), &symbol_displays)?;
-                    let serialized_display = display
-                        .as_ref()
-                        .map(|display| {
+            let mut symbol_displays = BTreeMap::new();
+            for symbol in &artifacts.symbols {
+                let display = VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref());
+                if symbol_displays
+                    .insert(symbol.occurrence.clone(), display)
+                    .is_some()
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file contains duplicate symbol display identities"
+                            .to_owned(),
+                    ));
+                }
+            }
+            let imports = artifacts.imports.clone();
+            let clone_bodies = artifacts.clone_bodies.clone();
+            let chunks = {
+                let _span =
+                    tracing::trace_span!("code_index.restore.file_admit.exact_admission").entered();
+                exact_authority
+                    .admit_all(artifacts.chunks.chunks.clone())
+                    .map_err(CodeIndexProductionErrorV1::Chunk)
+            }?;
+            let (
+                serialized_chunks,
+                serialized_displays,
+                serialized_imports,
+                serialized_clone_bodies,
+            ) = {
+                let _span =
+                    tracing::trace_span!("code_index.restore.file_admit.serialize").entered();
+                {
+                    let mut serialized_chunks = Vec::with_capacity(chunks.len());
+                    let mut serialized_displays = Vec::with_capacity(chunks.len());
+                    let mut staging = Vec::new();
+                    for chunk in &chunks {
+                        serialized_chunks.push(serialize_page_row(
+                            chunk.chunk(),
+                            &mut staging,
+                            "sealed lexical chunk serialization failed",
+                        )?);
+                        let display = symbol_display_for_chunk(chunk.chunk(), &symbol_displays)?;
+                        let serialized_display = display
+                            .as_ref()
+                            .map(|display| {
+                                serialize_page_row(
+                                    display,
+                                    &mut staging,
+                                    "sealed lexical symbol display serialization failed",
+                                )
+                            })
+                            .transpose()?;
+                        serialized_displays.push(serialized_display);
+                    }
+                    let serialized_imports = imports
+                        .iter()
+                        .map(|evidence| {
                             serialize_page_row(
-                                display,
+                                evidence,
                                 &mut staging,
-                                "sealed lexical symbol display serialization failed",
+                                "sealed lexical import serialization failed",
                             )
                         })
-                        .transpose()?;
-                    serialized_displays.push(serialized_display);
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let serialized_clone_bodies = clone_bodies
+                        .iter()
+                        .map(|body| {
+                            serialize_page_row(
+                                body,
+                                &mut staging,
+                                "sealed lexical clone-body serialization failed",
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, CodeIndexProductionErrorV1>((
+                        serialized_chunks,
+                        serialized_displays,
+                        serialized_imports,
+                        serialized_clone_bodies,
+                    ))
                 }
-                let serialized_imports = imports
-                    .iter()
-                    .map(|evidence| {
-                        serialize_page_row(
-                            evidence,
-                            &mut staging,
-                            "sealed lexical import serialization failed",
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let serialized_clone_bodies = clone_bodies
-                    .iter()
-                    .map(|body| {
-                        serialize_page_row(
-                            body,
-                            &mut staging,
-                            "sealed lexical clone-body serialization failed",
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, CodeIndexProductionErrorV1>((
-                    serialized_chunks,
-                    serialized_displays,
-                    serialized_imports,
-                    serialized_clone_bodies,
-                ))
-            })?;
-        Ok(AdmittedSealedLexicalFileV1 {
-            chunks,
-            serialized_chunks,
-            symbol_displays,
-            serialized_displays,
-            imports,
-            serialized_imports,
-            clone_bodies,
-            serialized_clone_bodies,
-            next_file_offset,
-        })
-    })
+            }?;
+            Ok(AdmittedSealedLexicalFileV1 {
+                chunks,
+                serialized_chunks,
+                symbol_displays,
+                serialized_displays,
+                imports,
+                serialized_imports,
+                clone_bodies,
+                serialized_clone_bodies,
+                next_file_offset,
+            })
+        }
+    }
 }
 
 pub(super) fn checkpoint(

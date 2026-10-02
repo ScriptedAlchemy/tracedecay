@@ -51,7 +51,6 @@ impl DaemonRemoteRecoveryPhysicalEffectsV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
@@ -118,7 +117,11 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         ])
     }
 
-    #[hotpath::measure(label = "daemon.session_registry.remote_recovery.promote")]
+    #[tracing::instrument(
+        name = "daemon.session_registry.remote_recovery.promote",
+        level = "trace",
+        skip_all
+    )]
     fn promote(
         &self,
         operation_id: &str,

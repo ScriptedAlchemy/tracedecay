@@ -44,7 +44,11 @@ pub struct RunAffectedArgs {
 impl RunAffectedArgs {
     /// Applies the managed-run bounds to a decoded request. A bound violation
     /// is an in-band refusal, reported before any test is selected.
-    #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
+    #[tracing::instrument(
+        name = "mcp.workflow.affected_tests.request_build",
+        level = "trace",
+        skip_all
+    )]
     pub fn from_request(
         request: RunAffectedTestsSurfaceRequestV1,
     ) -> std::result::Result<Self, Box<AffectedTestsNotRunV1>> {

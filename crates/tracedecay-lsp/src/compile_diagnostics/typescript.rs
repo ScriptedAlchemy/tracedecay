@@ -47,7 +47,7 @@ impl Driver for TscDriver {
         project_root: &'a Path,
         _scope: &'a Scope,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let mut diagnostics = Vec::new();
                 for project in typescript_projects(project_root) {
@@ -67,7 +67,7 @@ impl Driver for TscDriver {
                 }
                 Ok(diagnostics)
             },
-            label = "compile_diagnostics.typescript.tsc"
+            tracing::trace_span!("compile_diagnostics.typescript.tsc"),
         ))
     }
 }
@@ -87,7 +87,11 @@ impl Driver for TscDriver {
 /// With `build_info`, the check is incremental against that
 /// `--tsBuildInfoFile`: tsc rechecks only what changed since the check that
 /// wrote it and records the program files it read there.
-#[hotpath::measure(label = "compile_diagnostics.typescript.run_compiler", future = true)]
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.run_compiler",
+    level = "trace",
+    skip_all
+)]
 pub async fn run_compiler(
     compiler: &Path,
     project_root: &Path,
@@ -153,7 +157,11 @@ fn is_global_error(line: &str) -> bool {
 
 /// Parse the full tsc stdout into a flat diagnostic list. Top-level so it
 /// can be unit-tested without spawning tsc.
-#[hotpath::measure(label = "compile_diagnostics.typescript.parse")]
+#[tracing::instrument(
+    name = "compile_diagnostics.typescript.parse",
+    level = "trace",
+    skip_all
+)]
 pub fn parse_tsc_output(stdout: &str) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new();
     for line in stdout.lines() {

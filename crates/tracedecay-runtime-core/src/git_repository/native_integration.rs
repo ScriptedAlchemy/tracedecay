@@ -164,7 +164,7 @@ impl GitRepositoryAuthority {
 
     /// Preflight one exact pair and let a caller consume the eligible
     /// candidate before the temporary object-memory database is dropped.
-    #[hotpath::measure(label = "runtime_core.git.native_preflight")]
+    #[tracing::instrument(name = "runtime_core.git.native_preflight", level = "trace", skip_all)]
     pub fn preflight_native_integration_with_candidate<T, E>(
         &self,
         source_ref: &str,
@@ -290,7 +290,7 @@ impl GitRepositoryAuthority {
     /// Recreate and commit an exact eligible preflight with one destination
     /// ref CAS. Checked-out destinations remain ineligible until a native
     /// checkout transaction is supplied.
-    #[hotpath::measure(label = "runtime_core.git.native_apply")]
+    #[tracing::instrument(name = "runtime_core.git.native_apply", level = "trace", skip_all)]
     pub fn apply_native_integration(
         &self,
         source_ref: &str,
@@ -418,7 +418,7 @@ impl GitRepositoryAuthority {
     }
 
     /// Roll back only the exact candidate ref tip written by this transaction.
-    #[hotpath::measure(label = "runtime_core.git.native_rollback")]
+    #[tracing::instrument(name = "runtime_core.git.native_rollback", level = "trace", skip_all)]
     pub fn rollback_native_integration(
         &self,
         destination_ref: &str,

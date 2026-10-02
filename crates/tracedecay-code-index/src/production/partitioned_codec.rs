@@ -383,19 +383,21 @@ struct PartitionedGenerationEvidenceV1 {
 fn deserialize_evidence_projection_request<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<PersistedProjectionRequestV1, D::Error> {
-    hotpath::measure_block!(
-        "code_index.restore.evidence_projection_request",
+    {
+        let _span =
+            tracing::trace_span!("code_index.restore.evidence_projection_request").entered();
         Deserialize::deserialize(deserializer)
-    )
+    }
 }
 
 fn deserialize_evidence_projection_receipt<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<PersistedBatchReceiptV1, D::Error> {
-    hotpath::measure_block!(
-        "code_index.restore.evidence_projection_receipt",
+    {
+        let _span =
+            tracing::trace_span!("code_index.restore.evidence_projection_receipt").entered();
         Deserialize::deserialize(deserializer)
-    )
+    }
 }
 
 #[derive(Serialize)]
@@ -982,7 +984,7 @@ impl PartitionedSegmentEncoderV1 {
         &self.segment
     }
 
-    #[hotpath::measure(label = "code_index.sealed_encode.file")]
+    #[tracing::instrument(name = "code_index.sealed_encode.file", level = "trace", skip_all)]
     fn encode_file_segment(
         &mut self,
         generation_id: &CodeGenerationId,
@@ -1029,7 +1031,11 @@ impl PartitionedSegmentEncoderV1 {
     /// share this single authority so production never carries a second
     /// encoder. The content address covers the stored bytes, which the store
     /// and retention verify without inflating them.
-    #[hotpath::measure(label = "code_index.sealed_encode.file_rewrite")]
+    #[tracing::instrument(
+        name = "code_index.sealed_encode.file_rewrite",
+        level = "trace",
+        skip_all
+    )]
     fn encode_serialized_file_segment<'s>(
         &mut self,
         format_revision: u32,
@@ -1122,7 +1128,7 @@ impl PartitionedSegmentEncoderV1 {
         })
     }
 
-    #[hotpath::measure(label = "code_index.sealed_encode.evidence")]
+    #[tracing::instrument(name = "code_index.sealed_encode.evidence", level = "trace", skip_all)]
     fn encode_generation_evidence(
         &mut self,
         generation: &CodeIndexPublishedGenerationV1,
@@ -1218,8 +1224,8 @@ fn decode_file_segment(
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!(
-        "code_index.restore.segment_verify",
+    {
+        let _span = tracing::trace_span!("code_index.restore.segment_verify").entered();
         verify_segment_identity(
             bytes,
             &descriptor.segment_digest,
@@ -1228,9 +1234,9 @@ fn decode_file_segment(
             "sealed file segment byte size does not match its manifest",
             "sealed file segment digest does not match its manifest",
         )
-    )?;
-    hotpath::measure_block!(
-        "code_index.restore.segment_decode",
+    }?;
+    {
+        let _span = tracing::trace_span!("code_index.restore.segment_decode").entered();
         decode_verified_file_segment(
             descriptor,
             generation_id,
@@ -1239,7 +1245,7 @@ fn decode_file_segment(
             bytes,
             restored,
         )
-    )
+    }
 }
 
 /// Inflate stored segment bytes into exactly `decoded_size_bytes` of
@@ -1412,20 +1418,20 @@ fn decode_verified_file_segment(
     bytes: &[u8],
     restored: &mut Vec<u8>,
 ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
-    hotpath::gauge!("code_index.restore.segment_bytes_total").inc(bytes.len());
+    metrics::gauge!("code_index.restore.segment_bytes_total").increment((bytes.len()) as f64);
     let mut canonical = Vec::new();
-    hotpath::measure_block!(
-        "code_index.restore.segment_inflate",
+    {
+        let _span = tracing::trace_span!("code_index.restore.segment_inflate").entered();
         inflate_file_segment(bytes, descriptor.decoded_size_bytes, &mut canonical)
-    )?;
-    let segment: PartitionedRawFileSegmentV1 = hotpath::measure_block!(
-        "code_index.restore.segment_parse",
+    }?;
+    let segment: PartitionedRawFileSegmentV1 = {
+        let _span = tracing::trace_span!("code_index.restore.segment_parse").entered();
         serde_json::from_slice(&canonical).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed file segment decoding failed: {error}"
             ))
         })
-    )?;
+    }?;
     if segment.format_revision != FILE_SEGMENT_FORMAT_REVISION {
         return Err(CodeIndexProductionErrorV1::SealedRowContractRefused {
             revision: segment.format_revision,
@@ -1441,11 +1447,12 @@ fn decode_verified_file_segment(
         symbol_occurrences: &symbol_occurrences,
     };
     restored.clear();
-    let identity_restore = hotpath::measure_block!(
-        "code_index.restore.segment_identity_restore",
+    let identity_restore = {
+        let _span = tracing::trace_span!("code_index.restore.segment_identity_restore").entered();
         canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, restored)
-    );
-    hotpath::gauge!("code_index.restore.identity_restored_bytes_total").inc(restored.len());
+    };
+    metrics::gauge!("code_index.restore.identity_restored_bytes_total")
+        .increment((restored.len()) as f64);
     identity_restore?;
     let payload_decoding_failed = |error: serde_json::Error| {
         // The payload already parsed as canonical JSON under its verified
@@ -1461,26 +1468,31 @@ fn decode_verified_file_segment(
             "sealed file segment payload decoding failed: {error}"
         ))
     };
-    let mut file: PersistedFileGenerationArtifactsV1 = hotpath::measure_block!(
-        "code_index.restore.segment_typed_deserialize_expand",
+    let mut file: PersistedFileGenerationArtifactsV1 = {
+        let _span =
+            tracing::trace_span!("code_index.restore.segment_typed_deserialize_expand").entered();
         serde_json::from_slice::<PersistedFileGenerationArtifactsV2>(restored)
             .map_err(payload_decoding_failed)
             .and_then(|file| file.expand(scope, &symbol_occurrences, &segment.symbol_identities))
-    )?;
-    hotpath::measure_block!("code_index.restore.segment_artifact_sorts", {
-        file.artifacts
-            .symbols
-            .sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-        file.artifacts.edges.sort_by(|left, right| {
-            crate::chunks::canonical_edge_key(left).cmp(&crate::chunks::canonical_edge_key(right))
-        });
-        file.artifacts.clone_bodies.sort_by(|left, right| {
-            left.occurrence
-                .symbol_occurrence_id
-                .cmp(&right.occurrence.symbol_occurrence_id)
-        });
-        file.artifacts.unresolved_references.sort();
-    });
+    }?;
+    {
+        let _span = tracing::trace_span!("code_index.restore.segment_artifact_sorts").entered();
+        {
+            file.artifacts
+                .symbols
+                .sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+            file.artifacts.edges.sort_by(|left, right| {
+                crate::chunks::canonical_edge_key(left)
+                    .cmp(&crate::chunks::canonical_edge_key(right))
+            });
+            file.artifacts.clone_bodies.sort_by(|left, right| {
+                left.occurrence
+                    .symbol_occurrence_id
+                    .cmp(&right.occurrence.symbol_occurrence_id)
+            });
+            file.artifacts.unresolved_references.sort();
+        }
+    };
     Ok(file)
 }
 
@@ -1499,11 +1511,11 @@ fn decode_generation_evidence(
     };
     let (decoded, unread) = {
         let mut evidence = (&mut reader).take(descriptor.evidence_size_bytes);
-        let decoded = hotpath::measure_block!(
-            "code_index.restore.evidence_stream",
+        let decoded = {
+            let _span = tracing::trace_span!("code_index.restore.evidence_stream").entered();
             serde_json::from_reader::<_, PartitionedGenerationEvidenceV1>(&mut evidence)
                 .map_err(decoding_failure)
-        );
+        };
         (decoded, evidence.limit())
     };
     if let Some(error) = reader.take_read_error() {
@@ -1658,32 +1670,32 @@ where
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<PartitionedPublishedGenerationV1, CodeIndexProductionErrorV1> {
-    let raw: PartitionedRawEnvelopeV1 = hotpath::measure_block!(
-        "code_index.restore.manifest_envelope_parse",
+    let raw: PartitionedRawEnvelopeV1 = {
+        let _span = tracing::trace_span!("code_index.restore.manifest_envelope_parse").entered();
         serde_json::from_slice(bytes).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest decoding failed: {error}"
             ))
         })
-    )?;
-    let actual_digest = hotpath::measure_block!(
-        "code_index.restore.manifest_digest",
+    }?;
+    let actual_digest = {
+        let _span = tracing::trace_span!("code_index.restore.manifest_digest").entered();
         ManifestDigest::from_sha256_bytes(&Sha256::digest(raw.generation.get().as_bytes()))
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-    )?;
+    }?;
     if actual_digest != raw.state_digest {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation manifest state digest does not match its payload".to_owned(),
         ));
     }
-    let probe: PartitionedFormatProbeV1 = hotpath::measure_block!(
-        "code_index.restore.manifest_revision_probe",
+    let probe: PartitionedFormatProbeV1 = {
+        let _span = tracing::trace_span!("code_index.restore.manifest_revision_probe").entered();
         serde_json::from_str(raw.generation.get()).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest format probe failed: {error}"
             ))
         })
-    )?;
+    }?;
     match probe.format_revision {
         SEALED_GENERATION_FORMAT_REVISION_V1 => {}
         // Every other revision is a manifest this build refuses to read. A
@@ -1700,14 +1712,14 @@ fn parse_partitioned_manifest(
             ));
         }
     }
-    let generation: PartitionedPublishedGenerationV1 = hotpath::measure_block!(
-        "code_index.restore.manifest_payload_parse",
+    let generation: PartitionedPublishedGenerationV1 = {
+        let _span = tracing::trace_span!("code_index.restore.manifest_payload_parse").entered();
         serde_json::from_str(raw.generation.get()).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest payload decoding failed: {error}"
             ))
         })
-    )?;
+    }?;
     validate_partitioned_generation_layout(
         generation
             .file_segments
@@ -1946,10 +1958,10 @@ fn read_segment_window(
             break;
         }
         buffer.clear();
-        hotpath::measure_block!(
-            "code_index.restore.segment_read",
+        {
+            let _span = tracing::trace_span!("code_index.restore.segment_read").entered();
             read_segment(descriptor, buffer)
-        )?;
+        }?;
         bytes = bytes.saturating_add(descriptor.decoded_size_bytes);
         read += 1;
     }
@@ -2048,10 +2060,10 @@ fn decode_file_pages(
             scope,
         )?);
     }
-    hotpath::measure_block!(
-        "code_index.sealed_decode.page_restore",
+    {
+        let _span = tracing::trace_span!("code_index.sealed_decode.page_restore").entered();
         restore_file_pages(files)
-    )
+    }
 }
 
 /// Reads one sealed segment's bytes into the buffer it is handed.
@@ -2346,10 +2358,10 @@ impl CodeIndexPublishedGenerationV1 {
             .max(1)
             .saturating_mul(SEALED_ENCODE_WINDOW_FILES_PER_WORKER_V1);
         for window in self.files.chunks(window_files) {
-            let plans = hotpath::measure_block!(
-                "code_index.sealed_encode.file_window",
+            let plans = {
+                let _span = tracing::trace_span!("code_index.sealed_encode.file_window").entered();
                 collect_bounded_ordered(window, |file, _worker| plan_file(file))
-            )?;
+            }?;
             for plan in plans {
                 let descriptor = match plan {
                     FileSegmentPlanV1::Reused(descriptor) => descriptor,
@@ -2376,14 +2388,14 @@ impl CodeIndexPublishedGenerationV1 {
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let (lineage_prior_generation, file_evidence) = hotpath::measure_block!(
-            "code_index.sealed_encode.file_evidence",
+        let (lineage_prior_generation, file_evidence) = {
+            let _span = tracing::trace_span!("code_index.sealed_encode.file_evidence").entered();
             self.encode_file_evidence(
                 &file_keys,
                 reusable_file_evidence_digests,
-                &mut publish_segment
+                &mut publish_segment,
             )
-        )?;
+        }?;
         let (generation_evidence, code_graph_pages) = PartitionedSegmentEncoderV1::default()
             .encode_generation_evidence(
                 self,
@@ -2407,37 +2419,43 @@ impl CodeIndexPublishedGenerationV1 {
             generation_evidence: &generation_evidence,
             code_graph_pages: &code_graph_pages,
         };
-        let generation_bytes = hotpath::measure_block!(
-            "code_index.sealed_encode.manifest_serialize",
+        let generation_bytes = {
+            let _span =
+                tracing::trace_span!("code_index.sealed_encode.manifest_serialize").entered();
             serde_json::to_vec(&generation).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation manifest serialization failed: {error}"
                 ))
             })
-        )?;
-        let state_digest = hotpath::measure_block!(
-            "code_index.sealed_encode.manifest_digest",
+        }?;
+        let state_digest = {
+            let _span = tracing::trace_span!("code_index.sealed_encode.manifest_digest").entered();
             ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-        )?;
-        hotpath::measure_block!("code_index.sealed_encode.manifest_envelope", {
-            let generation =
-                RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed generation manifest is not UTF-8: {error}"
-                    ))
-                })?)
+        }?;
+        {
+            let _span =
+                tracing::trace_span!("code_index.sealed_encode.manifest_envelope").entered();
+            {
+                let generation = RawValue::from_string(
+                    String::from_utf8(generation_bytes).map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed generation manifest is not UTF-8: {error}"
+                        ))
+                    })?,
+                )
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            serde_json::to_vec(&PartitionedEnvelopeRefV1 {
-                state_digest: &state_digest,
-                generation: &generation,
-            })
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest serialization failed: {error}"
-                ))
-            })
-        })
+                serde_json::to_vec(&PartitionedEnvelopeRefV1 {
+                    state_digest: &state_digest,
+                    generation: &generation,
+                })
+                .map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed generation manifest serialization failed: {error}"
+                    ))
+                })
+            }
+        }
     }
 
     /// Seal each file's cross-file evidence as its own segment, publishing
@@ -2503,7 +2521,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// by `fill_admitted_window`/`read_window`
     /// (`LEXICAL_DECODE_WINDOW_FILES_PER_WORKER_V1`): this function only
     /// bounds `decode_partitioned_sealed`'s monolithic in-memory rehydration
-    /// path, which no measured hotpath drives through the drain-window
+    /// path, which no measured span drives through the drain-window
     /// fan-out that motivated the multiplier (`index-bench` reaches the
     /// lazy `VerifiedSealedLexicalPageSourceV1` restore paths, never this
     /// one). Widening it here would only grow buffer-pool memory without
@@ -2528,10 +2546,10 @@ impl CodeIndexPublishedGenerationV1 {
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let mut probe = DecodePeakProbeV1::start();
-        let generation = hotpath::measure_block!(
-            "code_index.restore.manifest",
+        let generation = {
+            let _span = tracing::trace_span!("code_index.restore.manifest").entered();
             parse_partitioned_manifest(bytes)
-        )?;
+        }?;
         let scope = FileScopeIdentityV1::of(&generation.manifest, &generation.snapshot);
         let digest = decoded_content_digest(&scope, &generation.file_segments)?;
         let content = match content.lookup(&digest) {
@@ -2542,28 +2560,29 @@ impl CodeIndexPublishedGenerationV1 {
             )),
         };
         probe.sample();
-        let evidence = hotpath::measure_block!(
-            "code_index.restore.generation_evidence",
+        let evidence = {
+            let _span = tracing::trace_span!("code_index.restore.generation_evidence").entered();
             decode_generation_evidence(&generation.generation_evidence, &mut read_segment)
-        )?;
+        }?;
         probe.sample();
         let files = &content.files;
         let FileEvidenceV1 {
             cross_file_edges,
             unresolved_calls,
             lineage,
-        } = hotpath::measure_block!(
-            "code_index.restore.file_evidence",
+        } = {
+            let _span = tracing::trace_span!("code_index.restore.file_evidence").entered();
             decode_file_evidence(
                 &generation,
                 files,
                 evidence.lineage_prior_generation.as_ref(),
                 &mut read_segment,
             )
-        )?;
+        }?;
         probe.sample();
-        let (projection_request, projection_receipt) =
-            hotpath::measure_block!("code_index.restore.evidence_expand", {
+        let (projection_request, projection_receipt) = {
+            let _span = tracing::trace_span!("code_index.restore.evidence_expand").entered();
+            {
                 let chunks = chunk_roster(
                     files
                         .iter()
@@ -2572,7 +2591,8 @@ impl CodeIndexPublishedGenerationV1 {
                 let request = evidence.projection_request.expand(&chunks)?;
                 let receipt = evidence.projection_receipt.expand(&request)?;
                 Ok::<_, CodeIndexProductionErrorV1>((request, receipt))
-            })?;
+            }
+        }?;
         probe.sample();
         assemble_published_generation(
             StreamingPersistedPublishedGenerationV1 {

@@ -9,10 +9,6 @@ description = "Session retrieval, project memory, provider usage, and runtime te
 include = ["/src/**"]
 
 [features]
-# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
-# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
-# feature only selects the on-mode hotpath test/bench targets of this crate.
-hotpath = ["hotpath/hotpath"]
 default = []
 # Forwarded from the root package: compiles the fact-commit acceptance barrier
 # in `fact_store::commit_barrier` alongside the kernel's in-process transport
@@ -22,8 +18,8 @@ test-transport = ["tracedecay-runtime-core/test-transport"]
 [dependencies]
 amari-holographic = "0.23.0"
 hex = "0.4"
+metrics.workspace = true
 regex = "1.12.3"
-hotpath.workspace = true
 memmap2 = "0.9"
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -23,7 +23,7 @@ const CIRCULAR_MAX_LIMIT: usize = 200;
 const CIRCULAR_DEFAULT_MEMBER_LIMIT: usize = 12;
 const CIRCULAR_MAX_MEMBER_LIMIT: usize = 200;
 
-#[hotpath::measure(future = true, label = "mcp.analysis.circular.total")]
+#[tracing::instrument(name = "mcp.analysis.circular.total", level = "trace", skip_all)]
 pub(super) async fn compute_circular(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
@@ -38,15 +38,15 @@ pub(super) async fn compute_circular(
             (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
         });
 
-    let all_cycles = hotpath::future!(
+    let all_cycles = tracing::Instrument::instrument(
         graph.find_circular_dependencies(),
-        label = "mcp.analysis.circular.graph"
+        tracing::trace_span!("mcp.analysis.circular.graph"),
     )
     .await?;
-    let result = hotpath::measure_block!(
-        "mcp.analysis.circular.compute",
+    let result = {
+        let _span = tracing::trace_span!("mcp.analysis.circular.compute").entered();
         bound_cycles(all_cycles, limit, member_limit)
-    );
+    };
     Ok(graph_tool_completion(
         GraphToolResultV1::Circular(result),
         Vec::new(),

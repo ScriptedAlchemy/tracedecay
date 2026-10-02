@@ -282,7 +282,7 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtraction), ParseError> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained", {
+        crate::observe::measure_hot_loop!("code_index.collect.retained", {
             let (report, extraction) =
                 self.parse_and_extract_artifact(identity, language_id, source, extractor)?;
             Ok((
@@ -330,7 +330,7 @@ impl SharedRetainedParsePool {
         artifact_revision: &ExtractorRevision,
         control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained_artifact", {
+        crate::observe::measure_hot_loop!("code_index.collect.retained_artifact", {
             let prepared_source = extractor.prepare_parse_source(source);
             let (report, extraction) = self.parse_internal(
                 identity,
@@ -359,7 +359,7 @@ impl SharedRetainedParsePool {
         let grammar_key = extraction
             .map(|(extractor, _)| extractor.retained_grammar_key(identity.logical_path()));
         let grammar_key = grammar_key.as_deref();
-        crate::hotpath_observe::measure_hot_loop!("code_index.collect.parse", {
+        crate::observe::measure_hot_loop!("code_index.collect.parse", {
             if source.len() > self.limits.max_total_source_bytes {
                 self.record_failure();
                 return Err(ParseError::SourceTooLarge {
@@ -492,7 +492,7 @@ impl SharedRetainedParsePool {
         extractor: &dyn LanguageExtractor,
         control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
-        crate::hotpath_observe::measure_hot_loop!("code_index.collect.unretained_artifact", {
+        crate::observe::measure_hot_loop!("code_index.collect.unretained_artifact", {
             if source.len() > self.limits.max_total_source_bytes {
                 self.record_failure();
                 return Err(ParseError::SourceTooLarge {
@@ -836,18 +836,18 @@ fn record_success(
         match extraction.disposition {
             ParsedExtractionDisposition::FullDocument => {
                 stats.full_extractions = stats.full_extractions.saturating_add(1);
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("code_index.collect.full_extraction_total").inc(1_u64);
+
+                metrics::gauge!("code_index.collect.full_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::ChangedRegions => {
                 stats.incremental_extractions = stats.incremental_extractions.saturating_add(1);
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("code_index.collect.incremental_extraction_total").inc(1_u64);
+
+                metrics::gauge!("code_index.collect.incremental_extraction_total").increment(1.0);
             }
             ParsedExtractionDisposition::Reset { .. } => {
                 stats.reset_extractions = stats.reset_extractions.saturating_add(1);
-                #[cfg(feature = "hotpath")]
-                hotpath::gauge!("code_index.collect.reset_extraction_total").inc(1_u64);
+
+                metrics::gauge!("code_index.collect.reset_extraction_total").increment(1.0);
             }
         }
         stats.visited_top_level_nodes = stats
@@ -857,9 +857,9 @@ fn record_success(
             .extracted_bytes
             .saturating_add(extraction.metrics.visited_bytes as u64);
     }
-    crate::hotpath_observe::add_parse_bytes(report.metrics.source_bytes as u64);
+    crate::observe::add_parse_bytes(report.metrics.source_bytes as u64);
     if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
-        crate::hotpath_observe::add_reused_parses(1);
+        crate::observe::add_reused_parses(1);
     }
 }
 

@@ -251,7 +251,7 @@ fn append_plan_markdown(output: &mut String, plan: &ContextPlanV1) {
 
 /// The plan section for the selected symbols: public traits and interfaces
 /// with their implementor counts, and the test files reaching the selection.
-#[hotpath::measure(label = "mcp.graph.plan_context")]
+#[tracing::instrument(name = "mcp.graph.plan_context", level = "trace", skip_all)]
 pub(super) fn verified_plan_context(
     graph: &VerifiedGraphQuery,
     symbols: &[CodeGraphSymbolSummaryV1],

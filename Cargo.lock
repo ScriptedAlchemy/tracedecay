@@ -58,7 +58,7 @@ dependencies = [
  "bytemuck",
  "dashu-float",
  "num-traits",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -72,7 +72,7 @@ dependencies = [
  "num-traits",
  "rand 0.10.3",
  "rand_chacha 0.10.0",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -223,12 +223,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ascii"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
-
-[[package]]
 name = "ast-grep-core"
 version = "0.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,7 +230,7 @@ checksum = "44135ff8104e5fbdcd5e0a8a8850b083694762530aa0212cac3a71158ac90a42"
 dependencies = [
  "bit-set 0.10.0",
  "regex",
- "thiserror 2.0.21",
+ "thiserror",
  "tree-sitter",
 ]
 
@@ -735,12 +729,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chunked_transfer"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
-
-[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,40 +1118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "darling"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
-dependencies = [
- "darling_core",
- "darling_macro",
-]
-
-[[package]]
-name = "darling_core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
-dependencies = [
- "ident_case",
- "proc-macro2",
- "quote",
- "strsim",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "darling_macro"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
-dependencies = [
- "darling_core",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "dashmap"
 version = "6.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1251,7 +1205,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -1317,16 +1271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs-next"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
-dependencies = [
- "cfg-if",
- "dirs-sys-next",
-]
-
-[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1334,19 +1278,8 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users 0.5.3",
+ "redox_users",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "dirs-sys-next"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
-dependencies = [
- "libc",
- "redox_users 0.4.6",
- "winapi",
 ]
 
 [[package]]
@@ -1406,12 +1339,6 @@ checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 dependencies = [
  "serde",
 ]
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -1876,7 +1803,7 @@ dependencies = [
  "gix-zlib",
  "nonempty",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -1903,7 +1830,7 @@ dependencies = [
  "gix-quote",
  "gix-trace",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
  "unicode-bom",
 ]
 
@@ -1966,7 +1893,7 @@ dependencies = [
  "gix-sec",
  "gix-utils",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
  "unicode-bom",
 ]
 
@@ -1980,7 +1907,7 @@ dependencies = [
  "bstr",
  "gix-path",
  "libc",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2016,7 +1943,7 @@ dependencies = [
  "gix-trace",
  "gix-traverse",
  "gix-worktree",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2036,7 +1963,7 @@ dependencies = [
  "gix-trace",
  "gix-utils",
  "gix-worktree",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2051,7 +1978,7 @@ dependencies = [
  "gix-path",
  "gix-ref",
  "gix-sec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2100,7 +2027,7 @@ dependencies = [
  "gix-trace",
  "gix-utils",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2113,7 +2040,7 @@ dependencies = [
  "gix-features",
  "gix-path",
  "gix-utils",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2138,7 +2065,7 @@ dependencies = [
  "gix-features",
  "sha1-checked",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2172,7 +2099,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2200,7 +2127,7 @@ dependencies = [
  "memmap2",
  "rustix 1.1.5",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2211,7 +2138,7 @@ checksum = "d4c69157820343bf1c6e4b88b9808e920900de02e18aaf5862b30ada43814848"
 dependencies = [
  "gix-tempfile",
  "gix-utils",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2248,7 +2175,7 @@ dependencies = [
  "gix-trace",
  "gix-worktree",
  "nonempty",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2281,7 +2208,7 @@ dependencies = [
  "gix-validate",
  "itoa",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2303,7 +2230,7 @@ dependencies = [
  "memmap2",
  "parking_lot",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2324,7 +2251,7 @@ dependencies = [
  "gix-zlib",
  "memmap2",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2336,7 +2263,7 @@ dependencies = [
  "bstr",
  "faster-hex",
  "gix-trace",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2348,7 +2275,7 @@ dependencies = [
  "bstr",
  "gix-trace",
  "gix-validate",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2363,7 +2290,7 @@ dependencies = [
  "gix-config-value",
  "gix-glob",
  "gix-path",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2382,7 +2309,7 @@ dependencies = [
  "gix-transport",
  "gix-utils",
  "nonempty",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2413,7 +2340,7 @@ dependencies = [
  "gix-utils",
  "gix-validate",
  "memmap2",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2426,7 +2353,7 @@ dependencies = [
  "gix-hash",
  "gix-validate",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2461,7 +2388,7 @@ dependencies = [
  "gix-hashtable",
  "gix-object",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2486,7 +2413,7 @@ dependencies = [
  "gix-hash",
  "gix-lock",
  "nonempty",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2510,7 +2437,7 @@ dependencies = [
  "gix-worktree",
  "hashbrown 0.16.1",
  "portable-atomic",
- "thiserror 2.0.21",
+ "thiserror",
  "windows-sys 0.61.2",
 ]
 
@@ -2526,7 +2453,7 @@ dependencies = [
  "gix-pathspec",
  "gix-refspec",
  "gix-url",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2562,7 +2489,7 @@ dependencies = [
  "gix-quote",
  "gix-sec",
  "gix-url",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2579,7 +2506,7 @@ dependencies = [
  "gix-object",
  "gix-revwalk",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2592,7 +2519,7 @@ dependencies = [
  "gix-path",
  "gix-utils",
  "percent-encoding",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2659,7 +2586,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e8813f5579b3075ff9c90f7c59cd2b62b4ebb639361f0911648b22d7446cc7c"
 dependencies = [
- "thiserror 2.0.21",
+ "thiserror",
  "zlib-rs",
 ]
 
@@ -2694,7 +2621,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2714,7 +2641,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2736,7 +2663,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
  "unicode-normalization",
 ]
 
@@ -2759,7 +2686,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "smallvec",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2777,7 +2704,7 @@ dependencies = [
  "memmap2",
  "parking_lot",
  "serde",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
 ]
 
@@ -2841,16 +2768,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hdrhistogram"
-version = "7.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
-dependencies = [
- "byteorder",
- "num-traits",
-]
-
-[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2894,64 +2811,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
-]
-
-[[package]]
-name = "hotpath"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2645642a23d4061ec15a4a6e74f851a3145c3125356846cfc7772ff9c6f2737"
-dependencies = [
- "arc-swap",
- "axum",
- "cfg-if",
- "crossbeam-channel",
- "flate2",
- "futures-util",
- "hdrhistogram",
- "hotpath-macros",
- "hotpath-meta",
- "libc",
- "object",
- "pin-project-lite",
- "prettytable-rs",
- "quanta",
- "regex",
- "rmcp 1.8.0",
- "rustc-demangle",
- "schemars",
- "serde",
- "serde_json",
- "tiny_http",
- "tokio",
- "tokio-util",
- "tower-layer",
- "tower-service",
- "ureq",
-]
-
-[[package]]
-name = "hotpath-macros"
-version = "0.24.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "hotpath-macros-meta"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84cd2417fa60938241cf1cd6c03e09953f5c821122dc5da9b8f27975d136c5b"
-
-[[package]]
-name = "hotpath-meta"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2c145b67b1a4e7bcefa918995e212c30a49a85f05cc5962fe1f717878d560b"
-dependencies = [
- "hotpath-macros-meta",
 ]
 
 [[package]]
@@ -3081,7 +2940,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -3175,12 +3034,6 @@ dependencies = [
  "zerotrie",
  "zerovec",
 ]
-
-[[package]]
-name = "ident_case"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
@@ -3619,6 +3472,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics"
+version = "0.24.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
+dependencies = [
+ "portable-atomic",
+ "rapidhash",
+]
+
+[[package]]
 name = "micromap"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3801,15 +3664,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "object"
-version = "0.36.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -4017,19 +3871,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prettytable-rs"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eea25e07510aa6ab6547308ebe3c036016d162b8da920dbb079e3ba8acf3d95a"
-dependencies = [
- "encode_unicode",
- "is-terminal",
- "lazy_static",
- "term",
- "unicode-width",
-]
-
-[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4072,21 +3913,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quanta"
-version = "0.12.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3ab5a9d756f0d97bdc89019bd2e4ea098cf9cde50ee7564dde6b81ccc8f06c7"
-dependencies = [
- "crossbeam-utils",
- "libc",
- "once_cell",
- "raw-cpuid",
- "wasi",
- "web-sys",
- "winapi",
-]
-
-[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4100,7 +3926,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "rustls",
  "socket2",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracing",
  "web-time",
@@ -4122,7 +3948,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.21",
+ "thiserror",
  "tinyvec",
  "tracing",
  "web-time",
@@ -4244,12 +4070,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "raw-cpuid"
-version = "11.6.0"
+name = "rapidhash"
+version = "4.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
 dependencies = [
- "bitflags 2.13.2",
+ "rustversion",
 ]
 
 [[package]]
@@ -4283,23 +4109,12 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "redox_users"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -4436,37 +4251,6 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "futures",
- "http",
- "http-body",
- "http-body-util",
- "pastey",
- "pin-project-lite",
- "rand 0.10.3",
- "rmcp-macros",
- "schemars",
- "serde",
- "serde_json",
- "sse-stream",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower-service",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "rmcp"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b23c62fe489ac1d401ab32688cfacac3737a8978dc3343e5361464c7724fd3cb"
@@ -4479,25 +4263,12 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "rmcp-macros"
-version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -4531,12 +4302,6 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
 ]
-
-[[package]]
-name = "rustc-demangle"
-version = "0.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc-hash"
@@ -4965,7 +4730,7 @@ dependencies = [
  "jiff",
  "serde_json",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -4982,7 +4747,7 @@ dependencies = [
  "jiff",
  "sigstore-types",
  "spki",
- "thiserror 2.0.21",
+ "thiserror",
  "x509-cert",
 ]
 
@@ -4995,7 +4760,7 @@ dependencies = [
  "base64 0.22.1",
  "sigstore-crypto",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -5010,7 +4775,7 @@ dependencies = [
  "serde_json",
  "sigstore-merkle",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -5027,7 +4792,7 @@ dependencies = [
  "serde_json",
  "sigstore-crypto",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -5048,7 +4813,7 @@ dependencies = [
  "rustls-webpki",
  "sigstore-crypto",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
  "tracing",
  "x509-cert",
 ]
@@ -5065,7 +4830,7 @@ dependencies = [
  "pem",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -5091,7 +4856,7 @@ dependencies = [
  "sigstore-trust-root",
  "sigstore-tsa",
  "sigstore-types",
- "thiserror 2.0.21",
+ "thiserror",
  "tls_codec",
  "tracing",
  "x509-cert",
@@ -5145,19 +4910,6 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "sse-stream"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
-dependencies = [
- "bytes",
- "futures-util",
- "http-body",
- "http-body-util",
- "pin-project-lite",
 ]
 
 [[package]]
@@ -5263,21 +5015,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "term"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c59df8ac95d96ff9bede18eb7300b0fda5e5d8d90960e76f8e14ae765eedbf1f"
-dependencies = [
- "dirs-next",
- "rustversion",
- "winapi",
 ]
 
 [[package]]
@@ -5288,31 +5029,11 @@ checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.21",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -5397,18 +5118,6 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
-]
-
-[[package]]
-name = "tiny_http"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
-dependencies = [
- "ascii",
- "chunked_transfer",
- "httpdate",
- "log",
 ]
 
 [[package]]
@@ -5707,13 +5416,13 @@ dependencies = [
  "gix",
  "glob",
  "hex",
- "hotpath",
  "jsonschema",
  "keyring",
  "libc",
+ "metrics",
  "notify",
  "regex",
- "rmcp 3.4.0",
+ "rmcp",
  "rusqlite",
  "rustls",
  "serde",
@@ -5790,16 +5499,16 @@ dependencies = [
  "getrandom 0.2.17",
  "gix",
  "hex",
- "hotpath",
  "jsonc-parser",
  "libc",
+ "metrics",
  "same-file",
  "serde",
  "serde_json",
  "sha2",
  "shell-words",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tiktoken-rs",
  "tokio",
  "toml",
@@ -5838,16 +5547,17 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "hotpath",
+ "metrics",
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tower",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -5859,7 +5569,7 @@ dependencies = [
  "gix",
  "glob",
  "hex",
- "hotpath",
+ "metrics",
  "same-file",
  "schemars",
  "serde",
@@ -5867,7 +5577,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tracedecay-automation",
@@ -5905,13 +5615,13 @@ dependencies = [
 name = "tracedecay-automation"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracing",
 ]
 
 [[package]]
@@ -5922,14 +5632,14 @@ dependencies = [
  "cap-std",
  "getrandom 0.2.17",
  "hex",
- "hotpath",
+ "metrics",
  "rustls",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-agent-hosts",
  "tracedecay-automation",
@@ -5958,12 +5668,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
- "hotpath",
+ "metrics",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
  "tracedecay-store",
+ "tracing",
 ]
 
 [[package]]
@@ -5978,8 +5689,8 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
- "hotpath",
  "libc",
+ "metrics",
  "mimalloc",
  "rayon",
  "regex",
@@ -6020,7 +5731,6 @@ dependencies = [
  "tracedecay-global-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
- "tracedecay-hotpath-guard",
  "tracedecay-lcm",
  "tracedecay-lsp",
  "tracedecay-maintenance",
@@ -6049,14 +5759,15 @@ name = "tracedecay-code-extraction"
 version = "0.1.0"
 dependencies = [
  "cc",
- "hotpath",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tokensave-large-treesitters",
  "tokensave-medium-treesitters",
  "tracedecay-domain",
+ "tracing",
  "tree-sitter",
  "tree-sitter-hlsl",
  "tree-sitter-json",
@@ -6074,8 +5785,8 @@ dependencies = [
  "criterion",
  "flate2",
  "hex",
- "hotpath",
  "ignore",
+ "metrics",
  "rayon",
  "regex",
  "rusqlite",
@@ -6083,7 +5794,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "toml",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
@@ -6094,6 +5805,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
+ "tracing",
  "tree-sitter",
 ]
 
@@ -6103,17 +5815,18 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "hotpath",
  "libc",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracing",
 ]
 
 [[package]]
@@ -6123,7 +5836,7 @@ dependencies = [
  "filetime",
  "futures-util",
  "gix",
- "hotpath",
+ "metrics",
  "notify",
  "rayon",
  "rusqlite",
@@ -6132,7 +5845,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-application",
  "tracedecay-code-extraction",
@@ -6162,11 +5875,10 @@ dependencies = [
 name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-automation",
  "tracedecay-contracts",
@@ -6176,6 +5888,7 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracing",
 ]
 
 [[package]]
@@ -6184,16 +5897,17 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
- "hotpath",
+ "metrics",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -6201,7 +5915,6 @@ name = "tracedecay-daemon-control"
 version = "0.1.0"
 dependencies = [
  "hex",
- "hotpath",
  "serde",
  "serde_json",
  "sha2",
@@ -6221,7 +5934,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
- "hotpath",
  "serde",
  "serde_json",
  "tempfile",
@@ -6230,6 +5942,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracing",
 ]
 
 [[package]]
@@ -6237,19 +5950,20 @@ name = "tracedecay-daemon-protocol"
 version = "0.1.0"
 dependencies = [
  "hex",
- "hotpath",
+ "metrics",
  "semver",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-private-fs",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -6259,16 +5973,16 @@ dependencies = [
  "axum",
  "getrandom 0.2.17",
  "hex",
- "hotpath",
  "hyper",
  "hyper-util",
  "libc",
+ "metrics",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -6322,8 +6036,8 @@ dependencies = [
  "clru",
  "futures-util",
  "getrandom 0.2.17",
- "hotpath",
  "httpdate",
+ "metrics",
  "schemars",
  "semver",
  "serde",
@@ -6360,12 +6074,12 @@ name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
  "globset",
- "hotpath",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
+ "tracing",
  "url",
 ]
 
@@ -6373,8 +6087,8 @@ dependencies = [
 name = "tracedecay-framing"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6387,14 +6101,14 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
- "hotpath",
+ "metrics",
  "rusqlite",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
@@ -6424,7 +6138,7 @@ dependencies = [
  "grafeo-engine",
  "grafeo-storage",
  "hex",
- "hotpath",
+ "metrics",
  "parking_lot",
  "rayon",
  "rusqlite",
@@ -6432,7 +6146,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
@@ -6444,10 +6158,10 @@ dependencies = [
 name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
@@ -6458,17 +6172,18 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-domain",
  "tracedecay-framing",
@@ -6480,7 +6195,7 @@ dependencies = [
 name = "tracedecay-host-admission"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
@@ -6501,27 +6216,19 @@ dependencies = [
 name = "tracedecay-host-integration"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
-]
-
-[[package]]
-name = "tracedecay-hotpath-guard"
-version = "0.1.0"
-dependencies = [
- "hotpath",
- "serde_json",
+ "tracing",
 ]
 
 [[package]]
 name = "tracedecay-lcm"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "regex",
  "rusqlite",
  "serde",
@@ -6545,13 +6252,13 @@ dependencies = [
  "constant_time_eq",
  "futures-util",
  "globset",
- "hotpath",
  "jsonc-parser",
  "lsp-types",
+ "metrics",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracedecay-code-extraction",
@@ -6560,6 +6267,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
+ "tracing",
  "url",
  "walkdir",
 ]
@@ -6571,7 +6279,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "filetime",
- "hotpath",
+ "metrics",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6591,6 +6299,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -6601,15 +6310,15 @@ dependencies = [
  "gix",
  "glob",
  "hex",
- "hotpath",
  "libc",
- "rmcp 3.4.0",
+ "metrics",
+ "rmcp",
  "serde",
  "serde_json",
  "sha2",
  "shell-words",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-util",
  "toml",
@@ -6658,28 +6367,29 @@ dependencies = [
 name = "tracedecay-mcp-catalog"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-api",
  "tracedecay-contracts",
  "tracedecay-daemon-protocol",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "schemars",
  "serde",
  "serde_json",
  "tracedecay-domain",
+ "tracing",
 ]
 
 [[package]]
@@ -6688,8 +6398,8 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "hex",
- "hotpath",
  "jsonc-parser",
+ "metrics",
  "percent-encoding",
  "regex-automata",
  "serde",
@@ -6697,7 +6407,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "toml",
  "tracedecay-capture",
@@ -6717,8 +6427,8 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "hotpath",
  "libc",
+ "metrics",
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",
@@ -6728,12 +6438,11 @@ dependencies = [
 name = "tracedecay-project"
 version = "1.0.0-beta.66"
 dependencies = [
- "hotpath",
  "rusqlite",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-agent-hosts",
  "tracedecay-api",
@@ -6776,7 +6485,7 @@ dependencies = [
  "gix",
  "hex",
  "hmac",
- "hotpath",
+ "metrics",
  "rayon",
  "roaring",
  "rusqlite",
@@ -6785,7 +6494,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
@@ -6806,8 +6515,8 @@ dependencies = [
  "getrandom 0.2.17",
  "gix",
  "hex",
- "hotpath",
  "libc",
+ "metrics",
  "reflink-copy",
  "rusqlite",
  "serde",
@@ -6815,7 +6524,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracedecay-capture",
@@ -6834,7 +6543,7 @@ name = "tracedecay-rusqlite-runtime"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "hotpath",
+ "metrics",
  "proptest",
  "ring",
  "rusqlite",
@@ -6842,19 +6551,19 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-store",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
 name = "tracedecay-sdk"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "reqwest",
  "rustls",
  "serde",
@@ -6864,6 +6573,7 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -6872,13 +6582,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
- "hotpath",
  "libc",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-capture",
  "tracedecay-code-index",
  "tracedecay-contracts",
@@ -6888,6 +6597,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
  "tracedecay-sessions",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -6897,15 +6607,15 @@ version = "0.1.0"
 dependencies = [
  "amari-holographic",
  "hex",
- "hotpath",
  "memmap2",
+ "metrics",
  "regex",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "toml",
  "tracedecay-automation",
@@ -6932,7 +6642,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "hex",
- "hotpath",
+ "metrics",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6972,12 +6682,12 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
- "hotpath",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-capture",
  "tracedecay-contracts",
@@ -7004,14 +6714,14 @@ dependencies = [
  "getrandom 0.2.17",
  "gix",
  "hex",
- "hotpath",
+ "metrics",
  "rayon",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-capture",
  "tracedecay-contracts",
@@ -7033,7 +6743,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "hotpath",
+ "metrics",
  "same-file",
  "serde",
  "serde_json",
@@ -7058,14 +6768,15 @@ dependencies = [
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
  "tracedecay-temporal-query",
+ "tracing",
 ]
 
 [[package]]
@@ -7073,13 +6784,13 @@ name = "tracedecay-store-runtime"
 version = "0.1.0"
 dependencies = [
  "hex",
- "hotpath",
  "libc",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.21",
+ "thiserror",
  "tokio",
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
@@ -7109,12 +6820,13 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
- "hotpath",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
+ "tracing",
  "zeroize",
 ]
 
@@ -7122,13 +6834,14 @@ dependencies = [
 name = "tracedecay-tool-catalog"
 version = "0.1.0"
 dependencies = [
- "hotpath",
+ "metrics",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.21",
+ "thiserror",
  "tracedecay-domain",
+ "tracing",
 ]
 
 [[package]]
@@ -7687,12 +7400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unicode-width"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
-
-[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7970,7 +7677,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

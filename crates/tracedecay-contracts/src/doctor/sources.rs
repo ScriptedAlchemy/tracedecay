@@ -182,7 +182,11 @@ pub enum ConfigurationAuthorityReadV1 {
 }
 
 /// Map a configuration-authority read into its `Configuration`-family finding.
-#[hotpath::measure(label = "application.doctor_sources.configuration")]
+#[tracing::instrument(
+    name = "application.doctor_sources.configuration",
+    level = "trace",
+    skip_all
+)]
 pub fn configuration_finding(
     read: &ConfigurationAuthorityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -284,7 +288,7 @@ pub enum RuntimeHealthReadV1 {
 }
 
 /// Map a runtime-health read into its `StorageRuntime`-family finding.
-#[hotpath::measure(label = "application.doctor_sources.runtime")]
+#[tracing::instrument(name = "application.doctor_sources.runtime", level = "trace", skip_all)]
 pub fn runtime_health_finding(
     read: &RuntimeHealthReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -418,7 +422,11 @@ pub struct OperationalAuditReadV1 {
     pub profile_authority: ProfileAuthorityReadV1,
 }
 
-#[hotpath::measure(label = "application.doctor_sources.operational_audit")]
+#[tracing::instrument(
+    name = "application.doctor_sources.operational_audit",
+    level = "trace",
+    skip_all
+)]
 pub fn operational_audit_findings(
     read: &OperationalAuditReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
@@ -592,7 +600,7 @@ pub enum HostIntegrationReadV1 {
 }
 
 /// Map a host-integration conformance read into its `Advisory`-family finding.
-#[hotpath::measure(label = "application.doctor_sources.host")]
+#[tracing::instrument(name = "application.doctor_sources.host", level = "trace", skip_all)]
 pub fn host_integration_finding(
     read: &HostIntegrationReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1005,7 +1013,11 @@ fn advisory_feedback_observation_is_consistent(
 
 /// Map the mounted canonical feedback-owner read into distinct Advisory
 /// findings. Host conformance is deliberately not part of this producer.
-#[hotpath::measure(label = "application.doctor_sources.advisory")]
+#[tracing::instrument(
+    name = "application.doctor_sources.advisory",
+    level = "trace",
+    skip_all
+)]
 pub fn advisory_feedback_findings(
     read: &AdvisoryFeedbackReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
@@ -1107,7 +1119,11 @@ pub enum GitHubSourceReadV1 {
 
 /// The Advisory-family finding for an observed GitHub source; `None` when
 /// the project has none, which is not a Doctor concern.
-#[hotpath::measure(label = "application.doctor_sources.github_source")]
+#[tracing::instrument(
+    name = "application.doctor_sources.github_source",
+    level = "trace",
+    skip_all
+)]
 pub fn github_source_finding(
     read: &GitHubSourceReadV1,
 ) -> Result<Option<DoctorFindingV1>, ApplicationContractError> {
@@ -1203,7 +1219,11 @@ pub enum CodeIndexMountReadV1 {
 }
 
 /// Map a code-index mount read into its `CodeIndex`-family finding.
-#[hotpath::measure(label = "application.doctor_sources.code_index")]
+#[tracing::instrument(
+    name = "application.doctor_sources.code_index",
+    level = "trace",
+    skip_all
+)]
 pub fn code_index_finding(
     read: &CodeIndexMountReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1441,7 +1461,11 @@ pub enum LanguageServerReadV1 {
 }
 
 /// Map a live analyzer read into its `LanguageServer`-family finding.
-#[hotpath::measure(label = "application.doctor_sources.language_server")]
+#[tracing::instrument(
+    name = "application.doctor_sources.language_server",
+    level = "trace",
+    skip_all
+)]
 pub fn language_server_finding(
     read: &LanguageServerReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1601,7 +1625,11 @@ pub enum ObservabilityReadV1 {
 }
 
 /// Map the canonical durable read model into its `Observability` finding.
-#[hotpath::measure(label = "application.doctor_sources.observability")]
+#[tracing::instrument(
+    name = "application.doctor_sources.observability",
+    level = "trace",
+    skip_all
+)]
 pub fn observability_finding(
     read: &ObservabilityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1712,7 +1740,11 @@ const MIB: u64 = 1024 * 1024;
 
 /// Map the inventory into its `Memory` findings: one for the process against
 /// its limit, then one per retained owner.
-#[hotpath::measure(label = "application.doctor_sources.resident_memory")]
+#[tracing::instrument(
+    name = "application.doctor_sources.resident_memory",
+    level = "trace",
+    skip_all
+)]
 pub fn resident_memory_findings(
     read: &ResidentMemoryReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
@@ -1914,7 +1946,11 @@ fn refusal_listing(refusals: &[IngestRefusalV1]) -> String {
 /// names its provider, session, covered range, typed cause, and why nothing
 /// needs doing. Only a reason this build cannot classify leaves the finding
 /// unknown.
-#[hotpath::measure(label = "application.doctor_sources.ingest_refusal")]
+#[tracing::instrument(
+    name = "application.doctor_sources.ingest_refusal",
+    level = "trace",
+    skip_all
+)]
 pub fn ingest_refusal_finding(
     read: &IngestRefusalCensusReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {

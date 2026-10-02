@@ -37,7 +37,6 @@ impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication<'_, E>
 where
     E: crate::handle::SessionTemporalExec,
 {
-    #[hotpath::skip]
     async fn publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
@@ -144,7 +143,11 @@ async fn append_summary_relation(
         .map_err(|error| LcmError::Db(error.to_string()))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.publish_summary")]
+#[tracing::instrument(
+    name = "session_temporal.persist.publish_summary",
+    level = "trace",
+    skip_all
+)]
 pub async fn publish_immutable_summary(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: LcmImmutableSummaryPublication,
@@ -331,7 +334,11 @@ async fn insert_canonical_node(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.publication.verify_replay")]
+#[tracing::instrument(
+    name = "session_temporal.publication.verify_replay",
+    level = "trace",
+    skip_all
+)]
 async fn exact_replay_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     publication: &LcmImmutableSummaryPublication,

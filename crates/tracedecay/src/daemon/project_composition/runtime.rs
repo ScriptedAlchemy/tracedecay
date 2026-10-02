@@ -23,7 +23,7 @@ use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 /// (Work topology, workflow recovery) within that
 /// activation. A missing runtime is therefore never reported as success, and
 /// no rebind retry is required.
-#[hotpath::measure(label = "daemon.project.compose.bind_graph", future = true)]
+#[tracing::instrument(name = "daemon.project.compose.bind_graph", level = "trace", skip_all)]
 pub(super) async fn bind_verified_project_graph_runtime(
     database: &tracedecay_runtime_core::db::Database,
     sessions: &RegisteredGlobalDb,
@@ -95,7 +95,6 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
-    #[hotpath::skip]
     pub(super) const fn startup_catch_up(&self) -> bool {
         match self {
             #[cfg(unix)]

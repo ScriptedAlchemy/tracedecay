@@ -109,7 +109,6 @@ impl<'f> ChangedSitesV1<'f> {
     }
 
     /// References re-decided at the moved sites.
-    #[cfg(feature = "hotpath")]
     pub(super) fn resolved_references(&self) -> usize {
         self.selection.iter().map(|(_, picks)| picks.len()).sum()
     }
@@ -230,8 +229,9 @@ pub(super) fn edge_evidence_over_parent(
             unresolved_calls: unresolved,
         });
     };
-    #[cfg(feature = "hotpath")]
-    hotpath::gauge!("code_index.build.references_resolved").inc(sites.resolved_references() as u64);
+
+    metrics::gauge!("code_index.build.references_resolved")
+        .increment((sites.resolved_references() as u64) as f64);
     // Only cross-file resolution emits name-resolved edges.
     let cross_file = sites.cross_file_edges(
         files,

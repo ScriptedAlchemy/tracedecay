@@ -244,7 +244,6 @@ pub enum TranscriptIngestError {
 }
 
 impl TranscriptIngestError {
-    #[hotpath::skip]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled { .. })
     }

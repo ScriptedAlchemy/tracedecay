@@ -71,7 +71,11 @@ pub fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityAuthorit
     })
 }
 
-#[hotpath::measure(label = "daemon.profile_identity.load_or_create")]
+#[tracing::instrument(
+    name = "daemon.profile_identity.load_or_create",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn load_or_create_pinned(
     profile_root: &Path,
     expected: Option<(&BrainId, &UserProfileId)>,

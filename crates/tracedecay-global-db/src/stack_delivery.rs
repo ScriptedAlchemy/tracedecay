@@ -75,7 +75,6 @@ pub enum GitHubStackDeliveryStateV1 {
 }
 
 impl GitHubStackDeliveryStateV1 {
-    #[hotpath::skip]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -118,7 +117,6 @@ pub enum GitHubStackSignalAppendOutcomeV1 {
 }
 
 impl GitHubStackSignalAppendOutcomeV1 {
-    #[hotpath::skip]
     pub const fn pending_count(&self) -> usize {
         match self {
             Self::Appended { pending_count, .. }
@@ -127,7 +125,6 @@ impl GitHubStackSignalAppendOutcomeV1 {
         }
     }
 
-    #[hotpath::skip]
     pub const fn deferred_count(&self) -> usize {
         match self {
             Self::Appended { deferred_count, .. }
@@ -318,7 +315,11 @@ async fn counts(executor: &impl QueryExecutor, project_id: &str) -> Result<(usiz
 
 /// Promotes the oldest deferred rows whenever pending capacity becomes
 /// available.  The ordering is explicit so a restart cannot reorder a queue.
-#[hotpath::measure(future = true, label = "global_db.stack_delivery.queue.promote")]
+#[tracing::instrument(
+    name = "global_db.stack_delivery.queue.promote",
+    level = "trace",
+    skip_all
+)]
 async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<usize, String> {
     let pending = state_count(executor, project_id, GitHubStackDeliveryStateV1::Pending).await?;
     let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending);
@@ -347,15 +348,15 @@ async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<
         .map_err(|error| format!("promote deferred GitHub stack deliveries: {error}"))?;
     let promoted = usize::try_from(promoted)
         .map_err(|_| "promoted GitHub stack delivery count exceeds usize".to_owned())?;
-    hotpath::gauge!("global_db.stack_delivery.queue.promoted_rows").inc(promoted as u64);
+    metrics::gauge!("global_db.stack_delivery.queue.promoted_rows").increment(promoted as f64);
     Ok(promoted)
 }
 
 /// Records the durable queue depth a caller has already counted inside its
 /// own transaction; it never issues extra queries for observability.
 fn record_queue_depth(pending: usize, deferred: usize) {
-    hotpath::gauge!("global_db.stack_delivery.queue.pending_depth").set(pending as u64);
-    hotpath::gauge!("global_db.stack_delivery.queue.deferred_depth").set(deferred as u64);
+    metrics::gauge!("global_db.stack_delivery.queue.pending_depth").set(pending as f64);
+    metrics::gauge!("global_db.stack_delivery.queue.deferred_depth").set(deferred as f64);
 }
 
 async fn lookup_signal(
@@ -386,9 +387,10 @@ struct DeliveryBatchRow {
     state: Option<GitHubStackDeliveryStateV1>,
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.stack_delivery.query.transition_batch"
+#[tracing::instrument(
+    name = "global_db.stack_delivery.query.transition_batch",
+    level = "trace",
+    skip_all
 )]
 async fn read_delivery_batch(
     executor: &impl QueryExecutor,
@@ -461,9 +463,10 @@ async fn read_delivery_batch(
     Ok(batch)
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.stack_delivery.persist.transition_batch"
+#[tracing::instrument(
+    name = "global_db.stack_delivery.persist.transition_batch",
+    level = "trace",
+    skip_all
 )]
 async fn transition_pending_batch(
     executor: &impl Executor,
@@ -516,7 +519,11 @@ async fn transition_pending_batch(
 impl RegisteredGlobalDb {
     /// Appends one immutable signal and its recipient bindings.  Overflow
     /// bindings are durably deferred and reported as typed saturation.
-    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.append")]
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.persist.append",
+        level = "trace",
+        skip_all
+    )]
     pub async fn append_github_stack_signal(
         &self,
         record: GitHubStackSignalRecordV1,
@@ -626,7 +633,11 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns a deterministic page of coordinator-pending deliveries.
-    #[hotpath::measure(future = true, label = "global_db.stack_delivery.query.pending_page")]
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.query.pending_page",
+        level = "trace",
+        skip_all
+    )]
     pub async fn pending_github_stack_deliveries(
         &self,
         project_id: &str,
@@ -674,7 +685,11 @@ impl RegisteredGlobalDb {
 
     /// Publishes a host batch.  This is the durable handoff boundary: rows
     /// become `host_pending`, never `settled`, before a host receipt arrives.
-    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.publish")]
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.persist.publish",
+        level = "trace",
+        skip_all
+    )]
     pub async fn publish_github_stack_deliveries(
         &self,
         project_id: &str,
@@ -691,7 +706,11 @@ impl RegisteredGlobalDb {
 
     /// Coordinator acknowledgement is intentionally not final host
     /// settlement.  It is idempotent for both `pending` and `host_pending`.
-    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.acknowledge")]
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.persist.acknowledge",
+        level = "trace",
+        skip_all
+    )]
     pub async fn acknowledge_github_stack_deliveries(
         &self,
         project_id: &str,
@@ -706,7 +725,6 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    #[hotpath::skip]
     async fn transition_github_stack_deliveries_to_host_pending(
         &self,
         project_id: &str,
@@ -771,7 +789,11 @@ impl RegisteredGlobalDb {
 
     /// Final host receipt.  Replaying a receipt after settlement is harmless;
     /// settling a row that never reached the host is rejected.
-    #[hotpath::measure(future = true, label = "global_db.stack_delivery.persist.settle")]
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.persist.settle",
+        level = "trace",
+        skip_all
+    )]
     pub async fn acknowledge_github_stack_host_delivery(
         &self,
         project_id: &str,
@@ -838,7 +860,6 @@ impl RegisteredGlobalDb {
     /// Marks a pending/deferred recipient as permanently unauthorized.  The
     /// optional outcome is intentionally not persisted: the state itself is
     /// the durable denial authority.
-    #[hotpath::skip]
     pub async fn record_github_stack_authorization_loss(
         &self,
         project_id: &str,
@@ -895,7 +916,6 @@ impl RegisteredGlobalDb {
 
     /// Looks up the immutable signal payload by its exact registered-project
     /// identity.
-    #[hotpath::skip]
     pub async fn github_stack_signal(
         &self,
         project_id: &str,
@@ -912,9 +932,10 @@ impl RegisteredGlobalDb {
 
     /// Reads the host-pending handoff page without exposing settled or
     /// authorization-lost bindings.
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.stack_delivery.query.host_pending_page"
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.query.host_pending_page",
+        level = "trace",
+        skip_all
     )]
     pub async fn pending_host_github_stack_deliveries(
         &self,
@@ -967,7 +988,6 @@ impl RegisteredGlobalDb {
     /// Selects the oldest host-pending signal for one exact recipient and
     /// scope. Authorization predicates are applied before the deterministic
     /// limit so another recipient's backlog cannot hide an eligible signal.
-    #[hotpath::skip]
     pub async fn oldest_host_pending_github_stack_delivery(
         &self,
         project_id: &str,
@@ -1011,7 +1031,6 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns one recipient's durable binding state.
-    #[hotpath::skip]
     pub async fn github_stack_recipient_state(
         &self,
         project_id: &str,

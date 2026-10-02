@@ -1,4 +1,4 @@
-//! Opt-in rusqlite-runtime Hotpath gauges.
+//! rusqlite-runtime metrics gauges.
 //!
 //! These exist to answer one question the writer's own timings cannot: when
 //! `begin_immediate` averages 10.65 ms against an 82 µs p95, a few transactions
@@ -16,28 +16,22 @@
 
 #[inline(always)]
 fn add(name: &'static str, delta: u64) {
-    #[cfg(feature = "hotpath")]
     {
         if delta == 0 {
             return;
         }
-        hotpath::gauge!(name).inc(delta);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
+        metrics::gauge!(name).increment((delta) as f64);
+    };
 }
 
 #[inline(always)]
 fn subtract(name: &'static str, delta: u64) {
-    #[cfg(feature = "hotpath")]
     {
         if delta == 0 {
             return;
         }
-        hotpath::gauge!(name).dec(delta);
-    }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = (name, delta);
+        metrics::gauge!(name).decrement((delta) as f64);
+    };
 }
 
 #[derive(Clone, Copy)]

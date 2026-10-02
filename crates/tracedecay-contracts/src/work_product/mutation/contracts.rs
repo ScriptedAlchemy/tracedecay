@@ -117,12 +117,10 @@ impl WorkProductEventCommitV1 {
         Ok(commit)
     }
 
-    #[hotpath::skip]
     pub const fn event(&self) -> &WorkProductEventV1 {
         &self.event
     }
 
-    #[hotpath::skip]
     pub const fn verified_graph_version(&self) -> &VerifiedWorkGraphVersionV1 {
         &self.verified_graph_version
     }
@@ -217,17 +215,14 @@ impl<'de> Deserialize<'de> for WorkProductMutationReceiptV1 {
 }
 
 impl WorkProductMutationReceiptV1 {
-    #[hotpath::skip]
     pub const fn event(&self) -> &WorkProductEventV1 {
         &self.event
     }
 
-    #[hotpath::skip]
     pub const fn verified_graph_version(&self) -> &VerifiedWorkGraphVersionV1 {
         &self.verified_graph_version
     }
 
-    #[hotpath::skip]
     pub const fn replayed(&self) -> bool {
         self.replayed
     }
@@ -415,7 +410,6 @@ pub enum WorkProductMutationRequestV1 {
 }
 
 impl WorkProductMutationRequestV1 {
-    #[hotpath::skip]
     pub const fn mutation_identity(&self) -> &WorkProductMutationIdentityV1 {
         match self {
             Self::Create(request) => &request.mutation,

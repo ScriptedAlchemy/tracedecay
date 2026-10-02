@@ -142,7 +142,7 @@ pub async fn run_agent_task_with_retry(
     .await
 }
 
-#[hotpath::measure(label = "automation.backend.run_task", future = true)]
+#[tracing::instrument(name = "automation.backend.run_task", level = "trace", skip_all)]
 pub async fn run_agent_task_with_retry_report(
     backend: &dyn AgentTaskBackend,
     request: &AgentTaskRequest,
@@ -154,7 +154,11 @@ pub async fn run_agent_task_with_retry_report(
     let max_attempts = policy.max_attempts.max(1);
     let mut attempt: u32 = 1;
     loop {
-        match hotpath::measure_block!("automation.backend.invoke", backend.run_task(request)) {
+        let match_result = {
+            let _span = tracing::trace_span!("automation.backend.invoke").entered();
+            backend.run_task(request)
+        };
+        match match_result {
             Ok(response) => {
                 report.attempts.push(AgentTaskRetryAttempt {
                     attempt,
@@ -242,9 +246,10 @@ impl CodexAppServerBackend {
 impl AgentTaskBackend for CodexAppServerBackend {
     // One backend attempt end to end, distinct from the retry-ladder block
     // (`automation.backend.startup`) that also includes backoff sleeps.
-    #[hotpath::measure(
-        label = "automation.backend.invoke.codex_app_server",
-        impl_type = "CodexAppServerBackend"
+    #[tracing::instrument(
+        name = "automation.backend.invoke.codex_app_server",
+        level = "trace",
+        skip_all
     )]
     fn run_task(
         &self,

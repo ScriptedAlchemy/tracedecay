@@ -161,7 +161,7 @@ pub fn daemon_response_stalled_during(
     )
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.ensure_live", future = true)]
+#[tracing::instrument(name = "daemon_protocol.client.ensure_live", level = "trace", skip_all)]
 pub async fn ensure_daemon_connection_live(
     connection: &DaemonConnection,
     request_label: &str,
@@ -237,7 +237,11 @@ fn response_line(
     }
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.response.wait", future = true)]
+#[tracing::instrument(
+    name = "daemon_protocol.client.response.wait",
+    level = "trace",
+    skip_all
+)]
 pub async fn next_daemon_response_line<R>(
     reader: &mut R,
     connection: &DaemonConnection,
@@ -273,7 +277,7 @@ pub async fn write_daemon_handshake_preamble(
     Ok(())
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.preamble", future = true)]
+#[tracing::instrument(name = "daemon_protocol.client.preamble", level = "trace", skip_all)]
 pub async fn write_daemon_preamble(
     writer: &mut tokio::io::WriteHalf<BrokerStream>,
     connection: &DaemonConnection,
@@ -312,7 +316,7 @@ pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Resu
     .await
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.connect", future = true)]
+#[tracing::instrument(name = "daemon_protocol.client.connect", level = "trace", skip_all)]
 pub async fn connect_with_restart_grace(
     connection: &DaemonConnection,
     grace: Duration,

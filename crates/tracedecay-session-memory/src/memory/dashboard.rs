@@ -24,7 +24,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Finite dashboard overview; the dashboard never opens a memory database
     /// or constructs an unbounded store query itself.
-    #[hotpath::measure(label = "usecases.memory.dashboard.overview", future = true)]
+    #[tracing::instrument(name = "usecases.memory.dashboard.overview", level = "trace", skip_all)]
     pub async fn dashboard_overview(
         &self,
         fact_limit: usize,
@@ -66,7 +66,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(overview)
     }
 
-    #[hotpath::measure(label = "usecases.memory.dashboard.detail", future = true)]
+    #[tracing::instrument(name = "usecases.memory.dashboard.detail", level = "trace", skip_all)]
     pub async fn dashboard_fact_detail(
         &self,
         fact_id: FactId,
@@ -98,7 +98,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(detail)
     }
 
-    #[hotpath::skip]
     pub async fn dashboard_feedback_history(
         &self,
         fact_id: FactId,
@@ -116,7 +115,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    #[hotpath::skip]
     pub async fn dashboard_memory_status(
         &self,
         read_control: &FactReadControl,
@@ -125,7 +123,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     /// Canonical store generation used to identify derived dashboard caches.
-    #[hotpath::measure(label = "usecases.memory.dashboard.store_revision", future = true)]
+    #[tracing::instrument(
+        name = "usecases.memory.dashboard.store_revision",
+        level = "trace",
+        skip_all
+    )]
     pub async fn dashboard_store_revision(
         &self,
         read_control: &FactReadControl,
@@ -137,7 +139,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     /// Capped vector inputs and their same-snapshot store generation.
-    #[hotpath::measure(label = "usecases.memory.dashboard.vectors", future = true)]
+    #[tracing::instrument(name = "usecases.memory.dashboard.vectors", level = "trace", skip_all)]
     pub async fn dashboard_vector_snapshot(
         &self,
         search: Option<String>,
@@ -164,7 +166,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(snapshot)
     }
 
-    #[hotpath::measure(label = "usecases.memory.dashboard.oplog", future = true)]
+    #[tracing::instrument(name = "usecases.memory.dashboard.oplog", level = "trace", skip_all)]
     pub async fn dashboard_oplog(
         &self,
         limit: usize,

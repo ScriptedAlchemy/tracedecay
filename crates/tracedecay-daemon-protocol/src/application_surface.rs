@@ -133,7 +133,11 @@ pub struct ApplicationToolRequest {
 }
 
 /// Separates transport-only metadata from the canonical application request.
-#[hotpath::measure(label = "application_surface.transport_metadata")]
+#[tracing::instrument(
+    name = "application_surface.transport_metadata",
+    level = "trace",
+    skip_all
+)]
 pub fn separate_application_tool_request(
     mut args: Value,
 ) -> Result<ApplicationToolRequest, ApplicationSurfaceAdapterError> {
@@ -585,7 +589,7 @@ fn parse_native_integration_surface_request(
     }
 }
 
-#[hotpath::measure(label = "application_surface.parse")]
+#[tracing::instrument(name = "application_surface.parse", level = "trace", skip_all)]
 pub fn parse_application_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,

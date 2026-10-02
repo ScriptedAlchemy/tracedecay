@@ -69,33 +69,36 @@ impl RemoteSqliteStorageV1 {
             return Ok(());
         }
         let state = CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
-        hotpath::measure_block!("rusqlite.remote.persist_authority", {
-            execute(
-                &transaction,
-                "INSERT INTO remote_replay_policies (
+        {
+            let _span = tracing::trace_span!("rusqlite.remote.persist_authority").entered();
+            {
+                execute(
+                    &transaction,
+                    "INSERT INTO remote_replay_policies (
                     scope_digest, policy_revision, evidence_json
                  ) VALUES (?1, ?2, ?3)
                  ON CONFLICT(scope_digest) DO NOTHING",
-                vec![
-                    text(policy_scope_digest(policy)?.as_str()),
-                    integer(policy.policy_revision)?,
-                    text(&encode(policy)?),
-                ],
-            )?;
-            execute(
-                &transaction,
-                "INSERT INTO remote_authorities (
+                    vec![
+                        text(policy_scope_digest(policy)?.as_str()),
+                        integer(policy.policy_revision)?,
+                        text(&encode(policy)?),
+                    ],
+                )?;
+                execute(
+                    &transaction,
+                    "INSERT INTO remote_authorities (
                     brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                vec![
-                    text(writer.authority.fence.brain_id.as_str()),
-                    text(&encode(&self.binding)?),
-                    text(&encode(&state)?),
-                    text(&encode(writer)?),
-                    ExactSqlValue::Integer(published_at.0),
-                ],
-            )
-        })?;
+                    vec![
+                        text(writer.authority.fence.brain_id.as_str()),
+                        text(&encode(&self.binding)?),
+                        text(&encode(&state)?),
+                        text(&encode(writer)?),
+                        ExactSqlValue::Integer(published_at.0),
+                    ],
+                )
+            }
+        }?;
         transaction.commit().map_err(unavailable)?;
         Ok(())
     }

@@ -1,6 +1,10 @@
 use super::*;
 
-#[hotpath::measure(label = "rusqlite.external_source.load_pending")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_pending",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_next_pending_projection(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -97,7 +101,11 @@ pub(super) fn load_next_pending_projection(
     .map_err(invalid)
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_pending_any")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_pending_any",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_next_pending_projection_any(
     connection: &rusqlite::Connection,
 ) -> rusqlite::Result<Option<SourcePendingProjectionV1>> {
@@ -128,7 +136,11 @@ pub(super) fn load_next_pending_projection_any(
 
 /// The replay identity a key committed, whether or not its full receipt is
 /// still retained.
-#[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_summary")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_commit_receipt_summary",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_commit_receipt_summary(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -164,7 +176,11 @@ pub(super) fn load_commit_receipt_summary(
 
 /// A receipt still retained in full: the binding's current receipt or one
 /// awaiting projection.
-#[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_by_digest")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_commit_receipt_by_digest",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_commit_receipt_by_digest(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -181,7 +197,11 @@ pub(super) fn load_commit_receipt_by_digest(
     .transpose()
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_authority_receipt")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_authority_receipt",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_authority_receipt(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -196,7 +216,11 @@ pub(super) fn load_authority_receipt(
     )
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_projection_receipt")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_projection_receipt",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_projection_receipt(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -205,7 +229,11 @@ pub(super) fn load_projection_receipt(
     load_projection_receipt_by_digest(connection, binding, digest.as_str())
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_projection_receipt_by_digest")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_projection_receipt_by_digest",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn load_projection_receipt_by_digest(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -235,7 +263,11 @@ fn load_slim_optional(
         .optional()
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_encoded_optional")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_encoded_optional",
+    level = "trace",
+    skip_all
+)]
 fn load_encoded_optional<T: serde::de::DeserializeOwned>(
     connection: &rusqlite::Connection,
     sql: &str,
@@ -250,7 +282,11 @@ fn load_encoded_optional<T: serde::de::DeserializeOwned>(
         .optional()
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.verify_encoded_row")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.verify_encoded_row",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn verify_encoded_row<K: rusqlite::ToSql + ?Sized>(
     connection: &rusqlite::Connection,
     sql: &str,

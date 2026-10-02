@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-#[cfg(feature = "hotpath")]
+
 use tracedecay_domain::WorkflowRunStatus;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
@@ -181,7 +181,6 @@ impl<P> WorkflowRunService<P>
 where
     P: WorkflowRunStoragePort,
 {
-    #[hotpath::skip]
     pub const fn new(storage: P) -> Self {
         Self { storage }
     }
@@ -196,7 +195,7 @@ where
         self.admit_with_fan_out(run_id, definition, admission, Vec::new(), context)
     }
 
-    #[hotpath::measure(label = "application.workflow.run.admit")]
+    #[tracing::instrument(name = "application.workflow.run.admit", level = "trace", skip_all)]
     pub fn admit_with_fan_out(
         &self,
         run_id: RunId,
@@ -209,15 +208,15 @@ where
         // stale digest means runs are being started against a drifted
         // policy/configuration/catalog environment.
         if definition.pinned_policy_digest() != &admission.policy_digest {
-            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
+            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
         if definition.pinned_configuration_digest() != &admission.configuration_digest {
-            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
+            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::ConfigurationDigestMismatch);
         }
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
-            hotpath::gauge!("application.workflow.run.admit.stale_digest").inc(1u64);
+            metrics::gauge!("application.workflow.run.admit.stale_digest").increment(1.0);
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
         let event = WorkflowRunEvent::admitted_with_fan_out(
@@ -239,7 +238,7 @@ where
         Ok(projection)
     }
 
-    #[hotpath::measure(label = "application.workflow.run.apply")]
+    #[tracing::instrument(name = "application.workflow.run.apply", level = "trace", skip_all)]
     pub fn apply(
         &self,
         run_id: &RunId,
@@ -270,7 +269,6 @@ where
 /// daemon restarts through the journal, so a per-transition counter, not an
 /// in-process RAII lifetime, is the truthful application-layer record.
 fn observe_run_status_entered(projection: &WorkflowRunProjection) {
-    #[cfg(feature = "hotpath")]
     {
         let entered = match projection.status() {
             WorkflowRunStatus::Running => "application.workflow.run.status.running",
@@ -280,10 +278,8 @@ fn observe_run_status_entered(projection: &WorkflowRunProjection) {
             WorkflowRunStatus::Failed => "application.workflow.run.status.failed",
             WorkflowRunStatus::Cancelled => "application.workflow.run.status.cancelled",
         };
-        hotpath::gauge!(entered).inc(1u64);
+        metrics::gauge!(entered).increment(1.0);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = projection;
 }
 
 /// Upper bound on one durable workflow artifact payload.
@@ -345,18 +341,22 @@ impl WorkflowArtifactPayload {
         // The decode/verify phase of artifact hydration and persistence: a
         // canonical framed SHA-256 over up to 4 MiB, distinct from the store
         // I/O around it. The bytes gauge sizes what the digest walked.
-        hotpath::measure_block!("application.workflow.artifact.verify", {
-            if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
-                return Err(WorkflowArtifactStoreError::Oversized);
-            }
-            hotpath::gauge!("application.workflow.artifact.verify.bytes").set(bytes.len() as u64);
-            if bytes.len() as u64 != artifact.byte_length()
-                || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
+        {
+            let _span = tracing::trace_span!("application.workflow.artifact.verify").entered();
             {
-                return Err(WorkflowArtifactStoreError::DigestMismatch);
+                if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
+                    return Err(WorkflowArtifactStoreError::Oversized);
+                }
+                metrics::gauge!("application.workflow.artifact.verify.bytes")
+                    .set((bytes.len() as u64) as f64);
+                if bytes.len() as u64 != artifact.byte_length()
+                    || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
+                {
+                    return Err(WorkflowArtifactStoreError::DigestMismatch);
+                }
+                Ok(Self { artifact, bytes })
             }
-            Ok(Self { artifact, bytes })
-        })
+        }
     }
 
     pub fn artifact(&self) -> &WorkArtifactRefV1 {

@@ -114,12 +114,10 @@ impl BenchmarkHostPolicy {
         }
     }
 
-    #[hotpath::skip]
     const fn allows_diagnostic_measurement(self) -> bool {
         matches!(self, Self::Linux | Self::Macos)
     }
 
-    #[hotpath::skip]
     const fn allows_contract_refresh(self) -> bool {
         matches!(self, Self::Linux)
     }
@@ -141,7 +139,6 @@ impl Phase {
         Phase::LateHydrate,
     ];
 
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Phase::RebuildActivate => "rebuild_activate",

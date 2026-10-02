@@ -297,8 +297,6 @@ integration branch waits behind, so a run spends only what its state earns:
 | `CI` dispatch | Repository gates, benchmark-harness self-tests, and the Linux lane: build, clippy, feature gates, dashboard, and Linux test partitions. |
 | `CI` with `run_os=true` | Adds the macOS and Windows matrices. |
 | `CI` with `run_hosts=true` | Adds stock host integrations. |
-| `CI` with `run_perf=true` | Adds hotpath parity. |
-| Hotpath workflow dispatch | Runs the selected profile, coverage, or runtime-core suite. |
 | Push to `master` | Everything. |
 
 Run `gh workflow run ci.yml --ref <branch>` when a PR head is ready. Add

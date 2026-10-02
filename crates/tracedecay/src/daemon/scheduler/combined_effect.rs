@@ -271,7 +271,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[hotpath::measure(label = "daemon.scheduler.combined_effect", future = true)]
+#[tracing::instrument(name = "daemon.scheduler.combined_effect", level = "trace", skip_all)]
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
@@ -454,13 +454,13 @@ fn run_combined_scheduler_effect_inner<'a>(
         };
         match outcome {
             CombinedEffectOutcome::Completed => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.completed_total").inc(1_u64);
+                metrics::gauge!("daemon.scheduler.combined_effect.completed_total").increment(1.0);
             }
             CombinedEffectOutcome::Handled => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.handled_total").inc(1_u64);
+                metrics::gauge!("daemon.scheduler.combined_effect.handled_total").increment(1.0);
             }
             CombinedEffectOutcome::Deferred => {
-                hotpath::gauge!("daemon.scheduler.combined_effect.deferred_total").inc(1_u64);
+                metrics::gauge!("daemon.scheduler.combined_effect.deferred_total").increment(1.0);
             }
         }
         outcome
@@ -603,7 +603,11 @@ fn run_execute_pair<'a>(
     clippy::too_many_arguments,
     reason = "composition keeps daemon admission, project memory, cancellation and pinned configuration authorities explicit"
 )]
-#[hotpath::measure(label = "daemon.scheduler.combined_effect_prepare", future = true)]
+#[tracing::instrument(
+    name = "daemon.scheduler.combined_effect_prepare",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn prepare_combined_effects(
     engine: &DaemonEngine,
     memory: &TraceDecay,

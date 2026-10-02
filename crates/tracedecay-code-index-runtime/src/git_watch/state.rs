@@ -182,31 +182,22 @@ impl WatchState {
     ) -> Self {
         Self {
             common_dir,
-            ownership: hotpath::mutex!(
-                std::sync::Mutex::new(WatchStateOwnership {
-                    worktrees: BTreeMap::from([(
-                        project_root,
-                        WorktreeWatchRegistration { git_dir, config },
-                    )]),
-                    retired: false,
-                }),
-                label = "daemon.git.watch.ownership"
-            ),
-            dirty: hotpath::mutex!(
-                tokio::sync::Mutex::new(DirtySet::default()),
-                label = "daemon.git.watch.dirty"
-            ),
+            ownership: std::sync::Mutex::new(WatchStateOwnership {
+                worktrees: BTreeMap::from([(
+                    project_root,
+                    WorktreeWatchRegistration { git_dir, config },
+                )]),
+                retired: false,
+            }),
+            dirty: tokio::sync::Mutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
             reconfigure: Notify::new(),
-            retry_not_before: hotpath::mutex!(
-                std::sync::Mutex::new(None),
-                label = "daemon.git.watch.retry"
-            ),
+            retry_not_before: std::sync::Mutex::new(None),
             retry_backoff_ms: AtomicU64::new(250),
             maintenance,
             health: ProjectHealth::default(),
-            task: hotpath::mutex!(std::sync::Mutex::new(None), label = "daemon.git.watch.task"),
+            task: std::sync::Mutex::new(None),
             retirement: CancellationToken::new(),
             #[cfg(test)]
             entered_debounce: Notify::new(),

@@ -264,7 +264,7 @@ impl McpServerWriters {
 }
 
 impl McpServerConstructionContext {
-    #[hotpath::measure(label = "mcp.server.construction.direct")]
+    #[tracing::instrument(name = "mcp.server.construction.direct", level = "trace", skip_all)]
     pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {
         let cg = cg.into();
         // A direct context serves the checkout its opened project already
@@ -352,7 +352,11 @@ impl McpServerConstructionContext {
         self
     }
 
-    #[hotpath::measure(label = "mcp.server.construction.daemon_owned")]
+    #[tracing::instrument(
+        name = "mcp.server.construction.daemon_owned",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) fn daemon_owned(
         cg: impl Into<Arc<TraceDecay>>,
         scope_prefix: Option<String>,

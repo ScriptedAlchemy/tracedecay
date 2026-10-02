@@ -48,7 +48,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
         context: TestPrimitivePortContext<'a>,
         request: &'a TestMapPrimitiveRequest,
     ) -> TestPrimitivePortFuture<'a, TestMapPrimitiveResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
                 let Ok(reader) = open_code_graph(
@@ -197,7 +197,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                     }
                 }
             },
-            label = "usecases.primitives.test_map"
+            tracing::trace_span!("usecases.primitives.test_map"),
         ))
     }
 
@@ -206,7 +206,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
         context: TestPrimitivePortContext<'a>,
         request: &'a AffectedFileTestsPrimitiveRequest,
     ) -> TestPrimitivePortFuture<'a, AffectedFileTestsPrimitiveResultV1> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 let custom_glob = request
                     .filter
@@ -288,7 +288,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                     budget: OperationBudgetUsage::default(),
                 }
             },
-            label = "usecases.primitives.affected_file_tests"
+            tracing::trace_span!("usecases.primitives.affected_file_tests"),
         ))
     }
 }

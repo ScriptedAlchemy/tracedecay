@@ -130,7 +130,7 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
         cancellation: &'a CancellationSignal,
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(hotpath::future!(
+        Box::pin(tracing::Instrument::instrument(
             async move {
                 if cancellation.context().token_id != context.cancellation().token_id {
                     return SessionRetrievalServiceOutcome::Denied;
@@ -141,13 +141,13 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                        metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                         SessionRetrievalServiceOutcome::Cancelled
                     }
                     outcome = self.retrieve_admitted(context, query) => outcome,
                 }
             },
-            label = "daemon.session_retrieval.retrieve"
+            tracing::trace_span!("daemon.session_retrieval.retrieve"),
         ))
     }
 
@@ -234,14 +234,14 @@ struct SessionRetrievalInFlightObservation;
 
 impl SessionRetrievalInFlightObservation {
     fn begin() -> Self {
-        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(1.0);
+        metrics::gauge!("daemon.session_retrieval.in_flight").increment(1.0);
         Self
     }
 }
 
 impl Drop for SessionRetrievalInFlightObservation {
     fn drop(&mut self) {
-        hotpath::gauge!("daemon.session_retrieval.in_flight").inc(-1.0);
+        metrics::gauge!("daemon.session_retrieval.in_flight").increment(-1.0);
     }
 }
 
@@ -382,7 +382,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                    metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                     LcmDescribeServiceOutcome::Cancelled
                 }
                 outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
@@ -412,7 +412,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    hotpath::gauge!("daemon.session_retrieval.cancelled").inc(1.0);
+                    metrics::gauge!("daemon.session_retrieval.cancelled").increment(1.0);
                     LcmExpandServiceOutcome::Cancelled
                 }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
@@ -578,14 +578,14 @@ fn counted_admitted_session_binding(
     let binding = build_admitted_session_binding(root, retrieval_configuration, context, budgets);
     match &binding {
         Ok(_) => {
-            hotpath::gauge!("daemon.session_retrieval.admitted").inc(1.0);
+            metrics::gauge!("daemon.session_retrieval.admitted").increment(1.0);
         }
         Err(outcome) => match outcome.as_ref() {
             SessionRetrievalServiceOutcome::WrongScope => {
-                hotpath::gauge!("daemon.session_retrieval.refused.wrong_scope").inc(1.0);
+                metrics::gauge!("daemon.session_retrieval.refused.wrong_scope").increment(1.0);
             }
             _ => {
-                hotpath::gauge!("daemon.session_retrieval.refused.unavailable").inc(1.0);
+                metrics::gauge!("daemon.session_retrieval.refused.unavailable").increment(1.0);
             }
         },
     }

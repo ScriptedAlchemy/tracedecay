@@ -213,7 +213,7 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     })
 }
 
-#[cfg(any(feature = "hotpath", test))]
+#[cfg(test)]
 pub(crate) fn is_hook_protocol_invocation(args: &[OsString]) -> bool {
     args.get(1)
         .and_then(|value| value.to_str())

@@ -47,15 +47,17 @@ pub(crate) fn staged_generation(
     });
     let (chunks, symbols, parent_shared_occurrences) = match parent {
         Some(parent) => {
-            let (chunks, symbols, shared) = hotpath::measure_block!(
-                "code_index.generation.aggregate_parent_delta",
+            let (chunks, symbols, shared) = {
+                let _span =
+                    tracing::trace_span!("code_index.generation.aggregate_parent_delta").entered();
                 aggregate_from_parent(generation_id, parent, &files)
-            )?;
+            }?;
             (chunks, symbols, Some(shared))
         }
         None => {
-            let chunks = hotpath::measure_block!(
-                "code_index.generation.aggregate_chunks",
+            let chunks = {
+                let _span =
+                    tracing::trace_span!("code_index.generation.aggregate_chunks").entered();
                 GenerationChunkManifestV1::from_validated_files(
                     generation_id.clone(),
                     files
@@ -63,10 +65,11 @@ pub(crate) fn staged_generation(
                         .map(|file| file.artifacts.chunks.clone())
                         .collect(),
                 )
-            )
+            }
             .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = hotpath::measure_block!(
-                "code_index.generation.aggregate_symbols",
+            let symbols = {
+                let _span =
+                    tracing::trace_span!("code_index.generation.aggregate_symbols").entered();
                 GenerationSymbolIndexV1::new(
                     generation_id,
                     files
@@ -74,7 +77,7 @@ pub(crate) fn staged_generation(
                         .flat_map(|file| file.artifacts.symbols.clone())
                         .collect(),
                 )
-            )
+            }
             .map_err(CodeIndexProductionErrorV1::Lineage)?;
             (chunks, symbols, None)
         }
@@ -421,7 +424,7 @@ where
 /// through [`ModuleImportIndexV1`]. Other bare names have no cross-file
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
-#[hotpath::measure(label = "code_index.seal.resolve")]
+#[tracing::instrument(name = "code_index.seal.resolve", level = "trace", skip_all)]
 pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
 ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
@@ -440,7 +443,7 @@ pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
 /// Resolves only `selection`'s references against the whole staged file set.
 /// Each reference binds exactly as [`resolve_cross_file_references`] binds
 /// it; the result is the edges those references contribute.
-#[hotpath::measure(label = "code_index.seal.resolve_selected")]
+#[tracing::instrument(name = "code_index.seal.resolve_selected", level = "trace", skip_all)]
 pub(crate) fn resolve_selected_cross_file_references<T>(
     files: &[T],
     selection: &ReferenceSelectionV1,
@@ -484,14 +487,15 @@ where
     T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
     let workers = crate::parallelism::indexing_workers().max(1);
-    #[cfg(feature = "hotpath")]
+
     {
-        hotpath::gauge!("code_index.seal.resolve.effective_workers").set(workers);
-        hotpath::gauge!("code_index.seal.resolve.unresolved_references")
-            .set(selected_references(files, selection).count() as u64);
+        metrics::gauge!("code_index.seal.resolve.effective_workers").set((workers) as f64);
+        metrics::gauge!("code_index.seal.resolve.unresolved_references")
+            .set((selected_references(files, selection).count() as u64) as f64);
     }
-    let (by_simple_name, rust_files, typescript_modules, modules) =
-        hotpath::measure_block!("code_index.seal.reference_index", {
+    let (by_simple_name, rust_files, typescript_modules, modules) = {
+        let _span = tracing::trace_span!("code_index.seal.reference_index").entered();
+        {
             let mut by_simple_name: HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
                 HashMap::new();
             for (index, file) in files.iter().enumerate() {
@@ -508,7 +512,8 @@ where
                 TypeScriptModuleIndexV1::new(files),
                 ModuleImportIndexV1::new(files),
             )
-        });
+        }
+    };
     // Every file resolves against the same immutable whole-set index, so this
     // is one ordered fan-out over the indexing pool. Concatenating each file's
     // edges in file-index order reproduces the exact sequence the serial loop
@@ -535,10 +540,13 @@ where
     for file_edges in per_file {
         edges.extend(file_edges);
     }
-    hotpath::measure_block!("code_index.seal.edge_materialization", {
-        edges.sort_by(edge_order);
-        edges.dedup();
-    });
+    {
+        let _span = tracing::trace_span!("code_index.seal.edge_materialization").entered();
+        {
+            edges.sort_by(edge_order);
+            edges.dedup();
+        }
+    };
     Ok(edges)
 }
 
@@ -719,8 +727,9 @@ where
         let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
         } else {
-            let resolved = hotpath::measure_block!(
-                "code_index.seal.reference_candidate_lookup",
+            let resolved = {
+                let _span =
+                    tracing::trace_span!("code_index.seal.reference_candidate_lookup").entered();
                 resolve_cross_file_reference(
                     files,
                     by_simple_name,
@@ -730,7 +739,7 @@ where
                     index,
                     reference,
                 )
-            );
+            };
             resolved_references.insert(cache_key, resolved.clone());
             resolved
         };

@@ -292,7 +292,7 @@ pub fn default_pr_command_control() -> &'static PrCommandControlV1 {
     CONTROL.get_or_init(PrCommandControlV1::default)
 }
 
-#[hotpath::measure(label = "application.pr_tracking.discover")]
+#[tracing::instrument(name = "application.pr_tracking.discover", level = "trace", skip_all)]
 pub fn discover_open_prs_with_control(
     repo_root: &Path,
     control: &PrCommandControlV1,
@@ -433,7 +433,11 @@ fn gh_available(control: &PrCommandControlV1) -> bool {
     })
 }
 
-#[hotpath::measure(label = "application.pr_tracking.discover_gh")]
+#[tracing::instrument(
+    name = "application.pr_tracking.discover_gh",
+    level = "trace",
+    skip_all
+)]
 fn discover_via_gh(repo_root: &Path, control: &PrCommandControlV1) -> Option<PrDiscovery> {
     let limit = GH_PR_LIST_LIMIT.to_string();
     let mut command = std::process::Command::new("gh");
@@ -465,7 +469,11 @@ fn discover_via_gh(repo_root: &Path, control: &PrCommandControlV1) -> Option<PrD
     parse_gh_pr_list(&String::from_utf8(output.stdout).ok()?, GH_PR_LIST_LIMIT).ok()
 }
 
-#[hotpath::measure(label = "application.pr_tracking.discover_ls_remote")]
+#[tracing::instrument(
+    name = "application.pr_tracking.discover_ls_remote",
+    level = "trace",
+    skip_all
+)]
 fn discover_via_ls_remote(
     repo_root: &Path,
     control: &PrCommandControlV1,

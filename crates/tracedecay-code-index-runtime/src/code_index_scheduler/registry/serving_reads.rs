@@ -149,7 +149,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// the binding is an immutable publication read the retained historical
     /// owner answers directly, so blocking here parked the caller (and its
     /// runtime worker thread) behind work the read never needed.
-    #[hotpath::measure(label = "daemon.code_index.registry.replay_binding", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.registry.replay_binding",
+        level = "trace",
+        skip_all
+    )]
     pub async fn code_graph_replay_binding(
         &self,
         project_root: &Path,
@@ -305,23 +309,25 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         tokio::task::spawn_blocking(move || {
-            let mut progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
+            let mut progress = {
+                                   let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
+                                   {
                 let progress = build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .snapshot()
                     .map(|snapshot| snapshot.as_ref().clone());
-                #[cfg(feature = "hotpath")]
+
                 if let Some(progress) = progress.as_ref() {
                     let age_micros = now_micros()
                         .0
                         .saturating_sub(progress.last_progress_micros)
                         .max(0);
-                    hotpath::gauge!("daemon.code_index.dashboard.progress_age_micros")
-                        .set(u64::try_from(age_micros).unwrap_or(u64::MAX));
+                    metrics::gauge!("daemon.code_index.dashboard.progress_age_micros").set((u64::try_from(age_micros).unwrap_or(u64::MAX)) as f64);
                 }
                 progress
-            });
+                }
+                               };
             let refresh_in_flight = reconcile_in_progress.running()
                 || pending_wake.lock()
                     .micros
@@ -564,7 +570,11 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Query-admission entry point: serve only an already-decoded generation
     /// whose exact identity authority still resolves. Freshness verification and
     /// any rebuild remain retained background work.
-    #[hotpath::measure(label = "daemon.code_index.query.latest_fresh", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.query.latest_fresh",
+        level = "trace",
+        skip_all
+    )]
     pub async fn latest_complete_fresh(
         &self,
         project_root: &Path,
@@ -721,7 +731,11 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// [`Self::latest_complete_ready`] under an explicit decode admission.
-    #[hotpath::measure(label = "daemon.code_index.query.latest_ready", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.query.latest_ready",
+        level = "trace",
+        skip_all
+    )]
     async fn latest_complete_ready_with(
         &self,
         project_root: &Path,
@@ -1089,7 +1103,11 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// [`Self::latest_complete_ready_decoded_for_root_scope`] under an
     /// explicit residency lease.
-    #[hotpath::measure(label = "daemon.code_index.query.latest_ready_decoded", future = true)]
+    #[tracing::instrument(
+        name = "daemon.code_index.query.latest_ready_decoded",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn latest_complete_ready_decoded_for_root_scope_with(
         &self,
         project_root: &Path,
@@ -1101,10 +1119,16 @@ impl CodeIndexSchedulerRegistryV1 {
         // sections are brief map reads, while an abstention under contention
         // here falsely demotes a proven-current answer to the stale serving
         // arm for that read.
-        let parts = hotpath::measure_block!(
-            "daemon.code_index.query.latest_ready_decoded.mounted_wait",
+        let parts = {
+            use tracing::Instrument as _;
             {
-                let mounted = self.mounted.lock().await;
+                let mounted = self
+                    .mounted
+                    .lock()
+                    .instrument(tracing::trace_span!(
+                        "daemon.code_index.query.latest_ready_decoded.mounted_wait"
+                    ))
+                    .await;
                 let parts = Self::serving_parts_for_root_scope(&mounted, &project_root, scope)?;
                 if lease == ServingReadLeaseV1::Renew
                     && let Some(worktree) = mounted.get(&project_root)
@@ -1113,19 +1137,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 parts
             }
-        );
+        };
         let scope = scope.clone();
         let probe_root = project_root.clone();
         let probe = tokio::task::spawn_blocking(move || {
-            hotpath::measure_block!(
-                "daemon.code_index.query.latest_ready_decoded.execution",
-                Self::ready_decoded_from_serving_parts(parts, &probe_root, &scope)
-            )
+            let _span =
+                tracing::trace_span!("daemon.code_index.query.latest_ready_decoded.execution")
+                    .entered();
+            Self::ready_decoded_from_serving_parts(parts, &probe_root, &scope)
         });
-        let latest = hotpath::measure_block!(
-            "daemon.code_index.query.latest_ready_decoded.offload_join",
-            probe.await
-        )
+        let latest = {
+            use tracing::Instrument as _;
+            probe
+                .instrument(tracing::trace_span!(
+                    "daemon.code_index.query.latest_ready_decoded.offload_join"
+                ))
+                .await
+        }
         .ok()
         .flatten()?;
         self.install_test_attribution_authority(&project_root, &latest)
@@ -1516,9 +1544,10 @@ impl CodeIndexSchedulerRegistryV1 {
     /// exact mounted root. An expired source proof can own the same worker
     /// without any evidence that the checkout moved; that is verification,
     /// not a replacement build.
-    #[hotpath::measure(
-        label = "daemon.code_index.query.rebuild_pass_in_flight",
-        future = true
+    #[tracing::instrument(
+        name = "daemon.code_index.query.rebuild_pass_in_flight",
+        level = "trace",
+        skip_all
     )]
     pub async fn rebuild_pass_in_flight_for_root_scope(
         &self,

@@ -241,7 +241,6 @@ impl InProcessDaemonInvocationExecutor {
         }
     }
 
-    #[hotpath::skip]
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
         if let Some(project_admission) = self.project_admission.as_ref()
             && !matches!(
@@ -641,9 +640,9 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             let request_cancellations = self.invocation.service.request_cancellations().clone();
             tokio::spawn(async move {
                 let request_id = request.request_id.clone();
-                let invocation = tokio::spawn(hotpath::future!(
+                let invocation = tokio::spawn(tracing::Instrument::instrument(
                     async move { executor.invoke_once(request).await },
-                    label = "daemon.invocation.invoke_once"
+                    tracing::trace_span!("daemon.invocation.invoke_once"),
                 ));
                 settle_in_process_invocation(
                     &request_cancellations,

@@ -248,7 +248,11 @@ impl GenerationChunkManifestV1 {
 ///
 /// Carry-forward always rematerializes generation-local file and symbol
 /// occurrences before constructing the next chunk and lineage manifests.
-#[hotpath::measure(label = "code_index.build.increment_materialize")]
+#[tracing::instrument(
+    name = "code_index.build.increment_materialize",
+    level = "trace",
+    skip_all
+)]
 pub fn materialize_generation_increment(
     plan: &GenerationIncrementPlanV1,
     generation_id: CodeGenerationId,
@@ -434,7 +438,11 @@ pub fn materialize_generation_increment(
 /// different digests are updated, current-only IDs are added, and prior-only
 /// IDs are deleted. The returned domain manifest is fully validated and its
 /// digest is sealed before return.
-#[hotpath::measure(label = "code_index.build.plan_chunk_increment")]
+#[tracing::instrument(
+    name = "code_index.build.plan_chunk_increment",
+    level = "trace",
+    skip_all
+)]
 pub fn plan_chunk_increment(
     prior: Option<&GenerationChunkManifestV1>,
     current: &GenerationChunkManifestV1,
@@ -507,7 +515,11 @@ pub fn plan_chunk_increment(
 /// divergent row is returned, naming that chunk id, before `reused_digest`
 /// is sealed. The seal itself stays the parent full-replay attestation plus
 /// reused cardinality.
-#[hotpath::measure(label = "code_index.build.plan_chunk_increment_arc_shared")]
+#[tracing::instrument(
+    name = "code_index.build.plan_chunk_increment_arc_shared",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn plan_chunk_increment_arc_shared(
     prior: &GenerationChunkManifestV1,
     current: &GenerationChunkManifestV1,

@@ -294,14 +294,14 @@ struct RmcpQueueDepthGuard;
 
 impl RmcpQueueDepthGuard {
     fn enter() -> Self {
-        hotpath::gauge!("mcp.server.rmcp.queue_depth").inc(1_u64);
+        metrics::gauge!("mcp.server.rmcp.queue_depth").increment(1.0);
         Self
     }
 }
 
 impl Drop for RmcpQueueDepthGuard {
     fn drop(&mut self) {
-        hotpath::gauge!("mcp.server.rmcp.queue_depth").dec(1_u64);
+        metrics::gauge!("mcp.server.rmcp.queue_depth").decrement(1.0);
     }
 }
 
@@ -348,7 +348,7 @@ where
         self.selected_project_responses.clone()
     }
 
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_total", future = true)]
+    #[tracing::instrument(name = "mcp.server.rmcp.dispatch_total", level = "trace", skip_all)]
     async fn dispatch(
         &self,
         context: RequestContext<RoleServer>,
@@ -359,8 +359,8 @@ where
         let queued = RmcpQueueDepthGuard::enter();
         let request_permit = self.acquire_request_permit().await?;
         drop(queued);
-        hotpath::gauge!("mcp.server.rmcp.queue_wait_us")
-            .set(queued_at.elapsed().as_micros() as u64);
+        metrics::gauge!("mcp.server.rmcp.queue_wait_us")
+            .set((queued_at.elapsed().as_micros() as u64) as f64);
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
         // combined resident frame overflows the worker stack in perf-profile
@@ -373,7 +373,7 @@ where
         result
     }
 
-    #[hotpath::measure(label = "mcp.server.rmcp.queue_wait", future = true)]
+    #[tracing::instrument(name = "mcp.server.rmcp.queue_wait", level = "trace", skip_all)]
     async fn acquire_request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, ErrorData> {
         self.request_admission
             .acquire()
@@ -381,7 +381,7 @@ where
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))
     }
 
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch", future = true)]
+    #[tracing::instrument(name = "mcp.server.rmcp.dispatch", level = "trace", skip_all)]
     async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
@@ -415,7 +415,7 @@ where
             .await
     }
 
-    #[hotpath::measure(label = "mcp.server.rmcp.dispatch_request", future = true)]
+    #[tracing::instrument(name = "mcp.server.rmcp.dispatch_request", level = "trace", skip_all)]
     async fn dispatch_request_with_connection(
         &self,
         request: McpDispatchRequest<'_>,
@@ -487,7 +487,7 @@ where
         Ok(response)
     }
 
-    #[hotpath::measure(label = "mcp.server.rmcp.notification", future = true)]
+    #[tracing::instrument(name = "mcp.server.rmcp.notification", level = "trace", skip_all)]
     async fn dispatch_notification(&self, method: String, params: Option<Value>) {
         // Custom notifications (hook events, cancellations) have no typed
         // `rmcp` DTO: their params arrive as JSON and stay JSON.
@@ -742,7 +742,6 @@ where
         .with_server_info(Implementation::new("tracedecay", self.build_version))
     }
 
-    #[hotpath::skip]
     async fn initialize(
         &self,
         request: InitializeRequestParams,
@@ -761,7 +760,6 @@ where
         rmcp_response_result(response)
     }
 
-    #[hotpath::skip]
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -773,7 +771,6 @@ where
         )
     }
 
-    #[hotpath::skip]
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
@@ -801,7 +798,6 @@ where
         Ok(result.into())
     }
 
-    #[hotpath::skip]
     async fn list_resources(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -813,7 +809,6 @@ where
         )
     }
 
-    #[hotpath::skip]
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -830,7 +825,6 @@ where
         .map(Into::into)
     }
 
-    #[hotpath::skip]
     async fn on_cancelled(
         &self,
         notification: rmcp::model::CancelledNotificationParam,
@@ -839,7 +833,6 @@ where
         let _ = self.cancel_request(notification.request_id);
     }
 
-    #[hotpath::skip]
     async fn on_custom_notification(
         &self,
         notification: CustomNotification,
@@ -854,7 +847,6 @@ where
     /// Any other custom request is an unknown method or a known one whose
     /// params did not fit its typed DTO; the dispatch authority answers it
     /// (method not found, invalid params) and accounts for it.
-    #[hotpath::skip]
     async fn on_custom_request(
         &self,
         request: CustomRequest,

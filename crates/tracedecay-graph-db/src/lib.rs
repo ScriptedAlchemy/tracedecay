@@ -4,11 +4,11 @@ mod epoch_cache;
 mod error;
 mod generation;
 mod generation_runtime;
-mod hotpath_observe;
 mod lease;
 mod limits;
 mod location;
 mod mutation;
+mod observe;
 mod owner;
 mod point_read;
 mod projection;
@@ -119,13 +119,13 @@ pub struct GraphDbHydrationCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_hydration_counters() -> GraphDbHydrationCounters {
-    hotpath_observe::take_hydration_counters()
+    observe::take_hydration_counters()
 }
 
 /// How sealed-generation verification resolved on **this thread** since the
 /// last take.
 ///
-/// Independent of the Hotpath feature on purpose: a test that asserts a marker
+/// Independent of measurement instrumentation on purpose: a test that asserts a marker
 /// hit skipped the row enumeration must be able to observe that in an ordinary
 /// build.
 ///
@@ -147,7 +147,7 @@ pub struct GraphDbVerificationCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_verification_counters() -> GraphDbVerificationCounters {
-    hotpath_observe::take_verification_counters()
+    observe::take_verification_counters()
 }
 
 /// Fan-out decode, quarantine-lock, and epoch-cache work on **this thread**
@@ -169,7 +169,7 @@ pub struct GraphDbTraversalCounters {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn take_graph_db_traversal_counters() -> GraphDbTraversalCounters {
-    hotpath_observe::take_traversal_counters()
+    observe::take_traversal_counters()
 }
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,

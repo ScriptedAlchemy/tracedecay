@@ -132,7 +132,7 @@ where
     Ok(AffectedTestTraversal { test_distances })
 }
 
-#[hotpath::measure(future = true, label = "mcp.git.affected.total")]
+#[tracing::instrument(name = "mcp.git.affected.total", level = "trace", skip_all)]
 pub async fn compute_affected<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
@@ -157,9 +157,9 @@ where
     ctx.verify_graph_scope(&graph)?;
     let files = request.files;
 
-    let traversal = hotpath::future!(
+    let traversal = tracing::Instrument::instrument(
         collect_verified_affected_test_files(&graph, &files, max_depth, custom_glob.as_ref()),
-        label = "mcp.git.affected.traverse"
+        tracing::trace_span!("mcp.git.affected.traverse"),
     )
     .await?;
 

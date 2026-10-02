@@ -87,7 +87,11 @@ async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'
     }
 }
 
-#[hotpath::measure(label = "daemon.maintenance.registered_store_retention", future = true)]
+#[tracing::instrument(
+    name = "daemon.maintenance.registered_store_retention",
+    level = "trace",
+    skip_all
+)]
 async fn run_registered_store_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &tracedecay_configuration::RetentionConfig,
@@ -218,9 +222,10 @@ fn log_payload_gc_outcome(
     }
 }
 
-#[hotpath::measure(
-    label = "daemon.maintenance.profile_observability_retention",
-    future = true
+#[tracing::instrument(
+    name = "daemon.maintenance.profile_observability_retention",
+    level = "trace",
+    skip_all
 )]
 async fn run_profile_observability_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
@@ -385,7 +390,6 @@ pub(crate) fn project_store_maintenance_lease(
 }
 
 impl MaintenanceCoordinator {
-    #[hotpath::skip]
     pub(super) async fn spawn(
         profile_root: PathBuf,
         administration: StoreAdministration,
@@ -422,11 +426,11 @@ impl MaintenanceCoordinator {
             );
         }
         let sampler_owner = coordinator.clone();
-        let sampler = tokio::spawn(hotpath::future!(
+        let sampler = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 sampler_owner.run_resident_memory_sampler().await;
             },
-            label = "daemon.maintenance.resident_memory_sampler"
+            tracing::trace_span!("daemon.maintenance.resident_memory_sampler"),
         ));
         *coordinator.resident_memory_sampler.lock().await = Some(sampler);
         if !retention_maintenance_enabled(&retention) {
@@ -438,7 +442,7 @@ impl MaintenanceCoordinator {
         // letting a day of publications pile up behind the daily cadence.
         let publication_owner = coordinator.clone();
         let mut publications = code_index_schedulers.subscribe_generation_publications();
-        tokio::spawn(hotpath::future!(
+        tokio::spawn(tracing::Instrument::instrument(
             async move {
                 loop {
                     tokio::select! {
@@ -453,11 +457,11 @@ impl MaintenanceCoordinator {
                     }
                 }
             },
-            label = "daemon.maintenance.publication_due_requests"
+            tracing::trace_span!("daemon.maintenance.publication_due_requests"),
         ));
         let task_owner = coordinator.clone();
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
-        let handle = tokio::spawn(hotpath::future!(
+        let handle = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 task_owner
                     .run(
@@ -470,7 +474,7 @@ impl MaintenanceCoordinator {
                     )
                     .await;
             },
-            label = "daemon.maintenance.retention_loop"
+            tracing::trace_span!("daemon.maintenance.retention_loop"),
         ));
         *coordinator.task.lock().await = Some(handle);
         coordinator
@@ -501,7 +505,6 @@ impl MaintenanceCoordinator {
         self.wake.notify_waiters();
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) {
         self.cancel();
         // Cancel stops the next pass; an in-flight tick only notices between
@@ -525,7 +528,6 @@ impl MaintenanceCoordinator {
     /// idle collect its workers' heaps (again after a release, which frees
     /// what they built), and asks the async runtime and store workers to
     /// collect theirs as they idle.
-    #[hotpath::skip]
     async fn run_resident_memory_sampler(&self) {
         let log = Arc::clone(&self.resident_memory_log);
         run_resident_memory_sampler_loop(
@@ -543,7 +545,6 @@ impl MaintenanceCoordinator {
         .await;
     }
 
-    #[hotpath::skip]
     #[allow(
         clippy::too_many_arguments,
         reason = "The task retains independently owned profile, stores, schedulers and cadence for its full cancellation lifetime."
@@ -597,17 +598,14 @@ impl MaintenanceCoordinator {
         .await;
     }
 
-    #[hotpath::measure(label = "daemon.maintenance.tick", future = true)]
+    #[tracing::instrument(name = "daemon.maintenance.tick", level = "trace", skip_all)]
     #[allow(
         clippy::too_many_arguments,
         reason = "A tick borrows independently owned stores and policy while retaining the continuation cursor."
     )]
-    #[cfg_attr(
-        not(feature = "hotpath"),
-        expect(
-            clippy::too_many_lines,
-            reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
-        )
+    #[expect(
+        clippy::too_many_lines,
+        reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
     )]
     async fn run_tick(
         &self,
@@ -630,7 +628,7 @@ impl MaintenanceCoordinator {
             return MaintenanceTickOutcome::Retry;
         };
         let Some(_background_cpu) = background_cpu.try_acquire() else {
-            hotpath::gauge!("daemon.maintenance.background_cpu_deferred_total").inc(1_u64);
+            metrics::gauge!("daemon.maintenance.background_cpu_deferred_total").increment(1.0);
             return MaintenanceTickOutcome::Retry;
         };
         administration
@@ -952,7 +950,7 @@ impl MaintenanceCoordinator {
     }
 }
 
-/// Samples this process's resident set, republishes it as Hotpath gauges, and
+/// Samples this process's resident set, republishes it as metrics gauges, and
 /// feeds its admission bytes to the resident-memory admission authority.
 ///
 /// A 20G RSS overrun past the admission limit was visible only to `ps` during
@@ -971,10 +969,11 @@ fn record_process_resident_memory_gauge(log: &std::sync::Mutex<ResidentMemoryLog
     let Some((sample, state)) = pressure.sample_and_publish() else {
         return;
     };
-    hotpath::gauge!("daemon.process.resident_bytes").set(sample.resident_bytes);
+    metrics::gauge!("daemon.process.resident_bytes").set((sample.resident_bytes) as f64);
     // The gauge keeps its name: admission may publish the larger cgroup
     // committed figure, which is not this process's unreclaimable set.
-    hotpath::gauge!("daemon.process.unreclaimable_resident_bytes").set(sample.unreclaimable_bytes);
+    metrics::gauge!("daemon.process.unreclaimable_resident_bytes")
+        .set((sample.unreclaimable_bytes) as f64);
     let over_budget = matches!(state, ResidentMemoryPressureStateV1::OverBudget { .. });
     let transition = {
         let mut log = log

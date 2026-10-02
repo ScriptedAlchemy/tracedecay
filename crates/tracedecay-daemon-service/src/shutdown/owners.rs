@@ -194,17 +194,14 @@ pub struct DrainingGauge {
 
 impl DrainingGauge {
     pub fn arm(key: &'static str) -> Self {
-        hotpath::gauge!(key).inc(1_u64);
+        metrics::gauge!(key).increment(1.0);
         Self { key }
     }
 }
 
 impl Drop for DrainingGauge {
     fn drop(&mut self) {
-        #[cfg(feature = "hotpath")]
-        hotpath::gauge!(self.key).dec(1_u64);
-        #[cfg(not(feature = "hotpath"))]
-        let _ = self.key;
+        metrics::gauge!(self.key).decrement(1.0);
     }
 }
 
@@ -239,7 +236,7 @@ pub fn prepare_shutdown_owner_phases(phases: Vec<Vec<ShutdownOwner>>) -> Prepare
 }
 
 impl PreparedShutdownOwners {
-    #[hotpath::measure(label = "daemon.shutdown.owners.join", future = true)]
+    #[tracing::instrument(name = "daemon.shutdown.owners.join", level = "trace", skip_all)]
     pub async fn join(self, deadline: Instant) -> ShutdownReceipt {
         let mut receipts = Vec::new();
         for phase in self.phases {
@@ -262,13 +259,10 @@ impl PreparedShutdownOwners {
     }
 }
 
-#[hotpath::measure(label = "daemon.shutdown.phase.join", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Shutdown-phase join waits out one named owner group under the shared budget."
-    )
+#[tracing::instrument(name = "daemon.shutdown.phase.join", level = "trace", skip_all)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Shutdown-phase join waits out one named owner group under the shared budget."
 )]
 async fn join_shutdown_phase(
     deadline: Instant,
@@ -330,15 +324,15 @@ async fn join_shutdown_phase(
             // straggler without replaying the receipt.
             match &status {
                 ShutdownStatus::Clean => {
-                    hotpath::gauge!("daemon.shutdown.owner.clean_total").inc(1_u64);
+                    metrics::gauge!("daemon.shutdown.owner.clean_total").increment(1.0);
                 }
                 ShutdownStatus::Failed(_) => {
-                    hotpath::gauge!("daemon.shutdown.owner.failed_total").inc(1_u64);
+                    metrics::gauge!("daemon.shutdown.owner.failed_total").increment(1.0);
                 }
                 ShutdownStatus::TimedOut => {
-                    hotpath::gauge!("daemon.shutdown.owner.timed_out_total").inc(1_u64);
-                    #[cfg(feature = "hotpath")]
-                    hotpath::val!("daemon.shutdown.straggler.owner").set(&name);
+                    metrics::gauge!("daemon.shutdown.owner.timed_out_total").increment(1.0);
+
+                    tracing::trace!(name: "daemon.shutdown.straggler.owner", value = ?name);
                 }
             }
             (ordinal, ShutdownOwnerReceipt { name, status })

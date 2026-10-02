@@ -319,7 +319,11 @@ impl RunLedgerIndex {
 
     /// Folds every committed row in `[frontier, len)` and advances the
     /// frontier. Callers make those bytes durable first.
-    #[hotpath::measure(label = "hosts.automation.run_ledger_index.fold")]
+    #[tracing::instrument(
+        name = "hosts.automation.run_ledger_index.fold",
+        level = "trace",
+        skip_all
+    )]
     fn fold_to(&mut self, file: &std::fs::File, path: &Path, len: u64) -> Result<()> {
         let mut rows = ForwardJsonlScanner::new_from(file, path, self.frontier, len)?;
         while let Some(span) = rows.next_span()? {
@@ -399,7 +403,11 @@ fn inspect_ledger(file: &std::fs::File, path: &Path) -> Result<OpenLedger> {
 
 /// Brings the index for `file` to its current committed frontier, rebuilding
 /// it from byte zero when it is missing or stale.
-#[hotpath::measure(label = "hosts.automation.run_ledger_index.refresh")]
+#[tracing::instrument(
+    name = "hosts.automation.run_ledger_index.refresh",
+    level = "trace",
+    skip_all
+)]
 fn refresh_index(
     taken: Option<RunLedgerIndex>,
     file: &std::fs::File,

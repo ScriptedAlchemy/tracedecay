@@ -80,7 +80,7 @@ pub struct ConcreteRepositoryWriteExecutor {
 }
 
 impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
-    #[hotpath::measure(label = "rusqlite.repository.execute_write")]
+    #[tracing::instrument(name = "rusqlite.repository.execute_write", level = "trace", skip_all)]
     fn execute(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -172,7 +172,7 @@ pub struct ConcreteRepositoryReadExecutor {
 }
 
 impl ConcreteRepositoryReadExecutor {
-    #[hotpath::measure(label = "rusqlite.repository.execute_read")]
+    #[tracing::instrument(name = "rusqlite.repository.execute_read", level = "trace", skip_all)]
     pub fn execute(
         &mut self,
         snapshot: &Transaction<'_>,

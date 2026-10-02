@@ -294,7 +294,6 @@ struct ProjectionAuthorityState {
 }
 
 impl ProjectionAuthorityState {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -367,7 +366,6 @@ struct ProjectionAliasRow {
 }
 
 impl ProjectionAliasRow {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -412,9 +410,10 @@ impl ProjectionProvenanceRow {
     /// An observation/ordinal with no row is simply absent, which each caller
     /// reads as the same "projection provenance disappeared" outcome the
     /// per-row `Ok(None)` produced.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "global_db.observation_audit.batch.provenance")
+    #[tracing::instrument(
+        name = "global_db.observation_audit.batch.provenance",
+        level = "trace",
+        skip_all
     )]
     async fn load_batch(
         conn: &impl QueryExecutor,
@@ -468,7 +467,6 @@ struct ProjectionDispositionRow {
 }
 
 impl ProjectionDispositionRow {
-    #[hotpath::skip]
     async fn load(
         conn: &impl QueryExecutor,
         observation_id: &str,
@@ -509,9 +507,10 @@ impl ProjectionOutputOwnership {
     /// `COALESCE(SUM(message_created), 0)` returned for the same key. The
     /// aggregate deliberately keeps spanning every projector version, so a
     /// second projector that also claims creation is still caught.
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "global_db.observation_audit.batch.ownership")
+    #[tracing::instrument(
+        name = "global_db.observation_audit.batch.ownership",
+        level = "trace",
+        skip_all
     )]
     async fn load_batch(
         conn: &impl QueryExecutor,
@@ -1086,9 +1085,10 @@ fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, Str
 ///
 /// Derivation concurrency stays exactly what it was; only its result is now
 /// retained so the page's stored authority can be read once for all of it.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_audit.batch.derive")
+#[tracing::instrument(
+    name = "global_db.observation_audit.batch.derive",
+    level = "trace",
+    skip_all
 )]
 async fn derive_page_effects(
     conn: &impl QueryExecutor,
@@ -1110,9 +1110,10 @@ async fn derive_page_effects(
 
 /// Reads the stored authority for every output a page's derivations name, in
 /// one batched statement per authority table.
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::measure(label = "global_db.observation_audit.batch.authority")
+#[tracing::instrument(
+    name = "global_db.observation_audit.batch.authority",
+    level = "trace",
+    skip_all
 )]
 async fn resolve_output_authority<'a>(
     conn: &impl QueryExecutor,

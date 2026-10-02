@@ -594,10 +594,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
-        let serving_generation: Arc<ServingGenerationSlot> = Arc::new(hotpath::rw_lock!(
-            RwLock::new(None),
-            label = "daemon.code_index.serving_generation"
-        ));
+        let serving_generation: Arc<ServingGenerationSlot> = Arc::new(RwLock::new(None));
         let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let (
             complete_generation_requested_changed,
@@ -873,7 +870,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
                     }
-                    hotpath::future!(notified, label = "daemon.code_index.wake_wait").await;
+                    tracing::Instrument::instrument(
+                        notified,
+                        tracing::trace_span!("daemon.code_index.wake_wait"),
+                    )
+                    .await;
                 }
                 worker_owner_headroom.mark_unchanged();
                 worker_admission_headroom.mark_unchanged();
@@ -931,9 +932,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::AwaitingAdmission,
                 );
-                let Ok(_background_reconcile_admission) = hotpath::future!(
+                let Ok(_background_reconcile_admission) = tracing::Instrument::instrument(
                     Arc::clone(&worker_background_reconcile_admission).acquire_owned(),
-                    label = "daemon.code_index.admission_wait"
+                    tracing::trace_span!("daemon.code_index.admission_wait"),
                 )
                 .await
                 else {
@@ -1157,11 +1158,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // seat to unblock, so the slice stays inline and the pass
                     // keeps yielding back to the loop between slices.
                     let failed_latest = latest.clone();
-                    let build = hotpath::future!(
+                    let build = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                         }),
-                        label = "daemon.code_index.text_projection"
+                        tracing::trace_span!("daemon.code_index.text_projection"),
                     )
                     .await;
                     match build {
@@ -1255,20 +1256,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 if text_slice_incomplete {
                     if !graph_activation_enabled {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .inc(1_u64);
+                        metrics::gauge!("daemon.code_index.artifact.slice.continue_total")
+                            .increment(1.0);
                         continue;
                     }
                     if Self::incomplete_text_slice_may_continue(&worker_pending_wake) {
-                        #[cfg(feature = "hotpath")]
-                        hotpath::gauge!("daemon.code_index.artifact.slice.continue_total")
-                            .inc(1_u64);
+                        metrics::gauge!("daemon.code_index.artifact.slice.continue_total")
+                            .increment(1.0);
                         continue;
                     }
-                    #[cfg(feature = "hotpath")]
-                    hotpath::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
-                        .inc(1_u64);
+
+                    metrics::gauge!("daemon.code_index.artifact.slice.yield_to_reconcile_total")
+                        .increment(1.0);
                 }
                 let refused_retained_text_metadata = if worker_text_generation
                     .read()
@@ -1277,7 +1276,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 {
                     let text_scheduler = Arc::clone(&scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
-                    let retained_text = hotpath::future!(
+                    let retained_text = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             Self::lock_scheduler_unless_shutting_down(
                                 &text_scheduler,
@@ -1285,7 +1284,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             )
                             .map(|mut scheduler| scheduler.restore_retained_text_generation())
                         }),
-                        label = "daemon.code_index.text_restore"
+                        tracing::trace_span!("daemon.code_index.text_restore"),
                     )
                     .await;
                     if worker_shutting_down.load(Ordering::Acquire) {
@@ -1420,104 +1419,90 @@ impl CodeIndexSchedulerRegistryV1 {
                 let bind_serving_generation = Arc::clone(&worker_serving_generation);
                 let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
                 let bind_source_freshness = worker_source_freshness.clone();
-                let source_result = hotpath::future!(
-                    tokio::task::spawn_blocking(move || {
-                        let mut scheduler =
-                            Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
-                        // One arrival per attempted pass, before the branch: the
-                        // three reconcile entry points below are alternatives, so
-                        // hooking them individually would under- or double-count.
-                        #[cfg(test)]
-                        scheduler.arrive_reconcile_fault_for_test()?;
-                        // A prior pass may have built the successor and lost
-                        // only the durable write. Republish before choosing a
-                        // reconcile branch: graph-off with no text owner goes
-                        // to reconcile_now and would otherwise extract again.
-                        if let Some(outcome) =
-                            scheduler.republish_unpublished_retained_generation()?
-                        {
-                            return Ok(outcome);
-                        }
-                        // Legacy graph recovery requires a decoded complete
-                        // generation in the serving slot before a dirty-tree
-                        // rebuild. Revision 7 deliberately leaves that slot
-                        // empty: the retained manifest owner validates and
-                        // seats Grafeo below without opening partition bytes.
-                        // Graph-off and deferred passes also fall through to
-                        // retained text reconciliation.
-                        if graph_activation_enabled
-                            && !graph_activation_deferred
-                            && serving_empty
-                            && text_serving_ready
-                            && !retained_text_uses_partitioned_manifest
-                            && let Some(outcome) =
-                                scheduler.seat_retained_generation_on_empty_serving()?
-                        {
-                            return Ok(outcome);
-                        }
-                        if retained_partitioned_graph_recovery_pending
-                            && let Some(metadata) = retained_text_metadata.as_ref()
-                        {
-                            // Reserve this pass for verified-head recovery.
-                            // `Noop` here means no successor was published;
-                            // it never claims source currency. The successor
-                            // pass below captures the source state itself so
-                            // a quiet remount is not fabricated as dirty.
-                            return Ok(CodeIndexReconcileOutcomeV1::Noop(
-                                CodeIndexNoopEvidenceV1 {
-                                    snapshot_content_identity: metadata
-                                        .snapshot()
-                                        .content_identity
-                                        .clone(),
-                                    overflow_reconciled: false,
-                                },
-                            ));
-                        }
-                        let outcome = if let Some(metadata) = retained_text_metadata {
-                            match scheduler.reconcile_retained_text_generation_with(
-                                &metadata,
-                                !graph_activation_enabled,
-                            ) {
-                                Ok(Some(outcome)) => Ok(outcome),
-                                Ok(None) if graph_activation_enabled => {
-                                    scheduler.activate_or_reconcile()
-                                }
-                                Ok(None) => scheduler.reconcile_now(),
-                                Err(error) => Err(error),
+                let source_result = tokio::task::spawn_blocking(move || {
+                    let mut scheduler =
+                        Self::lock_scheduler_unless_shutting_down(&scheduler, &shutting_down)?;
+                    // One arrival per attempted pass, before the branch: the
+                    // three reconcile entry points below are alternatives, so
+                    // hooking them individually would under- or double-count.
+                    #[cfg(test)]
+                    scheduler.arrive_reconcile_fault_for_test()?;
+                    // A prior pass may have built the successor and lost
+                    // only the durable write. Republish before choosing a
+                    // reconcile branch: graph-off with no text owner goes
+                    // to reconcile_now and would otherwise extract again.
+                    if let Some(outcome) = scheduler.republish_unpublished_retained_generation()? {
+                        return Ok(outcome);
+                    }
+                    // Legacy graph recovery requires a decoded complete
+                    // generation in the serving slot before a dirty-tree
+                    // rebuild. Revision 7 deliberately leaves that slot
+                    // empty: the retained manifest owner validates and
+                    // seats Grafeo below without opening partition bytes.
+                    // Graph-off and deferred passes also fall through to
+                    // retained text reconciliation.
+                    if graph_activation_enabled
+                        && !graph_activation_deferred
+                        && serving_empty
+                        && text_serving_ready
+                        && !retained_text_uses_partitioned_manifest
+                        && let Some(outcome) =
+                            scheduler.seat_retained_generation_on_empty_serving()?
+                    {
+                        return Ok(outcome);
+                    }
+                    if retained_partitioned_graph_recovery_pending
+                        && let Some(metadata) = retained_text_metadata.as_ref()
+                    {
+                        // Reserve this pass for verified-head recovery.
+                        // `Noop` here means no successor was published;
+                        // it never claims source currency. The successor
+                        // pass below captures the source state itself so
+                        // a quiet remount is not fabricated as dirty.
+                        return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+                            snapshot_content_identity: metadata.snapshot().content_identity.clone(),
+                            overflow_reconciled: false,
+                        }));
+                    }
+                    let outcome = if let Some(metadata) = retained_text_metadata {
+                        match scheduler.reconcile_retained_text_generation_with(
+                            &metadata,
+                            !graph_activation_enabled,
+                        ) {
+                            Ok(Some(outcome)) => Ok(outcome),
+                            Ok(None) if graph_activation_enabled => {
+                                scheduler.activate_or_reconcile()
                             }
-                        } else if graph_activation_enabled {
-                            scheduler.activate_or_reconcile()
-                        } else {
-                            scheduler.reconcile_now()
-                        }?;
-                        // A seat whose publishing pass could not prove its
-                        // source (`code_index_post_projection_source_unverified`)
-                        // installs without a currency witness. The swap arm
-                        // re-proves such a seat as `Offered`, but a retained
-                        // native graph that already serves skips the graph
-                        // prepare and with it the swap, so no later pass ever
-                        // reached that arm. This unchanged pass verified
-                        // exactly the snapshot the seat was sealed from, so
-                        // bind that proof here, while this pass still holds
-                        // the scheduler: a reader that holds the scheduler to
-                        // keep a seat unproven must not see the proof land
-                        // after the pass has already let go.
-                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
-                            Self::bind_unproven_seat_to_verified_source(
-                                &bind_serving_generation,
-                                &bind_serving_source_witness,
-                                &bind_source_freshness,
-                                &evidence.snapshot_content_identity,
-                            );
+                            Ok(None) => scheduler.reconcile_now(),
+                            Err(error) => Err(error),
                         }
-                        Ok(outcome)
-                    }),
-                    // Sealing moved inside this blocking reconcile pipeline.
-                    // Keep the outer future labeled so default reports retain
-                    // the end-to-end seal path even when short synchronous
-                    // inner spans fall below the functions-timing row limit.
-                    label = "daemon.code_index.reconcile_or_seal"
-                )
+                    } else if graph_activation_enabled {
+                        scheduler.activate_or_reconcile()
+                    } else {
+                        scheduler.reconcile_now()
+                    }?;
+                    // A seat whose publishing pass could not prove its
+                    // source (`code_index_post_projection_source_unverified`)
+                    // installs without a currency witness. The swap arm
+                    // re-proves such a seat as `Offered`, but a retained
+                    // native graph that already serves skips the graph
+                    // prepare and with it the swap, so no later pass ever
+                    // reached that arm. This unchanged pass verified
+                    // exactly the snapshot the seat was sealed from, so
+                    // bind that proof here, while this pass still holds
+                    // the scheduler: a reader that holds the scheduler to
+                    // keep a seat unproven must not see the proof land
+                    // after the pass has already let go.
+                    if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
+                        Self::bind_unproven_seat_to_verified_source(
+                            &bind_serving_generation,
+                            &bind_serving_source_witness,
+                            &bind_source_freshness,
+                            &evidence.snapshot_content_identity,
+                        );
+                    }
+                    Ok(outcome)
+                })
                 .await;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
@@ -2290,8 +2275,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         #[cfg(test)]
                         let after_decode_gate =
                             Self::enter_graph_decode_gate(&worker_project_root).await;
-                        let prepared = hotpath::future!(
-                            tokio::task::spawn_blocking(move || {
+                        let prepared = tracing::Instrument::instrument(tokio::task::spawn_blocking(move || {
                                 // A graph build the memory watermark stopped
                                 // parks exactly like a decode that does not fit.
                                 if let Some(detail) = graph_publish_refusal {
@@ -2404,9 +2388,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 replay_binding
                                     .transpose()
                                     .map(|binding| (latest, binding, roster_refusal_rebuild, None))
-                            }),
-                            label = "daemon.code_index.graph_prepare"
-                        )
+                            }), tracing::trace_span!("daemon.code_index.graph_prepare"))
                         .await;
                         #[cfg(test)]
                         Self::pass_worker_step_gate(after_decode_gate).await;
@@ -2624,12 +2606,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     "graph activation failed retryably; the sealed generation \
                                      still seats and the next pass retries native graph"
                                 );
-                                hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
-                                    .inc(1_u64);
-                                hotpath::gauge!(
+                                metrics::gauge!("daemon.code_index.graph_seat.retry_total")
+                                    .increment(1.0);
+                                metrics::gauge!(
                                     "daemon.code_index.graph_seat.retry_backoff_micros"
                                 )
-                                .set(retry_delay.as_micros() as u64);
+                                .set((retry_delay.as_micros() as u64) as f64);
                                 seat_retry_backoff = seat_retry_backoff
                                     .saturating_mul(2)
                                     .min(ACTIVATION_RETRY_BACKOFF_CEILING);
@@ -2885,7 +2867,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let swap_passes = Arc::clone(&worker_reconcile_in_progress);
-                    let serving_swap = hotpath::future!(
+                    let serving_swap = tracing::Instrument::instrument(
                         tokio::task::spawn_blocking(move || {
                             let (_swap_pass, scheduler) = Self::lock_scheduler_for_graph_step(
                                 &scheduler,
@@ -3011,7 +2993,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                             Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
-                        label = "daemon.code_index.serving_swap"
+                        tracing::trace_span!("daemon.code_index.serving_swap"),
                     )
                     .await;
                     match serving_swap {
@@ -3515,9 +3497,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             worker_loop,
-            label = "daemon.code_index.scheduler_worker"
+            tracing::trace_span!("daemon.code_index.scheduler_worker"),
         ));
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
         let residency_registration = Arc::clone(&residency).register(

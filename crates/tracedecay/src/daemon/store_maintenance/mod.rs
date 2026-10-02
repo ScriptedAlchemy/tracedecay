@@ -15,7 +15,7 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the maintenance owner keeps the GC cadence
 /// eligible for a retry.
-#[hotpath::measure(label = "daemon.git.maintenance.branch_gc", future = true)]
+#[tracing::instrument(name = "daemon.git.maintenance.branch_gc", level = "trace", skip_all)]
 pub(super) async fn run_gc(
     administration: &StoreAdministration,
     schedulers: &CodeIndexSchedulerRegistryV1,

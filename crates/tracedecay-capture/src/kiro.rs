@@ -28,12 +28,12 @@ pub fn snapshot_native_payload(message: KiroSnapshotMessage<'_>) -> Value {
     // Kiro snapshots come from a database, not a byte-ranged file; the message
     // text is the corpus-scale payload, so its length is the bytes gauge.
     // Composition is infallible, so entries are the snapshot span's call count.
-    hotpath::gauge!("capture.kiro.snapshot_text_bytes").inc(message.text.len());
+    metrics::gauge!("capture.kiro.snapshot_text_bytes").increment((message.text.len()) as f64);
     snapshot_kiro_record(message)
 }
 
 /// One snapshot-message composition, not a per-field walk.
-#[hotpath::measure(label = "capture.kiro.snapshot")]
+#[tracing::instrument(name = "capture.kiro.snapshot", level = "trace", skip_all)]
 fn snapshot_kiro_record(message: KiroSnapshotMessage<'_>) -> Value {
     let mut fields = Map::new();
     fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));

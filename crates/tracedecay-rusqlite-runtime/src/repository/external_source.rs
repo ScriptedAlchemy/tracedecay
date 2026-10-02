@@ -185,7 +185,11 @@ CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1
 pub struct ExternalSourceExecutor;
 
 impl ExternalSourceExecutor {
-    #[hotpath::measure(label = "rusqlite.external_source.execute_write")]
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_write",
+        level = "trace",
+        skip_all
+    )]
     pub fn execute_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -215,7 +219,11 @@ impl ExternalSourceExecutor {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.external_source.execute_authority_publication")]
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_authority_publication",
+        level = "trace",
+        skip_all
+    )]
     pub fn execute_authority_publication(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -250,7 +258,11 @@ impl ExternalSourceExecutor {
         persist_authority_publication(savepoint, &revised, &receipt)
     }
 
-    #[hotpath::measure(label = "rusqlite.external_source.execute_projection_write")]
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_projection_write",
+        level = "trace",
+        skip_all
+    )]
     pub fn execute_projection_write(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -290,7 +302,11 @@ impl ExternalSourceExecutor {
         }
     }
 
-    #[hotpath::measure(label = "rusqlite.external_source.execute_acquisition_cas")]
+    #[tracing::instrument(
+        name = "rusqlite.external_source.execute_acquisition_cas",
+        level = "trace",
+        skip_all
+    )]
     pub fn execute_acquisition_state_cas(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -453,7 +469,11 @@ fn load_next_ready_acquisition(
     Ok(state)
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_state")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_state",
+    level = "trace",
+    skip_all
+)]
 fn load_state(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
@@ -521,7 +541,11 @@ fn load_state(
     Ok(Some(state))
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_definition")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_definition",
+    level = "trace",
+    skip_all
+)]
 fn load_definition(
     connection: &rusqlite::Connection,
     source_id: &str,
@@ -537,7 +561,11 @@ fn load_definition(
     decode(encoded)
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_binding")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_binding",
+    level = "trace",
+    skip_all
+)]
 fn load_binding(
     connection: &rusqlite::Connection,
     binding_id: &str,
@@ -559,7 +587,11 @@ enum CurrentObjects {
     Projected,
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_current_mutations")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.load_current_mutations",
+    level = "trace",
+    skip_all
+)]
 fn load_current_mutations(
     connection: &rusqlite::Connection,
     table: CurrentObjects,
@@ -624,7 +656,11 @@ fn load_current_mutations(
 
 const ROOT_PROJECTION_FRONTIER: &str = "root";
 
-#[hotpath::measure(label = "rusqlite.external_source.persist_commit")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.persist_commit",
+    level = "trace",
+    skip_all
+)]
 fn persist_source_commit(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -817,7 +853,11 @@ fn persist_source_commit(
 /// lookup, so a commit's cost does not grow with the pending backlog: the
 /// receipts a backlog still needs were examined when they became eligible and
 /// need no rescan now.
-#[hotpath::measure(label = "rusqlite.external_source.retire_superseded_history")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.retire_superseded_history",
+    level = "trace",
+    skip_all
+)]
 fn retire_superseded_history(
     savepoint: &Savepoint<'_>,
     binding_id: &str,
@@ -894,7 +934,11 @@ fn retire_superseded_history(
     Ok(())
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.persist_projection")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.persist_projection",
+    level = "trace",
+    skip_all
+)]
 fn persist_projection(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -1052,7 +1096,11 @@ fn persist_projection(
     )
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.persist_authority")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.persist_authority",
+    level = "trace",
+    skip_all
+)]
 fn persist_authority_publication(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
@@ -1229,7 +1277,11 @@ const REVISION_COLLISION_PROBE_CHUNK: usize = 100;
 /// `(binding_id, native_object_digest, revision_digest)` index in batched
 /// row-value `IN` chunks. Returns each mutation's encoding keyed by mutation
 /// digest so the persist path reuses it instead of re-serializing.
-#[hotpath::measure(label = "rusqlite.external_source.validate_revision_collisions")]
+#[tracing::instrument(
+    name = "rusqlite.external_source.validate_revision_collisions",
+    level = "trace",
+    skip_all
+)]
 fn validate_revision_collisions(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,

@@ -305,7 +305,7 @@ pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogE
     }
 }
 
-#[hotpath::measure(label = "mcp.catalog.assemble")]
+#[tracing::instrument(name = "mcp.catalog.assemble", level = "trace", skip_all)]
 fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     #[cfg(test)]
     MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

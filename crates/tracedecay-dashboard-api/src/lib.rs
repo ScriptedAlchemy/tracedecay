@@ -12,10 +12,6 @@
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
 
-#[cfg(all(test, feature = "hotpath-alloc"))]
-#[global_allocator]
-static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
-
 use tracedecay_application as application;
 pub use tracedecay_application::git_query;
 pub use tracedecay_contracts::request_identity;
@@ -1406,27 +1402,13 @@ pub fn with_dashboard_http_admission(
     addr: std::net::SocketAddr,
     access: DashboardAccessToken,
 ) -> Router {
-    let app = app.layer(middleware::from_fn_with_state(
+    app.layer(middleware::from_fn_with_state(
         DashboardHttpAdmission {
             port: addr.port(),
             access,
         },
         admit_dashboard_http_request,
-    ));
-    with_hotpath_server_layer(app)
-}
-
-/// Attach Hotpath only after the complete dashboard router and admission
-/// middleware are assembled. Nested/leaf routers stay unlayered so merged
-/// routes emit exactly one server event.
-#[cfg(feature = "hotpath")]
-fn with_hotpath_server_layer(router: Router) -> Router {
-    router.layer(hotpath::AxumLayer::new())
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn with_hotpath_server_layer(router: Router) -> Router {
-    router
+    ))
 }
 
 async fn admit_dashboard_http_request(
@@ -1435,9 +1417,10 @@ async fn admit_dashboard_http_request(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let admitted = hotpath::measure_block!("dashboard_api.http.admission", {
+    let admitted = {
+        let _span = tracing::trace_span!("dashboard_api.http.admission").entered();
         admit_dashboard_http_control(admission, headers, request)
-    });
+    };
     let (request, mut cancellation_guard) = match admitted {
         Ok(admitted) => admitted,
         Err(response) => return *response,
@@ -2220,7 +2203,7 @@ async fn forward_project_request(
     state: DashboardState,
     req: Request<Body>,
 ) -> Response {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         async move {
             let (mut parts, body) = req.into_parts();
             let request_control = parts
@@ -2244,14 +2227,14 @@ async fn forward_project_request(
                     .into_response(),
             }
         },
-        label = "dashboard_api.http.forward_project"
+        tracing::trace_span!("dashboard_api.http.forward_project"),
     )
     .await
 }
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
-#[hotpath::measure(label = "dashboard_api.http.capabilities", future = true)]
+#[tracing::instrument(name = "dashboard_api.http.capabilities", level = "trace", skip_all)]
 async fn capabilities(
     State(state): State<DashboardState>,
     RequestControl(control): RequestControl,
@@ -3009,19 +2992,6 @@ mod authority_tests {
         const COLD_RUNS: usize = 5;
         const WARM_RUNS: usize = 20;
 
-        #[cfg(feature = "hotpath-alloc")]
-        let allocation_report_dir = tempfile::tempdir().expect("allocation report directory");
-        #[cfg(feature = "hotpath-alloc")]
-        let allocation_report_path = allocation_report_dir.path().join("allocations.json");
-        #[cfg(feature = "hotpath-alloc")]
-        let allocation_guard =
-            hotpath::HotpathGuardBuilder::new("dashboard-derived-cache-measurement")
-                .report("functions-alloc")
-                .format(hotpath::Format::Json)
-                .output_path(&allocation_report_path)
-                .functions_limit(0)
-                .build();
-
         println!(
             "caps: projection={} similarity={}; cold_runs={} warm_runs={}",
             memory_service::projection_point_cap(),
@@ -3053,14 +3023,14 @@ mod authority_tests {
             let mut similarity_cold_heartbeat = None;
             for (index, fixture) in fixtures.iter().enumerate() {
                 let started = Instant::now();
-                let projection = hotpath::future!(
+                let projection = tracing::Instrument::instrument(
                     memory_service::projection_payload(
                         &fixture.state,
                         "",
                         memory_service::projection_point_cap(),
                         &control,
                     ),
-                    label = "dashboard.measure.projection_cold"
+                    tracing::trace_span!("dashboard.measure.projection_cold"),
                 )
                 .await;
                 projection_cold.push(started.elapsed());
@@ -3075,17 +3045,18 @@ mod authority_tests {
 
                 let started = Instant::now();
                 let (similarity, heartbeat) = if index == 0 {
-                    let (payload, heartbeat) = with_tokio_heartbeat(hotpath::future!(
-                        memory_service::similarity_payload(&fixture.state, 0.5, 100, &control,),
-                        label = "dashboard.measure.similarity_cold"
-                    ))
-                    .await;
+                    let (payload, heartbeat) =
+                        with_tokio_heartbeat(tracing::Instrument::instrument(
+                            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control),
+                            tracing::trace_span!("dashboard.measure.similarity_cold"),
+                        ))
+                        .await;
                     (payload, Some(heartbeat))
                 } else {
                     (
-                        hotpath::future!(
-                            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control,),
-                            label = "dashboard.measure.similarity_cold"
+                        tracing::Instrument::instrument(
+                            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control),
+                            tracing::trace_span!("dashboard.measure.similarity_cold"),
                         )
                         .await,
                         None,
@@ -3110,14 +3081,14 @@ mod authority_tests {
             let mut projection_warm_rows = Vec::with_capacity(WARM_RUNS);
             for _ in 0..WARM_RUNS {
                 let started = Instant::now();
-                let projection = hotpath::future!(
+                let projection = tracing::Instrument::instrument(
                     memory_service::projection_payload(
                         &warm_fixture.state,
                         "",
                         memory_service::projection_point_cap(),
                         &control,
                     ),
-                    label = "dashboard.measure.projection_warm"
+                    tracing::trace_span!("dashboard.measure.projection_warm"),
                 )
                 .await;
                 projection_warm.push(started.elapsed());
@@ -3137,14 +3108,14 @@ mod authority_tests {
                     let mut rows = Vec::with_capacity(WARM_RUNS);
                     for _ in 0..WARM_RUNS {
                         let started = Instant::now();
-                        let similarity = hotpath::future!(
+                        let similarity = tracing::Instrument::instrument(
                             memory_service::similarity_payload(
                                 &warm_fixture.state,
                                 0.5,
                                 100,
                                 &control,
                             ),
-                            label = "dashboard.measure.similarity_warm"
+                            tracing::trace_span!("dashboard.measure.similarity_warm"),
                         )
                         .await;
                         timings.push(started.elapsed());
@@ -3195,36 +3166,6 @@ mod authority_tests {
 
         println!(
             "10k/50k stores omitted: canonical fixture seeding commits each fact through the production write authority; both dashboard vector reads are already capped at 2000 rows."
-        );
-
-        #[cfg(feature = "hotpath-alloc")]
-        {
-            drop(allocation_guard);
-            let report: hotpath::json::JsonReport = serde_json::from_slice(
-                &std::fs::read(&allocation_report_path).expect("read allocation report"),
-            )
-            .expect("parse allocation report");
-            let allocations = report.functions_alloc.expect("function allocation report");
-            println!("| allocation scope | calls | average bytes | total bytes |");
-            println!("|---|---:|---:|---:|");
-            for label in [
-                "dashboard_api.memory.projection_compute",
-                "dashboard_api.memory.similarity_compute",
-            ] {
-                let entry = allocations
-                    .data
-                    .iter()
-                    .find(|entry| entry.name == label)
-                    .unwrap_or_else(|| panic!("missing allocation entry for {label}"));
-                println!(
-                    "| {label} | {} | {} | {} |",
-                    entry.calls, entry.avg, entry.total
-                );
-            }
-        }
-        #[cfg(not(feature = "hotpath-alloc"))]
-        println!(
-            "allocations: rerun this ignored test with --features hotpath-alloc to activate the workspace counting allocator"
         );
     }
 

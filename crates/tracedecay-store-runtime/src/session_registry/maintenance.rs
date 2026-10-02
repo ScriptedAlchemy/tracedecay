@@ -149,7 +149,6 @@ impl ForegroundProjectOpenState {
         })
     }
 
-    #[hotpath::skip]
     async fn wait_until_settled(&self) {
         loop {
             let settled = self.settled.notified();
@@ -390,9 +389,9 @@ impl RegisteredSchemaConvergenceMaintenance {
             drop(target);
             lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
-        let task = tokio::spawn(hotpath::future!(
+        let task = tokio::spawn(tracing::Instrument::instrument(
             work,
-            label = "daemon.session_registry.schema_converge"
+            tracing::trace_span!("daemon.session_registry.schema_converge"),
         ));
         tasks.insert(shard_id, Arc::new(RetainedHookTaskJoin::new(task)));
     }
@@ -402,7 +401,6 @@ impl RegisteredSchemaConvergenceMaintenance {
     /// physical retirement: reader-pool quiescence includes outstanding pool
     /// references, and writer shutdown joins its actor before replacement.
     /// Cancellation of this join leaves the handle available for the next retry.
-    #[hotpath::skip]
     pub(super) async fn retire(
         &self,
         shard_id: &StoreShardIdV1,
@@ -450,7 +448,6 @@ impl RegisteredSchemaConvergenceMaintenance {
         }
     }
 
-    #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.begin_shutdown();
         let tasks = self
@@ -543,7 +540,11 @@ impl RegisteredSchemaConvergenceTestGate {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    #[hotpath::measure(label = "daemon.session_registry.attach_registered", future = true)]
+    #[tracing::instrument(
+        name = "daemon.session_registry.attach_registered",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn attach_registered(
         &self,
         runtime: StoreRuntimeClientLease,
@@ -648,7 +649,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         stores
     }
 
-    // Erase the inner state machine before Hotpath wraps it by value. Boxing
+    // Erase the inner state machine before instrumentation wraps it by value. Boxing
     // only the caller leaves large temporaries in the measured poll frame.
     fn attach_registered_inner(
         &self,

@@ -39,7 +39,11 @@ fn observation_envelope(
         .map_err(|error| storage(PERSIST_OPERATION, error))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.projection_batch")]
+#[tracing::instrument(
+    name = "session_temporal.persist.projection_batch",
+    level = "trace",
+    skip_all
+)]
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -197,7 +201,11 @@ async fn canonical_occurrence_projection(
     })
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.occurrences")]
+#[tracing::instrument(
+    name = "session_temporal.persist.occurrences",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn persist_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -557,18 +565,16 @@ pub(super) async fn canonical_occurrence(
 
 #[inline(always)]
 fn record_occurrence_persistence_work(work: OccurrencePersistenceWork) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("session_temporal.persistence.source_projections")
-            .inc(work.source_projections);
-        hotpath::gauge!("session_temporal.persistence.envelope_parses").inc(work.envelope_parses);
-        hotpath::gauge!("session_temporal.persistence.projection_output_index_rows")
-            .inc(work.indexed_outputs);
-        hotpath::gauge!("session_temporal.persistence.projection_output_lookups")
-            .inc(work.output_lookups);
+        metrics::gauge!("session_temporal.persistence.source_projections")
+            .increment((work.source_projections) as f64);
+        metrics::gauge!("session_temporal.persistence.envelope_parses")
+            .increment((work.envelope_parses) as f64);
+        metrics::gauge!("session_temporal.persistence.projection_output_index_rows")
+            .increment((work.indexed_outputs) as f64);
+        metrics::gauge!("session_temporal.persistence.projection_output_lookups")
+            .increment((work.output_lookups) as f64);
     }
-    #[cfg(not(feature = "hotpath"))]
-    let _ = work;
 }
 
 /// Versions a thread whose earliest grouping or creation time moved. The
@@ -780,7 +786,11 @@ pub(super) async fn require_exact_occurrence(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.projection.validate_copy")]
+#[tracing::instrument(
+    name = "session_temporal.projection.validate_copy",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn validate_copy(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -995,7 +1005,7 @@ pub(super) async fn validate_copy_proof(
     Ok(())
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.persist.assertion")]
+#[tracing::instrument(name = "session_temporal.persist.assertion", level = "trace", skip_all)]
 pub(super) async fn persist_assertion(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
@@ -1285,9 +1295,10 @@ const CURRENT_ENTITY_VERSION_INSERT: &str = "
         current_occurrence_id = excluded.current_occurrence_id,
         coverage_json = excluded.coverage_json";
 
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.rebuild_occurrences"
+#[tracing::instrument(
+    name = "session_temporal.projection.rebuild_occurrences",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn rebuild_current_occurrences(
     conn: &impl crate::handle::SessionTemporalExec,
@@ -1349,9 +1360,10 @@ pub(super) async fn rebuild_current_occurrences(
 /// a candidate that added assertions can change them. Their direct edges
 /// compare two assertions' own fields, so the closure over the visible
 /// assertions contains every edge the base already holds.
-#[hotpath::measure(
-    future = true,
-    label = "session_temporal.projection.rebuild_assertions"
+#[tracing::instrument(
+    name = "session_temporal.projection.rebuild_assertions",
+    level = "trace",
+    skip_all
 )]
 pub(super) async fn extend_assertion_derivatives(
     conn: &impl crate::handle::SessionTemporalExec,

@@ -244,7 +244,7 @@ pub fn verified_embedded_host_component_set(
     )
 }
 
-#[hotpath::measure(label = "host_bundle_registry_component_set")]
+#[tracing::instrument(name = "host_bundle_registry_component_set", level = "trace", skip_all)]
 pub fn verified_embedded_host_component_set_with_tracedecay_bin(
     host: HostKindV1,
     requested_components: &[HostComponentV1],
@@ -319,7 +319,7 @@ pub fn verified_embedded_host_bundle(
     )
 }
 
-#[hotpath::measure(label = "host_bundle_registry_verify")]
+#[tracing::instrument(name = "host_bundle_registry_verify", level = "trace", skip_all)]
 fn verified_embedded_host_bundle_with_tracedecay_bin(
     host: HostKindV1,
     component: HostComponentV1,

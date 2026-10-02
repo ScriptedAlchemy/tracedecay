@@ -1,4 +1,3 @@
-#[cfg(any(test, feature = "hotpath"))]
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -507,58 +506,26 @@ fn unchanged_generation_cache_key(
     })
 }
 
-#[cfg(any(test, feature = "hotpath"))]
 struct ScanPayloadMeter(Cell<u64>);
-
-#[cfg(not(any(test, feature = "hotpath")))]
-struct ScanPayloadMeter;
 
 impl ScanPayloadMeter {
     fn new() -> Self {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            Self(Cell::new(0))
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            Self
-        }
+        Self(Cell::new(0))
     }
 
     fn get(&self) -> u64 {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            self.0.get()
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            0
-        }
+        self.0.get()
     }
 }
 
 struct MeasuredJsonlFile<'a> {
     inner: std::fs::File,
-    #[cfg(any(test, feature = "hotpath"))]
     meter: &'a ScanPayloadMeter,
-    #[cfg(not(any(test, feature = "hotpath")))]
-    meter: std::marker::PhantomData<&'a ScanPayloadMeter>,
 }
 
 impl<'a> MeasuredJsonlFile<'a> {
     fn new(inner: std::fs::File, meter: &'a ScanPayloadMeter) -> Self {
-        #[cfg(any(test, feature = "hotpath"))]
-        {
-            Self { inner, meter }
-        }
-        #[cfg(not(any(test, feature = "hotpath")))]
-        {
-            let _ = meter;
-            Self {
-                inner,
-                meter: std::marker::PhantomData,
-            }
-        }
+        Self { inner, meter }
     }
 
     fn inner(&self) -> &std::fs::File {
@@ -573,7 +540,7 @@ impl<'a> MeasuredJsonlFile<'a> {
 impl Read for MeasuredJsonlFile<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
-        #[cfg(any(test, feature = "hotpath"))]
+
         self.meter
             .0
             .set(self.meter.0.get().saturating_add(read as u64));

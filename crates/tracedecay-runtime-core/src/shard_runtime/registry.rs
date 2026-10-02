@@ -39,7 +39,7 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
 use crate::cancellation::CancellationToken;
-use crate::profiled_lock::{ProfiledMutex, ProfiledMutexGuard};
+use std::sync::{Mutex as ProfiledMutex, MutexGuard as ProfiledMutexGuard};
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -98,7 +98,6 @@ impl StoreRuntimeKey {
         &self.shard_id
     }
 
-    #[hotpath::skip]
     pub const fn incarnation(&self) -> StoreIncarnationV1 {
         self.incarnation
     }
@@ -921,7 +920,6 @@ impl StoreRuntimeClientLease {
         Ok(counts)
     }
 
-    #[hotpath::skip]
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
@@ -956,7 +954,6 @@ impl StoreRuntimeClientLease {
         Ok(())
     }
 
-    #[hotpath::skip]
     pub async fn run_checkpoint(
         &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
@@ -1069,7 +1066,6 @@ impl StoreRuntimeClientLease {
             })
     }
 
-    #[hotpath::skip]
     pub async fn dispatch_submit_authorized(
         &self,
         request: tracedecay_store::RuntimeSubmitRequestV1,
@@ -1477,10 +1473,7 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config: StoreRuntimeRegistryConfig::default(),
-                state: hotpath::mutex!(
-                    Mutex::new(RegistryState::default()),
-                    label = "runtime_core.shard_runtime.registry_state"
-                ),
+                state: Mutex::new(RegistryState::default()),
                 open_cancellation: CancellationToken::new(),
             }),
         }
@@ -1509,10 +1502,7 @@ impl StoreRuntimeRegistry {
                 resolver,
                 publisher,
                 config,
-                state: hotpath::mutex!(
-                    Mutex::new(RegistryState::default()),
-                    label = "runtime_core.shard_runtime.registry_state"
-                ),
+                state: Mutex::new(RegistryState::default()),
                 open_cancellation: CancellationToken::new(),
             }),
         })

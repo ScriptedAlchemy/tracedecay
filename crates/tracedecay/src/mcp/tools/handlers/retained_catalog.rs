@@ -76,7 +76,7 @@ fn resolve_retained_mcp_binding(
     })
 }
 
-#[hotpath::measure(label = "mcp.retained.binding_resolve")]
+#[tracing::instrument(name = "mcp.retained.binding_resolve", level = "trace", skip_all)]
 pub(super) fn retained_mcp_binding(
     operation: RetainedSurfaceOperation,
 ) -> Result<&'static RetainedMcpBindingContract> {

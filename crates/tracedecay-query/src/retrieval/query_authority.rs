@@ -383,7 +383,7 @@ impl QueryAuthorityV1 {
     /// fallback subpayload together. `anchor_tiers` names the caller anchors
     /// each lexical site carries; see
     /// [`CompositionKernel::compose_with_anchor_tiers`].
-    #[hotpath::measure(label = "query.authority.compose")]
+    #[tracing::instrument(name = "query.authority.compose", level = "trace", skip_all)]
     pub fn compose(
         &self,
         request: &RetrievalRequest,
@@ -416,7 +416,7 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
+        metrics::gauge!("query.fusion.results").set((page.ranked_candidates.len()) as f64);
         for (ordinal, candidate) in page.ranked_candidates.iter_mut().enumerate() {
             candidate.final_ordinal = ordinal as u32;
         }
@@ -445,7 +445,7 @@ impl QueryAuthorityV1 {
     /// Compose and page every canonical retrieval lane under the accepted
     /// immutable profile. Candidate payloads remain unhydrated; the returned
     /// page is an authenticated slice of the frozen compact candidate set.
-    #[hotpath::measure(label = "query.authority.compose_federated")]
+    #[tracing::instrument(name = "query.authority.compose_federated", level = "trace", skip_all)]
     pub fn compose_federated(
         &self,
         request: &RetrievalRequest,
@@ -475,7 +475,7 @@ impl QueryAuthorityV1 {
             page_size,
             cursor,
         )?;
-        hotpath::gauge!("query.fusion.results").set(page.ranked_candidates.len());
+        metrics::gauge!("query.fusion.results").set((page.ranked_candidates.len()) as f64);
         Ok(AuthorizedFederatedRetrievalV1 {
             query_digest,
             composition,

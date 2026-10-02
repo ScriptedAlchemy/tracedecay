@@ -276,7 +276,11 @@ impl CodeIndexActivationV1 {
     /// init`, `tracedecay sync`, `tracedecay_admin_sync`) skips exactly that
     /// question and nothing else: route liveness, the indexing identity check
     /// inside the mount, and the activation state machine all still apply.
-    #[hotpath::measure(label = "daemon.code_index.activation.activate")]
+    #[tracing::instrument(
+        name = "daemon.code_index.activation.activate",
+        level = "trace",
+        skip_all
+    )]
     fn activate_with_demand(&self, demand: ActivationDemandV1) -> bool {
         if (demand == ActivationDemandV1::Automatic
             && self.automatic_admission != CodeIndexAutomaticAdmissionV1::Admitted)
@@ -294,7 +298,7 @@ impl CodeIndexActivationV1 {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                hotpath::gauge!("daemon.code_index.generation_state")
+                metrics::gauge!("daemon.code_index.generation_state")
                     .set(f64::from(ACTIVATION_MOUNTING));
             }
             Err(ACTIVATION_MOUNTING | ACTIVATION_MOUNTED) => return true,
@@ -304,7 +308,7 @@ impl CodeIndexActivationV1 {
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
-            hotpath::gauge!("daemon.code_index.generation_state").set(f64::from(ACTIVATION_IDLE));
+            metrics::gauge!("daemon.code_index.generation_state").set(f64::from(ACTIVATION_IDLE));
             return false;
         };
         let project_root = self.project_root.clone();
@@ -315,21 +319,21 @@ impl CodeIndexActivationV1 {
         let mount = Arc::clone(&self.mount);
         let mount_failed = self.mount_failed.clone();
         let hint_sink = Arc::clone(&self.hint_sink);
-        runtime.spawn(hotpath::future!(
+        runtime.spawn(tracing::Instrument::instrument(
             async move {
                 let route_is_live =
                     || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
+                    metrics::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
                 let mounted = mount().await;
                 if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
+                    metrics::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
                     // The retained failure publishes only once the attempt
                     // has fully settled: a waiter that reads the flag while
@@ -349,7 +353,7 @@ impl CodeIndexActivationV1 {
                 if !route_is_live() || !Self::identity_is_current(&project_root, &expected_identity)
                 {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
+                    metrics::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_IDLE));
                     return;
                 }
@@ -358,7 +362,7 @@ impl CodeIndexActivationV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.store(ACTIVATION_MOUNTED, Ordering::Release);
-                    hotpath::gauge!("daemon.code_index.generation_state")
+                    metrics::gauge!("daemon.code_index.generation_state")
                         .set(f64::from(ACTIVATION_MOUNTED));
                     pending.take()
                 };
@@ -372,7 +376,7 @@ impl CodeIndexActivationV1 {
                     "demand-driven code-index activation mounted"
                 );
             },
-            label = "daemon.code_index.activation.mount"
+            tracing::trace_span!("daemon.code_index.activation.mount"),
         ));
         true
     }
@@ -443,7 +447,7 @@ impl CodeIndexActivationV1 {
     /// check, and the choice between the mounted scheduler and the bounded
     /// pre-mount queue all live in this one place, so no layer above can
     /// rebuild a reason the front door did not mint.
-    #[hotpath::measure(label = "daemon.code_index.activation.admit", future = true)]
+    #[tracing::instrument(name = "daemon.code_index.activation.admit", level = "trace", skip_all)]
     pub async fn admit(
         &self,
         project_root: &Path,

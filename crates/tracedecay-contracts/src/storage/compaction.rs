@@ -131,7 +131,6 @@ pub enum CompactionDecisionV1 {
 
 impl CompactionDecisionV1 {
     #[must_use]
-    #[hotpath::skip]
     pub const fn is_scheduled(&self) -> bool {
         matches!(self, Self::ScheduleIncrementalVacuum { .. })
     }
@@ -139,7 +138,6 @@ impl CompactionDecisionV1 {
     /// The placement, if scheduled. Always the deferred background lane by
     /// construction, foreground placement is unrepresentable.
     #[must_use]
-    #[hotpath::skip]
     pub const fn placement(&self) -> Option<CompactionPlacementV1> {
         match self {
             Self::ScheduleIncrementalVacuum { placement, .. } => Some(*placement),

@@ -1,4 +1,4 @@
-//! File-operation Hotpath instrumentation for language parse and extract.
+//! File-operation instrumentation for language parse and extract.
 //!
 //! Spans stay at one file per measurement. Individual AST nodes are never
 //! timed. Static counters use a closed family vocabulary and byte-size buckets
@@ -14,7 +14,7 @@ use crate::extraction_artifact::ExtractionArtifactV1;
 use crate::incremental::ParseReuse;
 use crate::parsed_extraction::{ParsedExtractionArtifactV1, ParsedExtractionResetReason};
 use crate::types::ExtractionResult;
-#[cfg(feature = "hotpath")]
+
 use std::time::Instant;
 use tree_sitter::Node as TreeSitterNode;
 
@@ -54,7 +54,6 @@ impl ExtractOutputCounts {
 
 /// Closed language-family label. Accepts extractor display names and the
 /// lowercase / grammar-key aliases retained parse already uses.
-#[cfg(any(feature = "hotpath", test))]
 pub(crate) fn language_family(language: &str) -> &'static str {
     match language {
         "C" | "c" | "C++" | "cpp" | "c++" | "Metal" | "metal" | "Objective-C" | "objc"
@@ -82,8 +81,7 @@ pub(crate) fn language_family(language: &str) -> &'static str {
     }
 }
 
-/// Bounded source-size label. Exact byte length is never a Hotpath key.
-#[cfg(any(feature = "hotpath", test))]
+/// Bounded source-size label. Exact byte length is never a metric key.
 pub(crate) fn file_byte_bucket(bytes: usize) -> &'static str {
     const KIB: usize = 1024;
     const MIB: usize = 1024 * 1024;
@@ -102,14 +100,13 @@ pub(crate) fn file_byte_bucket(bytes: usize) -> &'static str {
 /// Count one file operation (`parse` or `traverse`) under the closed family
 /// and byte-bucket vocabularies. Both labels come from bounded tables, so the
 /// derived gauge names cannot grow with path, dialect, or exact file size.
-#[cfg(feature = "hotpath")]
 fn record_file_dims(operation: &str, language: &str, source_bytes: usize) {
-    hotpath::gauge!(format!("code_extraction.{operation}_calls")).inc(1.0);
-    hotpath::gauge!(format!("code_extraction.{operation}_bytes")).inc(source_bytes as f64);
+    metrics::gauge!(format!("code_extraction.{operation}_calls")).increment(1.0);
+    metrics::gauge!(format!("code_extraction.{operation}_bytes")).increment(source_bytes as f64);
     let family = language_family(language);
-    hotpath::gauge!(format!("code_extraction.{operation}_calls.{family}")).inc(1.0);
+    metrics::gauge!(format!("code_extraction.{operation}_calls.{family}")).increment(1.0);
     let bucket = file_byte_bucket(source_bytes);
-    hotpath::gauge!(format!("code_extraction.{operation}_calls.{bucket}")).inc(1.0);
+    metrics::gauge!(format!("code_extraction.{operation}_calls.{bucket}")).increment(1.0);
 }
 
 /// Accumulate one file operation's inclusive time into the closed family
@@ -117,10 +114,9 @@ fn record_file_dims(operation: &str, language: &str, source_bytes: usize) {
 /// not wall time; the span totals remain the timing authority. On the batch
 /// traverse path this includes the nested parse, mirroring the inclusive
 /// `traverse_file` span; on the retained path it is pure walk.
-#[cfg(feature = "hotpath")]
 fn record_family_nanos(operation: &str, language: &str, nanos: f64) {
     let family = language_family(language);
-    hotpath::gauge!(format!("code_extraction.{operation}_nanos.{family}")).inc(nanos);
+    metrics::gauge!(format!("code_extraction.{operation}_nanos.{family}")).increment(nanos);
 }
 
 /// Closed per-file parse outcome recorded by [`measure_parse_file`].
@@ -130,7 +126,7 @@ pub(crate) enum ParseFileOutcome {
     /// grammar errors, which force downstream full re-extraction.
     // Feature-off, classification closures are compiled but never invoked,
     // so only the feature-on recorder reads these fields.
-    #[cfg_attr(not(feature = "hotpath"), allow(dead_code))]
+    #[allow(dead_code)]
     Parsed {
         root_children: usize,
         has_syntax_errors: bool,
@@ -162,37 +158,35 @@ pub(crate) fn measure_parse_file<T>(
     f: impl FnOnce() -> T,
     outcome: impl FnOnce(&T) -> ParseFileOutcome,
 ) -> T {
-    #[cfg(feature = "hotpath")]
     {
         record_file_dims("parse", language, source_bytes);
         let started = Instant::now();
-        let result = hotpath::measure_block!("code_extraction.parse_file", f());
+        let result = {
+            let _span = tracing::trace_span!("code_extraction.parse_file").entered();
+            f()
+        };
         record_family_nanos("parse", language, started.elapsed().as_nanos() as f64);
         match outcome(&result) {
             ParseFileOutcome::Parsed {
                 root_children,
                 has_syntax_errors,
             } => {
-                hotpath::gauge!("code_extraction.parse.root_children").inc(root_children as f64);
+                metrics::gauge!("code_extraction.parse.root_children")
+                    .increment(root_children as f64);
                 if has_syntax_errors {
-                    hotpath::gauge!("code_extraction.parse.syntax_error_trees").inc(1.0);
+                    metrics::gauge!("code_extraction.parse.syntax_error_trees").increment(1.0);
                 }
             }
             ParseFileOutcome::TimedOut => {
-                hotpath::gauge!("code_extraction.parse_failures").inc(1.0);
-                hotpath::gauge!("code_extraction.parse_failures.timeout").inc(1.0);
+                metrics::gauge!("code_extraction.parse_failures").increment(1.0);
+                metrics::gauge!("code_extraction.parse_failures.timeout").increment(1.0);
             }
             ParseFileOutcome::NoTree => {
-                hotpath::gauge!("code_extraction.parse_failures").inc(1.0);
-                hotpath::gauge!("code_extraction.parse_failures.no_tree").inc(1.0);
+                metrics::gauge!("code_extraction.parse_failures").increment(1.0);
+                metrics::gauge!("code_extraction.parse_failures.no_tree").increment(1.0);
             }
         }
         result
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = (language, source_bytes, outcome);
-        f()
     }
 }
 
@@ -204,24 +198,21 @@ pub(crate) fn measure_extract_file<T>(
     f: impl FnOnce() -> T,
     counts: impl FnOnce(&T) -> ExtractOutputCounts,
 ) -> T {
-    #[cfg(feature = "hotpath")]
     {
         record_file_dims("traverse", language, source_bytes);
         let started = Instant::now();
-        let result = hotpath::measure_block!("code_extraction.traverse_file", f());
+        let result = {
+            let _span = tracing::trace_span!("code_extraction.traverse_file").entered();
+            f()
+        };
         record_family_nanos("traverse", language, started.elapsed().as_nanos() as f64);
         let counts = counts(&result);
-        hotpath::gauge!("code_extraction.extract.nodes").inc(counts.nodes as f64);
-        hotpath::gauge!("code_extraction.extract.edges").inc(counts.edges as f64);
-        hotpath::gauge!("code_extraction.extract.unresolved_refs")
-            .inc(counts.unresolved_refs as f64);
-        hotpath::gauge!("code_extraction.extract.imports").inc(counts.imports as f64);
+        metrics::gauge!("code_extraction.extract.nodes").increment(counts.nodes as f64);
+        metrics::gauge!("code_extraction.extract.edges").increment(counts.edges as f64);
+        metrics::gauge!("code_extraction.extract.unresolved_refs")
+            .increment(counts.unresolved_refs as f64);
+        metrics::gauge!("code_extraction.extract.imports").increment(counts.imports as f64);
         result
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = (language, source_bytes, counts);
-        f()
     }
 }
 
@@ -229,53 +220,46 @@ pub(crate) fn measure_extract_file<T>(
 /// another full-file traversal.
 #[inline]
 pub(crate) fn measure_markdown_composite_fallback<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.markdown_composite_fallback_calls").inc(1.0);
-        hotpath::measure_block!("code_extraction.markdown_composite_fallback", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        metrics::gauge!("code_extraction.markdown_composite_fallback_calls").increment(1.0);
+        {
+            let _span =
+                tracing::trace_span!("code_extraction.markdown_composite_fallback").entered();
+            f()
+        }
     }
 }
 
 /// Time grammar acquisition and language-specific source prep (masking).
 #[inline]
 pub(crate) fn measure_language<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!("code_extraction.language", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        {
+            let _span = tracing::trace_span!("code_extraction.language").entered();
+            f()
+        }
     }
 }
 
 /// Time one file-level AST walk. Per-node visitors stay unmeasured.
 #[inline]
 pub(crate) fn measure_query<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!("code_extraction.query", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        {
+            let _span = tracing::trace_span!("code_extraction.query").entered();
+            f()
+        }
     }
 }
 
 /// Time file-level graph emit / canonicalize. Not a per-token emit.
 #[inline]
 pub(crate) fn measure_emit<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!("code_extraction.emit", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        {
+            let _span = tracing::trace_span!("code_extraction.emit").entered();
+            f()
+        }
     }
 }
 
@@ -285,13 +269,11 @@ pub(crate) fn measure_emit<T>(f: impl FnOnce() -> T) -> T {
 /// label it hides inside one outlier `code_extraction.language` sample.
 #[inline]
 pub(crate) fn measure_grammar_table_init<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!("code_extraction.grammar_table_init", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        {
+            let _span = tracing::trace_span!("code_extraction.grammar_table_init").entered();
+            f()
+        }
     }
 }
 
@@ -300,40 +282,35 @@ pub(crate) fn measure_grammar_table_init<T>(f: impl FnOnce() -> T) -> T {
 /// Runs once per edit batch, never per node.
 #[inline]
 pub(crate) fn measure_change_ranges<T>(f: impl FnOnce() -> T) -> T {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::measure_block!("code_extraction.change_ranges", f())
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        f()
+        {
+            let _span = tracing::trace_span!("code_extraction.change_ranges").entered();
+            f()
+        }
     }
 }
 
 /// Count a grammar-table lookup that found no bundled grammar.
 #[inline]
 pub(crate) fn record_grammar_lookup_miss() {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.grammar.lookup_miss").inc(1.0);
+        metrics::gauge!("code_extraction.grammar.lookup_miss").increment(1.0);
     }
 }
 
 /// Count a bundled grammar that Tree-sitter's `set_language` rejected.
 #[inline]
 pub(crate) fn record_grammar_rejected() {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.grammar.rejected").inc(1.0);
+        metrics::gauge!("code_extraction.grammar.rejected").increment(1.0);
     }
 }
 
 /// Count a registry dispatch that found no extractor for the file extension.
 #[inline]
 pub(crate) fn record_dispatch_no_extractor() {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.dispatch.no_extractor").inc(1.0);
+        metrics::gauge!("code_extraction.dispatch.no_extractor").increment(1.0);
     }
 }
 
@@ -341,26 +318,21 @@ pub(crate) fn record_dispatch_no_extractor() {
 /// means the incremental machinery is paying full reparses at scale.
 #[inline]
 pub(crate) fn record_retained_parse_reuse(reuse: ParseReuse) {
-    #[cfg(feature = "hotpath")]
     {
         match reuse {
             ParseReuse::Initial => {
-                hotpath::gauge!("code_extraction.retained.parse.initial").inc(1.0);
+                metrics::gauge!("code_extraction.retained.parse.initial").increment(1.0);
             }
             ParseReuse::Incremental => {
-                hotpath::gauge!("code_extraction.retained.parse.incremental").inc(1.0);
+                metrics::gauge!("code_extraction.retained.parse.incremental").increment(1.0);
             }
             ParseReuse::Noop => {
-                hotpath::gauge!("code_extraction.retained.parse.noop").inc(1.0);
+                metrics::gauge!("code_extraction.retained.parse.noop").increment(1.0);
             }
             ParseReuse::Reset { .. } => {
-                hotpath::gauge!("code_extraction.retained.parse.reset").inc(1.0);
+                metrics::gauge!("code_extraction.retained.parse.reset").increment(1.0);
             }
         }
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = reuse;
     }
 }
 
@@ -379,31 +351,27 @@ pub(crate) enum RetainedParseAbstention {
 /// same weight as performed work so admission waste stays visible.
 #[inline]
 pub(crate) fn record_retained_parse_abstention(reason: RetainedParseAbstention) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.retained.abstentions").inc(1.0);
+        metrics::gauge!("code_extraction.retained.abstentions").increment(1.0);
         match reason {
             RetainedParseAbstention::SourceTooLarge => {
-                hotpath::gauge!("code_extraction.retained.abstain.source_too_large").inc(1.0);
+                metrics::gauge!("code_extraction.retained.abstain.source_too_large").increment(1.0);
             }
             RetainedParseAbstention::PreparedSourceMismatch => {
-                hotpath::gauge!("code_extraction.retained.abstain.prepared_source_mismatch")
-                    .inc(1.0);
+                metrics::gauge!("code_extraction.retained.abstain.prepared_source_mismatch")
+                    .increment(1.0);
             }
             RetainedParseAbstention::InvalidEdit => {
-                hotpath::gauge!("code_extraction.retained.abstain.invalid_edit").inc(1.0);
+                metrics::gauge!("code_extraction.retained.abstain.invalid_edit").increment(1.0);
             }
             RetainedParseAbstention::IdentityMismatch => {
-                hotpath::gauge!("code_extraction.retained.abstain.identity_mismatch").inc(1.0);
+                metrics::gauge!("code_extraction.retained.abstain.identity_mismatch")
+                    .increment(1.0);
             }
             RetainedParseAbstention::StaleReport => {
-                hotpath::gauge!("code_extraction.retained.abstain.stale_report").inc(1.0);
+                metrics::gauge!("code_extraction.retained.abstain.stale_report").increment(1.0);
             }
         };
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = reason;
     }
 }
 
@@ -413,36 +381,33 @@ pub(crate) fn record_retained_parse_abstention(reason: RetainedParseAbstention) 
 /// dedicated counter.
 #[inline]
 pub(crate) fn record_extraction_reset(reason: ParsedExtractionResetReason) {
-    #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_extraction.extract.resets").inc(1.0);
+        metrics::gauge!("code_extraction.extract.resets").increment(1.0);
         match reason {
             ParsedExtractionResetReason::ChangedRootIdentity => {
-                hotpath::gauge!("code_extraction.extract.reset.changed_root_identity").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.changed_root_identity")
+                    .increment(1.0);
             }
             ParsedExtractionResetReason::CompositeGrammar => {
-                hotpath::gauge!("code_extraction.extract.reset.composite_grammar").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.composite_grammar").increment(1.0);
             }
             ParsedExtractionResetReason::FullReplacement => {
-                hotpath::gauge!("code_extraction.extract.reset.full_replacement").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.full_replacement").increment(1.0);
             }
             ParsedExtractionResetReason::LanguageChanged => {
-                hotpath::gauge!("code_extraction.extract.reset.language_changed").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.language_changed").increment(1.0);
             }
             ParsedExtractionResetReason::MissingPriorExtraction => {
-                hotpath::gauge!("code_extraction.extract.reset.missing_prior_extraction").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.missing_prior_extraction")
+                    .increment(1.0);
             }
             ParsedExtractionResetReason::MultilineEdit => {
-                hotpath::gauge!("code_extraction.extract.reset.multiline_edit").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.multiline_edit").increment(1.0);
             }
             ParsedExtractionResetReason::PartialParse => {
-                hotpath::gauge!("code_extraction.extract.reset.partial_parse").inc(1.0);
+                metrics::gauge!("code_extraction.extract.reset.partial_parse").increment(1.0);
             }
         };
-    }
-    #[cfg(not(feature = "hotpath"))]
-    {
-        let _ = reason;
     }
 }
 

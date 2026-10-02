@@ -1,11 +1,8 @@
-//! Hotpath probes for the blocking SDK HTTP client.
+//! Tracing spans for the blocking SDK HTTP client.
 //!
-//! Every macro here is a compile-time no-op until the binary selects the
-//! `hotpath/hotpath` backend, so the call sites need no crate feature.
-//! `hotpath::http!` wraps async reqwest 0.12 (`ClientWithMiddleware`) and
-//! cannot sit on `reqwest::blocking::Client` without changing the public
-//! blocking type. Header/connection time and body/decode time are therefore
-//! split with `measure_block!` around `.send()` and `.json()` / decode.
+//! reqwest's `blocking::Client` has no middleware hook, so header/connection
+//! time and body/decode time are split with explicit spans around `.send()`
+//! and `.json()` / decode.
 //!
 //! Execute-boundary time is a separate static span: `sdk.mcp.execute` covers
 //! encode / tool-call / decode on the MCP path; `sdk.http.execute` covers the
@@ -20,23 +17,35 @@ use crate::client::ClientError;
 use crate::remote_client::RemoteClientError;
 
 pub(crate) fn headers<T, E>(send: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-    hotpath::measure_block!("sdk.http.headers", send())
+    {
+        let _span = tracing::trace_span!("sdk.http.headers").entered();
+        send()
+    }
 }
 
 pub(crate) fn body_decode<T, E>(decode: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-    hotpath::measure_block!("sdk.http.body_decode", decode())
+    {
+        let _span = tracing::trace_span!("sdk.http.body_decode").entered();
+        decode()
+    }
 }
 
 pub(crate) fn mcp_execute<T>(
     run: impl FnOnce() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
-    hotpath::measure_block!("sdk.mcp.execute", finish(run()))
+    {
+        let _span = tracing::trace_span!("sdk.mcp.execute").entered();
+        finish(run())
+    }
 }
 
 pub(crate) fn http_execute<T>(
     run: impl FnOnce() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
-    hotpath::measure_block!("sdk.http.execute", finish(run()))
+    {
+        let _span = tracing::trace_span!("sdk.http.execute").entered();
+        finish(run())
+    }
 }
 
 #[inline(always)]
@@ -69,7 +78,7 @@ pub(crate) fn record_client_error(error: &ClientError) {
         ClientError::StreamFrameTooLarge { .. } => "stream_frame_too_large",
         ClientError::Problem(problem) => problem_kind_name(&problem.kind),
     };
-    hotpath::val!("sdk.http.error_class").set(&class);
+    tracing::trace!(name: "sdk.http.error_class", value = ?class);
 }
 
 pub(crate) fn record_remote_error(error: &RemoteClientError) {
@@ -78,7 +87,7 @@ pub(crate) fn record_remote_error(error: &RemoteClientError) {
         RemoteClientError::Transport(_) => "transport",
         RemoteClientError::Protocol(_) => "protocol",
     };
-    hotpath::val!("sdk.http.error_class").set(&class);
+    tracing::trace!(name: "sdk.http.error_class", value = ?class);
 }
 
 fn problem_kind_name(kind: &str) -> &'static str {

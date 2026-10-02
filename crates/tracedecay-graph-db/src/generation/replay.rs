@@ -104,13 +104,16 @@ pub(crate) fn metadata_manifest_from_source(
 fn validate_metadata_publication(
     publication: &GraphPublicationReplayV1,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
-        publication
-            .validate()
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("metadata-only graph replay is invalid: {error}"),
-            })
-    })
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.validate").entered();
+        {
+            publication
+                .validate()
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: format!("metadata-only graph replay is invalid: {error}"),
+                })
+        }
+    }
 }
 
 fn validate_decoded_metadata_binding(
@@ -140,13 +143,16 @@ pub(crate) fn validate_supplied_rows_binding(
     validate_expected_digest: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.validate", {
-        publication
-            .validate()
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("graph publication replay is invalid: {error}"),
-            })
-    })?;
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.validate").entered();
+        {
+            publication
+                .validate()
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: format!("graph publication replay is invalid: {error}"),
+                })
+        }
+    }?;
     let manifest = match rows {
         GraphGenerationRows::Manifest(manifest) => manifest,
         // Spilled and layered rows only ever publish a sealed code
@@ -240,27 +246,31 @@ fn validate_publication_identity(
     expected_digest: Option<tracedecay_store::runtime::GraphRecoveredGenerationDigestV1>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    hotpath::measure_block!("graph_db.generation.replay.binding.identity", {
-        let direct_dependencies = super::relational_dependency_generations(
-            &identity.dependencies,
-            &publication.key.projection.shard_id,
-        )?;
-        if publication.key.projection.namespace.as_str() != identity.projection.namespace.as_str()
-            || publication.key.projection.projection.as_str()
-                != identity.projection.projection.as_str()
-            || publication.key.generation.as_str() != identity.generation.as_str()
-            || publication.direct_dependency_generations != direct_dependencies
-            || publication.dependency_generation_closure_digest
-                != identity.dependency_closure_digest(check)?
-            || expected_digest
-                .is_some_and(|expected| publication.expected_recovered_digest != expected)
+    {
+        let _span = tracing::trace_span!("graph_db.generation.replay.binding.identity").entered();
         {
-            return Err(GraphDbError::conflict(
-                "replay.validate_publication_manifest_identity",
-            ));
+            let direct_dependencies = super::relational_dependency_generations(
+                &identity.dependencies,
+                &publication.key.projection.shard_id,
+            )?;
+            if publication.key.projection.namespace.as_str()
+                != identity.projection.namespace.as_str()
+                || publication.key.projection.projection.as_str()
+                    != identity.projection.projection.as_str()
+                || publication.key.generation.as_str() != identity.generation.as_str()
+                || publication.direct_dependency_generations != direct_dependencies
+                || publication.dependency_generation_closure_digest
+                    != identity.dependency_closure_digest(check)?
+                || expected_digest
+                    .is_some_and(|expected| publication.expected_recovered_digest != expected)
+            {
+                return Err(GraphDbError::conflict(
+                    "replay.validate_publication_manifest_identity",
+                ));
+            }
+            Ok(())
         }
-        Ok(())
-    })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -369,7 +379,7 @@ impl GraphGenerationManifestProvider for InlineOnlyGraphGenerationManifestProvid
     }
 }
 
-#[hotpath::measure(label = "graph_db.generation.replay.decode")]
+#[tracing::instrument(name = "graph_db.generation.replay.decode", level = "trace", skip_all)]
 pub(crate) fn checked_decode_replay_source(
     payload: &[u8],
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -394,23 +404,19 @@ pub(crate) fn checked_decode_replay_source(
             "canonical graph generation replay is invalid: {error}"
         ))
     })?;
-    crate::hotpath_observe::record_counts(0, 0, 1, payload.len());
-    crate::hotpath_observe::record_hydration_source(hydration_source(&source));
+    crate::observe::record_counts(0, 0, 1, payload.len());
+    crate::observe::record_hydration_source(hydration_source(&source));
     Ok(source)
 }
 
-fn hydration_source(
-    source: &GraphGenerationReplaySource,
-) -> crate::hotpath_observe::HydrationSource {
+fn hydration_source(source: &GraphGenerationReplaySource) -> crate::observe::HydrationSource {
     match source {
-        GraphGenerationReplaySource::InlineManifest(_) => {
-            crate::hotpath_observe::HydrationSource::Inline
-        }
+        GraphGenerationReplaySource::InlineManifest(_) => crate::observe::HydrationSource::Inline,
         GraphGenerationReplaySource::MetadataOnlyManifest(_) => {
-            crate::hotpath_observe::HydrationSource::Metadata
+            crate::observe::HydrationSource::Metadata
         }
         GraphGenerationReplaySource::SealedCodeGeneration(_) => {
-            crate::hotpath_observe::HydrationSource::Sealed
+            crate::observe::HydrationSource::Sealed
         }
     }
 }
@@ -601,13 +607,13 @@ mod tests {
                 &|| Ok(()),
             )
             .unwrap();
-        let _ = crate::hotpath_observe::take_hydration_counters();
+
         let source =
             checked_decode_replay_source(&publication.canonical_replay_source, &|| Ok(())).unwrap();
         let hydrated = metadata_manifest_from_source(&publication, &source, &|| Ok(()))
             .unwrap()
             .expect("a metadata-only replay must hydrate a metadata manifest");
-        let counters = crate::hotpath_observe::take_hydration_counters();
+        let counters = crate::observe::take_hydration_counters();
         assert_eq!(
             counters.replay_rows, 1,
             "metadata hydration must decode the canonical payload exactly once: {counters:?}"

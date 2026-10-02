@@ -143,8 +143,6 @@ pub(crate) enum GenerationVerification {
 }
 
 impl GenerationVerification {
-    #[cfg(feature = "hotpath")]
-    #[hotpath::skip]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::VerifiedFresh => "verified_fresh",

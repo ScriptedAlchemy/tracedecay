@@ -131,7 +131,6 @@ impl Error {
         }
     }
 
-    #[hotpath::skip]
     pub const fn sqlite_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { code, .. } => *code,
@@ -140,7 +139,6 @@ impl Error {
         }
     }
 
-    #[hotpath::skip]
     pub const fn sqlite_extended_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { extended_code, .. } => *extended_code,
@@ -156,7 +154,6 @@ impl Error {
     /// materialization ceiling refusing this exact statement. Neither is a
     /// transient engine condition, so a caller that retries one spins until
     /// something else changes the durable state.
-    #[hotpath::skip]
     pub const fn is_deterministic_refusal(&self) -> bool {
         match self {
             Self::InvalidOperation(_) => true,
@@ -168,7 +165,6 @@ impl Error {
     /// True when another connection holds the database (`SQLITE_BUSY` or
     /// `SQLITE_LOCKED`) or the runtime lane itself is saturated: the same
     /// statement can succeed once the holder releases.
-    #[hotpath::skip]
     pub const fn is_busy_or_locked(&self) -> bool {
         match self {
             Self::Busy => true,
@@ -180,7 +176,6 @@ impl Error {
     /// True when this failure says the database could not be read right now
     /// (held, interrupted, an I/O fault, or a file that would not open), so
     /// the same read can succeed later without anything changing.
-    #[hotpath::skip]
     pub const fn is_transient_read_failure(&self) -> bool {
         match self {
             Self::TransactionExpired => true,

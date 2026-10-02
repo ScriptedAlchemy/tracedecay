@@ -102,7 +102,6 @@ pub enum HostAdmissionScope {
 }
 
 impl HostAdmissionOutcome {
-    #[hotpath::skip]
     const fn new(
         status: HostAdmissionStatus,
         retryable: bool,
@@ -117,7 +116,6 @@ impl HostAdmissionOutcome {
         }
     }
 
-    #[hotpath::skip]
     pub const fn deterministic_content_refusal(reason_code: &'static str) -> Self {
         Self {
             status: HostAdmissionStatus::Degraded,
@@ -130,7 +128,6 @@ impl HostAdmissionOutcome {
 
     /// A deterministic refusal that keeps the refusing authority's own
     /// operator-facing cause beside the bounded reason code.
-    #[hotpath::skip]
     pub fn deterministic_content_refusal_with_cause(
         reason_code: &'static str,
         cause: impl std::fmt::Display,
@@ -141,32 +138,26 @@ impl HostAdmissionOutcome {
         }
     }
 
-    #[hotpath::skip]
     pub const fn supported() -> Self {
         Self::new(HostAdmissionStatus::Supported, false, None)
     }
 
-    #[hotpath::skip]
     pub const fn accepted_for_replay() -> Self {
         Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
     }
 
-    #[hotpath::skip]
     pub const fn retained_backpressured(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Backpressured, true, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn retained_unavailable(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Unavailable, true, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn degraded(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn replay_completed(changed: bool, exact_duplicate: bool) -> Self {
         if changed {
             Self::new(HostAdmissionStatus::Committed, false, None)
@@ -178,12 +169,10 @@ impl HostAdmissionOutcome {
     }
 
     /// The demand does not apply. Ack the replay record and do not retry it.
-    #[hotpath::skip]
     pub const fn not_applicable(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::NotApplicable, false, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn spool_overflow() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -192,7 +181,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -206,7 +194,6 @@ impl HostAdmissionOutcome {
     /// [`tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES`])
     /// before durable retention.
     /// Non-retryable; full payload is not retained.
-    #[hotpath::skip]
     pub const fn wire_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -215,7 +202,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_source_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
@@ -224,7 +210,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_corrupted() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -239,17 +224,14 @@ impl HostAdmissionOutcome {
     /// Distinct from [`Self::degraded`]: hosts must not treat this as soft
     /// capacity pressure, and distinct from [`Self::retained_unavailable`]
     /// which stays retryable.
-    #[hotpath::skip]
     pub const fn terminal_unavailable(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Unavailable, false, Some(reason_code))
     }
 
-    #[hotpath::skip]
     pub const fn durable_payload_unsupported_version() -> Self {
         Self::retained_unavailable("host_event_payload_unsupported_version")
     }
 
-    #[hotpath::skip]
     pub const fn durable_payload_malformed() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -258,7 +240,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_ack_conflict() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -267,7 +248,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn spool_recovery_required() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -276,7 +256,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_full() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -285,7 +264,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_corrupted() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -294,7 +272,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn quarantine_recovery_required() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -303,7 +280,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn project_authority_unbound() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -312,7 +288,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn project_authority_mismatch() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -321,7 +296,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn registered_authority_unavailable() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
@@ -330,7 +304,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    #[hotpath::skip]
     pub const fn parse_offset_conflict() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
@@ -813,7 +786,6 @@ pub(crate) mod test_support {
     }
 
     impl ObservationStore for MemoryObservationStore {
-        #[hotpath::skip]
         async fn persist_observation(
             &self,
             write: AnchoredObservationWrite,
@@ -821,7 +793,6 @@ pub(crate) mod test_support {
             Self::persist_one(&mut self.state(), write)
         }
 
-        #[hotpath::skip]
         async fn persist_observations(
             &self,
             writes: Vec<AnchoredObservationWrite>,
@@ -853,7 +824,6 @@ pub(crate) mod test_support {
             Ok(outcomes)
         }
 
-        #[hotpath::skip]
         async fn get_source_cursor(
             &self,
             source: &ObservationSourceIdentityV1,
@@ -862,7 +832,6 @@ pub(crate) mod test_support {
             Ok(Self::current_cursor(&self.state(), source, scope))
         }
 
-        #[hotpath::skip]
         async fn committed_source_cursors(
             &self,
             source: &ObservationSourceIdentityV1,
@@ -878,7 +847,6 @@ pub(crate) mod test_support {
                 .collect())
         }
 
-        #[hotpath::skip]
         async fn advance_source_cursor(
             &self,
             advance: ObservationCursorAdvance,
@@ -899,7 +867,6 @@ pub(crate) mod test_support {
             Ok(CursorAdvanceOutcome::Committed)
         }
 
-        #[hotpath::skip]
         async fn get_observation(
             &self,
             observation_id: &CanonicalObservationIdV1,
@@ -912,7 +879,6 @@ pub(crate) mod test_support {
                 .cloned())
         }
 
-        #[hotpath::skip]
         async fn replay_observations(
             &self,
             request: ObservationReplayRequest,

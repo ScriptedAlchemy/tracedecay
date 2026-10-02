@@ -141,7 +141,6 @@ impl RegisteredGlobalDb {
     /// directory are independent identity evidence. Conflicting evidence or
     /// any noncanonical/unavailable store fails closed. This method never uses
     /// the legacy default-shard, newest-store, or remote-URL fallbacks.
-    #[hotpath::skip]
     pub async fn resolve_project_observation_store(
         &self,
         project_root: &Path,
@@ -198,7 +197,6 @@ impl RegisteredGlobalDb {
         self.validate_project_observation_store(project, store)
     }
 
-    #[hotpath::skip]
     async fn observation_project_ids(
         &self,
         project_root: &Path,

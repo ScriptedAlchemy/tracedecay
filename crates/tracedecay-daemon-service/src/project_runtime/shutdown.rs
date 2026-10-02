@@ -13,7 +13,11 @@ pub(super) enum ShutdownState {
 }
 
 impl ProjectRuntimeRegistryV1 {
-    #[hotpath::measure(label = "daemon.service.project_runtime.retire_roots", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.retire_roots",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         {
             let mut fences = self.lock_root_fences();
@@ -22,7 +26,11 @@ impl ProjectRuntimeRegistryV1 {
         self.drain_roots(roots).await
     }
 
-    #[hotpath::measure(label = "daemon.service.project_runtime.quiesce_roots", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.quiesce_roots",
+        level = "trace",
+        skip_all
+    )]
     pub async fn quiesce_roots(
         &self,
         roots: &BTreeSet<PathBuf>,
@@ -44,7 +52,6 @@ impl ProjectRuntimeRegistryV1 {
         })
     }
 
-    #[hotpath::skip]
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         let retired =
             tokio::time::timeout(tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE, async {
@@ -154,7 +161,11 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Routers become unavailable before feedback owners drop and Work
     /// providers are joined.
-    #[hotpath::measure(label = "daemon.service.project_runtime.shutdown", future = true)]
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.shutdown",
+        level = "trace",
+        skip_all
+    )]
     pub(crate) async fn shut_down_all(&self) -> bool {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
@@ -221,7 +232,6 @@ impl ProjectRuntimeRegistryV1 {
         drop(shut_down_runtimes(runtimes));
     }
 
-    #[hotpath::skip]
     async fn join_shutdown_task(&self) {
         let result = {
             let mut retained = self.shutdown_task.lock().await;
@@ -276,7 +286,6 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
-    #[hotpath::skip]
     async fn finish_drained_runtimes(
         &self,
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,

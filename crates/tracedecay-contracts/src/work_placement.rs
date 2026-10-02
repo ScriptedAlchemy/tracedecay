@@ -145,7 +145,6 @@ impl<S> WorkPlacementService<S>
 where
     S: WorkPlacementStoragePort,
 {
-    #[hotpath::skip]
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
@@ -164,7 +163,11 @@ where
     }
 
     /// Evaluates a placement without changing anything.
-    #[hotpath::measure(label = "application.work.placement.preflight")]
+    #[tracing::instrument(
+        name = "application.work.placement.preflight",
+        level = "trace",
+        skip_all
+    )]
     pub fn preflight(
         &self,
         context: &RequestContext,
@@ -184,7 +187,7 @@ where
     /// The preflight is re-run here rather than trusted from a prior call: an
     /// admission that reused a caller-held preflight would admit against a
     /// target that may have changed since it was read.
-    #[hotpath::measure(label = "application.work.placement.admit")]
+    #[tracing::instrument(name = "application.work.placement.admit", level = "trace", skip_all)]
     pub fn admit_placement(
         &self,
         context: &RequestContext,
@@ -236,21 +239,24 @@ where
         context: &RequestContext,
         request: &WorkPlacementStatusRequestV1,
     ) -> Result<WorkPlacementReadingV1, ApplicationProblem> {
-        hotpath::measure_block!("application.work.placement.status", {
-            let authority = work_authority(context)?;
-            let identity =
-                WorkPlacementIdentityV1::new(request.task_id.clone(), request.run_id.clone());
-            Ok(
-                match self
-                    .storage
-                    .load_placement(&authority, &identity)
-                    .map_err(storage_problem)?
-                {
-                    Some(placement) => WorkPlacementReadingV1::Placed { placement },
-                    None => WorkPlacementReadingV1::Absent,
-                },
-            )
-        })
+        {
+            let _span = tracing::trace_span!("application.work.placement.status").entered();
+            {
+                let authority = work_authority(context)?;
+                let identity =
+                    WorkPlacementIdentityV1::new(request.task_id.clone(), request.run_id.clone());
+                Ok(
+                    match self
+                        .storage
+                        .load_placement(&authority, &identity)
+                        .map_err(storage_problem)?
+                    {
+                        Some(placement) => WorkPlacementReadingV1::Placed { placement },
+                        None => WorkPlacementReadingV1::Absent,
+                    },
+                )
+            }
+        }
     }
 
     /// Gives the target up, or quarantines it when removal is blocked.
@@ -258,7 +264,7 @@ where
     /// This never deletes. It publishes what the fresh cleanup preflight found,
     /// so a caller can tell "the bytes are gone" from "the bytes were kept, and
     /// here is exactly why".
-    #[hotpath::measure(label = "application.work.placement.release")]
+    #[tracing::instrument(name = "application.work.placement.release", level = "trace", skip_all)]
     pub fn release(
         &self,
         context: &RequestContext,

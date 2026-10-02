@@ -4,11 +4,7 @@
 //!
 //! Its own binary: one daemon indexing a large corpus is the whole test.
 
-#![cfg(all(
-    target_os = "linux",
-    not(feature = "alloc-jemalloc"),
-    not(feature = "hotpath-alloc")
-))]
+#![cfg(all(target_os = "linux", not(feature = "alloc-jemalloc")))]
 
 #[path = "../../tracedecay/tests/common/mod.rs"]
 mod common;

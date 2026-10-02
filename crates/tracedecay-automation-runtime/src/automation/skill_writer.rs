@@ -344,7 +344,11 @@ pub fn deploy_managed_skills_to_project(
 /// materialized files alone, leaving a prompt index that only ever converged as
 /// a side effect of a successful store mutation, so a store that emptied
 /// without one left every host advertising skills that no longer exist.
-#[hotpath::measure(label = "hosts.automation.managed_skill.deploy_at")]
+#[tracing::instrument(
+    name = "hosts.automation.managed_skill.deploy_at",
+    level = "trace",
+    skip_all
+)]
 pub fn deploy_managed_skills_at(
     host_io: &HostIo,
     home: &Path,
@@ -354,7 +358,11 @@ pub fn deploy_managed_skills_at(
     deploy_managed_skills_with_home(host_io, home, profile_root, Some(project_root))
 }
 
-#[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
+#[tracing::instrument(
+    name = "hosts.automation.managed_skill.deploy",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn deploy_managed_skills(
     host_io: &HostIo,
     host_home: Option<&Path>,

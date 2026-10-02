@@ -24,7 +24,6 @@ pub enum SourceReadModeV1 {
 }
 
 impl SourceReadModeV1 {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",

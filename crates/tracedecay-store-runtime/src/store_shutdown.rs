@@ -161,9 +161,9 @@ where
 
     let mut outcomes = Vec::new();
     while !joins.is_empty() {
-        match hotpath::future!(
+        match tracing::Instrument::instrument(
             tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()),
-            label = "daemon.store_runtime.shutdown_wait"
+            tracing::trace_span!("daemon.store_runtime.shutdown_wait"),
         )
         .await
         {
@@ -208,9 +208,9 @@ where
                     )
                 }));
                 while !joins.is_empty() {
-                    match hotpath::future!(
+                    match tracing::Instrument::instrument(
                         tokio::time::timeout_at(deadline, joins.join_next()),
-                        label = "daemon.store_runtime.shutdown_abort_wait"
+                        tracing::trace_span!("daemon.store_runtime.shutdown_abort_wait"),
                     )
                     .await
                     {

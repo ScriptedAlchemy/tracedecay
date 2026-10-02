@@ -511,13 +511,11 @@ pub struct SnapshotSet {
 
 impl SnapshotSet {
     #[cfg(any(test, feature = "test-helpers"))]
-    #[hotpath::skip]
     pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
     }
 
-    #[hotpath::skip]
     pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
         Self::capture_with_policy(
             paths,
@@ -528,7 +526,6 @@ impl SnapshotSet {
         .await
     }
 
-    #[hotpath::skip]
     async fn capture_foreign_in(
         paths: &[PathBuf],
         root: &Path,
@@ -537,7 +534,7 @@ impl SnapshotSet {
         Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign, control).await
     }
 
-    #[hotpath::measure(label = "runtime_core.db.snapshot.capture")]
+    #[tracing::instrument(name = "runtime_core.db.snapshot.capture", level = "trace", skip_all)]
     async fn capture_with_policy(
         paths: &[PathBuf],
         root: &Path,
@@ -815,10 +812,7 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
         }
         hash.update(label);
         hash.update(bytes.to_be_bytes());
-        let mut file = hotpath::io!(
-            fs::File::open(&member)?,
-            label = "runtime_core.db.snapshot.fingerprint"
-        );
+        let mut file = fs::File::open(&member)?;
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             let read = file.read(&mut buffer)?;

@@ -28,7 +28,7 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
-#[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
+#[tracing::instrument(name = "mcp.search.ast_grep.total", level = "trace", skip_all)]
 pub async fn compute_ast_grep_search(
     project_root: &Path,
     path_policy: &IndexPathPolicyV1,
@@ -50,7 +50,7 @@ pub async fn compute_ast_grep_search(
     let query = request.pattern.clone();
     let scope_prefix = scope_prefix.map(str::to_owned);
     let path_policy = path_policy.clone();
-    let search: AstGrepSearchResult = hotpath::future!(
+    let search: AstGrepSearchResult = tracing::Instrument::instrument(
         run_bounded_search(
             "tracedecay_ast_grep_search",
             request.pattern,
@@ -74,7 +74,7 @@ pub async fn compute_ast_grep_search(
                 )
             },
         ),
-        label = "mcp.search.ast_grep.scan"
+        tracing::trace_span!("mcp.search.ast_grep.scan"),
     )
     .await?;
 

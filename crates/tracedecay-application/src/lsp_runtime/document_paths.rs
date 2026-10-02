@@ -28,7 +28,11 @@ pub(super) struct ValidatedDocumentPath {
     pub(super) relative: PathBuf,
 }
 
-#[hotpath::measure(label = "usecases.lsp.document.validate_path")]
+#[tracing::instrument(
+    name = "usecases.lsp.document.validate_path",
+    level = "trace",
+    skip_all
+)]
 pub(super) fn validated_document_path(
     project_root: &Path,
     root_identity: &Path,
@@ -75,7 +79,7 @@ pub(super) fn validate_relative_path(path: &Path) -> Result<(), LspRuntimeFailur
     Ok(())
 }
 
-#[hotpath::measure(label = "usecases.lsp.document.normalize")]
+#[tracing::instrument(name = "usecases.lsp.document.normalize", level = "trace", skip_all)]
 pub(super) fn normalize_overlay_relative(
     project_dir: &Dir,
     relative: &Path,
@@ -116,7 +120,7 @@ pub(super) fn normalize_overlay_relative(
     Ok(canonical)
 }
 
-#[hotpath::measure(label = "usecases.lsp.document.open")]
+#[tracing::instrument(name = "usecases.lsp.document.open", level = "trace", skip_all)]
 pub(super) fn open_project_file(
     project_dir: &Dir,
     relative: &Path,

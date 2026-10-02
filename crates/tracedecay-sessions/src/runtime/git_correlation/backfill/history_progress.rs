@@ -21,7 +21,11 @@ pub(super) const fn initial_reflog_content_chain() -> &'static str {
     INITIAL_REFLOG_CONTENT_CHAIN
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.history_schema", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.history_schema",
+    level = "trace",
+    skip_all
+)]
 pub(in super::super) async fn install_final_schema(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
@@ -161,7 +165,6 @@ pub(super) enum GitHistoryScanMode {
 }
 
 impl GitHistoryScanMode {
-    #[hotpath::skip]
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::ReflogCapture => "reflog_capture",
@@ -192,7 +195,6 @@ pub(super) enum GitHistoryCursorHeadState {
 }
 
 impl GitHistoryCursorHeadState {
-    #[hotpath::skip]
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::LocalBranch => "local_branch",
@@ -358,7 +360,11 @@ pub(super) async fn insert_progress(
 }
 
 /// Advances only mutable cursor fields when both generation and source seal match.
-#[hotpath::measure(label = "sessions.git_correlation.history_progress_cas", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.history_progress_cas",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn compare_and_swap_progress(
     conn: &(impl Executor + ?Sized),
     expected_generation: u64,
@@ -583,7 +589,11 @@ pub(super) async fn upsert_segment(
     Ok(changed == 1)
 }
 
-#[hotpath::measure(label = "sessions.git_correlation.history_pending_page", future = true)]
+#[tracing::instrument(
+    name = "sessions.git_correlation.history_pending_page",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn read_pending_page(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,

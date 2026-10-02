@@ -126,7 +126,11 @@ pub(super) async fn freeze_participants(
     collect_participant_rows(read, vec![rows], request, None).await
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.freeze.prepared_candidates")]
+#[tracing::instrument(
+    name = "session_temporal.freeze.prepared_candidates",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn freeze_prepared_candidate_participants(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
@@ -372,7 +376,11 @@ async fn collect_participant_rows(
     Ok((participants, aggregate, shared_cursor_key.flatten()))
 }
 
-#[hotpath::measure(future = true, label = "session_temporal.freeze.root_readiness")]
+#[tracing::instrument(
+    name = "session_temporal.freeze.root_readiness",
+    level = "trace",
+    skip_all
+)]
 pub(super) async fn root_readiness(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,

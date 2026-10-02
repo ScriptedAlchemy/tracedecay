@@ -6,14 +6,14 @@ use tracedecay_domain::errors::TraceDecayError;
 
 use super::port::SourceEditRuntime;
 
-#[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
+#[tracing::instrument(name = "usecases.edit.verify.file", level = "trace", skip_all)]
 async fn run_edit_verification(
     graph: &SourceEditRuntime,
     file_path: &str,
 ) -> SourceEditVerificationV1 {
-    let diagnostics = match hotpath::future!(
+    let diagnostics = match tracing::Instrument::instrument(
         graph.run_diagnostics(file_path),
-        label = "usecases.edit.verify.diagnostics"
+        tracing::trace_span!("usecases.edit.verify.diagnostics"),
     )
     .await
     {
@@ -57,7 +57,7 @@ async fn run_edit_verification(
     }
 }
 
-#[hotpath::measure(label = "usecases.edit.verify", future = true)]
+#[tracing::instrument(name = "usecases.edit.verify", level = "trace", skip_all)]
 pub(super) async fn run_edit_verifications(
     graph: &SourceEditRuntime,
     file_paths: &[String],

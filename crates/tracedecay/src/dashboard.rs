@@ -130,9 +130,9 @@ pub async fn dashboard_automation_authority_for_test(
 {
     let profile_root = canonical_existing_identity(profile.data_dir())?;
     let project_root = canonical_existing_identity(cg.project_root())?;
-    let configuration = hotpath::future!(
+    let configuration = tracing::Instrument::instrument(
         cg.configuration_runtime().client().current(),
-        label = "dashboard.automation.configuration"
+        tracing::trace_span!("dashboard.automation.configuration"),
     )
     .await
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -152,10 +152,10 @@ pub async fn dashboard_automation_authority_for_test(
             .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("dashboard automation fixture scope is invalid: {error}"),
             })?;
-    let project_database = hotpath::future!(
+    let project_database = tracing::Instrument::instrument(
         cg.store_runtime_registry()
             .project_sessions(project_id.clone(), [project_root.clone()]),
-        label = "dashboard.automation.project_sessions"
+        tracing::trace_span!("dashboard.automation.project_sessions"),
     )
     .await?;
     let configuration_policy_digest = tracedecay_domain::canonical_sha256(&(
@@ -180,7 +180,7 @@ pub async fn dashboard_automation_authority_for_test(
         ),
     )
     .with_owner_home(profile.home().map(std::path::Path::to_path_buf));
-    hotpath::future!(
+    tracing::Instrument::instrument(
         invocation_service.mount_observability_producer(
             project_root.clone(),
             project_database,
@@ -188,17 +188,17 @@ pub async fn dashboard_automation_authority_for_test(
             configuration.snapshot().effective_behavior_digest.clone(),
             configuration_policy_digest,
         ),
-        label = "dashboard.automation.mount"
+        tracing::trace_span!("dashboard.automation.mount"),
     )
     .await?;
-    hotpath::future!(
+    tracing::Instrument::instrument(
         crate::daemon::register_dashboard_test_retained_runtime(
             &invocation_service,
             &cg,
             project_root.clone(),
             project_id,
         ),
-        label = "dashboard.automation.runtime"
+        tracing::trace_span!("dashboard.automation.runtime"),
     )
     .await?;
     let authority =
@@ -239,7 +239,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
     let serving_db = cg.db_path();
     let project_id = cg.store_layout().identity.project_id.as_deref()?;
-    let serving = hotpath::future!(
+    let serving = tracing::Instrument::instrument(
         SessionRetrievalServingIdentityV1::resolve_project(
             project_id,
             &serving_db,
@@ -249,7 +249,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
             &project_database.binding().shard_id,
             registry,
         ),
-        label = "dashboard.lcm.root"
+        tracing::trace_span!("dashboard.lcm.root"),
     )
     .await?;
     let root = DaemonSessionRetrievalRoot::project(serving, registry).await?;
@@ -292,10 +292,10 @@ pub async fn record_project_span_for_test(
     observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
     merge_gap_secs: i64,
 ) -> tracedecay_domain::errors::Result<i64> {
-    hotpath::future!(
+    tracing::Instrument::instrument(
         tracedecay_global_db::GlobalDbGitCorrelationStore::new(project_database)
             .record_span_observation(observation, merge_gap_secs),
-        label = "dashboard.span.persist"
+        tracing::trace_span!("dashboard.span.persist"),
     )
     .await
     .map_err(

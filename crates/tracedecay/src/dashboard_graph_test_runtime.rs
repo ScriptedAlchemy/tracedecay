@@ -18,7 +18,6 @@ pub struct DashboardGraphTestRuntimeV1 {
 }
 
 impl DashboardGraphTestRuntimeV1 {
-    #[hotpath::skip]
     pub async fn open(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_domain::errors::Result<Self> {
@@ -38,20 +37,20 @@ impl DashboardGraphTestRuntimeV1 {
             "dashboard-graph-test-runtime",
         )?;
         let registry = std::sync::Arc::new(
-            hotpath::future!(
-                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity,),
-                label = "dashboard.graph.registry"
+            tracing::Instrument::instrument(
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity),
+                tracing::trace_span!("dashboard.graph.registry"),
             )
             .await?,
         );
-        let profile_database = hotpath::future!(
+        let profile_database = tracing::Instrument::instrument(
             registry.profile_database(),
-            label = "dashboard.graph.profile_database"
+            tracing::trace_span!("dashboard.graph.profile_database"),
         )
         .await?;
-        let profile_sessions_database = hotpath::future!(
+        let profile_sessions_database = tracing::Instrument::instrument(
             registry.profile_sessions(),
-            label = "dashboard.graph.profile_sessions"
+            tracing::trace_span!("dashboard.graph.profile_sessions"),
         )
         .await?;
         Ok(Self {
@@ -71,16 +70,15 @@ impl DashboardGraphTestRuntimeV1 {
         self.profile_sessions_database.clone()
     }
 
-    #[hotpath::skip]
     pub async fn project_sessions(
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
     ) -> tracedecay_domain::errors::Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
-        let registered = hotpath::future!(
+        let registered = tracing::Instrument::instrument(
             self.registry
                 .project_sessions(project_id.clone(), [project_root.to_path_buf()]),
-            label = "dashboard.graph.project_sessions"
+            tracing::trace_span!("dashboard.graph.project_sessions"),
         )
         .await?;
         // Production project open binds a weak project graph proxy to the
@@ -89,10 +87,10 @@ impl DashboardGraphTestRuntimeV1 {
         // dashboard test composition provides the same binding. The registry
         // caches the mount per project, so repeated opens reuse the proxy.
         if registered.project_graph_runtime().is_none() {
-            let project_database = hotpath::future!(
+            let project_database = tracing::Instrument::instrument(
                 self.registry
                     .project_memory(project_id.clone(), [project_root.to_path_buf()]),
-                label = "dashboard.graph.project_memory"
+                tracing::trace_span!("dashboard.graph.project_memory"),
             )
             .await?;
             let graph_proxy =
@@ -108,7 +106,6 @@ impl DashboardGraphTestRuntimeV1 {
         Ok(registered)
     }
 
-    #[hotpath::skip]
     pub async fn initialize(
         &self,
         project_root: &std::path::Path,
@@ -124,13 +121,13 @@ impl DashboardGraphTestRuntimeV1 {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
-        let layout = hotpath::future!(
+        let layout = tracing::Instrument::instrument(
             tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
                 project_root,
                 &options,
                 self.profile_database.as_ref(),
             ),
-            label = "dashboard.graph.layout"
+            tracing::trace_span!("dashboard.graph.layout"),
         )
         .await?;
         if layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
@@ -139,7 +136,7 @@ impl DashboardGraphTestRuntimeV1 {
             });
         }
         let project_database = self.project_sessions(project_root, project_id).await?;
-        hotpath::future!(
+        tracing::Instrument::instrument(
             tracedecay_project::project::TraceDecay::init_with_registered_configuration(
                 project_root,
                 options,
@@ -148,12 +145,11 @@ impl DashboardGraphTestRuntimeV1 {
                 self.profile_database.clone(),
                 std::sync::Arc::clone(&self.registry),
             ),
-            label = "dashboard.graph.init"
+            tracing::trace_span!("dashboard.graph.init"),
         )
         .await
     }
 
-    #[hotpath::skip]
     pub async fn reopen(
         &self,
         project_root: &std::path::Path,
@@ -162,13 +158,13 @@ impl DashboardGraphTestRuntimeV1 {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
-        let layout = hotpath::future!(
+        let layout = tracing::Instrument::instrument(
             tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
                 project_root,
                 &options,
                 self.profile_database.as_ref(),
             ),
-            label = "dashboard.graph.reopen.layout"
+            tracing::trace_span!("dashboard.graph.reopen.layout"),
         )
         .await?;
         let project_id = layout
@@ -186,7 +182,7 @@ impl DashboardGraphTestRuntimeV1 {
                 })
             })?;
         let project_database = self.project_sessions(project_root, project_id).await?;
-        hotpath::future!(
+        tracing::Instrument::instrument(
             tracedecay_project::project::TraceDecay::open_with_registered_configuration(
                 project_root,
                 options,
@@ -195,7 +191,7 @@ impl DashboardGraphTestRuntimeV1 {
                 self.profile_database.clone(),
                 std::sync::Arc::clone(&self.registry),
             ),
-            label = "dashboard.graph.reopen.open"
+            tracing::trace_span!("dashboard.graph.reopen.open"),
         )
         .await
     }

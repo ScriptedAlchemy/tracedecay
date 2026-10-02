@@ -30,9 +30,10 @@ use types::{
 };
 
 impl RegisteredGlobalDb {
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.observability_rollup.persist.rebuild"
+    #[tracing::instrument(
+        name = "global_db.observability_rollup.persist.rebuild",
+        level = "trace",
+        skip_all
     )]
     pub async fn rebuild_observability_rollup(
         &self,
@@ -197,7 +198,11 @@ impl RegisteredGlobalDb {
     /// suppression is evaluated on the final merged horizon cell, otherwise
     /// several small daily cohorts could never safely become one supported
     /// local result.
-    #[hotpath::measure(future = true, label = "global_db.observability_rollup.query")]
+    #[tracing::instrument(
+        name = "global_db.observability_rollup.query",
+        level = "trace",
+        skip_all
+    )]
     pub async fn query_observability_rollup_fragments(
         &self,
         query: &ObservabilityRollupFragmentQueryV1,

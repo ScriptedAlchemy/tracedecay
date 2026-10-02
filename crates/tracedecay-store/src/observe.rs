@@ -1,12 +1,11 @@
-//! Store-boundary Hotpath disposition counters.
+//! Store-boundary disposition gauges.
 //!
 //! Duration spans time success and failure alike but cannot distinguish a
 //! committed reduction from an exact-duplicate replay or a rejected
 //! compare-and-swap, and that split is exactly what a retry-storm diagnosis
 //! needs. Keys form a closed static vocabulary; no path, ID, digest, or error
 //! content ever becomes a key. Every gauge is a compile-time no-op until the
-//! binary selects the `hotpath/hotpath` backend, so feature-off builds compile
-//! every caller identically and record nothing.
+//! `metrics` facade and drop when no recorder is installed.
 
 use crate::external_source::{
     SourceCommitApplyOutcomeV1, SourceProjectionApplyOutcomeV1, SourceStoreResult,
@@ -18,13 +17,13 @@ pub(crate) fn record_source_commit_outcome(
 ) {
     match outcome {
         Ok(SourceCommitApplyOutcomeV1::Committed(_)) => {
-            hotpath::gauge!("store.external_source.apply_commit.committed").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_commit.committed").increment(1.0);
         }
         Ok(SourceCommitApplyOutcomeV1::ExactDuplicate(_)) => {
-            hotpath::gauge!("store.external_source.apply_commit.exact_duplicate").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_commit.exact_duplicate").increment(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("store.external_source.apply_commit.rejected").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_commit.rejected").increment(1.0);
         }
     }
 }
@@ -34,13 +33,14 @@ pub(crate) fn record_source_projection_outcome(
 ) {
     match outcome {
         Ok(SourceProjectionApplyOutcomeV1::Projected(_)) => {
-            hotpath::gauge!("store.external_source.apply_projection.projected").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_projection.projected").increment(1.0);
         }
         Ok(SourceProjectionApplyOutcomeV1::ExactDuplicate(_)) => {
-            hotpath::gauge!("store.external_source.apply_projection.exact_duplicate").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_projection.exact_duplicate")
+                .increment(1.0);
         }
         Err(_) => {
-            hotpath::gauge!("store.external_source.apply_projection.rejected").inc(1_u64);
+            metrics::gauge!("store.external_source.apply_projection.rejected").increment(1.0);
         }
     }
 }
@@ -50,10 +50,10 @@ pub(crate) fn record_session_projection_batch_disposition(
 ) {
     match disposition {
         SessionTemporalProjectionBatchDispositionV1::Applied => {
-            hotpath::gauge!("store.session.projection_batch.applied").inc(1_u64);
+            metrics::gauge!("store.session.projection_batch.applied").increment(1.0);
         }
         SessionTemporalProjectionBatchDispositionV1::ExactReplay => {
-            hotpath::gauge!("store.session.projection_batch.exact_replay").inc(1_u64);
+            metrics::gauge!("store.session.projection_batch.exact_replay").increment(1.0);
         }
     }
 }

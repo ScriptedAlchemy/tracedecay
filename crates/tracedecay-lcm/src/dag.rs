@@ -164,7 +164,7 @@ pub async fn expand_summary_nodes(
 // The one hydration pass behind every summary expansion (node rows, lineage,
 // raw + child source closure). Measured here rather than on the two public
 // wrappers so single-node and batched expansions share one label.
-#[hotpath::measure(label = "sessions.lcm.dag.hydrate", future = true)]
+#[tracing::instrument(name = "sessions.lcm.dag.hydrate", level = "trace", skip_all)]
 async fn expand_summary_nodes_with_content(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -175,9 +175,9 @@ async fn expand_summary_nodes_with_content(
     if node_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let requested = hotpath::future!(
+    let requested = tracing::Instrument::instrument(
         load_summary_nodes_by_ids(conn, node_ids, include_content, SummaryRead::Visible),
-        label = "sessions.lcm.expand.summary.fetch"
+        tracing::trace_span!("sessions.lcm.expand.summary.fetch"),
     )
     .await?;
 
@@ -203,31 +203,34 @@ async fn expand_summary_nodes_with_content(
         summaries.push(summary);
     }
 
-    let raw_sources = hotpath::future!(
+    let raw_sources = tracing::Instrument::instrument(
         load_raw_messages_by_store_ids(conn, &raw_store_ids, include_content),
-        label = "sessions.lcm.expand.summary.hydrate"
+        tracing::trace_span!("sessions.lcm.expand.summary.hydrate"),
     )
     .await?;
-    let child_sources = hotpath::future!(
+    let child_sources = tracing::Instrument::instrument(
         load_summary_nodes_by_ids(conn, &child_node_ids, include_content, SummaryRead::Lineage),
-        label = "sessions.lcm.expand.summary.fetch"
+        tracing::trace_span!("sessions.lcm.expand.summary.fetch"),
     )
     .await?;
 
-    hotpath::measure_block!("sessions.lcm.expand.summary.assemble", {
-        let mut expansions = Vec::with_capacity(summaries.len());
-        for summary in summaries {
-            expansions.push(assemble_summary_expansion(
-                summary,
-                provider,
-                session_id,
-                include_content,
-                &raw_sources,
-                &child_sources,
-            )?);
+    {
+        let _span = tracing::trace_span!("sessions.lcm.expand.summary.assemble").entered();
+        {
+            let mut expansions = Vec::with_capacity(summaries.len());
+            for summary in summaries {
+                expansions.push(assemble_summary_expansion(
+                    summary,
+                    provider,
+                    session_id,
+                    include_content,
+                    &raw_sources,
+                    &child_sources,
+                )?);
+            }
+            Ok::<_, LcmError>(expansions)
         }
-        Ok::<_, LcmError>(expansions)
-    })
+    }
 }
 
 /// Assembles one expansion from an already-hydrated source closure. Pure: it
@@ -429,7 +432,7 @@ fn uncondensed_summary_nodes_sql() -> String {
 // The recursive-CTE summary-DAG build: the dominant candidate when replay
 // assembly is slow on deep DAGs, so it gets its own label under the
 // assembly span.
-#[hotpath::measure(label = "sessions.lcm.dag.load_uncondensed", future = true)]
+#[tracing::instrument(name = "sessions.lcm.dag.load_uncondensed", level = "trace", skip_all)]
 pub async fn load_uncondensed_summary_nodes(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -505,7 +508,7 @@ async fn load_raw_messages_by_store_ids(
     } else {
         raw::RAW_MESSAGE_METADATA_SELECT_COLUMNS
     };
-    let fetched = hotpath::future!(
+    let fetched = tracing::Instrument::instrument(
         async {
             let mut fetched = Vec::new();
             for chunk in unique_store_ids.chunks(util::SQLITE_IN_BATCH_SIZE) {
@@ -533,19 +536,22 @@ async fn load_raw_messages_by_store_ids(
             }
             Ok::<_, LcmError>(fetched)
         },
-        label = "sessions.lcm.hydrate.fetch"
+        tracing::trace_span!("sessions.lcm.hydrate.fetch"),
     )
     .await?;
 
     if include_content {
-        hotpath::measure_block!("sessions.lcm.hydrate.redact", {
-            let mut out = BTreeMap::new();
-            for row in fetched {
-                let raw = raw::verified_raw_message_from_row(&row)?;
-                out.insert(raw.store_id, RawMessageRow::Hydrated(raw));
+        {
+            let _span = tracing::trace_span!("sessions.lcm.hydrate.redact").entered();
+            {
+                let mut out = BTreeMap::new();
+                for row in fetched {
+                    let raw = raw::verified_raw_message_from_row(&row)?;
+                    out.insert(raw.store_id, RawMessageRow::Hydrated(raw));
+                }
+                Ok::<_, LcmError>(out)
             }
-            Ok::<_, LcmError>(out)
-        })
+        }
     } else {
         let mut out = BTreeMap::new();
         for row in fetched {

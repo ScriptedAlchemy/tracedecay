@@ -21,7 +21,11 @@ const MAX_RELATION_HEALTH_ENTITIES: usize = 100_000;
 const MAX_RELATION_HEALTH_RELATIONS: usize = 100_000;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    #[hotpath::measure(future = true, label = "session_temporal.query.relation_health")]
+    #[tracing::instrument(
+        name = "session_temporal.query.relation_health",
+        level = "trace",
+        skip_all
+    )]
     pub(super) async fn with_relation_graph_health(
         &self,
         mut report: SessionTemporalHealthReport,

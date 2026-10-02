@@ -59,7 +59,6 @@ impl StructuredSanitizedPayload {
         &self.payload
     }
 
-    #[hotpath::skip]
     pub(crate) const fn was_structurally_parsed(&self) -> bool {
         self.structurally_parsed
     }
@@ -104,7 +103,11 @@ pub(crate) enum StructuredSanitizationError {
 /// Runs on every structured payload the privacy boundary admits (including
 /// each LCM hydration), so this entry span is the per-call cost authority;
 /// per-value work inside stays span-free and is aggregated by gauges.
-#[hotpath::measure(label = "runtime_core.privacy.sanitize_structured")]
+#[tracing::instrument(
+    name = "runtime_core.privacy.sanitize_structured",
+    level = "trace",
+    skip_all
+)]
 pub(crate) fn sanitize_structured_payload(
     raw: &[u8],
     limits: StructuredSanitizationLimits,

@@ -28,7 +28,7 @@ impl HookSpoolV1 {
     /// [`HookSpoolError::WriterLeaseLost`] forever.
     pub(super) fn ensure_live_lease(&self, now: UtcMicros) -> Result<(), HookSpoolError> {
         if self.lease.expires_at.0 <= now.0 {
-            hotpath::gauge!("hooks.spool.lease.lost").inc(1);
+            metrics::gauge!("hooks.spool.lease.lost").increment(1);
             return Err(HookSpoolError::WriterLeaseLost);
         }
         Ok(())
@@ -37,7 +37,7 @@ impl HookSpoolV1 {
 
 /// Acquires the single-writer lease without waiting. Native callbacks use the
 /// bounded admission path so capture and delivery each wait one budget.
-#[hotpath::measure(label = "hooks.spool.acquire_lease")]
+#[tracing::instrument(name = "hooks.spool.acquire_lease", level = "trace", skip_all)]
 pub(super) fn acquire_lease(
     root: &Path,
     lease_duration_micros: i64,
@@ -110,7 +110,7 @@ pub(super) fn lock_member(
 pub(super) fn map_try_lock_error(error: std::fs::TryLockError) -> HookSpoolError {
     match error {
         std::fs::TryLockError::WouldBlock => {
-            hotpath::gauge!("hooks.spool.lease.contended").inc(1);
+            metrics::gauge!("hooks.spool.lease.contended").increment(1);
             HookSpoolError::WriterLeaseHeld
         }
         std::fs::TryLockError::Error(_) => HookSpoolError::Io,

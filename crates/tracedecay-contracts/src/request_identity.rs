@@ -38,7 +38,6 @@ pub enum GlobalRequestSurface {
 }
 
 impl GlobalRequestSurface {
-    #[hotpath::skip]
     const fn prefix(self) -> &'static str {
         match self {
             Self::Cli => "request.cli",
@@ -73,7 +72,6 @@ pub enum GlobalOpaqueIdentityKind {
 }
 
 impl GlobalOpaqueIdentityKind {
-    #[hotpath::skip]
     const fn prefix(self) -> &'static str {
         match self {
             Self::DashboardPayloadGcPreview => "payload-gc",
@@ -92,7 +90,6 @@ pub enum GlobalOperationIdentityKind {
 }
 
 impl GlobalOperationIdentityKind {
-    #[hotpath::skip]
     const fn domain(self) -> &'static [u8] {
         match self {
             Self::HostArtifact => b"tracedecay.unique-operation.host-artifact.v1",
@@ -112,7 +109,6 @@ pub enum LogicalEffectIdempotencyDomain {
 }
 
 impl LogicalEffectIdempotencyDomain {
-    #[hotpath::skip]
     const fn domain(self) -> &'static str {
         match self {
             Self::HostObservation => "tracedecay.host-observation.idempotency.v1",
@@ -130,7 +126,6 @@ pub enum PreviewIdentityDomain {
 }
 
 impl PreviewIdentityDomain {
-    #[hotpath::skip]
     const fn domain(self) -> &'static str {
         match self {
             Self::SourceEdit => "tracedecay.source-edit-preview-idempotency.v1",

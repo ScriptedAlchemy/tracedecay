@@ -103,7 +103,7 @@ pub enum ExecutionTopologyViewV1 {
 /// Reads one execution-topology view: the attempt page (with the attempt
 /// list's own bounds, cursor, and staleness contract), one placement reading
 /// per distinct `(task, run)` lane, and the policy-carried dimensions.
-#[hotpath::measure(label = "application.work.topology.view")]
+#[tracing::instrument(name = "application.work.topology.view", level = "trace", skip_all)]
 pub fn execution_topology_view<S, PS>(
     attempts: &WorkAttemptService<S>,
     placements: &WorkPlacementService<PS>,

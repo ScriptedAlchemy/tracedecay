@@ -230,10 +230,13 @@ pub(crate) fn write_meta_atomic(path: &Path, meta: &SpoolMetaV1) -> Result<(), S
         }
     }
     let bytes = serde_json::to_vec(meta).map_err(|_| SpoolError::MetadataCorrupted)?;
-    hotpath::measure_block!("usecases.admission.fsync.meta", {
-        with_owned_temp_publish(path, "meta", "host admission spool metadata", |output| {
-            output.write_all(&bytes).map_err(io_error)?;
-            Ok(())
-        })
-    })
+    {
+        let _span = tracing::trace_span!("usecases.admission.fsync.meta").entered();
+        {
+            with_owned_temp_publish(path, "meta", "host admission spool metadata", |output| {
+                output.write_all(&bytes).map_err(io_error)?;
+                Ok(())
+            })
+        }
+    }
 }

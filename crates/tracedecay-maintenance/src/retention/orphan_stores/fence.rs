@@ -194,7 +194,11 @@ pub(super) fn capture_store_content_fence_controlled(
     capture_store_content_fence_impl(profile_root, data_root, Some(control))
 }
 
-#[hotpath::measure(label = "maintenance.orphan_stores.fence_content")]
+#[tracing::instrument(
+    name = "maintenance.orphan_stores.fence_content",
+    level = "trace",
+    skip_all
+)]
 fn capture_store_content_fence_impl(
     profile_root: &Path,
     data_root: &Path,

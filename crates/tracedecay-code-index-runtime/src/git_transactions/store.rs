@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 
-type ProfiledStdMutex<T> = hotpath::mutexes::Mutex<T>;
+type ProfiledStdMutex<T> = std::sync::Mutex<T>;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -144,7 +144,7 @@ struct PreviewGcTestObserver {
 }
 
 impl DaemonGitIndexTransactionStore {
-    #[hotpath::measure(label = "daemon.git.tx.store_open")]
+    #[tracing::instrument(name = "daemon.git.tx.store_open", level = "trace", skip_all)]
     pub fn open(database: RegisteredGlobalDbLeaseV1) -> GitIndexTransactionStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered {
             database,
@@ -202,14 +202,8 @@ impl DaemonGitIndexTransactionStore {
             return Err(error);
         }
         Ok(Self {
-            commands: hotpath::mutex!(
-                std::sync::Mutex::new(Some(commands)),
-                label = "daemon.git.tx.store.commands"
-            ),
-            worker: hotpath::mutex!(
-                std::sync::Mutex::new(Some(worker)),
-                label = "daemon.git.tx.store.worker"
-            ),
+            commands: std::sync::Mutex::new(Some(commands)),
+            worker: std::sync::Mutex::new(Some(worker)),
         })
     }
 

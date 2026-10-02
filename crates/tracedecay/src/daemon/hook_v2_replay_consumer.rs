@@ -82,7 +82,7 @@ fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmi
 /// that is not settled stays durable for the next sweep, and the failure
 /// names its cause. `Ok(true)` means a full batch settled and receipts
 /// remain behind it.
-#[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
+#[tracing::instrument(name = "daemon.hook_replay.receipt_drain", level = "trace", skip_all)]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: NativeHostIdentityV1,
@@ -162,18 +162,18 @@ struct HookReplaySweepObservation;
 
 impl HookReplaySweepObservation {
     fn begin() -> Self {
-        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(1.0);
+        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(1.0);
         Self
     }
 }
 
 impl Drop for HookReplaySweepObservation {
     fn drop(&mut self) {
-        hotpath::gauge!("daemon.hook_replay.sweeps_active").inc(-1.0);
+        metrics::gauge!("daemon.hook_replay.sweeps_active").increment(-1.0);
     }
 }
 
-#[hotpath::measure(label = "daemon.hook_replay.sweep", future = true)]
+#[tracing::instrument(name = "daemon.hook_replay.sweep", level = "trace", skip_all)]
 async fn drain_all_hosts(
     graph: &tracedecay_project::project::TraceDecay,
     data_root: &Path,
@@ -506,14 +506,14 @@ pub(crate) fn register_hook_v2_replay_consumer(
             // Retained records and failed spools wait at most this interval
             // for their next attempt; a hook append wakes the drain sooner. Keep
             // the pacing WAIT separate from sweep WORK.
-            hotpath::future!(
+            tracing::Instrument::instrument(
                 async {
                     tokio::select! {
                         () = tokio::time::sleep(REPLAY_INTERVAL) => {}
                         () = wake.notified() => {}
                     }
                 },
-                label = "daemon.hook_replay.interval_wait"
+                tracing::trace_span!("daemon.hook_replay.interval_wait"),
             )
             .await;
         }

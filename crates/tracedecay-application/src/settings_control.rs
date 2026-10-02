@@ -94,7 +94,7 @@ pub enum ProjectSettingsPreviewErrorV1 {
     InvalidAuthority,
 }
 
-#[hotpath::measure(label = "usecases.settings.preview")]
+#[tracing::instrument(name = "usecases.settings.preview", level = "trace", skip_all)]
 pub fn preview_project_settings(
     project_id: &ProjectId,
     current: &PinnedRuntimeConfiguration,

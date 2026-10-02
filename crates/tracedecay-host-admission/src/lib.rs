@@ -44,7 +44,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 
 mod authorities;
 mod discovery_queue;
-mod hotpath_observe;
+mod observe;
 mod projection_drain;
 mod replay;
 mod runtime;
@@ -113,7 +113,7 @@ impl HostAdmissionBroker {
         }
     }
 
-    #[hotpath::measure(label = "host_admission.with_runtime", future = true)]
+    #[tracing::instrument(name = "host_admission.with_runtime", level = "trace", skip_all)]
     async fn with_runtime<T, F>(&self, operation: F) -> Result<T, HostAdmissionOutcome>
     where
         T: Send + 'static,
@@ -130,7 +130,7 @@ impl HostAdmissionBroker {
 
     /// Durably admit one record, group-committed with every concurrent
     /// admission queued while an earlier batch holds the spool.
-    #[hotpath::measure(label = "usecases.admission.admit", future = true)]
+    #[tracing::instrument(name = "usecases.admission.admit", level = "trace", skip_all)]
     pub async fn admit(
         &self,
         source: &str,
@@ -182,7 +182,7 @@ impl HostAdmissionBroker {
             .is_ok_and(|count| count > 0)
     }
 
-    #[hotpath::measure(label = "usecases.admission.begin_replay", future = true)]
+    #[tracing::instrument(name = "usecases.admission.begin_replay", level = "trace", skip_all)]
     pub async fn begin_replay(&self) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
         let guard = self.replay.lock().await;
         self.with_runtime(HostAdmissionRuntime::recover_leases)
@@ -207,28 +207,32 @@ impl HostAdmissionBroker {
 }
 
 impl HostAdmissionReplay<'_> {
-    #[hotpath::measure(label = "usecases.admission.replay.lease", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.lease", level = "trace", skip_all)]
     pub async fn lease_next(&self) -> Result<Option<SpoolRecord>, HostAdmissionOutcome> {
         self.broker
             .with_runtime(HostAdmissionRuntime::try_lease_next)
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.defer", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.defer", level = "trace", skip_all)]
     pub async fn defer(&self, seq: u64) -> Result<(), HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.defer(seq))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.commit", future = true)]
+    #[tracing::instrument(name = "usecases.admission.replay.commit", level = "trace", skip_all)]
     pub async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.commit(seq))
             .await
     }
 
-    #[hotpath::measure(label = "usecases.admission.replay.quarantine", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.replay.quarantine",
+        level = "trace",
+        skip_all
+    )]
     pub async fn quarantine(
         &self,
         seq: u64,
@@ -562,7 +566,11 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
-    #[hotpath::measure(label = "usecases.admission.get_source_cursor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.get_source_cursor",
+        level = "trace",
+        skip_all
+    )]
     pub async fn get_source_cursor(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -575,7 +583,11 @@ impl<'a> HostAdmissionFacade<'a> {
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
-    #[hotpath::measure(label = "usecases.admission.committed_source_cursors", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.committed_source_cursors",
+        level = "trace",
+        skip_all
+    )]
     pub async fn committed_source_cursors(
         &self,
         source: &ObservationSourceIdentityV1,
@@ -588,7 +600,11 @@ impl<'a> HostAdmissionFacade<'a> {
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
     }
 
-    #[hotpath::measure(label = "usecases.admission.capture_observation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.capture_observation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn capture_observation(
         &self,
         request: CaptureObservationRequest,
@@ -623,7 +639,11 @@ impl<'a> HostAdmissionFacade<'a> {
     /// This overrides the trait default, which still walks
     /// [`Self::capture_observation`] one frame at a time. An empty window
     /// returns empty without minting a skipped-authority success.
-    #[hotpath::measure(label = "usecases.admission.capture_observations", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.capture_observations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn capture_observations(
         &self,
         requests: Vec<CaptureObservationRequest>,
@@ -631,7 +651,7 @@ impl<'a> HostAdmissionFacade<'a> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
-        crate::hotpath_observe::admission_capture_frames(requests.len());
+        crate::observe::admission_capture_frames(requests.len());
         let provider = first.provider().to_owned();
         let scope = first.scope().clone();
         self.authorities.validate_scope(&scope)?;
@@ -662,7 +682,11 @@ impl<'a> HostAdmissionFacade<'a> {
     }
 
     /// Persist one sanitized write through the store the façade already holds.
-    #[hotpath::measure(label = "usecases.admission.persist_observation", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.persist_observation",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_observation(
         &self,
         provider: &str,
@@ -690,7 +714,11 @@ impl<'a> HostAdmissionFacade<'a> {
     ///
     /// An empty window returns empty without opening the store or minting a
     /// skipped-authority success. Mixed provider or scope writes fail closed.
-    #[hotpath::measure(label = "usecases.admission.persist_observations", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.persist_observations",
+        level = "trace",
+        skip_all
+    )]
     pub async fn persist_observations(
         &self,
         provider: &str,
@@ -700,7 +728,7 @@ impl<'a> HostAdmissionFacade<'a> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        crate::hotpath_observe::admission_persist_frames(writes.len());
+        crate::observe::admission_persist_frames(writes.len());
         self.authorities.validate_scope(scope)?;
         for write in &writes {
             if write.observation().source().provider().as_str() != provider
@@ -733,7 +761,7 @@ impl<'a> HostAdmissionFacade<'a> {
         }
     }
 
-    #[hotpath::measure(label = "usecases.admission.advance_cursor", future = true)]
+    #[tracing::instrument(name = "usecases.admission.advance_cursor", level = "trace", skip_all)]
     pub async fn advance_non_durable_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
@@ -792,7 +820,11 @@ impl<'a> HostAdmissionFacade<'a> {
 }
 
 impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
-    #[hotpath::measure(label = "usecases.admission.resolve_evidence_anchor", future = true)]
+    #[tracing::instrument(
+        name = "usecases.admission.resolve_evidence_anchor",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_evidence_anchor(
         &self,
         owner: FactOwnerV1,
@@ -860,9 +892,10 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
 const EVIDENCE_ANCHOR_RESOLUTION_NAMESPACE: &str = "observation-resolution.v1";
 
 impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
-    #[hotpath::measure(
-        label = "usecases.admission.resolve_evidence_anchor_report",
-        future = true
+    #[tracing::instrument(
+        name = "usecases.admission.resolve_evidence_anchor_report",
+        level = "trace",
+        skip_all
     )]
     async fn resolve_evidence_anchor_report(
         &self,

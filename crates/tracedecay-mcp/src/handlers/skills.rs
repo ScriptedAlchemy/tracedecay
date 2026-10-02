@@ -64,7 +64,7 @@ fn support_file_paths(skill: &ManagedSkill) -> Vec<String> {
         .collect()
 }
 
-#[hotpath::measure(label = "mcp.automation.skill_list.total")]
+#[tracing::instrument(name = "mcp.automation.skill_list.total", level = "trace", skip_all)]
 pub async fn compute_skill_list(
     authority: &SkillReadAuthority<'_>,
     args: &Value,
@@ -73,9 +73,9 @@ pub async fn compute_skill_list(
         decode_primitive_request(args, "tracedecay_skill_list")?;
     let profile_root = authority.profile_root()?;
     authority.sync_project_analytics(profile_root).await?;
-    let mut skills = hotpath::future!(
+    let mut skills = tracing::Instrument::instrument(
         list_managed_skills(profile_root),
-        label = "mcp.automation.skill_list.load"
+        tracing::trace_span!("mcp.automation.skill_list.load"),
     )
     .await?;
     if let Some(state) = request.state {
@@ -116,7 +116,7 @@ pub async fn compute_skill_list(
     ))
 }
 
-#[hotpath::measure(label = "mcp.automation.skill_view.total")]
+#[tracing::instrument(name = "mcp.automation.skill_view.total", level = "trace", skip_all)]
 pub async fn compute_skill_view(
     authority: &SkillReadAuthority<'_>,
     args: &Value,
@@ -125,9 +125,9 @@ pub async fn compute_skill_view(
         decode_primitive_request(args, "tracedecay_skill_view")?;
     let profile_root = authority.profile_root()?;
     authority.sync_project_analytics(profile_root).await?;
-    let mut skill = hotpath::future!(
+    let mut skill = tracing::Instrument::instrument(
         load_managed_skill(profile_root, &request.id),
-        label = "mcp.automation.skill_view.load"
+        tracing::trace_span!("mcp.automation.skill_view.load"),
     )
     .await?;
     let targets = skill
@@ -205,7 +205,7 @@ pub async fn compute_skill_view(
     ))
 }
 
-#[hotpath::measure(label = "mcp.automation.hermes_bridge.total")]
+#[tracing::instrument(name = "mcp.automation.hermes_bridge.total", level = "trace", skip_all)]
 pub fn compute_hermes_skill_bridge(
     user_home: Option<&Path>,
     args: &Value,

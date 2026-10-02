@@ -17,10 +17,6 @@ on:
         description: "Also run stock host integrations"
         type: boolean
         default: false
-      run_perf:
-        description: "Also run hotpath parity"
-        type: boolean
-        default: false
       run_full_nextest:
         description: "Also run the full Linux search and transport selections"
         type: boolean
@@ -58,7 +54,6 @@ jobs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
-      run-perf: ${{ steps.decide.outputs.run-perf }}
       linux-groups: ${{ steps.linux-groups.outputs.matrix }}
       windows-partitions: ${{ steps.windows-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
@@ -88,7 +83,6 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft || false }}
           RUN_OS: ${{ inputs.run_os || false }}
           RUN_HOSTS: ${{ inputs.run_hosts || false }}
-          RUN_PERF: ${{ inputs.run_perf || false }}
           HAULER_DECISION: ${{ steps.route.outputs.decision }}
           HAULER_ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: |
@@ -103,19 +97,16 @@ jobs:
           fi
           os=false
           hosts=false
-          perf=false
           if [[ $EVENT == workflow_dispatch ]]; then
             [[ $RUN_OS == true ]] && os=true
             [[ $RUN_HOSTS == true ]] && hosts=true
-            [[ $RUN_PERF == true ]] && perf=true
           fi
           {
             echo "run-heavy=$heavy"
             echo "run-os=$os"
             echo "run-hosts=$hosts"
-            echo "run-perf=$perf"
           } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT)"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT)"
 
       # The Linux, Windows and macOS test matrices come from the same manifest
       # the partition jobs select their targets from, so a partition cannot
@@ -250,11 +241,8 @@ jobs:
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
-      - name: Check Rust cache key lineage and the superseded-entry selection
-        run: |
-          python3 scripts/test-prune-superseded-actions-caches.py
-          python3 scripts/test-rust-cache-lineage.py
-          python3 scripts/check-rust-cache-lineage.py
+      - name: Check the superseded-entry selection
+        run: python3 scripts/test-prune-superseded-actions-caches.py
 
       # Packager unit tests. They do not need a release binary, so they run
       # once here instead of once per release matrix target.
@@ -598,102 +586,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-  # The controlled-workload hotpath parity gate: `tracedecay-search-eval`'s
-  # `emit_controlled_workload_reports` example, built once with the hotpath
-  # profiler compiled out and once with `controlled-workload-hotpath`
-  # (`hotpath/hotpath`) on, must produce byte-identical durable results for
-  # the framed-log (private-fs) and cursor-parse (capture) workloads, from
-  # provably distinct executables. `scripts/build-controlled-workload-
-  # hotpath-helpers.py` builds the pair into target/controlled-workload-
-  # hotpath/, and the `#[ignore]`d test in the crate's library test target
-  # (`controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_
-  # identical`) spawns them from there; `--run-ignored only` with
-  # `--no-tests=fail` is the only way it runs, and nothing else. No
-  # partition, artifact upload or junit merge consumes the executables.
-  #
-  # Its own job rather than a tail on the `root-lib` partition, where it ran
-  # after the root library's tests: the feature-on build recompiles every
-  # workspace crate beneath the evaluator (all 21 depend on `hotpath`, so
-  # the feature flip changes each one's metadata hash) plus the example,
-  # ~10 min on top of the ~26 min root chain, which made that job the lane's
-  # critical path. Here the graph beneath the evaluator compiles from the
-  # checkout in both modes. A serial chain domain → contracts →
-  # rusqlite-runtime → runtime-core → code-index → sessions → query →
-  # search-eval → example of ~9 min per mode with four compile slots (cargo
-  # `--timings`, -j4 on EPYC 7742 cores; the same pair of builds took 19.5
-  # min on a hosted runner in run 34138693824, when the single-job lane
-  # still built them as their own resolution). Then the library test target
-  # (24 s against the feature-off graph) and the test itself (under 1 s).
-  # With setup, ~24 min hosted: beside the partitions and no longer than the
-  # slowest of them (25.9 and 27.4 min in run 34296614024), so the `Test
-  # Linux` verdict no longer waits for it. The property does not depend on
-  # the platform (the Windows lane never provisioned it for that reason), so
-  # a Linux runner carries it.
-  #
-  # Not a job in hotpath-coverage.yml: that workflow is path-filtered to
-  # Rust inputs and never runs on `push`, while this is a gate on every pull
-  # request head, and its feature-on slices (storage, sessions) do not cover
-  # the query/code-index/runtime-core graph the evaluator needs; rust-cache
-  # keeps dependency artifacts only, so no other job's compiled workspace
-  # crates could be reused anyway. The evaluator alone (`-p
-  # tracedecay-search-eval`) is the selection: the root partitions' wider
-  # one would turn every language tier on in `tracedecay-code-extraction`
-  # and `-code-index` for two builds that parse no source, and carry the root
-  # fixture feature for a crate this job never compiles. No cache: under
-  # this selection ~160 of the 420 registry crates (`syn`, `serde_core`,
-  # `tokio` and their dependents) unify differently from the lane's
-  # `ci-test-full-Linux` graph and would miss it, and the rest compile in
-  # the slots the serial chain leaves idle (the cold build measured 8.8 min
-  # against 9.1 for the warm feature-on one), so a restore
-  # would buy about what it costs, while another lineage would compete for
-  # the 10 GB budget the test lanes' dependency caches are already evicted
-  # from.
-  hotpath-parity:
-    name: Hotpath parity
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-perf == 'true' }}
-    runs-on: ubuntu-24.04-arm
-    # 19.5 min for the two builds (hosted, above) + ~1.5 cold registry the
-    # chain does not hide + ~1.5 setup + 0.5 test target + 0.5 run ≈ 24 min,
-    # plus 25 % headroom, as for the partition budgets.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      # Both modes under the evaluator's own selection; the helper copies
-      # each result out of target/perf/examples immediately so the second
-      # resolution cannot replace the first.
-      - name: Build controlled-workload hotpath parity executables
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf
-
-      # The library test target resolves the same feature-off graph as the
-      # first build above, so only the test target itself compiles here.
-      # nextest `ci` policy and the perf cargo profile, as the partitions.
-      - name: Verify controlled-workload hotpath parity
-        run: |
-          cargo nextest run --profile ci --cargo-profile perf --locked -p tracedecay-search-eval --lib \
-            --run-ignored only \
-            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
-            --no-tests=fail
-
   # The one `Test Linux` verdict, as when a single job carried the suite:
-  # every partition and the hotpath parity gate must pass. It also folds the
-  # partition reports back into the `nextest-junit-Linux` artifact the single
-  # job published; the parity verdict is its step's exit status, as it was
-  # inside the partition, and is not part of that report.
+  # every partition must pass. It also folds the partition reports back into
+  # the `nextest-junit-Linux` artifact the single job published.
   linux-test:
     name: Test Linux
     if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
-    needs: [linux-test-partition, hotpath-parity, scope-gate]
+    needs: [linux-test-partition, scope-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -708,18 +607,14 @@ jobs:
           separate-directories: true
           retention-days: 7
 
-      - name: Check Linux partitions and hotpath parity
+      - name: Check Linux partitions
         if: ${{ !cancelled() }}
         run: |
           if [ "${{ needs.linux-test-partition.result }}" != "success" ]; then
             echo "Linux partition result: ${{ needs.linux-test-partition.result }}"
             exit 1
           fi
-          if [ "${{ needs.hotpath-parity.result }}" != "success" ] && [ "${{ needs.hotpath-parity.result }}" != "skipped" ]; then
-            echo "Hotpath parity result: ${{ needs.hotpath-parity.result }}"
-            exit 1
-          fi
-          echo "All Linux partitions and the hotpath parity gate passed."
+          echo "All Linux partitions passed."
 
   # Optional cross-test isolation proof. The partition lane cannot expose
   # authorities leaked between targets that it runs in separate jobs. Keep
@@ -1069,18 +964,17 @@ jobs:
   # selections. `test-transport` acceptance suites (`mcp_suite`,
   # `transport_acceptance_suite`, `host_journeys_suite`, `work_loop_journey`)
   # now run as the `root-transport` Linux partition; this job still
-  # `cargo check`s the full `--features test-transport` / hotpath graphs so
+  # `cargo check`s the full `--features test-transport` graph so
   # non-selected targets cannot rot until release `--all-features`.
   #
   # Its own job, not a tail on the Linux build: these are dev-profile check
   # builds, a graph the perf-profile test lanes share nothing with, so there
   # is no compiled tree to reuse and nothing to gain from waiting for one.
-  # As the last steps of the Linux test job they ran only after a green
+  # As the last step of the Linux test job it ran only after a green
   # suite, never once on this branch, and would have held the Linux shards
-  # back by their own duration. Here the verdict lands independently at
-  # about clippy's cost: the cold `cargo clippy --workspace --all-targets`
-  # took 13.7 min (run 34231734416), the second check re-resolves only the
-  # crates the hotpath features touch (clippy's lean re-check: 2.7 min).
+  # back by its own duration. Here the verdict lands independently at
+  # about clippy's cost (the cold `cargo clippy --workspace --all-targets`
+  # took 13.7 min in run 34231734416).
   # Feature wiring does not vary by host, so one OS carries the gate. No
   # cache: it is off every lane's critical path, and another lineage would
   # compete for the 10 GB budget the test lanes' dependency caches are
@@ -1107,14 +1001,6 @@ jobs:
       - name: Check feature-gated surfaces compile
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
-          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-          # Lights the hotpath backend without any crate's own hotpath feature.
-          # The two lines above keep them in sync, which hides a type that
-          # forks on the local feature while hotpath::io! expands on the backend.
-          # It also carries tracedecay-hotpath-guard's live MCP proof, whose
-          # required-features name these two dependency features. That guard is
-          # a leaf and holds no backend feature of its own (see its manifest).
-          cargo check --workspace --all-targets --features hotpath/hotpath,hotpath/hotpath-mcp --locked
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.

@@ -55,7 +55,6 @@ pub enum GenerationCensusUnavailableReason {
 }
 
 impl GenerationCensusUnavailableReason {
-    #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityUnavailable => "authority_unavailable",
@@ -807,7 +806,11 @@ fn cpu_percent_from_linux_ticks(
     Some((cpu_secs / wall_secs * 100.0) as f32)
 }
 
-#[hotpath::measure(label = "usecases.runtime_telemetry.process_sample")]
+#[tracing::instrument(
+    name = "usecases.runtime_telemetry.process_sample",
+    level = "trace",
+    skip_all
+)]
 fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnapshot> {
     let pid = Pid::from_u32(std::process::id());
 

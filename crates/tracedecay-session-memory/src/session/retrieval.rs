@@ -73,12 +73,10 @@ impl SessionRetrievalConfiguration {
         })
     }
 
-    #[hotpath::skip]
     pub const fn schema_version(self) -> u32 {
         self.schema_version
     }
 
-    #[hotpath::skip]
     pub const fn ranking_version(self) -> u32 {
         self.ranking_version
     }
@@ -275,22 +273,18 @@ impl SessionTemporalQuery {
         self.cursor.as_deref()
     }
 
-    #[hotpath::skip]
     pub const fn temporal_mode(&self) -> TemporalModeV1 {
         self.temporal_mode
     }
 
-    #[hotpath::skip]
     pub const fn grain(&self) -> RetrievalGrainV1 {
         self.grain
     }
 
-    #[hotpath::skip]
     pub const fn limit(&self) -> usize {
         self.limit
     }
 
-    #[hotpath::skip]
     pub const fn diversity(&self) -> DiversityLimits {
         self.diversity
     }
@@ -299,12 +293,10 @@ impl SessionTemporalQuery {
         &self.context_budget
     }
 
-    #[hotpath::skip]
     pub const fn execution_limits(&self) -> ExecutionLimits {
         self.execution_limits
     }
 
-    #[hotpath::skip]
     pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
         self.freshness_policy
     }
@@ -347,7 +339,6 @@ pub struct SessionRetrievalService<'db, A, D: SessionTemporalRegisteredDb, E> {
 }
 
 impl<'db, A, D: SessionTemporalRegisteredDb, E> SessionRetrievalService<'db, A, D, E> {
-    #[hotpath::skip]
     pub const fn new(
         authorizer: A,
         execution: RegisteredGlobalDbSessionTemporalExecution<'db, D>,
@@ -369,7 +360,7 @@ where
     D: SessionTemporalRegisteredDb + Sync,
     E: VersionedTokenEstimator + Sync,
 {
-    #[hotpath::measure(label = "usecases.session.retrieve")]
+    #[tracing::instrument(name = "usecases.session.retrieve", level = "trace", skip_all)]
     pub async fn retrieve(
         &self,
         context: &RequestContext,
@@ -381,7 +372,7 @@ where
             Err(failure) => return failure.into_outcome(),
         };
         let expected_execution = admitted.execution.clone();
-        let result = hotpath::future!(
+        let result = tracing::Instrument::instrument(
             run_application_request_interruptible(
                 context,
                 binding.cancellation(),
@@ -390,7 +381,7 @@ where
                     admitted.cancellation_control.cancel();
                 },
             ),
-            label = "usecases.session.execute"
+            tracing::trace_span!("usecases.session.execute"),
         )
         .await;
         let result = match result {
@@ -427,7 +418,7 @@ fn budget_exhausted<T>(
     stage: SessionRetrievalBudgetStageV1,
     accounting: Option<SessionRetrievalBudgetAccountingV1>,
 ) -> SessionRetrievalOutcome<T> {
-    crate::session::hotpath_observe::session_retrieval_budget_stage(stage);
+    crate::session::observe::session_retrieval_budget_stage(stage);
     SessionRetrievalOutcome::BudgetExhausted { stage, accounting }
 }
 
@@ -686,7 +677,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                     .map(tracedecay_session_temporal_store::execution::port_budget_accounting),
             ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
-                crate::session::hotpath_observe::session_retrieval_budget_stage(
+                crate::session::observe::session_retrieval_budget_stage(
                     SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
@@ -696,7 +687,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 }
             }
             TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
-                crate::session::hotpath_observe::session_retrieval_budget_stage(
+                crate::session::observe::session_retrieval_budget_stage(
                     SessionRetrievalBudgetStageV1::ParticipantManifestCanonicalBytes,
                 );
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
