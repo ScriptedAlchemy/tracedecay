@@ -43,7 +43,6 @@ gix = { version = "=0.87.1", default-features = false, features = ["revision", "
 toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
-url = "2"
 ureq = { version = "3", features = ["json"] }
 yaml-edit = { version = "0.2.3", default-features = false }
 
