@@ -374,6 +374,10 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
 async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
     let projects = production_routed_projects_ready_for_first_read().await;
     let target_workspace = projects.target_root().to_path_buf();
+    let target_server = projects
+        .harness
+        .server(&target_workspace)
+        .expect("target project server");
     let server = projects.server();
     let session_id = "sess-unhinted-source-edit";
 
@@ -390,35 +394,40 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
     )
     .expect("write tracked source without a hook hint");
 
-    let payload = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let responses = run_client_connection_with_messages(
-                Arc::clone(&server),
-                vec![exact_symbol_call_for_session(
-                    1,
-                    session_id,
-                    "routed_edit_visible",
-                )],
-            )
-            .await;
-            let response = response_with_id(&responses, json!(1));
-            let payload: Value = serde_json::from_str(successful_tool_text(
-                &response,
-                "routed exact-symbol read after unhinted edit",
-            ))
-            .expect("routed exact-symbol JSON");
-            if payload["matches"].as_array().is_some_and(|matches| {
-                matches
-                    .iter()
-                    .any(|symbol| symbol["name"] == "routed_edit_visible")
-            }) {
-                break payload;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the daemon-routed read must expose the unhinted edit after reconciliation");
+    run_client_connection_with_messages(
+        Arc::clone(&server),
+        vec![exact_symbol_call_for_session(
+            1,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
+
+    let responses = run_client_connection_with_messages(
+        server,
+        vec![exact_symbol_call_for_session(
+            2,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    let response = response_with_id(&responses, json!(2));
+    let payload: Value = serde_json::from_str(successful_tool_text(
+        &response,
+        "routed exact-symbol read after unhinted edit",
+    ))
+    .expect("routed exact-symbol JSON");
+    assert!(
+        payload["matches"].as_array().is_some_and(|matches| {
+            matches
+                .iter()
+                .any(|symbol| symbol["name"] == "routed_edit_visible")
+        }),
+        "the routed exact-symbol read must expose the unhinted edit: {payload}"
+    );
     assert_eq!(payload["freshness"]["state"], "fresh", "{payload}");
 
     projects.shutdown().await;
