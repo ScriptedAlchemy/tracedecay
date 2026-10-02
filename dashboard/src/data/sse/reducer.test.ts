@@ -62,7 +62,7 @@ describe("SSE reducer, dedupe by stream/event/revision", () => {
     const r = createSseReducer<Body>();
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(true);
     expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
-    expect(r.takeBatch().events).toHaveLength(1);
+    expect(r.takeBatch().events).toEqual([ev({ event_revision: 1, event_id: "e1" })]);
     expect(r.stats().observedEvents).toBe(1);
   });
 
@@ -70,7 +70,10 @@ describe("SSE reducer, dedupe by stream/event/revision", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ stream_id: "a", event_revision: 1, event_id: "x" }));
     expect(r.ingest(ev({ stream_id: "b", event_revision: 1, event_id: "x" }))).toBe(true);
-    expect(r.takeBatch().events).toHaveLength(2);
+    expect(r.takeBatch().events).toEqual([
+      ev({ stream_id: "a", event_revision: 1, event_id: "x" }),
+      ev({ stream_id: "b", event_revision: 1, event_id: "x" }),
+    ]);
   });
 });
 
@@ -136,7 +139,11 @@ describe("SSE reducer, overflow => stale + single invalidation", () => {
     const batch = r.takeBatch();
     expect(batch.stale).toBe(true);
     expect(batch.refetch).toBe(true);
-    expect(batch.events).toHaveLength(3);
+    expect(batch.events).toEqual([
+      ev({ event_revision: 1, event_id: "e1" }),
+      ev({ event_revision: 2, event_id: "e2" }),
+      ev({ event_revision: 3, event_id: "e3" }),
+    ]);
   });
 
   it("marks stale on byte overflow", () => {
@@ -144,7 +151,13 @@ describe("SSE reducer, overflow => stale + single invalidation", () => {
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
     r.ingest(ev({ event_revision: 2, event_id: "e2" }));
     expect(r.ingest(ev({ event_revision: 3, event_id: "e3" }))).toBe(false);
-    expect(r.takeBatch().stale).toBe(true);
+    const batch = r.takeBatch();
+    expect(batch.stale).toBe(true);
+    expect(batch.refetch).toBe(true);
+    expect(batch.events).toEqual([
+      ev({ event_revision: 1, event_id: "e1" }),
+      ev({ event_revision: 2, event_id: "e2" }),
+    ]);
   });
 
   it("emits the invalidation only ONCE while stale", () => {
@@ -154,6 +167,7 @@ describe("SSE reducer, overflow => stale + single invalidation", () => {
     const first = r.takeBatch();
     expect(first.refetch).toBe(true);
     expect(first.stale).toBe(true);
+    expect(first.events).toEqual([ev({ event_revision: 1, event_id: "e1" })]);
     r.ingest(ev({ event_revision: 3, event_id: "e3" }));
     const second = r.takeBatch();
     expect(second.refetch).toBe(false);
@@ -170,7 +184,9 @@ describe("SSE reducer, overflow => stale + single invalidation", () => {
     expect(r.commitReseed(token)).toEqual({ status: "committed", epoch: 1 });
     expect(r.stats().stale).toBe(false);
     expect(r.ingest(ev({ generation: 2, event_revision: 101, event_id: "e101" }))).toBe(true);
-    expect(r.takeBatch().events).toHaveLength(1);
+    expect(r.takeBatch().events).toEqual([
+      ev({ generation: 2, event_revision: 101, event_id: "e101" }),
+    ]);
   });
 });
 
@@ -188,7 +204,7 @@ describe("SSE reducer, canonical refresh transaction", () => {
     expect(r.ingest(ev({ event_revision: 9, event_id: "e9" }))).toBe(true);
     const batch = r.takeBatch();
     expect(batch.refetch).toBe(true);
-    expect(batch.events).toHaveLength(1);
+    expect(batch.events).toEqual([ev({ event_revision: 9, event_id: "e9" })]);
   });
 
   it("still dedupes an event redelivered after a commit", () => {
