@@ -315,10 +315,9 @@ fn generation_relation(
 /// Rows a refresh changes relative to a sealed base, spilled like a cold
 /// generation's rows, plus the base identities it removes.
 ///
-/// The spill holds hard links to the base's container, attachment, and row
-/// index from the moment it is created, so the base bytes this delta is
-/// derived from survive the base generation's retirement until the delta
-/// seals.
+/// The spill hard-links the base container, producer attachment, row index,
+/// and endpoint sidecars when it is created, so every byte the delta derives
+/// from survives base-generation retirement until the delta seals.
 pub struct GraphLayeredRowSpill {
     spill: GraphGenerationRowSpill,
     base: GraphSealedBaseV1,
