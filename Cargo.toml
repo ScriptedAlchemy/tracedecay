@@ -75,11 +75,11 @@ version = "1.0.0-beta.66"
 # roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
 # build across the graph, so no member needs a feature just to be measured.
 hotpath = { version = "0.24", default-features = false, features = ["threads"] }
-grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
-grafeo-common = { version = "=0.5.42", default-features = false }
-grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
-grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
+grafeo-adapters = { version = "=0.5.43", default-features = false, features = ["algos"] }
+grafeo-common = { version = "=0.5.43", default-features = false }
+grafeo-core = { version = "=0.5.43", default-features = false, features = ["lpg"] }
+grafeo-engine = { version = "=0.5.43", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
+grafeo-storage = { version = "=0.5.43", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
@@ -217,7 +217,7 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # is still unmerged upstream (#1104).
 tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9" }
 
-# Patched grafeo 0.5.42, consumed from our fork at the reviewed head of
+# Patched grafeo 0.5.43, consumed from our fork at the reviewed head of
 # ScriptedAlchemy/grafeo#1 (codex/checked-lpg-block-ranges): the accumulated
 # patch stack (arena multi-chunk fix, streaming serialization + mmap compact
 # open, compact/overlay/close correctness, transaction-bounded WAL recovery,
@@ -250,13 +250,17 @@ tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokens
 # apart, which is what the graph engine's resident owner charges. Since
 # ScriptedAlchemy/grafeo#7 a string value over 64 KiB is stored whole with
 # its zone-map bound written absent, and an over-long table or property name
-# is a typed error, where the section writer used to panic. Its
+# is a typed error, where the section writer used to panic. The fork is
+# merged with upstream v0.5.43 (ScriptedAlchemy/grafeo#9), which adds
+# checked size fields that fail an oversize write instead of corrupting it,
+# keeps edges of modified nodes after `compact()`, and drops deleted nodes
+# from property and vector indexes. Its
 # workspace resolves sibling crates by path, so every grafeo crate must
 # come from the same revision. A mixed
 # registry/git graph would build type-incompatible instances of the patched
 # crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "58037effacda10952f14c45e258d98caea63f862" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "b3a46e952f678a767bb5efb3ae5cb91dee459684" }

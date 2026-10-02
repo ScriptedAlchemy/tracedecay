@@ -179,6 +179,7 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_temporal_generations_one_active",
     "idx_session_temporal_generations_session_state",
     "idx_session_temporal_observation_effects_session",
+    "idx_session_temporal_resets_requested",
     "idx_session_threads_introduced",
     "idx_session_turn_members_introduced",
     "idx_session_turn_members_occurrence",

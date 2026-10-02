@@ -105,7 +105,7 @@ use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
-pub use projection::record_canonical_observation_effect;
+pub use projection::{record_canonical_observation_effect, request_session_temporal_reset};
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use store::SessionTemporalStore;
 

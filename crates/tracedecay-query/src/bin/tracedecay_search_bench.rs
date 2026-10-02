@@ -31,7 +31,7 @@
 mod artifact_bench;
 
 use artifact_bench::{
-    ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
+    ActiveControl, AdmittedFile, ApplyingProjectionSink, SealedDrainBounds, decoded_generation,
     default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
     replicate, seal_partitioned,
 };
@@ -46,7 +46,8 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
     CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    MemorySealedPublicationStoreV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     AuthorizationRevision, ChunkerRevision, CodeGenerationId, ComponentRevision,
@@ -355,12 +356,9 @@ fn run(options: &Options) -> Result<String, String> {
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemoryPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .map_err(|error| format!("open production owner: {error}"))?;
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| format!("open production owner: {error}"))?;
 
     let request = build_request(&repository, &sanitizer_revision, &files);
     let generation_started = Instant::now();
@@ -368,6 +366,7 @@ fn run(options: &Options) -> Result<String, String> {
         .build_and_publish(request, &control)
         .map_err(|error| format!("build generation: {error}"))?;
     let generation_wall = generation_started.elapsed();
+    let generation = decoded_generation(&store, &generation)?;
     let chunk_count = generation.chunks().chunks().len() as u64;
 
     let seal_started = Instant::now();

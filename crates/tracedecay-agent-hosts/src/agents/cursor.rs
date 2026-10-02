@@ -230,6 +230,9 @@ fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationSt
 fn doctor_check_native_extension(dc: &mut DoctorCounters, home: &Path) {
     let install_dir = cursor_native_extension_install_dir(home);
     match cursor_native_extension_registration(home) {
+        HostBundleRegistrationStateV1::Unverifiable => {
+            dc.info("Cursor native extension registration is unverifiable")
+        }
         HostBundleRegistrationStateV1::Current => dc.pass(&format!(
             "Cursor native diagnostics extension {} deployed at {}",
             crate::PRODUCT_VERSION,

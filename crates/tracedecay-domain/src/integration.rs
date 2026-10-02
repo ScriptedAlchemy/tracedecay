@@ -50,10 +50,11 @@ pub enum HostKindV1 {
     Vibe,
     Pi,
     FactoryDroid,
+    ChatGpt,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -74,6 +75,7 @@ impl HostKindV1 {
         Self::Vibe,
         Self::Pi,
         Self::FactoryDroid,
+        Self::ChatGpt,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -99,7 +101,8 @@ impl HostKindV1 {
             | Self::OpenCode
             | Self::Gemini
             | Self::Copilot
-            | Self::FactoryDroid => None,
+            | Self::FactoryDroid
+            | Self::ChatGpt => None,
         }
     }
 }
@@ -338,6 +341,20 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Supported,
+            Supported,
+            Supported,
+        ),
+        // ChatGPT registers MCP servers through the `mcp.json` inside its
+        // portable Agent Plugins bundle, which the host launches once the
+        // operator activates the plugin. The plugin format admits a hooks
+        // extension point, but no checked-in native ChatGPT event fixture
+        // proves that route and the staged bundle declares none, Gemini's
+        // shape exactly. There is no LSP registration route, no diagnostics
+        // API, and no host CLI to drive the servers with.
+        HostKindV1::ChatGpt => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
             Supported,
             Supported,
         ),
@@ -590,6 +607,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::Vibe => &STOCK_HOST_CAPABILITIES[17],
             HostKindV1::Pi => &STOCK_HOST_CAPABILITIES[18],
             HostKindV1::FactoryDroid => &STOCK_HOST_CAPABILITIES[19],
+            HostKindV1::ChatGpt => &STOCK_HOST_CAPABILITIES[20],
         }
     }
 
@@ -680,7 +698,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 20] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 21] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -701,6 +719,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 20] = [
     canonical_stock_host_capabilities(HostKindV1::Vibe),
     canonical_stock_host_capabilities(HostKindV1::Pi),
     canonical_stock_host_capabilities(HostKindV1::FactoryDroid),
+    canonical_stock_host_capabilities(HostKindV1::ChatGpt),
 ];
 
 #[derive(Serialize)]

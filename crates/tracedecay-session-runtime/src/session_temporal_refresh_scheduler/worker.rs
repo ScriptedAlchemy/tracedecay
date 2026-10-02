@@ -910,6 +910,20 @@ async fn complete_ready_refresh(
             report.retryable_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
         }
+        Err(error) if is_deterministic_refusal(&error) => {
+            // Activation reads the same durable rows on every attempt, so a
+            // refused activation is refused again. Retire the operation so a
+            // fresh refresh can be admitted instead of leaving it running.
+            report.last_error = Some(format!("{error:?}"));
+            drop(attempt);
+            match durable_failure_request(
+                recovery,
+                durable_projector_failure_code(REFRESH_COMPLETION_REFUSED),
+            ) {
+                Some(request) => apply_fail_effect(store, state, recovery, request, report).await,
+                None => report.terminal_errors += 1,
+            }
+        }
         Err(error) => {
             attempt.retain();
             report.last_error = Some(format!("{error:?}"));
@@ -938,6 +952,10 @@ fn record_projector_error(
 /// progress row. It is not a projector fault: the row was well formed for the
 /// state the projector read, and the durable state disagrees.
 const REFRESH_PROGRESS_REFUSED: &str = "refresh_progress_refused";
+
+/// Typed failure recorded when the durable contract refuses to activate a
+/// refresh whose progress is complete.
+const REFRESH_COMPLETION_REFUSED: &str = "refresh_completion_refused";
 
 /// Builds the durable failure request that retires one running refresh.
 fn durable_failure_request(
@@ -1043,8 +1061,15 @@ async fn apply_fail_effect(
         return;
     }
     let mut attempt = TerminalAttemptGuard::new(state, recovery);
+    let session = recovery.session_id().as_str().to_owned();
+    let cause = report.last_error.clone();
     match store.fail_session_refresh(request).await {
         Ok(_) => {
+            tracing::warn!(
+                session,
+                error = cause.as_deref(),
+                "session temporal refresh failed durably"
+            );
             report.failed += 1;
             state.record_terminal_discovery_failure(recovery);
         }

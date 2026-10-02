@@ -33,6 +33,16 @@
 //!   OpenCode has no `plugin.json`.
 //! - `plugin/.mcp.json`, shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json`, Cursor MCP config (deploys to `mcp.json`).
+//! - `plugin/plugin.json` + `plugin/mcp.json`, the portable Agent Plugins
+//!   pair. ChatGPT's staged bundle deploys them verbatim at its root; no
+//!   host-specific dot-dir manifest exists because the portable manifest
+//!   carries the `extensions.com.openai` interface block directly.
+//! - `plugin/chatgpt-extension/`, the ChatGPT code explorer: a bundled
+//!   single-file MCP adapter (`embedded/server.mjs`), its shared MCP App
+//!   resource (`embedded/app.html`), and the manifest icon
+//!   (`assets/icon.svg`). The staged bundle keeps this layout so
+//!   `mcp.json`'s `${PLUGIN_ROOT}/chatgpt-extension/embedded/server.mjs`
+//!   resolves unchanged.
 //! - `plugin/README-<host>.md`, per-host README (Claude/Cursor/Codex/Kimi
 //!   deploy to `README.md`; OpenCode's README is source documentation).
 //!
@@ -101,6 +111,17 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
             message: format!("plugin MCP config mcpServers.{key} must be an object"),
         })?
         .insert("command".to_string(), serde_json::json!(bin));
+    // The explorer is a Node adapter that spawns the same resolved CLI.
+    // Pin both legs of the connection so a host's PATH cannot change authority.
+    if let Some(explorer) = servers.get_mut("tracedecay-explorer") {
+        let args = explorer
+            .get_mut("args")
+            .and_then(|value| value.as_array_mut())
+            .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "explorer MCP config is missing args".to_string(),
+            })?;
+        args.extend([serde_json::json!("--binary"), serde_json::json!(bin)]);
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
@@ -220,7 +241,7 @@ const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
 /// Codex manifest + shared MCP + Codex hooks + README.
 pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".codex-plugin/plugin.json", ".codex-plugin/plugin.json"),
-    plugin_file!(".mcp.json", ".mcp.json"),
+    plugin_file!(".mcp.json", "mcp.json"),
     plugin_file!("README.md", "README-codex.md"),
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
@@ -230,6 +251,33 @@ pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
 pub const KIMI_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!(".kimi-plugin/plugin.json", ".kimi-plugin/plugin.json"),
     plugin_file!("README.md", "README-kimi.md"),
+];
+
+/// ChatGPT portable manifest + MCP config + explorer bundle + README. The
+/// portable `plugin.json`/`mcp.json` pair is the single manifest authority:
+/// there is no separate dot-dir manifest, and the icon path referenced from
+/// `extensions.com.openai.interface` ships under the same relative path in
+/// the staged bundle.
+pub const CHATGPT_MANIFEST_FILES: &[PluginFile] = &[
+    plugin_file!("plugin.json", "plugin.json"),
+    plugin_file!("mcp.json", "mcp.json"),
+    plugin_file!("README.md", "README-chatgpt.md"),
+];
+
+/// The same MCP App and adapter are installed in Codex and ChatGPT.
+const EXPLORER_FILES: &[PluginFile] = &[
+    plugin_file!(
+        "chatgpt-extension/embedded/server.mjs",
+        "chatgpt-extension/embedded/server.mjs"
+    ),
+    plugin_file!(
+        "chatgpt-extension/embedded/app.html",
+        "chatgpt-extension/embedded/app.html"
+    ),
+    plugin_file!(
+        "chatgpt-extension/assets/icon.svg",
+        "chatgpt-extension/assets/icon.svg"
+    ),
 ];
 
 /// Compose a host's deploy set as deterministic `(relative, contents)` tuples.
@@ -312,7 +360,7 @@ pub fn cursor_native_extension_files() -> Vec<(&'static str, &'static str)> {
 /// `agents::codex::rendered_global_plugin_files`, the raw templates here are
 /// not directly installable (`hooks/hooks.json` is an empty scaffold).
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
-    compose(&[CODEX_MANIFEST_FILES], all_skill_files())
+    compose(&[CODEX_MANIFEST_FILES, EXPLORER_FILES], all_skill_files())
 }
 
 /// Files Kimi deploys: manifest + README + the shared Claude command Markdown
@@ -325,6 +373,19 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
         &[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES],
         all_skill_files(),
     )
+}
+
+/// Files ChatGPT's staged bundle deploys: the portable manifest pair, the
+/// explorer's compiled adapter and app resource, its icon, and the README.
+/// ChatGPT consumes no TraceDecay skills/agents/commands through this bundle:
+/// the manifest's `extensions.com.openai` block is its whole registration
+/// payload, so none of the shared inventories ship here.
+pub fn chatgpt_files() -> Vec<(&'static str, &'static str)> {
+    CHATGPT_MANIFEST_FILES
+        .iter()
+        .chain(EXPLORER_FILES.iter())
+        .map(|file| (file.relative, file.contents))
+        .collect()
 }
 
 /// `OpenCode` Agent component: host-loadable skills, agent definitions, and
@@ -397,6 +458,7 @@ mod tests {
         assert_unique_relatives(&cursor_files(), "cursor");
         assert_unique_relatives(&codex_files(), "codex");
         assert_unique_relatives(&kimi_files(), "kimi");
+        assert_unique_relatives(&chatgpt_files(), "chatgpt");
     }
 
     /// Adding a slash command is adding the Markdown files. The bundle must
@@ -465,6 +527,7 @@ mod tests {
             ("cursor-native", cursor_native_extension_files()),
             ("codex", codex_files()),
             ("kimi", kimi_files()),
+            ("chatgpt", chatgpt_files()),
             ("opencode-agent", opencode_agent_files()),
         ] {
             for (relative, contents) in files {

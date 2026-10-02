@@ -6,6 +6,7 @@
 
 pub mod antigravity;
 mod bundle_identity;
+pub mod chatgpt;
 pub mod claude;
 pub mod cline;
 pub mod codex;
@@ -54,6 +55,7 @@ pub(crate) use bundle_identity::{
     observed_bundle_content_digest, observed_bundle_discovery_matches,
     rendered_bundle_content_digest, unexpected_bundle_entrypoints,
 };
+pub use chatgpt::ChatGptIntegration;
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
 pub use codex::CodexIntegration;
@@ -294,12 +296,10 @@ pub trait AgentIntegration {
     /// through an interactive UI, or `None` for a host TraceDecay can activate
     /// non-interactively.
     ///
-    /// This is the capability twin of the typed deferral
-    /// [`AgentIntegration::preflight_non_interactive_install`] returns: doctor
-    /// needs the same fact without an `InstallContext`. Every integration returning `Some` here must also return
-    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight,
-    /// otherwise doctor would downgrade a state that an unattended reinstall
-    /// could actually have repaired.
+    /// Doctor uses this without an `InstallContext`. Observable registrations
+    /// awaiting the host's UI return `DeferredUserAction` from preflight;
+    /// hosts without registration readback report `Unverifiable` and complete
+    /// their owned staging without a standing deferral.
     fn interactive_activation_guidance(&self) -> Option<String> {
         None
     }
@@ -646,6 +646,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kilo" => Ok(Box::new(KiloIntegration)),
         "kiro" => Ok(Box::new(KiroIntegration)),
         "kimi" => Ok(Box::new(KimiIntegration)),
+        "chatgpt" => Ok(Box::new(ChatGptIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
         "pi" => Ok(Box::new(PiIntegration)),
         "droid" => Ok(Box::new(DroidIntegration)),
@@ -676,6 +677,7 @@ pub fn all_integrations() -> Vec<Box<dyn AgentIntegration>> {
         Box::new(KiloIntegration),
         Box::new(KiroIntegration),
         Box::new(KimiIntegration),
+        Box::new(ChatGptIntegration),
         Box::new(VibeIntegration),
         Box::new(PiIntegration),
         Box::new(DroidIntegration),
@@ -700,6 +702,7 @@ pub fn available_integrations() -> Vec<&'static str> {
         "kilo",
         "kiro",
         "kimi",
+        "chatgpt",
         "vibe",
         "pi",
         "droid",
@@ -722,6 +725,7 @@ pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
         host_bundle::HostKindV1::RooCode => "roo-code",
         host_bundle::HostKindV1::Kilo => "kilo",
         host_bundle::HostKindV1::KimiCode => "kimi",
+        host_bundle::HostKindV1::ChatGpt => "chatgpt",
         host_bundle::HostKindV1::OpenCode => "opencode",
         host_bundle::HostKindV1::Gemini => "gemini",
         host_bundle::HostKindV1::Copilot => "copilot",
@@ -980,9 +984,9 @@ mod select_detected_integrations_tests {
                  TraceDecay configures {}.\n\
                  Install one of them, then run `tracedecay install` again.",
                 home.path().display(),
-                "Antigravity, Claude Code, Cline, Codex CLI, Cursor, Devin, Factory Droid, \
-                 Gemini CLI, GitHub Copilot, Hermes, Kilo CLI, Kimi CLI, Kiro, Mistral Vibe, \
-                 OpenCode, Pi, Roo Code, Zed"
+                "Antigravity, ChatGPT, Claude Code, Cline, Codex CLI, Cursor, Devin, \
+                 Factory Droid, Gemini CLI, GitHub Copilot, Hermes, Kilo CLI, Kimi CLI, \
+                 Kiro, Mistral Vibe, OpenCode, Pi, Roo Code, Zed"
             )
         );
     }
