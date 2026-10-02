@@ -1,15 +1,16 @@
 //! Generation-pinned code-graph evidence shared by project-info handlers.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
-use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphFileSymbolCountV1, CodeGraphSymbolSummaryV1,
+};
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-pub(super) const INFO_SYMBOL_CENSUS_LIMIT: usize = 500_000;
 pub(super) const INFO_RELATION_LIMIT: usize = 2_000_000;
 
 #[derive(Debug)]
@@ -19,14 +20,39 @@ pub(super) struct IndexedFileSummary {
     pub(super) size: u64,
 }
 
-pub(super) fn all_symbols(graph: &VerifiedGraphQuery) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-    let page = graph.symbols_page(None, INFO_SYMBOL_CENSUS_LIMIT)?;
-    if page.has_more {
-        return Err(info_graph_error(
-            "verified-info-symbol-budget-exhausted",
-            "the indexed symbol census exceeds the project-info analytical budget",
-        ));
+/// Every file that binds at least one symbol, with its symbol count, read
+/// from the generation census rather than by paging its symbols.
+pub(super) fn indexed_file_counts(
+    graph: &VerifiedGraphQuery,
+) -> Result<Vec<CodeGraphFileSymbolCountV1>> {
+    Ok(graph.census(usize::MAX)?.largest_files)
+}
+
+/// The symbols bound to `files`, in canonical occurrence order. The census
+/// counts size the read exactly, so it touches only these files' symbols.
+pub(super) fn symbols_in_files(
+    graph: &VerifiedGraphQuery,
+    files: &[CodeGraphFileSymbolCountV1],
+) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+    let total = files.iter().try_fold(0_usize, |total, file| {
+        usize::try_from(file.symbols)
+            .ok()
+            .and_then(|symbols| total.checked_add(symbols))
+            .ok_or_else(|| {
+                info_graph_error(
+                    "verified-info-file-count-overflow",
+                    "the selected files contain more symbols than one read can address",
+                )
+            })
+    })?;
+    if total == 0 {
+        return Ok(Vec::new());
     }
+    let paths = files
+        .iter()
+        .map(|file| file.logical_path.clone())
+        .collect::<HashSet<_>>();
+    let page = graph.symbols_in_logical_files_page(&paths, None, total, total)?;
     for symbol in &page.symbols {
         required_symbol_parts(symbol)?;
     }
@@ -37,22 +63,19 @@ pub(super) async fn indexed_files(
     project_root: &Path,
     graph: &VerifiedGraphQuery,
 ) -> Result<Vec<IndexedFileSummary>> {
-    let mut counts = HashMap::<String, u32>::new();
-    for symbol in all_symbols(graph)? {
-        let path = required_file_path(&symbol)?;
-        let count = counts.entry(path.to_owned()).or_default();
-        *count = count.checked_add(1).ok_or_else(|| {
-            info_graph_error(
-                "verified-info-file-count-overflow",
-                "an indexed file contains more symbols than the file listing can represent",
-            )
-        })?;
-    }
+    let counts = indexed_file_counts(graph)?;
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut files = counts
             .into_iter()
-            .map(|(path, node_count)| {
+            .map(|file| {
+                let node_count = u32::try_from(file.symbols).map_err(|_| {
+                    info_graph_error(
+                        "verified-info-file-count-overflow",
+                        "an indexed file contains more symbols than the file listing can represent",
+                    )
+                })?;
+                let path = file.logical_path;
                 let project_path = tracedecay_runtime_core::storage::ProjectPath::resolve(
                     &project_root,
                     std::path::Path::new(&path),
@@ -86,13 +109,16 @@ pub(super) fn symbols_in_dir(
     // Trim every trailing slash first. `repository_path_matches_scope` treats
     // a leftover `/` as a literal character, so `src/` would miss `src/lib.rs`.
     let prefix = directory.trim_end_matches('/');
+    let files = indexed_file_counts(graph)?
+        .into_iter()
+        .filter(|file| {
+            tracedecay_domain::repository_path_matches_scope(&file.logical_path, Some(prefix))
+        })
+        .collect::<Vec<_>>();
     let mut selected = Vec::new();
-    for symbol in all_symbols(graph)? {
-        let (metadata, path) = required_symbol_parts(&symbol)?;
-        let path_matches = tracedecay_domain::repository_path_matches_scope(path, Some(prefix));
-        let kind_matches =
-            NodeKind::from_str(&metadata.kind).is_some_and(|kind| kinds.contains(&kind));
-        if path_matches && kind_matches {
+    for symbol in symbols_in_files(graph, &files)? {
+        let metadata = required_metadata(&symbol)?;
+        if NodeKind::from_str(&metadata.kind).is_some_and(|kind| kinds.contains(&kind)) {
             selected.push(symbol);
         }
     }

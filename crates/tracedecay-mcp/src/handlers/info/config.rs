@@ -24,9 +24,9 @@ pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToo
     } = decode_primitive_request(&args, "tracedecay_config")?;
 
     if path.is_none() && glob_pat.is_none() {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: 'path' or 'glob'".to_string(),
-        });
+        return Err(TraceDecayError::missing_required_parameter(
+            "missing required parameter: 'path' or 'glob'",
+        ));
     }
     if path.is_some() && glob_pat.is_some() {
         return Err(TraceDecayError::Config {
