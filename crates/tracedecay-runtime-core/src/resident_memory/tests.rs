@@ -1566,3 +1566,53 @@ fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
             .is_ok()
     );
 }
+
+#[test]
+fn allocator_reclaim_publishes_recovery_after_recent_checkpoint() {
+    let limit = bytes(1024 * 1024 * 1024 * 1024);
+    let sample = Arc::new(Mutex::new(ProcessResidentSampleV1 {
+        resident_bytes: 1,
+        unreclaimable_bytes: 1,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: Some(limit.get()),
+    }));
+    let sampled = Arc::clone(&sample);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || Some(*sampled.lock().expect("sample"))),
+    ));
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("register allocator reclaimer");
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    let shed = Arc::clone(&sample);
+    let _owner_shed = pressure
+        .register_pressure_reclaimer(
+            super::RESIDENT_OWNERS_PRESSURE_PRIORITY_V1,
+            Arc::new(move |_| {
+                shed.lock().expect("sample").cgroup_committed_bytes = Some(1);
+                0
+            }),
+        )
+        .expect("register owner reclaimer");
+
+    assert!(matches!(
+        pressure.sample_for_checkpoint(),
+        ResidentMemoryPressureStateV1::OverBudget { .. }
+    ));
+    pressure.publish_observed_resident_bytes(limit.get());
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::Nominal { .. }
+    ));
+    assert!(
+        authority
+            .reserve(
+                key("project", "worktree", "generation", "graph"),
+                growth_request()
+            )
+            .is_ok()
+    );
+}
