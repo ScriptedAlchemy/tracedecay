@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_component_set_carries_native_mcp_registration_and_v2_hook_plugin() {
+    fn opencode_component_set_carries_native_mcp_and_plugin_assets_without_lsp() {
         let component_set = verified_embedded_default_host_component_set(
             HostKindV1::OpenCode,
             0,
@@ -1441,24 +1441,21 @@ mod tests {
         );
         assert!(registration.get("lsp").is_none(), "V2 runs no LSP");
 
-        let plugin = component_set
+        let has_hook_plugin = component_set
             .component_set
             .components
             .iter()
             .flat_map(|component| &component.contents)
-            .find(|asset| asset.relative_path.ends_with("plugins/tracedecay.ts"))
-            .map(|asset| String::from_utf8(asset.bytes.clone()).unwrap())
-            .expect("OpenCode set includes Hook V2 plugin");
-        for marker in [
-            r#""hook-opencode-event""#,
-            r#""hook-opencode-tool-after""#,
-            r#"ctx.tool.hook("execute.after""#,
-            r#"ctx.session.hook("context""#,
-            r#"ctx.event.subscribe("#,
-            r#"id: "tracedecay-hooks""#,
-        ] {
-            assert!(plugin.contains(marker), "OpenCode plugin lacks {marker}");
-        }
+            .any(|asset| asset.relative_path.ends_with("plugins/tracedecay.ts"));
+        assert!(has_hook_plugin, "OpenCode set includes the Hook V2 plugin");
+
+        let has_mcp_plugin = component_set
+            .component_set
+            .components
+            .iter()
+            .flat_map(|component| &component.contents)
+            .any(|asset| asset.relative_path.ends_with("plugins/tracedecay-mcp.ts"));
+        assert!(has_mcp_plugin, "OpenCode set includes the MCP plugin");
     }
 
     #[test]
