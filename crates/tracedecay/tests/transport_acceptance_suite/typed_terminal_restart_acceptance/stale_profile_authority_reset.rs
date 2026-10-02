@@ -144,7 +144,7 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
     wait_for_code_index_hit(&home_path, &project_path, "probe");
     assert_eq!(
         registered_project_ids(&home_path, &project_path),
-        [project_id.clone()]
+        std::slice::from_ref(&project_id)
     );
     daemon
         .kill_and_wait()
