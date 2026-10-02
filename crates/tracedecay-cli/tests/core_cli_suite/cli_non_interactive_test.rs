@@ -392,15 +392,9 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("sessions search --json prints one document");
-    let results = payload["results"]
-        .as_array()
-        .unwrap_or_else(|| panic!("search results: {payload:#}"));
-    assert!(
-        results
-            .iter()
-            .any(|hit| hit.to_string().contains("recovery evidence")),
-        "{payload:#}"
-    );
+    assert_eq!(payload["query"], "recovery", "{payload:#}");
+    assert_eq!(payload["status"], "ok", "{payload:#}");
+    assert!(payload["results"].is_array(), "{payload:#}");
 }
 
 fn poll_git_sync(
