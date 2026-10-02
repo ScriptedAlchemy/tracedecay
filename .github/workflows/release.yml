@@ -185,11 +185,17 @@ jobs:
       # Restore before the packaging compile. Tag runs can restore only
       # same-ref or default-branch caches; keep this shared-key stable so a
       # later master writer can seed them. cache-workspace-crates stays false
-      # so release blobs stay inside the 10 GB GitHub cache budget.
+      # so release blobs stay inside the 10 GB GitHub cache budget. The
+      # workspace roots keep the vendored dependencies (see the debug-cli
+      # cache step in ci.yml); 2.9.2 is the first release that cleans
+      # `target/<triple>/release` as a profile instead of deleting it.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release-${{ matrix.target }}
+          workspaces: |
+            crates -> ../target
+            . -> target/rust-cache-lockfile-key
           cache-workspace-crates: "false"
           cache-on-failure: true
 

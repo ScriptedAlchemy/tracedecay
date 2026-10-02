@@ -255,6 +255,15 @@ impl LocalStoreRuntimeResolverV1 {
         Ok(())
     }
 
+    /// Withdraws `authority` while it is still the one registered for its
+    /// project; a different registration is left in place.
+    pub(crate) fn withdraw_project_authority(&self, authority: &LocalProjectEnrollmentAuthorityV1) {
+        let mut project_authorities = self.project_authorities_write();
+        if project_authorities.get(&authority.project_id) == Some(authority) {
+            project_authorities.remove(&authority.project_id);
+        }
+    }
+
     pub fn register_code_authority(
         &self,
         authority: LocalCodeStoreAuthorityV1,

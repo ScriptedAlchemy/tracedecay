@@ -1,7 +1,5 @@
 //! Trust score helpers for bounded confidence and feedback.
 
-pub const TRUST_MIN: f64 = 0.0;
-pub const TRUST_MAX: f64 = 1.0;
 pub const DEFAULT_TRUST: f64 = 0.5;
 pub const DEFAULT_MIN_TRUST: f64 = 0.3;
 /// Representative score for a "low" trust label, inside the low bucket.

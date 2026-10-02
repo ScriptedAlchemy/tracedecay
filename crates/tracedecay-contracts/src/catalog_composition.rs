@@ -55,21 +55,6 @@ impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
             .get(use_case_id)
             .map(|descriptor| descriptor.bind(&self.dispatcher))
     }
-
-    /// Bind one validated descriptor to a request-scoped dispatcher.
-    ///
-    /// Long-lived catalog metadata stays immutable while adapters supply the
-    /// exact mounted authorities for one invocation. The descriptor remains
-    /// the same application-owned handler validated during composition.
-    pub fn bind_handler<'a, RequestDispatcher>(
-        &'a self,
-        use_case_id: &UseCaseId,
-        dispatcher: &'a RequestDispatcher,
-    ) -> Option<BoundApplicationHandler<'a, RequestDispatcher>> {
-        self.handlers
-            .get(use_case_id)
-            .map(|descriptor| descriptor.bind(dispatcher))
-    }
 }
 
 /// Compose the immutable catalog and retain its one canonical application

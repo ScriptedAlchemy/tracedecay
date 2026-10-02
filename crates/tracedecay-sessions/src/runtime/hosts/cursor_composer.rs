@@ -107,23 +107,4 @@ impl CursorComposerSource {
         )
         .await
     }
-
-    /// User-scope ingest with an aggregate serialized-payload byte budget.
-    #[hotpath::skip]
-    pub async fn ingest_user_capped(
-        &self,
-        admission: &dyn crate::admission::HostAdmission,
-        registered_roots: &[std::path::PathBuf],
-        envelope_cap: usize,
-        max_new_bytes: Option<u64>,
-    ) -> CursorComposerSweepResult {
-        self.ingest_user_capped_with_cancellation(
-            admission,
-            registered_roots,
-            envelope_cap,
-            max_new_bytes,
-            &crate::observation::ObservationCancellation::default(),
-        )
-        .await
-    }
 }

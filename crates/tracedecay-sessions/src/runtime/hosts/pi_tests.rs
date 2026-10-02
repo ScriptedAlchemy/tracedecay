@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationFactV1, ObservationScopeV1,
+    CanonicalObservationFactV1, ObservationId, ObservationScopeV1,
 };
 
 use super::{
@@ -148,7 +148,8 @@ async fn fixture_session_lands_with_stable_entry_identities_and_messages() {
     assert!(facts.iter().any(|fact| matches!(
         fact,
         CanonicalObservationFactV1::ToolInvocation { invocation_id, name, .. }
-            if invocation_id.as_str() == "toolu_01PiEdit" && name == "edit"
+            if invocation_id.as_ref().map(ObservationId::as_str) == Some("toolu_01PiEdit")
+                && name == "edit"
     )));
     assert!(facts.iter().any(|fact| matches!(
         fact,

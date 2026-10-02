@@ -36,6 +36,7 @@ use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServin
 
 use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
+use crate::daemon::hook_v2_replay_consumer;
 use crate::mcp::project_route::mcp_analytics_session_id;
 use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
 
@@ -351,13 +352,11 @@ async fn compute_project_info(
             let request: StatusSurfaceRequestV1 = decode_primitive_request(args, tool_name)?;
             // Wait before admitting snapshots, so the payload describes the
             // worktree the wait ended on.
-            let (wait, reached_freshness) = match request.wait_for {
+            let waited = match request.wait_for {
                 Some(wait_for) => {
-                    let (outcome, reached) =
-                        status_readiness_wait(options, cg.project_root(), wait_for).await?;
-                    (Some(outcome), reached)
+                    Some(status_readiness_wait(options, cg.project_root(), wait_for).await?)
                 }
-                None => (None, None),
+                None => None,
             };
             let project = admitted_project_authorities(cg, options)?;
             let snapshots = admitted_status_snapshots(options).await;
@@ -372,9 +371,9 @@ async fn compute_project_info(
                 &request,
                 options.server_stats.clone(),
                 session_projection,
+                hook_v2_replay_consumer::hook_replay_status(&cg.hook_store_layout().data_root),
                 scope_prefix,
-                wait,
-                reached_freshness,
+                waited,
             )
             .await
             .map(GraphToolResultV1::Status)

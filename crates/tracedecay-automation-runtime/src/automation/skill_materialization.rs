@@ -1505,22 +1505,6 @@ pub fn resolve_project_root(profile: &ProfileRoot, start: &Path) -> PathBuf {
         .unwrap_or_else(|| start.to_path_buf())
 }
 
-/// Non-fatal reconcile for lifecycle call sites (activate, install,
-/// update): reconciles every detected host+scope under `home`, and logs
-/// (rather than propagates) failures so a materialization problem never
-/// breaks an activation or install.
-pub fn reconcile_after_activation(
-    host_io: &HostIo,
-    profile_root: &Path,
-    home: &Path,
-    project_root: &Path,
-) {
-    let (_results, errors) = reconcile_detected_scopes(host_io, profile_root, home, project_root);
-    for error in errors {
-        tracing::warn!(%error, "managed skill materialization failed");
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 #[path = "skill_materialization_tests.rs"]

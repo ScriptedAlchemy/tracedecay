@@ -247,7 +247,7 @@ describe('SettingsPage effective configuration review', () => {
 
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
-    await user.type(input, '2097152');
+    await user.paste('2097152');
     // The proposal is a proposal: the effective value stands beside it.
     expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
     expect(within(row(MAX_FILE_SIZE)).getByText('1,048,576')).toBeTruthy();
@@ -255,16 +255,16 @@ describe('SettingsPage effective configuration review', () => {
     expect(document.querySelector('[data-settings-validation]')?.getAttribute('data-settings-validation')).toBe('ready');
     expect(reviewReadout()).toBe('proposal');
 
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
+    await user.click(within(panel).getByRole('button', { name: 'Review project change' }));
     expect(reviewReadout()).toBe('pending');
     expect(within(panel).getByText(/"max_file_size": 2097152/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Apply project settings' }).hasAttribute('disabled')).toBe(true);
+    expect(within(panel).getByRole('button', { name: 'Apply project settings' }).hasAttribute('disabled')).toBe(true);
     await user.click(
-      screen.getByRole('checkbox', {
+      within(panel).getByRole('checkbox', {
         name: /I confirm this change against configuration revision rev-42/,
       }),
     );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await user.click(within(panel).getByRole('button', { name: 'Apply project settings' }));
 
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
     expect(screen.getByText('Resync recommended')).toBeTruthy();

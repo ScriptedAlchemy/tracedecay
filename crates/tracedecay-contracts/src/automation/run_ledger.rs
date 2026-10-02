@@ -27,6 +27,9 @@ pub enum AgentTaskFailureClass {
     Denied,
     Disconnected,
     MalformedOutput,
+    /// The backend refused the request because it exceeds its input or
+    /// context-window limit.
+    InputTooLarge,
 }
 
 impl AgentTaskFailureClass {
@@ -41,9 +44,10 @@ impl AgentTaskFailureClass {
     }
 
     /// A later run may succeed where this one failed: every retryable class,
-    /// plus malformed output, which a fresh prompt can repair.
+    /// plus malformed output, which a fresh prompt can repair, and an
+    /// oversized input, which a later run bounds from fresh evidence.
     pub fn is_retryable_on_later_run(self) -> bool {
-        self.is_retryable() || self == Self::MalformedOutput
+        self.is_retryable() || matches!(self, Self::MalformedOutput | Self::InputTooLarge)
     }
 }
 

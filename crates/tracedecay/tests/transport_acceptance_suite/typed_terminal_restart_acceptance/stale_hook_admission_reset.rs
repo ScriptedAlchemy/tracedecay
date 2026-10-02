@@ -112,3 +112,48 @@ fn a_pre_log_hook_admission_ledger_is_refused_until_wipe_stale_resets_it() {
     );
     let _ = daemon.kill_and_wait();
 }
+
+/// Issue #2875: after a restart the census listed a refused ledger only once
+/// a hook had opened it, so a pre-log profile ledger left behind read as
+/// `reset_required_stores: []` until some host's profile hook fired.
+#[test]
+fn a_pre_log_profile_ledger_is_in_the_reset_census_before_any_hook_opens_it() {
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+    let profile_root = home_path.join(".tracedecay");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "pre-log-profile-ledger");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+
+    let ledger = profile_root
+        .join("hook-v2-profile-admissions")
+        .join("claude");
+    std::fs::create_dir_all(&ledger).expect("create the pre-log profile ledger root");
+    let mut pre_log = b"TDL1\x01\x00".to_vec();
+    pre_log.extend_from_slice(&[9u8; 64]);
+    std::fs::write(ledger.join("admissions.v1.bin"), &pre_log).expect("write the pre-log ledger");
+    std::fs::write(ledger.join("admission-work-completions.v1.json"), b"[]")
+        .expect("write the pre-log completions");
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    assert_eq!(
+        reset_required_stores(&home_path, &project_path),
+        vec![json!({
+            "store": "profile hook admissions",
+            "authority": "hook admission ledger",
+            "found_version": null,
+            "required_version": null,
+            "reason": "hook admission ledger holds a pre-log shape this binary does not open",
+            "remedy": "tracedecay wipe --stale --yes",
+        })],
+        "the census reads the refused shape from disk"
+    );
+    let _ = daemon.kill_and_wait();
+}

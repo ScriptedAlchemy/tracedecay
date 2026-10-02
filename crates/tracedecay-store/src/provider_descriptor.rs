@@ -21,7 +21,7 @@
 //! so adding or retiring a provider is a change to this descriptor rather than
 //! a search for string comparisons inside the reducer.
 
-use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError, ObservationId};
+use tracedecay_domain::{CanonicalObservationFactV1, ObservationContractError};
 
 use crate::{
     ProjectionStoreError, ProjectionStoreResult, codex_goal_context_from_text,
@@ -94,12 +94,10 @@ pub(crate) fn provider_message_semantics(
 
 /// Normalizes a provider's tool invocations into the cross-provider message
 /// metadata shape. Selected by capture source, then applied to the merged
-/// metadata map and the record's canonical facts. `serves_id` answers whether
-/// an invocation id may be served as the host's own.
+/// metadata map and the record's canonical facts.
 pub type ToolMetadataNormalizer = fn(
     &mut serde_json::Map<String, serde_json::Value>,
     &[CanonicalObservationFactV1],
-    &dyn Fn(&ObservationId) -> bool,
 ) -> ProjectionStoreResult<()>;
 
 /// Message-metadata key naming why a record's tool calls carry no ids.
@@ -141,7 +139,6 @@ pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNorm
 fn normalize_cursor_tool_metadata(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     facts: &[CanonicalObservationFactV1],
-    serves_id: &dyn Fn(&ObservationId) -> bool,
 ) -> ProjectionStoreResult<()> {
     let mut tool_calls = Vec::new();
     let mut tool_events = Vec::new();
@@ -172,7 +169,7 @@ fn normalize_cursor_tool_metadata(
             "tool_name": name,
             "input_bytes": input_bytes,
         });
-        if serves_id(invocation_id) {
+        if let Some(invocation_id) = invocation_id {
             tool_call["id"] = invocation_id.as_str().into();
             tool_event["call_id"] = invocation_id.as_str().into();
         } else {

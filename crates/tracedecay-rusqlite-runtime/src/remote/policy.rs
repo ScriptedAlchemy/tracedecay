@@ -172,7 +172,7 @@ impl RemoteQueryAuthorizationPortV1 for RemoteSqliteStorageV1 {
     }
 }
 
-fn replay_scope_digest(
+pub(super) fn replay_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteReplayApplicationErrorV1> {
     canonical_sha256(&("tracedecay.remote-replay-policy-scope.v2", scope))

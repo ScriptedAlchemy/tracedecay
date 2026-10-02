@@ -240,29 +240,23 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
         "usage must stay correlated to its bubble message"
     );
 
-    // Reasoning row.
-    let reasoning = db
-        .get_session_message("cursor", "comp-1:b-asst:thinking")
-        .await
-        .expect("reasoning row");
-    assert_eq!(reasoning.kind.as_deref(), Some("reasoning"));
-    assert!(reasoning.text.contains("widget invariants"));
-
-    // Tool call row -> file_edit for an edit tool.
-    let tool = db
-        .get_session_message("cursor", "comp-1:b-asst:tool")
-        .await
-        .expect("tool row");
-    assert_eq!(tool.kind.as_deref(), Some("file_edit"));
-    assert_eq!(tool.tool_names.as_deref(), Some("edit_file"));
-
-    // PR link row.
-    let pr = db
-        .get_session_message("cursor", "comp-1:b-asst:pr:0")
-        .await
-        .expect("pr_link row");
-    assert_eq!(pr.kind.as_deref(), Some("pr_link"));
-    assert!(pr.text.contains("example.invalid/pr/7"));
+    // The bubble's thinking and pull-request link follow its text in its one
+    // row; the edit call recorded no arguments, so it adds only its tool name.
+    assert_eq!(
+        message.text,
+        "Done refactoring the widget module.\n\n\
+         Considering the widget invariants carefully.\n\n\
+         https://example.invalid/pr/7"
+    );
+    assert_eq!(message.tool_names.as_deref(), Some("edit_file"));
+    for part in ["thinking", "tool", "pr:0"] {
+        assert!(
+            db.get_session_message("cursor", &format!("comp-1:b-asst:{part}"))
+                .await
+                .is_none(),
+            "the bubble's {part} is not a second row"
+        );
+    }
 
     // Envelope todos admit as WorkflowLifecycle TodoList/TodoItem (searchable).
     let first = db
@@ -370,7 +364,7 @@ async fn composer_completed_edit_records_edit_time_and_tool_call_id() {
         .get_session_message("cursor", "comp-edit:b-edit")
         .await
         .expect("edit tool row");
-    assert_eq!(edit.kind.as_deref(), Some("tool_invocation"));
+    assert_eq!(edit.kind.as_deref(), Some("file_edit"));
     assert_eq!(
         edit.timestamp,
         Some(1_780_383_222),

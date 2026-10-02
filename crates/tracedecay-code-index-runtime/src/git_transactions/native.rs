@@ -2361,6 +2361,44 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rejects_candidate_tree_when_skip_worktree_entries_drifted() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
+        let (preview, patches) = hunk_preview(
+            &assembler,
+            &runner,
+            GitIndexTransactionOperationV1::StageHunks,
+            GitDiffScopeV1::WorkingTree,
+            "git-index-preview.recovery-sparse-drift",
+        );
+        let mut lock = runner.acquire_index_lock().expect("index lock");
+        runner
+            .stage_hunks(&mut lock, &preview, &patches)
+            .expect("publish candidate index");
+        drop(lock);
+        let record = recovery_record(&preview, GitIndexJournalPhaseV1::IndexCommitted);
+        assert_eq!(
+            assembler
+                .reconcile(&record)
+                .expect("reconcile committed index")
+                .outcome,
+            GitIndexReceiptOutcomeV1::Committed
+        );
+
+        git(
+            directory.path(),
+            &["update-index", "--skip-worktree", "packet.txt"],
+        );
+        assert_eq!(
+            assembler
+                .reconcile(&record)
+                .expect("reconcile sparse drift")
+                .outcome,
+            GitIndexReceiptOutcomeV1::NeedsInspection
+        );
+    }
+
+    #[test]
     fn recovery_rejects_candidate_tree_when_the_previewed_ref_drifted() {
         let (directory, assembler, runner) = repository_fixture();
         fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");

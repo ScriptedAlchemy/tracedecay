@@ -253,6 +253,26 @@ describe('summaries', () => {
     expect(empty.state).toBe('empty');
     expect(empty.stateDetail).toBe('no mounted code-index worktree');
 
+    const mountFailed = pipelineSummary(
+      read(
+        envelope(
+          {
+            note: 'the last code-index mount for this project failed',
+            worktrees: [],
+            mount_failure: {
+              message: 'the code-index scheduler could not mount for this project',
+              remediation: 'run `tracedecay sync` to retry the code-index mount',
+            },
+          },
+          { domain_state: 'error' },
+        ),
+      ),
+    );
+    expect(mountFailed.state).toBe('failed');
+    expect(mountFailed.stateDetail).toBe(
+      'the code-index scheduler could not mount for this project · run `tracedecay sync` to retry the code-index mount',
+    );
+
     // A refused envelope stays refused even when the payload names a build.
     const denied = pipelineSummary(
       read(envelope({ note: 'live', worktrees: [worktree] }, { domain_state: 'denied' })),

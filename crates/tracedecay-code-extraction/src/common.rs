@@ -7,13 +7,13 @@
 //! of a state struct. Bodies are moved here unchanged from the per-language
 //! copies so extraction output stays byte-identical.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
-    generate_node_id, generate_node_id_at,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id, generate_node_id_at,
 };
 
 /// Seconds since the Unix epoch, stamped on every emitted node as `updated_at`.
@@ -48,6 +48,17 @@ impl<'s> ExtractionState<'s> {
             file_path: file_path.to_string(),
             source: source.as_bytes(),
             timestamp: unix_timestamp_secs(),
+        }
+    }
+
+    /// Builds the final `ExtractionResult` from the accumulated state.
+    pub(crate) fn into_result(self, start: Instant) -> ExtractionResult {
+        ExtractionResult {
+            nodes: self.nodes,
+            edges: self.edges,
+            unresolved_refs: self.unresolved_refs,
+            errors: self.errors,
+            duration_ms: start.elapsed().as_millis() as u64,
         }
     }
 

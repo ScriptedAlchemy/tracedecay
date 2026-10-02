@@ -905,7 +905,7 @@ fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::con
 
     #[cfg(unix)]
     {
-        let events = recent_watcher_events(profile.data_dir(), 2000);
+        let events = recent_watcher_events(profile, 2000);
         if events.is_empty() {
             dc.info("Daemon running; no recent watcher telemetry in the log yet");
             return;

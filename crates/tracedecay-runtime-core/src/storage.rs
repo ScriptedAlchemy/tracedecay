@@ -215,10 +215,6 @@ impl ProjectStorageStatus {
             Self::Stale => "stale",
         }
     }
-
-    pub fn is_live(self) -> bool {
-        self == Self::ProfileSharded
-    }
 }
 
 pub fn classify_project_storage(
@@ -507,7 +503,8 @@ pub(crate) use layout::has_path_local_profile_store;
 pub use layout::{
     default_profile_project_id, default_profile_sharded_layout, enrolled_project_roots,
     path_local_profile_project_id, profile_root_of_sharded_data_root, profile_sharded_data_root,
-    profile_sharded_layout, registered_project_id, resolve_layout, resolve_persisted_layout,
+    profile_sharded_layout, profile_shards_root, registered_project_id, resolve_layout,
+    resolve_persisted_layout,
 };
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{

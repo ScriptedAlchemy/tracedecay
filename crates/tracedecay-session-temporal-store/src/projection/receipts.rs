@@ -361,7 +361,8 @@ pub async fn record_canonical_observation_effect(
         return Ok(());
     };
     let mut outputs = effect
-        .messages()
+        .message()
+        .into_iter()
         .map(|output| {
             Ok(json!({
                 "anchor_id": output.provenance().retrieval_anchor_id().as_str(),

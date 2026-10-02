@@ -403,3 +403,176 @@ for line in sys.stdin:
         server.stop();
     });
 }
+
+/// A Codex turn that fails with `codexErrorInfo: "badRequest"` is a permanent
+/// failure even though its message says "not found": the run is attempted once
+/// and the dashboard history reports the typed class, not one guessed from the
+/// message text.
+#[test]
+fn dashboard_user_job_failure_reports_the_codex_error_code_class() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = canonical_existing_identity(tmp.path())
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let spawns = tmp_root.join("user-job-backend-spawns");
+        let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
+
+        let fake_codex_root = tmp_root.join("fake-codex");
+        let fake_codex_script = fake_codex_root.join("codex.py");
+        let fake_codex_bin = fake_codex_bin(&fake_codex_root);
+        let script = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if len(sys.argv) != 2 or sys.argv[1] != "app-server":
+    sys.exit(42)
+if os.environ.get("TRACEDECAY_CODEX_SUMMARY_CHILD") != "1":
+    sys.exit(43)
+with open(__SPAWNS_PATH__, "a", encoding="utf-8") as spawns:
+    spawns.write("spawn\n")
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"id": msg.get("id"), "result": {}}), flush=True)
+    elif method == "thread/start":
+        print(json.dumps({
+            "id": msg.get("id"),
+            "result": {"thread": {"id": "thread-dashboard-user-job", "model": "dashboard-fake-model"}}
+        }), flush=True)
+    elif method == "turn/start":
+        print(json.dumps({
+            "method": "turn/completed",
+            "params": {"turn": {"status": "failed", "error": {
+                "message": "model 'dashboard-fake-model' not found for this account",
+                "codexErrorInfo": "badRequest"
+            }}}
+        }), flush=True)
+        break
+"#
+        .replace(
+            "__SPAWNS_PATH__",
+            &serde_json::to_string(&spawns.display().to_string())
+                .unwrap_or_else(|error| panic!("encode spawn log path: {error}")),
+        );
+        write_file(&fake_codex_script, &script);
+        install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
+
+        let (cg, host_runtime) = setup_project(&profile, &project_root).await;
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
+        let agent = http_agent();
+        let port = pick_free_port();
+        let (access, base_url) = dashboard_access_for(port);
+        let mut server = spawn_dashboard_server_with_configuration_runtime(
+            cg,
+            host_runtime,
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            port,
+            access,
+        );
+        wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex_bin);
+
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let expected_revision_id = current_config["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("config read must return the pinned revision: {current_config}")
+            });
+        let (status, config) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({
+                "expected_revision_id": expected_revision_id,
+                "idempotency_key": "dashboard-user-job-typed-failure",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "host_mode": "standalone"
+            }),
+        );
+        assert_eq!(status, 200, "automation config patch failed: {config}");
+
+        let jobs_url = format!("{base_url}/api/automation/jobs");
+        let (status, created) = post_json_body(
+            &agent,
+            &jobs_url,
+            &serde_json::json!({
+                "id": "typed-failure",
+                "name": "Typed failure",
+                "prompt": "Produce the typed failure fixture.",
+                "enabled": true,
+                "delivery": { "mode": "file" }
+            }),
+        );
+        assert_eq!(status, 200, "{created}");
+        let (status, accepted) = post_json_body(
+            &agent,
+            &format!("{jobs_url}/typed-failure/run"),
+            &serde_json::json!({}),
+        );
+        assert_eq!(status, 202, "{accepted}");
+        let run_id = accepted["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("accepted run must expose its exact id: {accepted}"))
+            .to_owned();
+
+        let mut settled = None;
+        for _ in 0..1500 {
+            settled =
+                tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
+                    &dashboard_root,
+                    &run_id,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("read settled user-job history: {error}"));
+            if settled.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(settled.is_some(), "user-job failure must settle");
+
+        let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs"));
+        assert_eq!(status, 200, "{runs}");
+        let row = runs["runs"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["run_id"] == run_id.as_str()))
+            .unwrap_or_else(|| panic!("run history must list {run_id}: {runs}"));
+        assert_eq!(
+            (
+                row["status"].clone(),
+                row["error_classification"].clone(),
+                row["error_retryable"].clone(),
+                row["backend_attempt_count"].clone(),
+            ),
+            (
+                serde_json::json!("failed"),
+                serde_json::json!("permanent"),
+                serde_json::json!(false),
+                serde_json::json!(1),
+            ),
+            "{row}"
+        );
+        let spawn_count = std::fs::read_to_string(&spawns)
+            .unwrap_or_else(|error| panic!("read spawn log: {error}"))
+            .lines()
+            .count();
+        assert_eq!(spawn_count, 1, "a permanent failure is not retried");
+
+        server.stop();
+    });
+}

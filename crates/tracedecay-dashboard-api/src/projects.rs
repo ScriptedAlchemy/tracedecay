@@ -20,7 +20,7 @@ use crate::project_registry::{
     PublicCodeProject, align_public_checkout_branches, build_project_registry_view,
     public_code_project_for_checkout, public_code_project_from_record,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::ProjectRegistryContext;
 
 #[derive(Clone)]
@@ -103,7 +103,10 @@ impl DashboardRuntime {
         self.project_api.clone()
     }
 
-    pub async fn selected_project_state(&self, project_id: &str) -> Result<SelectedProjectState> {
+    pub async fn selected_project_state(
+        &self,
+        project_id: &str,
+    ) -> std::result::Result<SelectedProjectState, SelectedProjectError> {
         let active = self.active();
         if active.project_id.as_deref() == Some(project_id) {
             return Ok(SelectedProjectState {
@@ -114,7 +117,7 @@ impl DashboardRuntime {
         let db = active
             .savings_db
             .as_ref()
-            .ok_or_else(|| config_error("tracedecay project registry is unavailable"))?;
+            .ok_or(SelectedProjectError::RegistryNotMounted)?;
         let context = db
             .project_registry_context_by_id(project_id)
             .await?
@@ -145,7 +148,8 @@ impl DashboardRuntime {
             return Err(config_error(format!(
                 "registered project id mismatch for {project_id}: {}",
                 project_root.display()
-            )));
+            ))
+            .into());
         }
         let state = build_selected_project_state(cg, &active).await?;
         let mut project_states = self.project_states.write().await;
@@ -169,6 +173,20 @@ impl DashboardRuntime {
 
 pub struct SelectedProjectState {
     pub state: DashboardState,
+}
+
+/// Why a non-active project's dashboard state could not be selected.
+#[derive(Debug)]
+pub enum SelectedProjectError {
+    /// This dashboard mounts no project registry to resolve the id against.
+    RegistryNotMounted,
+    Failed(TraceDecayError),
+}
+
+impl From<TraceDecayError> for SelectedProjectError {
+    fn from(error: TraceDecayError) -> Self {
+        Self::Failed(error)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,27 +345,23 @@ pub fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
     matches!(
         error,
         TraceDecayError::Database { .. } | TraceDecayError::Sqlite(_)
-    ) || matches!(
-        error,
-        TraceDecayError::Config { message }
-            if message == "tracedecay project registry is unavailable"
     )
 }
 
 pub fn registry_unavailable_response(
     state: &DashboardState,
-    error: &TraceDecayError,
+    detail: String,
 ) -> Json<DashboardEnvelopeV1<ProjectContextPayloadV1>> {
     Json(DashboardEnvelopeV1::unavailable(
         scope_from_state(state),
         ProjectContextPayloadV1 {
             status: "registry_unavailable".to_owned(),
-            error: Some(error.to_string()),
+            error: Some(detail.clone()),
             is_active: None,
             project: None,
             aliases: Vec::new(),
         },
-        error.to_string(),
+        detail,
     ))
 }
 
@@ -372,7 +386,7 @@ pub async fn context(
     };
     let context = match db.project_registry_context_by_id(&project_id).await {
         Ok(context) => context,
-        Err(error) => return registry_unavailable_response(&active, &error),
+        Err(error) => return registry_unavailable_response(&active, error.to_string()),
     };
     let Some(context) = context else {
         return Json(DashboardEnvelopeV1::complete_zero_findings(
