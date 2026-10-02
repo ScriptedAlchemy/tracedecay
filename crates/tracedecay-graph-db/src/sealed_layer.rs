@@ -458,7 +458,6 @@ impl GraphLayeredRowSpill {
         endpoints: impl IntoIterator<Item = GraphEntityId>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
-        let mut entities = Vec::new();
         for endpoint in endpoints {
             check()?;
             let indexed = self
@@ -472,15 +471,16 @@ impl GraphLayeredRowSpill {
                     ))
                 })?;
             let (offset, length) = self.base.inner.entity_row_offsets.row(indexed.ordinal)?;
-            entities.push(read_spilled_entity(
+            let entity = read_spilled_entity(
                 &self.base.inner.entity_rows,
                 offset,
                 length,
                 &endpoint,
                 indexed.lanes,
-            )?);
+            )?;
+            self.spill.push_batch(vec![entity], Vec::new(), check)?;
         }
-        self.spill.push_batch(entities, Vec::new(), check)
+        Ok(())
     }
 
     /// Merges the delta and derives the layered generation's row sum and

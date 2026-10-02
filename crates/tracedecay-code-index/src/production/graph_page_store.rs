@@ -20,6 +20,21 @@ fn store_error(context: &str, error: impl std::fmt::Display) -> CodeIndexProduct
     CodeIndexProductionErrorV1::Contract(format!("code graph page store {context}: {error}"))
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodeGraphPageBuildFootprintV1 {
+    pub(crate) decode_bytes: u64,
+    pub(crate) entity_spill_buffered: u64,
+    pub(crate) entity_spill_resident: u64,
+    pub(crate) relation_spill_buffered: u64,
+    pub(crate) relation_spill_resident: u64,
+    pub(crate) identity_bytes: u64,
+    pub(crate) entity_count: u64,
+    pub(crate) relation_count: u64,
+    pub(crate) max_entity_spill_buffered: u64,
+    pub(crate) max_entity_spill_resident: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CodeGraphPageDescriptorV1 {
@@ -28,6 +43,7 @@ pub(crate) struct CodeGraphPageDescriptorV1 {
     pub(crate) logical_path: String,
     pub(crate) page_digest: ManifestDigest,
     pub(crate) size_bytes: u64,
+    pub(crate) build_footprint: CodeGraphPageBuildFootprintV1,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -101,6 +117,7 @@ impl<'source, 'reader> SealedCodeGraphPageStoreV1<'source, 'reader> {
                 logical_path: page.logical_path.clone(),
                 page_digest: page.page_digest.clone(),
                 size_bytes: page.size_bytes,
+                build_footprint: page.build_footprint.clone(),
             })
             .collect();
         Self {
@@ -133,6 +150,7 @@ impl CodeGraphPageStoreV1 for SealedCodeGraphPageStoreV1<'_, '_> {
                     && sealed.logical_path == descriptor.logical_path
                     && sealed.page_digest == descriptor.page_digest
                     && sealed.size_bytes == descriptor.size_bytes
+                    && sealed.build_footprint == descriptor.build_footprint
             })
             .ok_or_else(|| store_error("sealed page", "descriptor is outside its generation"))?
             .clone();

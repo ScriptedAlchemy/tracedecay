@@ -18,7 +18,8 @@ use tracedecay_graph_db::{
 use super::partitioned_codec::FILE_WINDOW_FILES_PER_WORKER_V1;
 use super::resident_bytes::{chunk_bytes, file_bytes, symbol_bytes};
 use super::{
-    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
+    CodeGraphPageDescriptorV1, CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1,
+    FileGenerationArtifactsV1,
 };
 use crate::graph_projection::{
     CodeGraphRowSampleV1, CodeGraphSampleFileV1, sample_code_graph_rows,
@@ -85,6 +86,198 @@ impl CodeGraphBuildBoundV1 {
 
 fn bytes(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+const SIZING_NAMESPACE_BYTES: u64 = 6;
+
+#[derive(Clone, Copy, Default)]
+struct PageBuildCostV1 {
+    decode: u64,
+    entity_buffered: u64,
+    entity_resident: u64,
+    relation_buffered: u64,
+    relation_resident: u64,
+    identities: u64,
+    entities: u64,
+    relations: u64,
+    max_entity_buffered: u64,
+    max_entity_resident: u64,
+}
+
+impl PageBuildCostV1 {
+    fn of(page: &CodeGraphPageDescriptorV1, namespace_bytes: u64) -> Self {
+        let footprint = &page.build_footprint;
+        let projection_growth = namespace_bytes
+            .saturating_sub(SIZING_NAMESPACE_BYTES)
+            .saturating_mul(2)
+            .saturating_mul(footprint.relation_count);
+        Self {
+            decode: footprint.decode_bytes,
+            entity_buffered: footprint.entity_spill_buffered,
+            entity_resident: footprint.entity_spill_resident,
+            relation_buffered: footprint
+                .relation_spill_buffered
+                .saturating_add(projection_growth),
+            relation_resident: footprint
+                .relation_spill_resident
+                .saturating_add(projection_growth),
+            identities: footprint.identity_bytes,
+            entities: footprint.entity_count,
+            relations: footprint.relation_count,
+            max_entity_buffered: footprint.max_entity_spill_buffered,
+            max_entity_resident: footprint.max_entity_spill_resident,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LayeredSpillBuffersV1 {
+    entity_buffered: u64,
+    entity_resident: u64,
+    relation_buffered: u64,
+    relation_resident: u64,
+    identities: u64,
+}
+
+impl LayeredSpillBuffersV1 {
+    fn resident(&self) -> u64 {
+        self.entity_resident
+            .saturating_add(self.relation_resident)
+            .saturating_add(self.identities)
+    }
+
+    fn push(&mut self, cost: PageBuildCostV1) -> u64 {
+        self.entity_buffered = self.entity_buffered.saturating_add(cost.entity_buffered);
+        self.entity_resident = self.entity_resident.saturating_add(cost.entity_resident);
+        self.relation_buffered = self
+            .relation_buffered
+            .saturating_add(cost.relation_buffered);
+        self.relation_resident = self
+            .relation_resident
+            .saturating_add(cost.relation_resident);
+        self.identities = self.identities.saturating_add(cost.identities);
+        let peak = self.resident();
+        if self.entity_buffered >= GRAPH_ROW_SPILL_RUN_BYTES as u64 {
+            self.entity_buffered = 0;
+            self.entity_resident = 0;
+        }
+        if self.relation_buffered >= GRAPH_ROW_SPILL_RUN_BYTES as u64 {
+            self.relation_buffered = 0;
+            self.relation_resident = 0;
+        }
+        peak
+    }
+}
+
+pub(crate) fn layered_page_graph_build_bound<'a>(
+    changed: impl IntoIterator<
+        Item = (
+            Option<&'a CodeGraphPageDescriptorV1>,
+            Option<&'a CodeGraphPageDescriptorV1>,
+        ),
+    >,
+    base_pages: &[CodeGraphPageDescriptorV1],
+    namespace_bytes: usize,
+) -> CodeGraphBuildBoundV1 {
+    let namespace_bytes = u64::try_from(namespace_bytes).unwrap_or(u64::MAX);
+    let mut spill = LayeredSpillBuffersV1::default();
+    let mut decode_window = 0_u64;
+    let mut emit_peak = 0_u64;
+    let mut emit_window = 0_u64;
+    let mut hidden_bytes = 0_u64;
+    let mut endpoint_slots = 0_u64;
+    let mut delta_entities = 0_u64;
+    let mut delta_relations = 0_u64;
+    let max_base_entity = base_pages
+        .iter()
+        .map(|page| PageBuildCostV1::of(page, namespace_bytes))
+        .max_by_key(|cost| cost.max_entity_resident)
+        .unwrap_or_default();
+    for (child, base) in changed {
+        let child = child.map(|page| PageBuildCostV1::of(page, namespace_bytes));
+        let base = base.map(|page| PageBuildCostV1::of(page, namespace_bytes));
+        decode_window = decode_window.max(
+            child
+                .map_or(0, |cost| cost.decode)
+                .saturating_add(base.map_or(0, |cost| cost.decode)),
+        );
+        if let Some(base) = base {
+            hidden_bytes = hidden_bytes
+                .saturating_add(base.identities)
+                .saturating_add(base.relation_buffered);
+        }
+        if let Some(child) = child {
+            let page_window = child
+                .entity_resident
+                .saturating_add(child.relation_resident);
+            emit_window = emit_window.max(page_window);
+            emit_peak = emit_peak.max(
+                spill
+                    .resident()
+                    .saturating_add(hidden_bytes)
+                    .saturating_add(page_window),
+            );
+            emit_peak = emit_peak.max(
+                spill
+                    .push(child)
+                    .saturating_add(hidden_bytes)
+                    .saturating_add(page_window),
+            );
+            endpoint_slots = endpoint_slots.saturating_add(child.relations.saturating_mul(2));
+            delta_entities = delta_entities.saturating_add(child.entities);
+            delta_relations = delta_relations.saturating_add(child.relations);
+        }
+    }
+    let endpoint_resident = endpoint_slots.saturating_mul(max_base_entity.max_entity_resident);
+    let endpoint_buffered = endpoint_slots.saturating_mul(max_base_entity.max_entity_buffered);
+    let endpoint_identities = endpoint_slots.saturating_mul(
+        max_base_entity
+            .identities
+            .checked_div(max_base_entity.entities.max(1))
+            .unwrap_or(0),
+    );
+    let endpoint_cost = PageBuildCostV1 {
+        entity_buffered: endpoint_buffered,
+        entity_resident: endpoint_resident,
+        identities: endpoint_identities,
+        entities: endpoint_slots,
+        ..PageBuildCostV1::default()
+    };
+    emit_window = emit_window.max(max_base_entity.max_entity_resident);
+    emit_peak = emit_peak.max(
+        spill
+            .push(endpoint_cost)
+            .saturating_add(hidden_bytes)
+            .saturating_add(max_base_entity.max_entity_resident),
+    );
+    delta_entities = delta_entities.saturating_add(endpoint_slots);
+    let identity_store = spill.identities.saturating_add(hidden_bytes);
+    let row_index_records = delta_entities
+        .saturating_add(delta_relations)
+        .saturating_mul(size_of::<([u8; 16], ([u64; 4], u32, u32))>() as u64)
+        .saturating_mul(2);
+    CodeGraphBuildBoundV1 {
+        decode_window_bytes: decode_window,
+        resolution_file_bytes: 0,
+        binding_bytes: 0,
+        bound_set_bytes: 0,
+        derived_bytes: 0,
+        emit_batch_bytes: 0,
+        emit_spill_bytes: emit_peak,
+        emit_window_bytes: emit_window,
+        store_bytes: identity_store.saturating_add(row_index_records),
+    }
+}
+
+pub(crate) fn sealed_page_graph_build_bound(
+    pages: &[CodeGraphPageDescriptorV1],
+    namespace_bytes: usize,
+) -> CodeGraphBuildBoundV1 {
+    layered_page_graph_build_bound(
+        pages.iter().map(|page| (Some(page), None)),
+        &[],
+        namespace_bytes,
+    )
 }
 
 /// A `Vec` grown by pushes holds up to twice its length.

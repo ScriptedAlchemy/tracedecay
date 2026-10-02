@@ -319,6 +319,7 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
         &mut |request, buffer| read_segment(&segments, request, buffer),
         &revision,
         spill,
+        &mut |_| Ok(()),
         &|| Ok(()),
     )
     .expect("sealed graph builds");

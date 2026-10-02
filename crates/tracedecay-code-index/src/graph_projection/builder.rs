@@ -10,8 +10,9 @@ use crate::chunks::{
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::{
-    CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1, PersistedCodeGraphPageV1,
-    SealedCodeGraphPageStoreV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1,
+    CodeGraphBuildBoundV1, CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1,
+    PersistedCodeGraphPageV1, SealedCodeGraphPageStoreV1, SealedGenerationFileWindowsV1,
+    SealedGenerationSegmentReaderV1, sealed_page_graph_build_bound,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, EdgeAuthorityV1,
@@ -51,6 +52,7 @@ pub fn build_sealed_code_graph_rows(
     read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
     projector_revision: &GraphProjectorRevision,
     mut spill: GraphGenerationRowSpill,
+    admit: &mut dyn FnMut(CodeGraphBuildBoundV1) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SpilledGraphGeneration, SealedCodeGraphRowsError> {
     check()?;
@@ -66,6 +68,10 @@ pub fn build_sealed_code_graph_rows(
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
     let mut pages = SealedCodeGraphPageStoreV1::new(source, read_segment);
     let descriptors = pages.pages().to_vec();
+    admit(sealed_page_graph_build_bound(
+        &descriptors,
+        projection.namespace.as_str().len(),
+    ))?;
     let mut attachment = CodeGraphPageStoreWriterV1::create(
         &spill.attachment_path(),
         &generation,
@@ -103,7 +109,7 @@ pub fn build_sealed_code_graph_rows(
     .map_err(Into::into)
 }
 
-pub(super) fn emit_persisted_code_graph_page(
+pub(crate) fn emit_persisted_code_graph_page(
     projection: &GraphProjectionIdentity,
     generation: &CodeGenerationId,
     page: &PersistedCodeGraphPageV1,

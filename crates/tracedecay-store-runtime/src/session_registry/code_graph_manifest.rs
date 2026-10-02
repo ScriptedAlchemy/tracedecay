@@ -471,6 +471,9 @@ fn spill_verified_seal_graph(
     projection: GraphProjectionIdentity,
     projector_revision: &GraphProjectorRevision,
     spill: GraphGenerationRowSpill,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<SpilledGraphGeneration, GraphDbError> {
     with_verified_segments(sealed_state_digest, routes, check, |read_segment| {
@@ -480,6 +483,7 @@ fn spill_verified_seal_graph(
             read_segment,
             projector_revision,
             spill,
+            admit,
             check,
         )
     })
@@ -533,6 +537,7 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
         projection,
         projector_revision,
         spill,
+        &mut |_| Ok(()),
         check,
     )
 }
@@ -600,6 +605,9 @@ pub(super) fn graph_rows_from_roots(
     projector_revision: &GraphProjectorRevision,
     layered_spill: &dyn Fn(&tracedecay_domain::CodeGenerationId) -> LayeredRowSpillV1,
     cold_spill: &dyn Fn() -> Result<GraphGenerationRowSpill, GraphDbError>,
+    admit: &mut dyn FnMut(
+        tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
     let (source, sealed_state_digest, routes) = open_seal_from_roots(
@@ -620,6 +628,7 @@ pub(super) fn graph_rows_from_roots(
                         read_segment,
                         projector_revision,
                         spill,
+                        admit,
                         check,
                     )
                 })
@@ -659,6 +668,7 @@ pub(super) fn graph_rows_from_roots(
         projection,
         projector_revision,
         cold_spill()?,
+        admit,
         check,
     )?;
     Ok((spilled.into(), None))
@@ -1276,6 +1286,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             projection,
             &source.projector_revision,
             spill,
+            &mut |_| Ok(()),
             check,
         )
     }

@@ -2026,10 +2026,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             let binding_scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
                             let binding_passes = Arc::clone(&worker_reconcile_in_progress);
-                            // The build is admitted like the decode it
-                            // replaces: charged before it runs, parked when it
-                            // does not fit, and holding its reservation until
-                            // the head is published.
+                            // The retained seat selects a cold or changed-page
+                            // plan, then this authority admits that exact plan
+                            // before its first page is materialized.
                             let admitted_binding = tokio::task::spawn_blocking(move || {
                                 let (_step, scheduler) = Self::lock_scheduler_for_graph_step(
                                     &binding_scheduler,
@@ -2038,30 +2037,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                 )?;
                                 let binding =
                                     scheduler.code_graph_replay_binding(&generation_id)?;
-                                let decoder = scheduler.active_generation_decoder();
-                                let admission = decoder
-                                    .as_ref()
-                                    .map(
-                                        DaemonCodeIndexPublicationStoreV1::admit_sealed_graph_build,
-                                    )
-                                    .transpose();
+                                let admission = scheduler.active_generation_decoder().as_ref().map(
+                                    DaemonCodeIndexPublicationStoreV1::sealed_graph_build_admission,
+                                );
                                 Ok::<_, CodeIndexSchedulerErrorV1>((binding, admission))
                             })
                             .await;
                             match admitted_binding {
-                                Ok(Ok((
-                                    _,
-                                    Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(
-                                        detail,
-                                    )),
-                                ))) => graph_publish_refusal = Some(detail),
-                                Ok(Ok((_, Err(error)))) => tracing::warn!(
-                                    event = "code_index_graph_publish_admission_failed",
-                                    error = %error,
-                                    "sealed graph build admission failed; activation publishes \
-                                     the graph after the serving decode"
-                                ),
-                                Ok(Ok((replay_binding, Ok(reservation)))) => {
+                                Ok(Ok((replay_binding, admission))) => {
                                     super::CodeIndexWorkerPhaseV1::enter(
                                         &worker_phase_signal,
                                         super::CodeIndexWorkerPhaseV1::PublishingGraph,
@@ -2073,6 +2056,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                             &worker_worktree_id,
                                             text,
                                             replay_binding,
+                                            admission,
                                             Arc::clone(&worker_shutting_down),
                                         )
                                         .await;
@@ -2080,7 +2064,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                         &worker_phase_signal,
                                         super::CodeIndexWorkerPhaseV1::Working,
                                     );
-                                    drop(reservation);
                                     match published {
                                         Ok(published) => graph_head_published = published,
                                         Err(error) if error.is_resident_memory_graph_refusal() => {

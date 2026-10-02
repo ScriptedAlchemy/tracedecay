@@ -33,6 +33,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionOutcomeV1, SanitizerRevision, WorktreeId,
     canonical_text::encode_tagged_lowercase_hex, sha256_hex_suffix,
 };
+use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, DurableFileBatch};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
@@ -57,6 +58,7 @@ use crate::code_index::{
 };
 
 use super::{CodeIndexSchedulerErrorV1, PendingHintsV1, ProfiledStdMutex};
+use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
@@ -64,6 +66,29 @@ const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 static CODE_INDEX_GENERATION_DECODES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hotpath")]
 static CODE_INDEX_GENERATION_DECODE_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+struct SealedGraphBuildAdmissionV1(DaemonCodeIndexPublicationStoreV1);
+
+impl CodeGraphBuildAdmissionV1 for SealedGraphBuildAdmissionV1 {
+    fn admit(
+        &self,
+        bound: CodeGraphBuildBoundV1,
+    ) -> std::result::Result<Box<dyn Send>, GraphDbError> {
+        self.0
+            .admit_sealed_graph_build_bound(bound)
+            .map(|reservation| Box::new(reservation) as Box<dyn Send>)
+            .map_err(|error| match error {
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_) => {
+                    GraphDbError::budget_exhausted(
+                        GraphBudgetKind::ResidentMemory,
+                        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
+                            .get(),
+                    )
+                }
+                error => GraphDbError::unavailable(error.to_string()),
+            })
+    }
+}
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2386,6 +2411,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
         self.admit_active_generation_work(ActiveGenerationWorkV1::SealedGraphBuild)
     }
 
+    pub(super) fn sealed_graph_build_admission(&self) -> Arc<dyn CodeGraphBuildAdmissionV1> {
+        Arc::new(SealedGraphBuildAdmissionV1(self.clone()))
+    }
+
+    pub(super) fn admit_sealed_graph_build_bound(
+        &self,
+        bound: tracedecay_code_index::production::CodeGraphBuildBoundV1,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        publish_graph_build_bound_gauges(&bound);
+        let Some(pointer) = self.read_publication_pointer()? else {
+            return Ok(None);
+        };
+        let generation_id =
+            CodeGenerationId::new(pointer.generation_id).map_err(Self::unavailable)?;
+        self.admit_measured_generation_work(
+            SEALED_GRAPH_BUILD_RESIDENT_COMPONENT_V1,
+            "building the code graph of",
+            generation_id,
+            bound.peak_bytes(),
+        )
+    }
+
     fn admit_active_generation_work(
         &self,
         work: ActiveGenerationWorkV1,
@@ -2397,15 +2444,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "building the code graph of",
             ),
         };
-        let Some(admission) = self
-            .decode_admission
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        else {
-            return Ok(None);
-        };
-        let (generation_id, requested) = match self.active_generation_charge(work)? {
+        let (generation_id, bytes) = match self.active_generation_charge(work)? {
             ActiveGenerationDecodeChargeV1::Decoded => return Ok(None),
             ActiveGenerationDecodeChargeV1::Unmeasured => {
                 tracing::debug!(
@@ -2417,10 +2456,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ActiveGenerationDecodeChargeV1::Measured {
                 generation_id,
                 bytes,
-            } => match NonZeroU64::new(bytes) {
-                Some(requested) => (generation_id, requested),
-                None => return Ok(None),
-            },
+            } => (generation_id, bytes),
+        };
+        self.admit_measured_generation_work(component, work_label, generation_id, bytes)
+    }
+
+    fn admit_measured_generation_work(
+        &self,
+        component: &str,
+        work_label: &str,
+        generation_id: CodeGenerationId,
+        bytes: u64,
+    ) -> Result<Option<ResidentMemoryReservationV1>, CodeIndexPublicationStoreErrorV1> {
+        let Some(requested) = NonZeroU64::new(bytes) else {
+            return Ok(None);
+        };
+        let Some(admission) = self
+            .decode_admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(None);
         };
         let watermark = admission.resident_memory.admission_watermark_bytes();
         let admissible = || -> Result<(), String> {

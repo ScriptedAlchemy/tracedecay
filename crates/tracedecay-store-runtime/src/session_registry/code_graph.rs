@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 #[cfg(any(test, feature = "test-helpers"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::{
@@ -32,7 +33,8 @@ use tracedecay_store::{
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 use tracedecay_code_index::graph_projection::CodeGraphLayeredReportV1;
 use tracedecay_code_index_runtime::{
-    CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
+    CodeGraphBuildAdmissionV1, CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1,
+    CodeGraphSeatRuntimePortV1,
 };
 
 mod memory_runtime;
@@ -1272,6 +1274,14 @@ impl RetainedCodeGraphRuntimeV1 {
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.publish_verified_snapshot_with_admission(request_cancelled, None)
+    }
+
+    fn publish_verified_snapshot_with_admission(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+        admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // The project-shard build permit is claimed before any row is built
         // and held through publication so 1/2/4/8 worktree scopes cannot
         // overlap corpus-sized transients. A same-generation twin waits here
@@ -1403,6 +1413,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 &probe,
                 &context,
                 &mut staging_release,
+                admission.as_deref(),
             )
         })
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?
@@ -1866,6 +1877,9 @@ impl RetainedCodeGraphRuntimeV1 {
         projection: &GraphProjectionIdentity,
         projector_revision: &GraphProjectorRevision,
         registration: &dyn Fn() -> GraphDbRegistration,
+        admit: &mut dyn FnMut(
+            tracedecay_code_index::production::CodeGraphBuildBoundV1,
+        ) -> std::result::Result<(), GraphDbError>,
         check: &dyn Fn() -> std::result::Result<(), GraphDbError>,
     ) -> std::result::Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError>
     {
@@ -1901,6 +1915,7 @@ impl RetainedCodeGraphRuntimeV1 {
             projector_revision,
             &layered_spill,
             &cold_spill,
+            admit,
             check,
         )
     }
@@ -1912,6 +1927,7 @@ impl RetainedCodeGraphRuntimeV1 {
         probe: &GraphPublicationProbeV1,
         context: &GraphPublicationOperationContextV1<'_>,
         staging_release: &mut Option<GraphProjectionIdentityV1>,
+        admission: Option<&dyn CodeGraphBuildAdmissionV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // A request cancelled or expired before publication starts must
         // answer its typed interruption before touching the publication
@@ -1964,7 +1980,8 @@ impl RetainedCodeGraphRuntimeV1 {
         // The generation's graph rows, built from its sealed segments the
         // first time an arm needs them and shared by every later use.
         let built_rows = std::cell::OnceCell::new();
-        let rows = || -> std::result::Result<GraphGenerationRows, GraphDbError> {
+        let admission_reservation = RefCell::new(None::<Box<dyn Send>>);
+        let mut rows = || -> std::result::Result<GraphGenerationRows, GraphDbError> {
             if let Some(rows) = built_rows.get() {
                 return Ok(GraphGenerationRows::clone(rows));
             }
@@ -1981,10 +1998,20 @@ impl RetainedCodeGraphRuntimeV1 {
                     PUBLICATION_PROJECTION_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
                 PUBLICATION_PROJECTION_OVERLAP_PEAK.fetch_max(overlapping, Ordering::AcqRel);
             }
+            let mut admit = |bound: tracedecay_code_index::production::CodeGraphBuildBoundV1| {
+                let Some(admission) = admission else {
+                    return Ok(());
+                };
+                drop(admission_reservation.borrow_mut().take());
+                let reservation = admission.admit(bound)?;
+                *admission_reservation.borrow_mut() = Some(reservation);
+                Ok(())
+            };
             let built = self.build_graph_rows(
                 &prepared.identity.projection,
                 &prepared.projector_revision,
                 &registration,
+                &mut admit,
                 &check,
             );
             #[cfg(any(test, feature = "test-helpers"))]
@@ -2957,6 +2984,17 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::publish_verified_snapshot(self, request_cancelled)
+    }
+
+    fn publish_verified_snapshot_admitted(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+        admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+    ) -> std::result::Result<
+        tracedecay_graph_db::VerifiedGraphSnapshot,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        self.publish_verified_snapshot_with_admission(request_cancelled, Some(admission))
     }
 
     fn recover_verified_snapshot_from_head(

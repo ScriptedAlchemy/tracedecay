@@ -151,6 +151,7 @@ pub(crate) struct PartitionedCodeGraphPageDescriptorV1 {
     pub(crate) page_digest: ManifestDigest,
     pub(crate) offset: u64,
     pub(crate) size_bytes: u64,
+    pub(crate) build_footprint: super::graph_page_store::CodeGraphPageBuildFootprintV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1166,6 +1167,7 @@ impl PartitionedSegmentEncoderV1 {
                 page_digest: page.page_digest,
                 offset,
                 size_bytes,
+                build_footprint: page.build_footprint,
             });
             Ok(())
         })?;

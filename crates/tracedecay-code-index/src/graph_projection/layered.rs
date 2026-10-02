@@ -22,9 +22,9 @@ use super::{
     symbol_entity_id,
 };
 use crate::production::{
-    CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, FileCodeGraphPageStoreV1,
-    PersistedCodeGraphPageV1, SealedCodeGraphPageStoreV1, SealedGenerationFileWindowsV1,
-    SealedGenerationSegmentReaderV1,
+    CodeGraphBuildBoundV1, CodeGraphPageDescriptorV1, CodeGraphPageStoreV1,
+    FileCodeGraphPageStoreV1, PersistedCodeGraphPageV1, SealedCodeGraphPageStoreV1,
+    SealedGenerationFileWindowsV1, SealedGenerationSegmentReaderV1, layered_page_graph_build_bound,
 };
 
 /// A refresh whose files changed since its base exceed this share, one in
@@ -73,6 +73,7 @@ pub fn build_layered_code_graph_rows(
     read_segment: &mut SealedGenerationSegmentReaderV1<'_>,
     projector_revision: &GraphProjectorRevision,
     mut spill: GraphLayeredRowSpill,
+    admit: &mut dyn FnMut(CodeGraphBuildBoundV1) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Result<CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1>, SealedCodeGraphRowsError> {
     check()?;
@@ -111,6 +112,13 @@ pub fn build_layered_code_graph_rows(
             files: child_files,
         }));
     }
+    admit(layered_page_graph_build_bound(
+        plan.changed
+            .iter()
+            .map(|page| (page.child.as_ref(), page.base.as_ref())),
+        base.pages(),
+        projection_identity.namespace.as_str().len(),
+    ))?;
     let report = hotpath::measure_block!(
         "code_index.graph.build_layered_rows.emit",
         emit_page_delta(
@@ -439,6 +447,7 @@ mod tests {
             logical_path: path.to_owned(),
             page_digest,
             size_bytes: 1,
+            build_footprint: Default::default(),
         };
         let page = PersistedCodeGraphPageV1 {
             file: SanitizedCodeFileV1 {

@@ -189,6 +189,7 @@ impl PartitionedSealV1 {
             &mut |request, buffer| self.read_segment(request, buffer),
             revision,
             spill,
+            &mut |_| Ok(()),
             check,
         )?;
         Ok(spilled.materialize(&|| Ok(()))?)

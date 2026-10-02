@@ -493,6 +493,7 @@ fn layered_report(runtime: &super::RetainedCodeGraphRuntimeV1) -> Option<CodeGra
             )
             .expect("projector revision"),
             &registration,
+            &mut |_| Ok(()),
             &|| Ok(()),
         )
         .expect("rebuild the generation's rows")

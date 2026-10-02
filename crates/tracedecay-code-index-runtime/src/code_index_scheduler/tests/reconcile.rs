@@ -1754,6 +1754,7 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
             projection,
         )
         .expect("row spill"),
+        &mut |_| Ok(()),
         &|| Ok(()),
     )
     .expect("code graph rows")

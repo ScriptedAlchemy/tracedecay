@@ -101,6 +101,7 @@ mod decoded_content;
 pub use decoded_content::{DecodedGenerationContentV1, SharedDecodedContentPoolV1};
 mod graph_build_bound;
 pub use graph_build_bound::CodeGraphBuildBoundV1;
+pub(crate) use graph_build_bound::{layered_page_graph_build_bound, sealed_page_graph_build_bound};
 mod changed_resolution;
 mod graph_page_store;
 mod graph_pages;
