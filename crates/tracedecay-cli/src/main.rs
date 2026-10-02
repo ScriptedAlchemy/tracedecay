@@ -1,8 +1,6 @@
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 // binary crate: match lib allow policy for CLI dispatch
-#[cfg(any(feature = "hotpath", test))]
-use clap::ArgMatches;
-use clap::{CommandFactory, FromArgMatches};
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 #[cfg(any(feature = "hotpath", test))]
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
