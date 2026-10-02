@@ -93,7 +93,7 @@ operation. Doctor diagnostics never invoke it.
 ### 3.1 Signature
 
 ```rust
-// crates/tracedecay-sessions/src/runtime/lcm/payload.rs (or a new gc.rs)
+// crates/tracedecay-lcm/src/payload.rs (or crates/tracedecay-lcm/src/gc.rs)
 pub(crate) async fn delete_external_payload(
     conn: &Connection,
     storage_root: &Path,
