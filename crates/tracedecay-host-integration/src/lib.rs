@@ -281,6 +281,22 @@ mod tests {
     }
 
     #[test]
+    fn opencode_exposes_plugin_hooks_and_mcp_without_an_lsp_route() {
+        let capabilities = stock_host_capabilities(HostKindV1::OpenCode);
+        assert_eq!(
+            capabilities[HostCapabilityV1::Lsp.row_index()].state,
+            HostCapabilityStateV1::Unavailable(
+                HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported
+            )
+        );
+        assert!(
+            stock_host_registration_evidence(HostKindV1::OpenCode)
+                .iter()
+                .all(|registration| registration.route.capability() != HostCapabilityV1::Lsp)
+        );
+    }
+
+    #[test]
     fn cline_family_hooks_stay_unverified_while_exact_hosts_support_mcp() {
         assert!(
             stock_host_registration_evidence(HostKindV1::ClineFamily)

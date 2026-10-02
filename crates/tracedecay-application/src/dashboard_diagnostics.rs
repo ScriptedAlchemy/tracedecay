@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_home_level_registration_does_not_revoke_the_project_level_one() {
+    async fn legacy_opencode_lsp_entries_do_not_disable_diagnostic_engines() {
         let home = tempfile::tempdir().expect("isolated home");
         let profile = tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let opencode_dir = home.path().join(".config").join("opencode");
@@ -692,15 +692,26 @@ mod tests {
         )
         .await;
 
-        let broker = broker.lock().await;
-        assert_eq!(
-            broker.host_retained_analyzer("rust"),
-            Some("rust-analyzer"),
-            "adopting the home level must not drop the project-level claim"
-        );
-        assert_eq!(
-            broker.host_retained_analyzer("typescript"),
-            Some("typescript")
-        );
+        let snapshot = broker.lock().await.snapshot();
+        for language in ["rust", "typescript"] {
+            let engine = snapshot
+                .engines
+                .iter()
+                .find(|engine| engine.language == language)
+                .unwrap_or_else(|| panic!("missing built-in {language} engine"));
+            assert_ne!(
+                engine.state,
+                EngineState::Disabled,
+                "an obsolete OpenCode LSP entry must not suppress the {language} engine"
+            );
+            assert!(
+                engine
+                    .last_error
+                    .as_deref()
+                    .is_none_or(|error| !error.contains("host analyzer")),
+                "obsolete OpenCode ownership leaked into {language}: {:?}",
+                engine.last_error
+            );
+        }
     }
 }
