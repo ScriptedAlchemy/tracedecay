@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
@@ -49,6 +50,21 @@ fn init_git_repo(root: &Path) {
 }
 
 async fn production_routed_projects() -> ProductionRoutedProjects {
+    let projects = production_routed_projects_ready_for_first_read().await;
+    let active_server = projects
+        .harness
+        .server(&projects.active_root)
+        .expect("active project server");
+    let target_server = projects
+        .harness
+        .server(&projects.target_root)
+        .expect("target project server");
+    crate::support::warm_code_index_search(&active_server, "active_only").await;
+    crate::support::warm_code_index_search(&target_server, "target_only").await;
+    projects
+}
+
+async fn production_routed_projects_ready_for_first_read() -> ProductionRoutedProjects {
     let isolation = TempDir::new().unwrap();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
@@ -76,10 +92,8 @@ async fn production_routed_projects() -> ProductionRoutedProjects {
     )
     .await
     .expect("production routed-project composition");
-    let active_server = harness.server(&active_root).expect("active project server");
     let target_server = harness.server(&target_root).expect("target project server");
-    crate::support::warm_code_index_search(&active_server, "active_only").await;
-    crate::support::warm_code_index_search(&target_server, "target_only").await;
+    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
 
     ProductionRoutedProjects {
         isolation,
@@ -278,6 +292,22 @@ fn files_call_for_session(id: i64, session_id: &str) -> String {
     )
 }
 
+fn search_call_for_session(id: i64, session_id: &str, query: &str) -> String {
+    jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({
+            "name": "tracedecay_search",
+            "arguments": {
+                "session_id": session_id,
+                "query": query,
+                "prefer_symbol": true,
+                "format": "json"
+            }
+        }),
+    )
+}
+
 /// Asserts a routed read refused rather than answering, and that it did not
 /// hand back the active project's files as if the route had resolved.
 fn assert_route_failed_closed(response: &Value, label: &str, expected_detail: &str) {
@@ -333,6 +363,69 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         "active_only.rs",
         "target_only.rs",
     );
+    projects.shutdown().await;
+}
+
+#[tokio::test]
+async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
+    let projects = production_routed_projects_ready_for_first_read().await;
+    let target_workspace = projects.target_root().to_path_buf();
+    let target_server = projects
+        .harness
+        .server(&target_workspace)
+        .expect("target project server");
+    let server = projects.server();
+    let session_id = "sess-unhinted-source-edit";
+
+    run_client_connection_with_messages(
+        Arc::clone(&server),
+        vec![workspace_open_for_session(&target_workspace, session_id)],
+    )
+    .await;
+
+    fs::write(
+        target_workspace.join("src/target_only.rs"),
+        "fn target_only() -> i32 { routed_edit_visible() }\n\
+         fn routed_edit_visible() -> i32 { 3 }\n",
+    )
+    .expect("write tracked source without a hook hint");
+
+    run_client_connection_with_messages(
+        Arc::clone(&server),
+        vec![search_call_for_session(
+            1,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    tokio::task::yield_now().await;
+    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
+
+    let responses = run_client_connection_with_messages(
+        server,
+        vec![search_call_for_session(
+            2,
+            session_id,
+            "routed_edit_visible",
+        )],
+    )
+    .await;
+    let response = response_with_id(&responses, json!(2));
+    let payload: Value = serde_json::from_str(successful_tool_text(
+        &response,
+        "routed search after unhinted edit",
+    ))
+    .expect("routed search JSON");
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results
+                .iter()
+                .any(|result| result["display"]["name"] == "routed_edit_visible")
+        }),
+        "the daemon-routed read must expose the unhinted edit after reconciliation: {payload}"
+    );
+
     projects.shutdown().await;
 }
 
