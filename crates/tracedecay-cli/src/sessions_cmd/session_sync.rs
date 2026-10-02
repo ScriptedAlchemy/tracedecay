@@ -70,10 +70,17 @@ pub(super) enum SessionSyncPollState {
     Completed,
 }
 
-fn sync_failed(label: &str, detail: &str) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("{label} did not complete successfully ({detail})"),
-    }
+fn sync_failed(
+    label: &str,
+    reason_code: &str,
+    retryable: bool,
+    detail: &str,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::project_route(
+        reason_code,
+        retryable,
+        format!("{label} did not complete successfully ({detail})"),
+    )
 }
 
 pub(super) fn session_sync_poll_state(
@@ -122,6 +129,11 @@ pub(super) fn session_sync_poll_state(
                 return Ok(SessionSyncPollState::Completed);
             }
             if termination != OperationTermination::Completed || remaining_work > 0 {
+                let reason_code = if termination == OperationTermination::Completed {
+                    "session_sync_incomplete".to_owned()
+                } else {
+                    format!("session_sync_{}", termination_label(termination))
+                };
                 let termination = termination_label(termination);
                 let detail = if failure_codes.is_empty() {
                     termination
@@ -133,18 +145,40 @@ pub(super) fn session_sync_poll_state(
                 } else {
                     format!("{detail}; remaining work {remaining_work}")
                 };
-                return Err(sync_failed(label, &detail));
+                return Err(sync_failed(
+                    label,
+                    &reason_code,
+                    remaining_work > 0,
+                    &detail,
+                ));
             }
             println!("{label} completed ({})", operation_id.as_str());
             Ok(SessionSyncPollState::Completed)
         }
-        AdminCliSessionSyncV1::Cancelled => Err(sync_failed(label, "cancelled")),
-        AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(label, "deadline_exceeded")),
-        AdminCliSessionSyncV1::WrongScope => Err(sync_failed(label, "wrong_scope")),
+        AdminCliSessionSyncV1::Cancelled => Err(sync_failed(
+            label,
+            "session_sync_cancelled",
+            false,
+            "cancelled",
+        )),
+        AdminCliSessionSyncV1::DeadlineExceeded => Err(sync_failed(
+            label,
+            "session_sync_deadline_exceeded",
+            true,
+            "deadline_exceeded",
+        )),
+        AdminCliSessionSyncV1::WrongScope => Err(sync_failed(
+            label,
+            "session_sync_wrong_scope",
+            false,
+            "wrong_scope",
+        )),
         AdminCliSessionSyncV1::Unavailable { reason_code } => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{label} unavailable ({reason_code})"),
-            })
+            Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                &reason_code,
+                true,
+                format!("{label} unavailable ({reason_code})"),
+            ))
         }
     }
 }

@@ -80,18 +80,7 @@ fn retained_tool_outcome(
     tool_name: &str,
     reply: Value,
 ) -> tracedecay_domain::errors::Result<ApplicationOutcome<Value>> {
-    if reply.get("problem").is_some() {
-        let envelope: ApplicationProblemEnvelope =
-            serde_json::from_value(reply).map_err(|error| {
-                retained_decode_error(tool_name, "an undecodable problem envelope", error)
-            })?;
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "daemon tool {tool_name} refused: {}: {}",
-                envelope.problem.code, envelope.problem.message
-            ),
-        });
-    }
+    reject_problem_envelope(&reply, tool_name)?;
     let envelope: ApplicationEnvelope<Value> = serde_json::from_value(reply).map_err(|error| {
         retained_decode_error(tool_name, "an undecodable application envelope", error)
     })?;
