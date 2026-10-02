@@ -3928,7 +3928,12 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let project_root = fixture.path().to_path_buf();
     let request_task = tokio::spawn(async move {
         request_registry
-            .index_verified_ignored_dependency(&project_root, request, Arc::new(ActiveControl))
+            .index_verified_ignored_dependency(
+                &project_root,
+                request,
+                Arc::new(ActiveControl),
+                tokio::time::Instant::now() + Duration::from_mins(1),
+            )
             .await
     });
     // The publication gate stays held until after this wait, so a request

@@ -95,11 +95,12 @@ pub fn try_acquire_code_generation_store_read_lock(
     }
 }
 
-/// Block the calling thread until no exclusive holder, in this or any other
-/// process, holds the generation store, then let go at once.
+/// Block the calling thread until no holder, in this or any other process,
+/// holds the generation store, then let go at once.
 ///
-/// The kernel wakes this wait on the holder's release itself, so a caller
-/// refused by a held lock retries exactly when the lock becomes free. On
+/// The kernel wakes this wait on the holders' release itself, so a caller
+/// refused by a held lock retries exactly when the lock becomes free. The
+/// wait is exclusive because a refused writer must also outlast readers. On
 /// Windows it first waits out a retention pass fencing the scope; a scope a
 /// pending retention transaction collected stays busy until that transaction
 /// resolves, so it is reported as
@@ -112,7 +113,7 @@ pub fn wait_for_code_generation_store_release(
     wait_for_generation_scope_fence_release(store_root)?;
     let store_root = canonical_store_root(store_root)?;
     open_lock_file(&store_root.join(STORE_LOCK_FILE))?
-        .lock_shared()
+        .lock()
         .map_err(storage)
 }
 

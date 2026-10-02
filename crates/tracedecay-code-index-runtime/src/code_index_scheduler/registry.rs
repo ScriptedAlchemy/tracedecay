@@ -468,7 +468,8 @@ mod resident_memory;
 mod test_gates;
 pub mod watch_ingress;
 pub use owner_signals::{
-    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexRetainedTextServingWaitV1,
+    CodeIndexOwnerSignalsClosedV1, CodeIndexOwnerSignalsV1, CodeIndexSeatParkV1,
+    CodeIndexSeatWaitV1,
 };
 
 /// At most two distinct worktrees may reconcile concurrently. Each reconcile

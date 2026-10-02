@@ -3,6 +3,7 @@
 
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
 };
@@ -18,8 +19,8 @@ use super::super::{
 use super::graph_cursor_retention::GraphCursorRetentionV1;
 use super::scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 use super::{
-    CodeIndexMountedScopeV1, CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexServingScopeV1, MountedCodeIndexWorktreeV1, PendingWakeClaimV1,
+    CodeIndexMountedScopeV1, CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1,
+    CodeIndexSeatWaitV1, CodeIndexServingScopeV1, MountedCodeIndexWorktreeV1, PendingWakeClaimV1,
     ReadyProbeServingPartsV1, dashboard_code_graph_serving, dashboard_freshness_identity,
     dashboard_terminal_status, dashboard_text_freshness_identity, project_graph_publication_phase,
     unique_mounted_for_scope,
@@ -797,7 +798,7 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .ok()?;
         // Parked on resident memory, a reader's pass would only repeat the
-        // refusal; memory given back or the retry delay wakes the worker.
+        // refusal; memory given back wakes the worker.
         if request_reconcile
             && admission == GenerationDecodeAdmissionV1::AwaitDecode
             && !memory_retry.waiting()
@@ -845,12 +846,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// whole decoded generation. A publication seats only its text owner and
     /// defers the decode until a reader needs it, so this read's own demand
     /// is what starts that decode: it waits for the seat rather than answering
-    /// the demanding request unavailable. It stops waiting once no decode is
-    /// pending (seated, memory-refused, shutting down, or unmounted); the
-    /// caller's resolution deadline bounds the rest.
+    /// the demanding request unavailable, until `deadline`. A seat that does
+    /// not serve this scope, or no published text owner to decode, ends it.
     pub(crate) async fn latest_complete_fresh_for_scope_awaiting_seat(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
+        deadline: tokio::time::Instant,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;
@@ -859,41 +860,45 @@ impl CodeIndexSchedulerRegistryV1 {
                 .0
                 .clone()
         };
-        let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, &root).await;
-        loop {
-            if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
-                return Some(latest);
-            }
-            if !self.complete_seat_pending(&root).await {
-                // The seat can land between the miss above and this check.
-                return self.latest_complete_fresh_for_scope(scope).await;
-            }
-            signals.changed().await.ok()?;
+        let root = &root;
+        let Ok(waited) = self
+            .wait_for_seat(root, deadline, |_| async move {
+                if let Some(latest) = self.latest_complete_fresh_for_scope(scope).await {
+                    return Ok(Some(CodeIndexSeatWaitV1::Seated(latest)));
+                }
+                let mounted = self.mounted.lock().await;
+                let Some(worktree) = mounted.get(root) else {
+                    return Ok(Some(CodeIndexSeatWaitV1::Cancelled));
+                };
+                let seated = worktree
+                    .serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some();
+                let text_published = worktree
+                    .text_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some();
+                Ok::<_, Infallible>(if seated {
+                    Some(CodeIndexSeatWaitV1::Parked(
+                        CodeIndexSeatParkV1::SeatNotServable,
+                    ))
+                } else if text_published {
+                    None
+                } else {
+                    Some(CodeIndexSeatWaitV1::Parked(
+                        CodeIndexSeatParkV1::Unpublished,
+                    ))
+                })
+            })
+            .await;
+        match waited {
+            CodeIndexSeatWaitV1::Seated(latest) => Some(latest),
+            CodeIndexSeatWaitV1::Parked(_)
+            | CodeIndexSeatWaitV1::Cancelled
+            | CodeIndexSeatWaitV1::Deadline => None,
         }
-    }
-
-    /// Whether demand has asked the worker to seat the complete generation
-    /// of a published text owner and nothing yet stops it from doing so.
-    async fn complete_seat_pending(&self, project_root: &Path) -> bool {
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(project_root) else {
-            return false;
-        };
-        worktree
-            .complete_generation_requested
-            .load(Ordering::Acquire)
-            && !worktree.memory_retry.waiting()
-            && !worktree.shutting_down.load(Ordering::Acquire)
-            && worktree
-                .serving_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-            && worktree
-                .text_generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
     }
 
     /// Resolve one exact scope and admit only an already-current generation.

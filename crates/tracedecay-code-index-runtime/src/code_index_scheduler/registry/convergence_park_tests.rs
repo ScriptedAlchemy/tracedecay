@@ -27,7 +27,8 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildPhaseV1, CodeIndexReadinessTargetV1,
+    CodeIndexReadinessWaitReadV1,
 };
 use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::UtcMicros;
@@ -41,7 +42,7 @@ use super::super::graph_activation::{
     set_injected_publication_deadline,
 };
 use super::super::tests::{OwnerSignals, application_context, query_authority};
-use super::{CodeIndexRetainedTextServingWaitV1, CodeIndexSchedulerRegistryV1};
+use super::{CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1};
 use crate::project_reads::project_code_graph_projection_read_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -690,10 +691,7 @@ async fn a_text_serving_wait_answers_while_the_graph_publishes() {
     )
     .await
     .expect("the wait answers at its own budget");
-    assert_eq!(
-        without_authority,
-        CodeIndexRetainedTextServingWaitV1::Warming
-    );
+    assert_eq!(without_authority, CodeIndexSeatWaitV1::Deadline);
 
     let text = fixture
         .registry
@@ -719,7 +717,7 @@ async fn a_text_serving_wait_answers_while_the_graph_publishes() {
     )
     .await
     .expect("the wait answers while the graph publication is held");
-    assert_eq!(serving, CodeIndexRetainedTextServingWaitV1::Serving);
+    assert_eq!(serving, CodeIndexSeatWaitV1::Seated(()));
     assert_eq!(
         fixture
             .registry
@@ -732,6 +730,84 @@ async fn a_text_serving_wait_answers_while_the_graph_publishes() {
     );
 
     gate.release();
+    fixture.registry.shutdown().await;
+}
+
+/// A seat wait answers a parked worker with its park instead of waiting out
+/// its budget for a seat the worker will not install. The squatted artifacts
+/// root parks the published generation's text owner on every pass, so the
+/// search's wait for retained text serving can never be satisfied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seat_wait_answers_a_parked_worker_with_its_park() {
+    let fixture =
+        Fixture::mount_with_poisoned_artifacts_root("project.seat-wait-parked", |artifacts_root| {
+            fs::write(artifacts_root, b"squatter").expect("occupy artifacts root path");
+        })
+        .await;
+    fixture
+        .wait_for_freshness(|freshness| freshness.parked.is_some())
+        .await
+        .expect("the worker parks on the squatted artifacts root");
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = application_context(&operation, scope.repository_id, scope.worktree_id);
+
+    let waited = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_retained_text_serving(
+            &fixture.project,
+            context.scope(),
+            CONVERGENCE_DEADLINE * 2,
+        ),
+    )
+    .await
+    .expect("a parked worker ends the wait before its budget");
+    let CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(park)) = waited else {
+        panic!("the wait must answer with the worker's park: {waited:?}");
+    };
+    assert!(
+        park.reason.contains("code text artifacts root"),
+        "{}",
+        park.reason
+    );
+    assert!(park.retries_on_wake);
+    fixture.registry.shutdown().await;
+}
+
+/// A readiness wait (`status` `wait_for`) ends as soon as the registry is
+/// cancelled: a worktree shutting down installs nothing more, so the wait
+/// reports the closed registry instead of spending its budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_readiness_wait_ends_when_the_registry_is_cancelled() {
+    let (fixture, _held) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.seat-wait-cancelled", |_| {})
+            .await;
+    let registry = fixture.registry.clone();
+    let project = fixture.project.clone();
+    let wait = tokio::spawn(async move {
+        registry
+            .wait_for_readiness(
+                &project,
+                CodeIndexReadinessTargetV1::Fresh,
+                CONVERGENCE_DEADLINE * 2,
+            )
+            .await
+    });
+    fixture.registry.cancel();
+    let waited = tokio::time::timeout(CONVERGENCE_DEADLINE, wait)
+        .await
+        .expect("cancellation ends the wait before its budget")
+        .expect("wait task")
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Unreachable { reason } = waited else {
+        panic!("a cancelled registry must end the wait: {waited:?}");
+    };
+    assert_eq!(reason, "code_index_scheduler_registry_closed");
     fixture.registry.shutdown().await;
 }
 
