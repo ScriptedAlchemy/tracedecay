@@ -166,6 +166,9 @@ pub struct CodexDiscoveryHub {
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// A consumer was told to wait for a scan in progress; the next scan to
+    /// finish releases it.
+    scan_waited: bool,
     source_key: Option<CodexDiscoverySourceKey>,
     frontier: Option<CodexDiscoveryFrontier>,
     consumers: HashMap<String, CodexDiscoveryConsumerState>,
@@ -789,6 +792,7 @@ impl CodexDiscoveryHub {
                     let index = inner.replay_indexes.entry(source_key.clone()).or_default();
                     if index.scanning {
                         hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     if index._scanner_memory.is_none() {
@@ -851,6 +855,7 @@ impl CodexDiscoveryHub {
                     }
                     if inner.discovery_scanning {
                         hotpath::gauge!("codex_discovery_scanner_waits").inc(1.0);
+                        inner.scan_waited = true;
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
@@ -881,8 +886,10 @@ impl CodexDiscoveryHub {
                     detail: "Codex discovery hub lock is poisoned",
                 }
             })?;
-            self.scan_released
-                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            if std::mem::take(&mut inner.scan_waited) {
+                self.scan_released
+                    .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            }
             let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
