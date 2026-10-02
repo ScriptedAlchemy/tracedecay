@@ -924,10 +924,16 @@ fn project_open_refusal_response(
             tracedecay_contracts::ApplicationProblem::invalid_request(reason_code, detail),
         );
     }
-    DaemonInvocationResponse::problem(
-        request_id,
-        project_open_problem(error, workflow_application, git_operation),
-    )
+    let problem = project_open_problem(error, workflow_application, git_operation);
+    if problem == DaemonInvocationProblem::ResetRequired
+        && let Some(detail) = tracedecay_mcp::reset_required_detail(error)
+    {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::from_detail(detail),
+        );
+    }
+    DaemonInvocationResponse::problem(request_id, problem)
 }
 
 fn project_open_problem(

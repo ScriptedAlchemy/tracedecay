@@ -423,9 +423,9 @@ pub use discovery::{
 
 pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
-pub(in crate::runtime) use jsonl::spin_until_jsonl_change_settled;
-#[cfg(test)]
 use jsonl::stream_new_jsonl_raw_strict;
+#[cfg(test)]
+pub(in crate::runtime) use jsonl::{HoldUnchangedGenerationCache, spin_until_jsonl_change_settled};
 pub(in crate::runtime) use jsonl::{
     JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_change_token_settled,
     jsonl_file_change_token, jsonl_file_change_token_under, jsonl_native_file_identity,

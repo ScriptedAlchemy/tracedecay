@@ -72,10 +72,11 @@ impl GitNativeCandidateTreeV1<'_> {
         oid(self.tree)
     }
 
-    /// Visit every non-tree, non-submodule entry in stable path order.
+    /// Visit every non-tree, non-submodule entry in stable path order, with
+    /// its raw Git path bytes.
     pub fn visit_blobs<E>(
         &self,
-        mut visitor: impl FnMut(&str, &[u8]) -> Result<(), E>,
+        mut visitor: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), GitNativeCandidateTreeVisitError<E>> {
         let tree = self
             .repository
@@ -98,12 +99,11 @@ impl GitNativeCandidateTreeV1<'_> {
             if entry.mode.is_tree() || entry.mode.is_commit() {
                 continue;
             }
-            let logical_path = entry.filepath.to_str_lossy();
             let blob = self
                 .repository
                 .find_blob(entry.oid)
                 .map_err(|error| repository_visit_error("native candidate blob", error))?;
-            visitor(&logical_path, &blob.data)
+            visitor(entry.filepath.as_ref(), &blob.data)
                 .map_err(GitNativeCandidateTreeVisitError::Visitor)?;
         }
         Ok(())

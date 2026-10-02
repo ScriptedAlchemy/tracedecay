@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
@@ -152,11 +152,10 @@ impl TraceDecay {
                 }
                 storage::default_profile_sharded_layout(project_root, &profile_root)
             }
-            None => Err(TraceDecayError::Config {
-                message:
-                    "registered configuration layout requires an enrolled or registry-resolved project identity"
-                        .to_owned(),
-            }),
+            None => Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IdentityUnregistered,
+                "registered configuration layout requires an enrolled or registry-resolved project identity",
+            )),
         }
     }
 

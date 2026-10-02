@@ -4,13 +4,12 @@
 //! publishes a core server before the project's session store is admitted, and
 //! a dashboard composed from that server has no session authority yet. The
 //! composition states that as [`DashboardSessionMountV1::Opening`] with a
-//! resolver, and the active-project gateway asks it again on every request
-//! until the daemon answers with the admitted authorities.
+//! receiver the daemon sends one terminal resolution to when the project's
+//! publication finishes; requests only read it.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio::sync::watch;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use crate::lcm_api::DashboardLcmReadPortV1;
@@ -24,25 +23,22 @@ pub struct DashboardSessionAuthoritiesV1 {
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
 }
 
-/// One answer from the daemon about a project that was opening.
+/// The daemon's answer about a project that was opening.
+#[derive(Clone)]
 pub enum DashboardSessionResolutionV1 {
-    /// The project's session store is not admitted yet.
+    /// The project's publication has not finished.
     Opening,
     Ready(DashboardSessionAuthoritiesV1),
-    /// The project no longer has a serving owner.
+    /// The publication finished without session authorities, or the project
+    /// no longer has a serving owner.
     Unavailable,
 }
-
-pub type DashboardSessionResolveFuture =
-    Pin<Box<dyn Future<Output = DashboardSessionResolutionV1> + Send + 'static>>;
-pub type DashboardSessionResolverV1 =
-    Arc<dyn Fn() -> DashboardSessionResolveFuture + Send + Sync + 'static>;
 
 /// How a dashboard state is composed with its project's session store.
 #[derive(Clone)]
 pub enum DashboardSessionMountV1 {
     Ready(DashboardSessionAuthoritiesV1),
-    Opening(DashboardSessionResolverV1),
+    Opening(watch::Receiver<DashboardSessionResolutionV1>),
     Unavailable,
 }
 
