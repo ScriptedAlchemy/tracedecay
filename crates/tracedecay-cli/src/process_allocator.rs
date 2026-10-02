@@ -9,8 +9,10 @@
     not(feature = "hotpath-alloc")
 ))]
 mod mimalloc_v3 {
+    use std::cell::Cell;
     use std::ffi::{c_int, c_void};
     use std::num::NonZeroUsize;
+    use std::sync::{Mutex, PoisonError};
 
     use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
@@ -60,6 +62,11 @@ mod mimalloc_v3 {
         // 3.3.2 declares `mi_theap_set_default` without defining it; this is
         // the definition its allocation path reads the default theap from.
         fn _mi_theap_default_set(theap: *mut c_void);
+        fn _mi_is_main_thread() -> bool;
+        fn mi_thread_done();
+        // `src/prim/unix/prim.c`: stores `theap` in the pthread key whose
+        // destructor (`mi_pthread_done`) calls `_mi_thread_done` on it.
+        fn _mi_prim_thread_associate_default_theap(theap: *mut c_void);
         fn mi_heap_visit_blocks(
             heap: *mut c_void,
             visit_blocks: bool,
@@ -187,7 +194,74 @@ mod mimalloc_v3 {
         NonZeroUsize::new(unsafe { mi_heap_new() } as usize)
     }
 
+    /// Held while an owner heap is deleted and while a thread that has a theap
+    /// of an owner heap frees its theaps. In 3.3.2 `mi_heap_delete` detaches
+    /// a theap from its heap while its exiting thread is still collecting it,
+    /// and that thread then dereferences the detached heap.
+    static OWNER_HEAP_TEARDOWN: Mutex<()> = Mutex::new(());
+
+    /// Frees the calling thread's theaps under [`OWNER_HEAP_TEARDOWN`]. Their
+    /// pages stay in their heaps, abandoned, so blocks stay valid and
+    /// charged; a later allocation on the thread re-initializes it. The main
+    /// thread's theaps outlive the process's exit.
+    fn free_thread_theaps() {
+        let _teardown = OWNER_HEAP_TEARDOWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: the thread is exiting and past its last owner heap scope.
+        unsafe {
+            if !_mi_is_main_thread() {
+                mi_thread_done();
+                // `mi_thread_done` frees the thread's main theap but leaves
+                // the pthread key (`_mi_heap_default_key`) pointing at it:
+                // it resets the default to `_mi_theap_empty`, which is not
+                // initialized, so the key is never re-associated. glibc runs
+                // TLS destructors (this one) before pthread key destructors,
+                // so `mi_pthread_done` would then dereference the freed
+                // theap. Hand it NULL instead, which it ignores.
+                _mi_prim_thread_associate_default_theap(std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Frees the exiting thread's theaps through [`free_thread_theaps`].
+    /// Rust thread-local destructors run before the pthread key destructor
+    /// that would otherwise free them unserialized; that one then finds the
+    /// thread already done.
+    struct OwnerHeapThreadExit;
+
+    impl Drop for OwnerHeapThreadExit {
+        fn drop(&mut self) {
+            free_thread_theaps();
+        }
+    }
+
+    thread_local! {
+        static OWNER_HEAP_THREAD_EXIT: OwnerHeapThreadExit = const { OwnerHeapThreadExit };
+        /// Owner heap scopes open on the thread. Has no destructor, so it
+        /// stays readable while the thread runs its thread-local destructors.
+        static OWNER_HEAP_SCOPES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Called before the calling thread gets a theap of an owner heap.
+    /// False once the thread's [`OwnerHeapThreadExit`] dropped, on a thread
+    /// running its later thread-local destructors.
+    fn serialize_thread_exit() -> bool {
+        OWNER_HEAP_THREAD_EXIT.try_with(|_| {}).is_ok()
+    }
+
+    /// Frees the theaps a thread got after its [`OwnerHeapThreadExit`]
+    /// dropped, which the pthread key destructor would free unserialized,
+    /// once no owner heap scope on it still uses them.
+    fn free_late_theaps(serialized: bool) {
+        if !serialized && OWNER_HEAP_SCOPES.get() == 0 {
+            free_thread_theaps();
+        }
+    }
+
     fn heap_enter(heap: NonZeroUsize) -> usize {
+        serialize_thread_exit();
+        OWNER_HEAP_SCOPES.set(OWNER_HEAP_SCOPES.get() + 1);
         // SAFETY: `heap` came from `mi_heap_new` and is not deleted while an
         // owner heap scope runs. v3 heaps allocate from any thread through
         // that thread's theap, which `mi_heap_theap` creates on first use.
@@ -211,6 +285,8 @@ mod mimalloc_v3 {
             mi_theap_collect(mi_theap_get_default(), false);
             _mi_theap_default_set(previous as *mut c_void);
         }
+        OWNER_HEAP_SCOPES.set(OWNER_HEAP_SCOPES.get() - 1);
+        free_late_theaps(serialize_thread_exit());
     }
 
     /// Granule both residency queries report in.
@@ -321,6 +397,7 @@ mod mimalloc_v3 {
     }
 
     fn heap_footprint(heap: NonZeroUsize) -> u64 {
+        let serialized = serialize_thread_exit();
         let heap = heap.get() as *mut c_void;
         let mut total = 0_u64;
         // SAFETY: the owner calls this once every thread that allocated into
@@ -331,13 +408,18 @@ mod mimalloc_v3 {
             mi_heap_collect(heap, true);
             mi_heap_visit_blocks(heap, false, add_resident, (&raw mut total).cast::<c_void>());
         }
+        free_late_theaps(serialized);
         total
     }
 
     fn heap_delete(heap: NonZeroUsize) {
-        // SAFETY: the owner heap is deleted once, when its owner dropped;
-        // `mi_heap_delete` frees its empty pages and moves live blocks to the
-        // main heap, so anything that escaped the owner stays valid.
+        let _teardown = OWNER_HEAP_TEARDOWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: the owner heap is deleted once, when its owner dropped, and
+        // no thread frees its theaps meanwhile; `mi_heap_delete` frees its
+        // empty pages and moves live blocks to the main heap, so anything
+        // that escaped the owner stays valid.
         unsafe { mi_heap_delete(heap.get() as *mut c_void) };
     }
 
@@ -420,6 +502,160 @@ mod mimalloc_v3 {
                     "leaving the heap returns the pages they emptied"
                 );
             });
+        }
+
+        /// An owner heap can be dropped while a thread that allocated into it
+        /// is still exiting: the thread's teardown of its part of the heap
+        /// and the heap's deletion never interleave, and blocks the thread
+        /// built stay valid after both.
+        #[test]
+        fn an_owner_heap_drops_safely_while_its_worker_exits() {
+            struct Exiting(std::sync::mpsc::Sender<()>);
+            impl Drop for Exiting {
+                fn drop(&mut self) {
+                    let _ = self.0.send(());
+                }
+            }
+            thread_local! {
+                static EXITING: std::cell::OnceCell<Exiting> = const { std::cell::OnceCell::new() };
+            }
+            const WORKERS: usize = 32;
+            super::install();
+            for _ in 0..WORKERS {
+                let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+                let (exiting, exited) = std::sync::mpsc::channel();
+                let (to_main, built) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
+                let worker = std::thread::scope(|threads| {
+                    threads.spawn(|| {
+                        let blocks = heap.scope(blocks);
+                        EXITING.with(|cell| {
+                            let _ = cell.set(Exiting(exiting));
+                        });
+                        to_main.send(blocks).expect("the test receives");
+                    });
+                    built.recv().expect("the worker's blocks")
+                });
+                exited.recv().expect("the worker begins exiting");
+                drop(heap);
+                assert!(
+                    worker
+                        .iter()
+                        .all(|block| block.iter().all(|byte| *byte == 7)),
+                    "blocks built in the heap stay valid after it dropped"
+                );
+            }
+        }
+
+        /// An owner heap entered by a thread-local destructor that runs after
+        /// the thread finished its owner heap teardown can be dropped while
+        /// that thread exits, and the blocks the destructor built stay valid.
+        #[test]
+        fn an_owner_heap_entered_by_a_late_thread_destructor_drops_safely() {
+            struct Late {
+                heap: Option<std::sync::Arc<OwnerHeapV1>>,
+                built: std::sync::mpsc::Sender<Vec<Vec<u8>>>,
+            }
+            impl Drop for Late {
+                fn drop(&mut self) {
+                    let heap = self.heap.take().expect("set once");
+                    let built = heap.scope(blocks);
+                    drop(heap);
+                    let _ = self.built.send(built);
+                }
+            }
+            thread_local! {
+                static LATE: std::cell::OnceCell<Late> = const { std::cell::OnceCell::new() };
+            }
+            const WORKERS: usize = 32;
+            super::install();
+            for _ in 0..WORKERS {
+                let heap =
+                    std::sync::Arc::new(OwnerHeapV1::new().expect("mimalloc provides owner heaps"));
+                let (built, late_blocks) = std::sync::mpsc::channel::<Vec<Vec<u8>>>();
+                let worker = std::thread::spawn({
+                    let heap = std::sync::Arc::clone(&heap);
+                    move || {
+                        let entered = std::sync::Arc::clone(&heap);
+                        LATE.with(|cell| {
+                            let _ = cell.set(Late {
+                                heap: Some(heap),
+                                built,
+                            });
+                        });
+                        drop(entered.scope(blocks));
+                    }
+                });
+                let late = late_blocks.recv().expect("the late destructor's blocks");
+                drop(heap);
+                worker.join().expect("the worker exits");
+                assert!(
+                    late.iter().all(|block| block.iter().all(|byte| *byte == 7)),
+                    "blocks a late destructor built in the heap stay valid after it dropped"
+                );
+            }
+        }
+
+        /// A thread-local destructor that runs after the thread's owner heap
+        /// teardown still builds in the heaps it enters, nested or not: each
+        /// heap charges the blocks it holds once that thread exited.
+        #[test]
+        fn a_late_thread_destructor_charges_its_blocks_to_its_owner_heaps() {
+            type Built = (Vec<Vec<u8>>, Vec<Vec<u8>>, OwnerHeapV1);
+            struct Late {
+                heaps: Option<(std::sync::Arc<OwnerHeapV1>, OwnerHeapV1)>,
+                built: std::sync::mpsc::Sender<Built>,
+            }
+            impl Drop for Late {
+                fn drop(&mut self) {
+                    let (outer, inner) = self.heaps.take().expect("set once");
+                    let (outer_blocks, inner_blocks) =
+                        outer.scope(|| (blocks(), inner.scope(blocks)));
+                    let _ = self.built.send((outer_blocks, inner_blocks, inner));
+                }
+            }
+            thread_local! {
+                static LATE: std::cell::OnceCell<Late> = const { std::cell::OnceCell::new() };
+            }
+            super::install();
+            let outer =
+                std::sync::Arc::new(OwnerHeapV1::new().expect("mimalloc provides owner heaps"));
+            let inner = OwnerHeapV1::new().expect("mimalloc provides owner heaps");
+            let (built, late_blocks) = std::sync::mpsc::channel::<Built>();
+            std::thread::spawn({
+                let outer = std::sync::Arc::clone(&outer);
+                move || {
+                    let entered = std::sync::Arc::clone(&outer);
+                    LATE.with(|cell| {
+                        let _ = cell.set(Late {
+                            heaps: Some((outer, inner)),
+                            built,
+                        });
+                    });
+                    drop(entered.scope(blocks));
+                }
+            })
+            .join()
+            .expect("the worker exits");
+            let (outer_blocks, inner_blocks, inner) =
+                late_blocks.recv().expect("the late destructor's blocks");
+
+            for (name, heap) in [("outer", &*outer), ("inner", &inner)] {
+                let charged = heap.resident_bytes();
+                assert!(
+                    (BLOCKS * BLOCK_BYTES) as u64 <= charged
+                        && charged <= (2 * BLOCKS * BLOCK_BYTES) as u64,
+                    "the {name} heap charges its {BLOCKS} blocks of {BLOCK_BYTES} B: {charged}"
+                );
+            }
+            drop(inner);
+            drop(outer);
+            assert!(
+                outer_blocks
+                    .iter()
+                    .chain(&inner_blocks)
+                    .all(|block| block.iter().all(|byte| *byte == 7)),
+                "blocks a late destructor built stay valid after their heaps dropped"
+            );
         }
 
         /// A page built on freed, not yet purged memory holds that memory
