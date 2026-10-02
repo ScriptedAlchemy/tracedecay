@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use std::sync::atomic::AtomicBool;
@@ -10,6 +10,9 @@ use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
+use tracedecay_runtime_core::storage::{
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, read_store_manifest,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
@@ -224,7 +227,117 @@ impl DaemonSessionRuntimeRegistryV1 {
             session_graph_publication_gate: std::sync::Mutex::new(None),
         };
         registry.mount_registered_remote_nodes().await?;
+        if registry.long_lived_session_maintenance {
+            registry.inspect_project_session_stores().await;
+        }
         Ok(registry)
+    }
+
+    /// Records the typed reset of every project sessions store the profile
+    /// holds, so the reset census names each one before its project opens.
+    /// It runs before the registry is published: the enrollment authority
+    /// each inspection registers from the store's manifest is withdrawn
+    /// before any project open can register its own. A store that cannot be
+    /// inspected is reported by its own attach instead.
+    async fn inspect_project_session_stores(&self) {
+        let projects_root = self.identity.profile_root().join("projects");
+        let entries = match std::fs::read_dir(&projects_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    event = "project_session_store_inspection_failed",
+                    path = %projects_root.display(),
+                    error = %error,
+                    "project sessions stores are inspected at their own attach instead"
+                );
+                return;
+            }
+        };
+        let mut manifests = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    let manifest = entry.path().join(STORE_MANIFEST_FILENAME);
+                    if manifest.is_file() {
+                        manifests.push(manifest);
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    event = "project_session_store_inspection_failed",
+                    path = %projects_root.display(),
+                    error = %error,
+                    "project sessions stores are inspected at their own attach instead"
+                ),
+            }
+        }
+        manifests.sort();
+        for manifest in manifests {
+            if let Err(error) = Box::pin(self.inspect_project_session_store(&manifest)).await {
+                tracing::warn!(
+                    event = "project_session_store_inspection_failed",
+                    path = %manifest.display(),
+                    error = %error,
+                    "project sessions store is inspected at its own attach instead"
+                );
+            }
+        }
+    }
+
+    async fn inspect_project_session_store(&self, manifest_path: &Path) -> Result<()> {
+        const OPERATION: &str = "inspect project session store";
+        let manifest = read_store_manifest(manifest_path)?;
+        let (Some(project_id), Some(store_root)) = (manifest.project_id, manifest_path.parent())
+        else {
+            return Ok(());
+        };
+        // A project whose root is gone cannot open its store either.
+        if !store_root.join(SESSIONS_DB_FILENAME).is_file() || !manifest.project_root.is_dir() {
+            return Ok(());
+        }
+        let project_id = ProjectId::new(project_id)
+            .map_err(|error| session_registry_error(OPERATION, error.to_string()))?;
+        let authority =
+            LocalProjectEnrollmentAuthorityV1::new(project_id.clone(), [manifest.project_root]);
+        self.resolver
+            .register_project_authority(authority.clone())
+            .map_err(|error| session_registry_error(OPERATION, format!("{error:?}")))?;
+        let shard_id = StoreShardIdV1::project_sessions(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id,
+        );
+        let refusal = self
+            .registered_store_reset_refusal(shard_id.clone(), OPERATION)
+            .await;
+        self.resolver.withdraw_project_authority(&authority);
+        if let Some(refusal) = refusal? {
+            self.record_registered_admission(shard_id, Some(&refusal));
+        }
+        Ok(())
+    }
+
+    async fn registered_store_reset_refusal(
+        &self,
+        shard_id: StoreShardIdV1,
+        operation: &'static str,
+    ) -> Result<Option<TraceDecayError>> {
+        let pin = self.profile_authority_pin(operation).await?;
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            StoreRuntimeOpenSpec::new(
+                shard_id,
+                self.incarnation,
+                Some(pin),
+                None,
+                false,
+                operation,
+            ),
+        )
+        .await?;
+        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
+        RegisteredGlobalDbOwnerV1::attach_reset_refusal(&database).await
     }
 
     #[hotpath::measure(label = "daemon.session_registry.mount_remote_nodes", future = true)]

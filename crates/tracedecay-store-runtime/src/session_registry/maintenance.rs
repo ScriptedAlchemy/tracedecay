@@ -562,7 +562,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         attached
     }
 
-    fn record_registered_admission(
+    pub(super) fn record_registered_admission(
         &self,
         shard_id: StoreShardIdV1,
         refusal: Option<&TraceDecayError>,
