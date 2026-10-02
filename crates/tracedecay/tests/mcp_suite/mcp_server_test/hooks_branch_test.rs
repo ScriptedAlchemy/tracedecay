@@ -375,10 +375,6 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
 async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
     let projects = production_routed_projects_ready_for_first_read().await;
     let target_workspace = projects.target_root().to_path_buf();
-    let target_server = projects
-        .harness
-        .server(&target_workspace)
-        .expect("target project server");
     let server = projects.server();
     let session_id = "sess-unhinted-source-edit";
 
@@ -395,41 +391,36 @@ async fn daemon_routed_read_reconciles_an_unhinted_source_edit() {
     )
     .expect("write tracked source without a hook hint");
 
-    run_client_connection_with_messages(
-        Arc::clone(&server),
-        vec![search_call_for_session(
-            1,
-            session_id,
-            "routed_edit_visible",
-        )],
-    )
-    .await;
-    tokio::task::yield_now().await;
-    crate::support::wait_for_readiness(&target_server, "fresh", Duration::from_secs(30)).await;
-
-    let responses = run_client_connection_with_messages(
-        server,
-        vec![search_call_for_session(
-            2,
-            session_id,
-            "routed_edit_visible",
-        )],
-    )
-    .await;
-    let response = response_with_id(&responses, json!(2));
-    let payload: Value = serde_json::from_str(successful_tool_text(
-        &response,
-        "routed search after unhinted edit",
-    ))
-    .expect("routed search JSON");
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results
-                .iter()
-                .any(|result| result["display"]["name"] == "routed_edit_visible")
-        }),
-        "the daemon-routed read must expose the unhinted edit after reconciliation: {payload}"
-    );
+    let payload = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let responses = run_client_connection_with_messages(
+                Arc::clone(&server),
+                vec![search_call_for_session(
+                    1,
+                    session_id,
+                    "routed_edit_visible",
+                )],
+            )
+            .await;
+            let response = response_with_id(&responses, json!(1));
+            let payload: Value = serde_json::from_str(successful_tool_text(
+                &response,
+                "routed search after unhinted edit",
+            ))
+            .expect("routed search JSON");
+            if payload["results"].as_array().is_some_and(|results| {
+                results
+                    .iter()
+                    .any(|result| result["display"]["name"] == "routed_edit_visible")
+            }) {
+                break payload;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the daemon-routed read must expose the unhinted edit after reconciliation");
+    assert_eq!(payload["freshness"]["state"], "fresh", "{payload}");
 
     projects.shutdown().await;
 }
