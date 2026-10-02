@@ -718,22 +718,28 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let workflow_results =
-            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit)
-                .await?
-                .into_iter()
-                .filter(|(observation_id, fact)| {
-                    !transcript_observations
-                        .get(observation_id)
-                        .is_some_and(|&index| {
-                            let goal = &transcript_results[index].message;
-                            fact.message.kind.as_deref() == Some("goal")
-                                && goal.kind.as_deref() == Some("goal")
-                                && goal.text == fact.message.text
-                        })
-                })
-                .map(|(_, fact)| fact)
-                .collect();
+        let mut workflow_results: Vec<SessionMessageSearchResult> = Vec::new();
+        let mut workflow_observations: BTreeMap<String, usize> = BTreeMap::new();
+        for (observation_id, fact) in
+            search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?
+        {
+            if let Some(&index) = transcript_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut transcript_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            if let Some(&index) = workflow_observations.get(&observation_id) {
+                append_observation_text(
+                    &mut workflow_results[index].message.text,
+                    &fact.message.text,
+                );
+                continue;
+            }
+            workflow_observations.insert(observation_id, workflow_results.len());
+            workflow_results.push(fact);
+        }
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -888,6 +894,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     }
 }
 
+fn append_observation_text(text: &mut String, fact_text: &str) {
+    if fact_text.is_empty() || text.contains(fact_text) {
+        return;
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(fact_text);
+}
+
 #[hotpath::measure(future = true, label = "global_db.registered_sessions.workflow_search")]
 async fn search_workflow_facts(
     snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
@@ -911,18 +927,18 @@ async fn search_workflow_facts(
         return Ok(Vec::new());
     }
 
-    let mut sql = "SELECT
-            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-            s.is_subagent, s.agent_id, s.parent_tool_use_id,
-            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
-            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
-            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
-            w.source_sequence, w.native_timestamp, w.observation_sequence,
-            w.ordering_domain, w.content_json, w.content_text
-         FROM observation_workflow_facts w
-         JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-         WHERE w.projector_version = ?1"
+    let mut sql = "WITH matching_observations AS (
+            SELECT
+                w.provider,
+                w.observation_id,
+                MIN(CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END) AS item_order_missing,
+                MIN(w.item_order) AS first_item_order,
+                MAX(w.native_timestamp) AS latest_timestamp,
+                MAX(w.observation_sequence) AS latest_sequence,
+                MIN(w.fact_ordinal) AS first_fact_ordinal
+            FROM observation_workflow_facts w
+            JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+            WHERE w.projector_version = ?1"
         .to_owned();
     let mut query_params = vec![
         Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
@@ -940,14 +956,34 @@ async fn search_workflow_facts(
             query_params.len()
         ));
     }
-    let _ = write!(sql, " AND ({})", term_predicates.join(" AND "));
+    let _ = write!(sql, " AND ({})", term_predicates.join(" OR "));
     query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
-        " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
-                  w.item_order, (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
-                  w.observation_sequence DESC, w.fact_ordinal
-          LIMIT ?{}",
+        " GROUP BY w.provider, w.observation_id
+          ORDER BY item_order_missing, first_item_order,
+                   (latest_timestamp IS NULL) ASC, latest_timestamp DESC,
+                   latest_sequence DESC, first_fact_ordinal
+          LIMIT ?{}
+        )
+        SELECT
+            s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+            s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+            s.is_subagent, s.agent_id, s.parent_tool_use_id,
+            w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+            w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+            w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+            w.source_sequence, w.native_timestamp, w.observation_sequence,
+            w.ordering_domain, w.content_json, w.content_text
+        FROM matching_observations matched
+        JOIN observation_workflow_facts w
+          ON w.provider = matched.provider
+         AND w.observation_id = matched.observation_id
+         AND w.projector_version = ?1
+        JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+        ORDER BY matched.item_order_missing, matched.first_item_order,
+                 (matched.latest_timestamp IS NULL) ASC, matched.latest_timestamp DESC,
+                 matched.latest_sequence DESC, matched.first_fact_ordinal, w.fact_ordinal",
         query_params.len()
     );
 
