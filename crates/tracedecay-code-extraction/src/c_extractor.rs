@@ -8,8 +8,7 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{ExtractionState, local_node_id};
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
-    generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id,
 };
 use crate::{
     common::{clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites},
@@ -90,7 +89,7 @@ impl CExtractor {
         state.node_stack.pop();
 
         crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+            state.into_result(start),
             scope,
             metrics,
         )
@@ -1391,17 +1390,6 @@ impl CExtractor {
             }
         }
         false
-    }
-
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
     }
 }
 
