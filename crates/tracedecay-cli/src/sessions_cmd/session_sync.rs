@@ -373,24 +373,32 @@ mod tests {
     }
 
     #[test]
-    fn session_sync_noncompletion_is_a_cli_error() {
-        for (outcome, expected) in [
+    fn session_sync_noncompletion_is_a_typed_route_refusal() {
+        for (outcome, code, retryable, detail) in [
             (
                 AdminCliSessionSyncV1::WrongScope,
+                "session_sync_wrong_scope",
+                false,
                 "session import did not complete successfully (wrong_scope)",
             ),
             (
                 AdminCliSessionSyncV1::DeadlineExceeded,
+                "session_sync_deadline_exceeded",
+                true,
                 "session import did not complete successfully (deadline_exceeded)",
             ),
             (
                 AdminCliSessionSyncV1::Cancelled,
+                "session_sync_cancelled",
+                false,
                 "session import did not complete successfully (cancelled)",
             ),
             (
                 AdminCliSessionSyncV1::Unavailable {
                     reason_code: "session_sync_authority_unavailable".to_owned(),
                 },
+                "session_sync_authority_unavailable",
+                true,
                 "session import unavailable (session_sync_authority_unavailable)",
             ),
             (
@@ -399,14 +407,26 @@ mod tests {
                     vec![SessionSyncCoverageV1::Complete],
                     &["native_transcript_scan_failed"],
                 ),
+                "session_sync_failed",
+                false,
                 "session import did not complete successfully (failed: native_transcript_scan_failed)",
             ),
+            (
+                complete(
+                    OperationTermination::Partial,
+                    vec![SessionSyncCoverageV1::Partial { deferred_units: 2 }],
+                    &["native_transcript_scan_failed"],
+                ),
+                "session_sync_partial",
+                true,
+                "session import did not complete successfully (partial: native_transcript_scan_failed; remaining work 2)",
+            ),
         ] {
+            let error = session_sync_poll_state("session import", outcome).unwrap_err();
             assert_eq!(
-                session_sync_poll_state("session import", outcome)
-                    .unwrap_err()
-                    .to_string(),
-                format!("config error: {expected}")
+                error.project_route_context(),
+                Some((code, retryable, detail)),
+                "{error}"
             );
         }
     }

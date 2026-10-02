@@ -115,3 +115,24 @@ pub(super) fn memory_definitions(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MEMORY_TOOLS;
+
+    #[test]
+    fn remove_and_supersede_document_unknown_ids_as_idempotent_not_found() {
+        for operation in ["fact_store_remove", "fact_store_supersede"] {
+            let tool = MEMORY_TOOLS
+                .iter()
+                .find(|tool| tool.operation == operation)
+                .expect("memory tool");
+            assert!(
+                tool.description.contains("`outcome: not_found`")
+                    && tool.description.contains("idempotent success"),
+                "{operation}: {}",
+                tool.description
+            );
+        }
+    }
+}
