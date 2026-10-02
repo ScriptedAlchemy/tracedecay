@@ -626,8 +626,8 @@ impl Worker {
                             let connection = checkpoint.connection_mut();
                             let rows_before = connection.total_changes();
                             let lock_work = LockWorkScope::enter();
-                            hotpath::measure_block!("rusqlite.writer.exact_sql", {
-                                run_writer_command(connection, command, &self.shutdown_requested);
+                            let reply = hotpath::measure_block!("rusqlite.writer.exact_sql", {
+                                run_writer_command(connection, command, &self.shutdown_requested)
                             });
                             self.telemetry.exact_sql_command(
                                 1,
@@ -636,6 +636,9 @@ impl Worker {
                                 take_observed_vm(),
                                 lock_work.take(),
                             );
+                            // Answer only once the work is in the telemetry, so
+                            // a caller's snapshot after its reply includes it.
+                            reply.send();
                             self.run_scheduled_checkpoint(&mut checkpoint);
                             hard_checkpoint_retry_due = checkpoint
                                 .hard_drain_required()
