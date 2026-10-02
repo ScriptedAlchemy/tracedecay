@@ -600,12 +600,11 @@ mod tests {
             !remedy.contains(tracedecay_domain::errors::STALE_STORE_RESET_COMMAND),
             "{remedy}"
         );
-        assert_eq!(
+        assert!(
             wire["error"]["message"]
                 .as_str()
                 .expect("human-readable refusal")
                 .contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
-            true,
             "the human-readable message must carry the profile-wide reset too: {wire}"
         );
     }
