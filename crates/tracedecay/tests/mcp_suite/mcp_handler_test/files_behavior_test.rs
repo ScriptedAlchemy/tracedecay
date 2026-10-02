@@ -13,11 +13,12 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::support::{
-    ProductionCompositionFixture, extract_first_json_content,
+    ProductionCompositionFixture, extract_first_json_content, harness_wait_for_readiness,
     production_composition_fixture_with_sources, refusal_problem,
 };
 
@@ -259,13 +260,21 @@ async fn files_lists_the_indexed_census_and_filters() {
 }
 
 async fn files_project() -> ProductionCompositionFixture {
-    production_composition_fixture_with_sources(|root| {
+    let fixture = production_composition_fixture_with_sources(|root| {
         write(root, "Cargo.toml", CARGO_TOML);
         write(root, "src/lib.rs", LIB_RS);
         write(root, "src/greeting.rs", GREETING_RS);
         write(root, "README.md", README_MD);
     })
-    .await
+    .await;
+    harness_wait_for_readiness(
+        &fixture.harness,
+        &fixture.project_root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
+    fixture
 }
 
 fn all_files() -> Value {

@@ -4850,6 +4850,7 @@ fn outliers_sorted_by_name(mut payload: Value) -> Value {
 #[tokio::test]
 async fn gini_reports_literal_coefficients_for_known_distributions() {
     let host = production_composition_fixture_with_sources(write_gini_distribution_sources).await;
+    wait_for_current_graph(&host).await;
 
     let lines = gini_json(
         &host,
@@ -5046,6 +5047,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
 #[tokio::test]
 async fn gini_empty_index_reports_perfect_equality() {
     let host = setup_empty_analysis_project().await;
+    wait_for_current_graph(&host).await;
     let payload = gini_json(&host, json!({"format": "json"})).await;
     assert_eq!(
         payload,
