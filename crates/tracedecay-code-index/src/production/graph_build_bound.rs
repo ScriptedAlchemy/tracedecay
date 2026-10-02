@@ -48,7 +48,7 @@ pub struct CodeGraphBuildBoundV1 {
     pub emit_spill_bytes: u64,
     /// At the emission peak: the batch being emitted as rows.
     pub emit_window_bytes: u64,
-    /// The compact store build over the merged rows.
+    /// The identities and row index retained while spill runs merge.
     pub store_bytes: u64,
 }
 
@@ -71,6 +71,7 @@ impl CodeGraphBuildBoundV1 {
             .saturating_add(self.emit_batch_bytes)
             .saturating_add(self.emit_spill_bytes)
             .saturating_add(self.emit_window_bytes)
+            .saturating_add(self.decode_window_bytes)
     }
 
     /// The build's peak: the largest of its three stages.
@@ -84,19 +85,6 @@ impl CodeGraphBuildBoundV1 {
 
 fn bytes(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-/// A `HashSet` of `entries` values of `slot` bytes: power-of-two buckets at
-/// a 7/8 load, each with a control byte.
-fn hash_set_bytes(entries: usize, slot: usize) -> usize {
-    if entries == 0 {
-        return 0;
-    }
-    entries
-        .saturating_mul(8)
-        .div_ceil(7)
-        .next_power_of_two()
-        .saturating_mul(slot.saturating_add(1))
 }
 
 /// A `Vec` grown by pushes holds up to twice its length.
@@ -314,7 +302,6 @@ impl CodeIndexPublishedGenerationV1 {
         let identity_bytes = size_of::<GraphEntityId>()
             .saturating_mul(2)
             .saturating_add(graph_stable_identity("symbol", "").len());
-        let mut canonical_rows = 0_usize;
         let mut spill = SpillBuffers::default();
         let mut emit = (0_usize, 0_usize);
         let mut record = |spilled: usize, window: usize| {
@@ -334,9 +321,6 @@ impl CodeIndexPublishedGenerationV1 {
                 relations = sum(&[relations, relation]);
                 entity_rows = entity_rows.saturating_add(cost.entity_count());
             }
-            canonical_rows = canonical_rows
-                .saturating_add(entities.buffered)
-                .saturating_add(relations.buffered);
             let rows = entities.resident.saturating_add(relations.resident);
             record(spill.resident(identity_bytes), rows);
             let spilled = spill.push(entities, relations, entity_rows, identity_bytes);
@@ -350,9 +334,6 @@ impl CodeIndexPublishedGenerationV1 {
             .count();
         let cross_relations = sample.edge_relations.scaled(cross_file_edges);
         let cross_entities = sample.file_entities.scaled(unsegmented);
-        canonical_rows = canonical_rows
-            .saturating_add(cross_entities.buffered)
-            .saturating_add(cross_relations.buffered);
         let spilled = spill.push(cross_entities, cross_relations, unsegmented, identity_bytes);
         record(
             spilled,
@@ -371,14 +352,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .saturating_add(cost.file.artifacts.edges.len())
         })
         .saturating_add(cross_file_edges);
-        let store = compact_store_bytes(
-            entity_rows,
-            relation_rows,
-            identity_bytes,
-            canonical_rows,
-            &sample,
-            &costs,
-        );
+        let store = spill_finish_bytes(entity_rows, relation_rows, identity_bytes);
 
         Ok(CodeGraphBuildBoundV1 {
             decode_window_bytes: bytes(decode_window),
@@ -394,36 +368,16 @@ impl CodeIndexPublishedGenerationV1 {
     }
 }
 
-/// The compact store build: the merged entity identities its relations
-/// resolve endpoints through, one node per entity and per relation locator,
-/// one edge per relation, and the largest column encoded at once. The reopen
-/// that proves the written container loads it whole, since the compact store
-/// is heap resident, about the rows' canonical bytes, while the allocator
-/// still holds the write's working set.
-fn compact_store_bytes(
-    entity_rows: usize,
-    relation_rows: usize,
-    identity_bytes: usize,
-    canonical_rows: usize,
-    sample: &CodeGraphRowSampleV1,
-    costs: &[FileGraphCost<'_>],
-) -> usize {
-    let nodes = entity_rows.saturating_add(relation_rows);
-    let node_topology = hash_set_bytes(nodes, size_of::<(u64, (usize, u32))>())
-        .saturating_add(grown_vec_bytes(nodes, size_of::<u64>()));
-    let edge_topology = hash_set_bytes(relation_rows, size_of::<u64>())
-        .saturating_add(grown_vec_bytes(relation_rows, size_of::<(u64, u32, u32)>()));
-    let symbol_rows = costs
-        .iter()
-        .map(|cost| cost.bound_occurrences)
-        .fold(0_usize, usize::saturating_add);
-    let largest_column = sample.symbol_entities.scaled(symbol_rows).buffered;
+/// Finishing the spill retains sorted entity identities and builds one
+/// fixed-width digest-index record per row. Canonical row bytes remain in
+/// spill files and pass through bounded I/O buffers.
+fn spill_finish_bytes(entity_rows: usize, relation_rows: usize, identity_bytes: usize) -> usize {
+    type RowIndexRecord = ([u8; 16], ([u64; 4], u32, u32));
+
     entity_rows
         .saturating_mul(identity_bytes)
-        .saturating_add(node_topology)
-        .saturating_add(edge_topology)
-        .saturating_add(largest_column)
-        .saturating_add(canonical_rows)
+        .saturating_add(grown_vec_bytes(entity_rows, size_of::<RowIndexRecord>()))
+        .saturating_add(grown_vec_bytes(relation_rows, size_of::<RowIndexRecord>()))
 }
 
 #[cfg(test)]
