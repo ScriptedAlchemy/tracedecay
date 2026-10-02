@@ -1058,8 +1058,11 @@ mod tests {
         assert!(OpenCodeIntegration.has_tracedecay(home.path(), &profile));
 
         let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("opencode.json"), std::fs::read(&config).unwrap())
-            .unwrap();
+        std::fs::write(
+            project.path().join("opencode.json"),
+            std::fs::read(&config).unwrap(),
+        )
+        .unwrap();
         assert!(local_config_has_tracedecay(project.path()));
     }
 
