@@ -534,8 +534,10 @@ mod tests {
 
     #[test]
     fn malformed_header_decode_stops_without_materializing_its_declared_tail() {
-        let error = decode_attachment_header(InvalidHeaderPrefix { served: false })
-            .expect_err("an invalid prefix must refuse the header");
+        let error = match decode_attachment_header(InvalidHeaderPrefix { served: false }) {
+            Ok(_) => panic!("an invalid prefix must refuse the header"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("header decode"));
     }
