@@ -1621,14 +1621,7 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
 #[test]
 fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() {
     let root = TestDir::new("lease-barrier-free");
-    // The drain reacquires its lease against admitted callbacks with the
-    // production lease wait; the dead-lease fixture gives it one attempt.
-    let config = HookSpoolConfigV1 {
-        writer_lease_micros: HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop)
-            .writer_lease_micros,
-        ..config()
-    };
-    let (mut writer, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    let (mut writer, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
     let records = (1..=3)
         .map(|event| {
             writer
@@ -1637,7 +1630,15 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         })
         .collect::<Vec<_>>();
     writer.commit().unwrap();
-    let (mut drain, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    // The drain reacquires its lease while an admitted callback may hold it,
+    // and the dead-lease fixture's 100µs wait gives that reacquire a single
+    // try_lock attempt; the drain therefore uses the production lease wait.
+    let drain_config = HookSpoolConfigV1 {
+        writer_lease_micros: HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop)
+            .writer_lease_micros,
+        ..config()
+    };
+    let (mut drain, _) = HookSpoolV1::open(&root.0, drain_config, UtcMicros(10)).unwrap();
     let acknowledgements = records
         .iter()
         .map(|record| HookSpoolAckV1 {
@@ -1660,7 +1661,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
                 admissions.push(
                     HookSpoolV1::open_within(
                         &root.0,
-                        config,
+                        config(),
                         UtcMicros(11),
                         crate::HOOK_SYNCHRONOUS_BUDGET,
                     )
@@ -1692,7 +1693,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         "{admissions:?}"
     );
     drop(slow_disk);
-    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
     assert_eq!(report.pending_records, 0);
     assert!(spool.pending.is_empty());
     assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
