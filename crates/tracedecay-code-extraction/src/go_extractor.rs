@@ -10,7 +10,8 @@ use crate::common::{
 };
 use crate::complexity::{GO_COMPLEXITY, count_complexity};
 use crate::extraction_artifact::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportBindingV1, ImportNamespaceV1,
+    ExtractedGoMethodSetRowV1, ExtractedImportEvidenceV1, ExtractionArtifactV1, GoMethodSetRowV1,
+    GoMethodSignatureV1, GoTypeTokenV1, GoTypeV1, ImportBindingV1, ImportNamespaceV1,
 };
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -31,6 +32,7 @@ impl GoExtractor {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
         let mut imports = Vec::new();
+        let mut method_sets = Vec::new();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -67,7 +69,7 @@ impl GoExtractor {
             crate::parsed_extraction::ParsedTraversalMetrics::default()
         } else {
             crate::parsed_extraction::visit_root_children(tree, scope, |child| {
-                Self::visit_node(&mut state, child);
+                Self::visit_node(&mut state, &mut method_sets, child);
                 if child.kind() == "import_declaration" {
                     Self::import_evidence(&mut state, &mut imports, child);
                 }
@@ -76,11 +78,9 @@ impl GoExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
-            ExtractionArtifactV1::with_imports(state.into_result(start), imports),
-            scope,
-            metrics,
-        )
+        let mut artifact = ExtractionArtifactV1::with_imports(state.into_result(start), imports);
+        artifact.go_method_sets = method_sets;
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(artifact, scope, metrics)
     }
 
     /// The `module` directive of a `go.mod` manifest becomes a `Module` symbol
@@ -203,13 +203,17 @@ impl GoExtractor {
         }
     }
 
-    fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_node(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        node: TsNode<'_>,
+    ) {
         match node.kind() {
             "package_clause" => Self::visit_package(state, node),
             "import_declaration" => Self::visit_imports(state, node),
             "function_declaration" => Self::visit_function(state, node),
-            "method_declaration" => Self::visit_method(state, node),
-            "type_declaration" => Self::visit_type_declaration(state, node),
+            "method_declaration" => Self::visit_method(state, method_sets, node),
+            "type_declaration" => Self::visit_type_declaration(state, method_sets, node),
             "const_declaration" => Self::visit_const_declaration(state, node),
             "var_declaration" => Self::visit_var_declaration(state, node),
             // Comments are picked up as docstrings by the definitions they precede.
@@ -443,7 +447,11 @@ impl GoExtractor {
     }
 
     /// Extract a method declaration node (function with receiver).
-    fn visit_method(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_method(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        node: TsNode<'_>,
+    ) {
         // In Go, method name is a `field_identifier` child.
         let name = find_direct_child_by_kind(node, "field_identifier").map_or_else(
             || "<anonymous>".to_string(),
@@ -504,7 +512,15 @@ impl GoExtractor {
             });
         }
 
-        Self::extract_receiver(state, node, &id);
+        if let Some(type_name) = Self::extract_receiver(state, node, &id) {
+            method_sets.push(ExtractedGoMethodSetRowV1 {
+                node_id: id.clone(),
+                row: GoMethodSetRowV1::Receiver {
+                    type_name,
+                    method: Self::method_signature(state, node),
+                },
+            });
+        }
 
         if let Some(body) = find_direct_child_by_kind(node, "block") {
             Self::extract_call_sites(state, body, &id);
@@ -512,15 +528,19 @@ impl GoExtractor {
     }
 
     /// Extract a type declaration (struct, interface, or type alias).
-    fn visit_type_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
+    fn visit_type_declaration(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        node: TsNode<'_>,
+    ) {
         // A type_declaration contains either a type_spec or a type_alias child.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "type_spec" => Self::visit_type_spec(state, child, node),
-                    "type_alias" => Self::visit_type_alias(state, child, node),
+                    "type_spec" => Self::visit_type_spec(state, method_sets, child, node),
+                    "type_alias" => Self::visit_type_alias(state, method_sets, child, node),
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -531,7 +551,12 @@ impl GoExtractor {
     }
 
     /// Extract a `type_spec` node, dispatching on whether it defines a struct or interface.
-    fn visit_type_spec(state: &mut ExtractionState, spec_node: TsNode<'_>, decl_node: TsNode<'_>) {
+    fn visit_type_spec(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        spec_node: TsNode<'_>,
+        decl_node: TsNode<'_>,
+    ) {
         let name = find_direct_child_by_kind(spec_node, "type_identifier").map_or_else(
             || "<anonymous>".to_string(),
             |n| state.node_text(n).to_string(),
@@ -539,19 +564,20 @@ impl GoExtractor {
 
         // Check what type is being defined.
         if let Some(struct_type) = find_direct_child_by_kind(spec_node, "struct_type") {
-            Self::visit_struct(state, &name, struct_type, decl_node);
+            Self::visit_struct(state, method_sets, &name, struct_type, decl_node);
         } else if let Some(iface_type) = find_direct_child_by_kind(spec_node, "interface_type") {
-            Self::visit_interface(state, &name, iface_type, decl_node);
+            Self::visit_interface(state, method_sets, &name, spec_node, iface_type, decl_node);
         } else {
             // A plain type definition (e.g., `type Foo int`) that is not a type alias.
             // Treat it like a type alias for graph purposes.
-            Self::visit_named_type(state, &name, decl_node);
+            Self::visit_named_type(state, method_sets, &name, decl_node);
         }
     }
 
     /// Extract a struct type definition.
     fn visit_struct(
         state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
         name: &str,
         struct_type: TsNode<'_>,
         decl_node: TsNode<'_>,
@@ -611,6 +637,10 @@ impl GoExtractor {
             });
         }
 
+        method_sets.push(ExtractedGoMethodSetRowV1 {
+            node_id: id.clone(),
+            row: GoMethodSetRowV1::NamedType,
+        });
         state.node_stack.push((name.to_string(), id.clone()));
         Self::extract_struct_fields(state, struct_type);
         state.node_stack.pop();
@@ -761,7 +791,9 @@ impl GoExtractor {
     /// Extract an interface type definition.
     fn visit_interface(
         state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
         name: &str,
+        spec_node: TsNode<'_>,
         iface_type: TsNode<'_>,
         decl_node: TsNode<'_>,
     ) {
@@ -822,9 +854,42 @@ impl GoExtractor {
 
         // Extract embedded interfaces (type_elem children).
         Self::extract_interface_embeddings(state, iface_type, &id);
+        Self::interface_method_set(state, method_sets, spec_node, iface_type, &id);
         state.node_stack.push((name.to_string(), id));
         Self::extract_interface_methods(state, iface_type);
         state.node_stack.pop();
+    }
+
+    /// The method-set rows of an interface body, all keyed by the interface.
+    /// A generic interface records only that it is generic: its method
+    /// signatures mention type parameters no named type's methods share.
+    fn interface_method_set(
+        state: &ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        spec_node: TsNode<'_>,
+        iface_type: TsNode<'_>,
+        iface_id: &str,
+    ) {
+        let row = |row| ExtractedGoMethodSetRowV1 {
+            node_id: iface_id.to_owned(),
+            row,
+        };
+        if spec_node.child_by_field_name("type_parameters").is_some() {
+            method_sets.push(row(GoMethodSetRowV1::GenericInterface));
+            return;
+        }
+        let mut cursor = iface_type.walk();
+        for child in iface_type.named_children(&mut cursor) {
+            match child.kind() {
+                "method_elem" => method_sets.push(row(GoMethodSetRowV1::InterfaceMethod {
+                    method: Self::method_signature(state, child),
+                })),
+                "type_elem" => method_sets.push(row(GoMethodSetRowV1::Embeds {
+                    embedded: Self::type_tokens(state, child),
+                })),
+                _ => {}
+            }
+        }
     }
 
     /// Extract the `method_elem` children of an `interface_type`.
@@ -929,6 +994,7 @@ impl GoExtractor {
     /// Extract a type alias (e.g., `type StringSlice = []string`).
     fn visit_type_alias(
         state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
         alias_node: TsNode<'_>,
         decl_node: TsNode<'_>,
     ) {
@@ -951,6 +1017,10 @@ impl GoExtractor {
             &name,
             decl_node,
         );
+        method_sets.push(ExtractedGoMethodSetRowV1 {
+            node_id: id.clone(),
+            row: GoMethodSetRowV1::NamedType,
+        });
 
         let graph_node = Node {
             id: id.clone(),
@@ -992,7 +1062,12 @@ impl GoExtractor {
     }
 
     /// Extract a named type definition that is neither struct nor interface.
-    fn visit_named_type(state: &mut ExtractionState, name: &str, decl_node: TsNode<'_>) {
+    fn visit_named_type(
+        state: &mut ExtractionState,
+        method_sets: &mut Vec<ExtractedGoMethodSetRowV1>,
+        name: &str,
+        decl_node: TsNode<'_>,
+    ) {
         let visibility = Self::go_visibility(name);
         let docstring = Self::extract_docstring(state, decl_node);
         let text = state.node_text(decl_node);
@@ -1008,6 +1083,10 @@ impl GoExtractor {
             name,
             decl_node,
         );
+        method_sets.push(ExtractedGoMethodSetRowV1 {
+            node_id: id.clone(),
+            row: GoMethodSetRowV1::NamedType,
+        });
 
         let graph_node = Node {
             id: id.clone(),
@@ -1206,8 +1285,14 @@ impl GoExtractor {
         Self::extract_call_sites(state, node, &id);
     }
 
-    /// Extract the receiver type from a `method_declaration` and create a Receives edge.
-    fn extract_receiver(state: &mut ExtractionState, node: TsNode<'_>, method_id: &str) {
+    /// Extract the receiver type from a `method_declaration`, create a
+    /// Receives edge, and return the receiver's type name.
+    fn extract_receiver(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        method_id: &str,
+    ) -> Option<String> {
+        let mut receiver = None;
         // The first parameter_list child is the receiver.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -1217,8 +1302,8 @@ impl GoExtractor {
                     // This is the receiver parameter list.
                     // Extract the type name from the parameter_declaration inside.
                     if let Some(param) = find_direct_child_by_kind(child, "parameter_declaration") {
-                        let receiver_type = Self::extract_receiver_type_name(state, param);
-                        if let Some(type_name) = receiver_type {
+                        receiver = Self::extract_receiver_type_name(state, param);
+                        if let Some(type_name) = receiver.clone() {
                             let line = child.start_position().row as u32;
                             let column = child.start_position().column as u32;
                             // Create an unresolved Receives reference.
@@ -1256,21 +1341,134 @@ impl GoExtractor {
                 }
             }
         }
+        receiver
     }
 
-    /// Extract the type name from a receiver `parameter_declaration`.
-    /// Handles both `c Circle` and `c *Circle` forms.
+    /// Extract the type name from a receiver `parameter_declaration`:
+    /// `c Circle`, `c *Circle`, `l List[T]`, and `l *List[T]`.
     fn extract_receiver_type_name(state: &ExtractionState, param: TsNode<'_>) -> Option<String> {
-        // Look for type_identifier directly or inside pointer_type.
-        if let Some(type_id) = find_direct_child_by_kind(param, "type_identifier") {
-            return Some(state.node_text(type_id).to_string());
+        let mut ty = param.child_by_field_name("type")?;
+        if ty.kind() == "pointer_type" {
+            ty = ty.named_child(0)?;
         }
-        if let Some(ptr_type) = find_direct_child_by_kind(param, "pointer_type")
-            && let Some(type_id) = find_direct_child_by_kind(ptr_type, "type_identifier")
-        {
-            return Some(state.node_text(type_id).to_string());
+        if ty.kind() == "generic_type" {
+            ty = ty.child_by_field_name("type")?;
         }
-        None
+        (ty.kind() == "type_identifier").then(|| state.node_text(ty).to_string())
+    }
+
+    /// The name, parameter types, and result types of a `method_declaration`
+    /// or `method_elem`, with parameter names dropped and grouped
+    /// parameters expanded.
+    fn method_signature(state: &ExtractionState, node: TsNode<'_>) -> GoMethodSignatureV1 {
+        let name = node
+            .child_by_field_name("name")
+            .map(|name| state.node_text(name).to_string())
+            .unwrap_or_default();
+        let params = node
+            .child_by_field_name("parameters")
+            .map(|list| Self::parameter_types(state, list))
+            .unwrap_or_default();
+        let results = match node.child_by_field_name("result") {
+            Some(list) if list.kind() == "parameter_list" => Self::parameter_types(state, list),
+            Some(result) => vec![Self::type_tokens(state, result)],
+            None => Vec::new(),
+        };
+        GoMethodSignatureV1 {
+            name,
+            params,
+            results,
+        }
+    }
+
+    /// One type per parameter of a `parameter_list`: `a, b int` is two
+    /// `int`s, `xs ...T` is `...` followed by `T`.
+    fn parameter_types(state: &ExtractionState, list: TsNode<'_>) -> Vec<GoTypeV1> {
+        let mut types = Vec::new();
+        let mut cursor = list.walk();
+        for param in list.named_children(&mut cursor) {
+            let Some(ty) = param.child_by_field_name("type") else {
+                continue;
+            };
+            let mut tokens = Vec::new();
+            if param.kind() == "variadic_parameter_declaration" {
+                tokens.push(GoTypeTokenV1::Text("...".to_owned()));
+            }
+            tokens.extend(Self::type_tokens(state, ty));
+            let mut names = param.walk();
+            let count = param
+                .children_by_field_name("name", &mut names)
+                .count()
+                .max(1);
+            types.extend(std::iter::repeat_n(tokens, count));
+        }
+        types
+    }
+
+    /// The tokens of a type node. Identifiers that name types are `Local` or
+    /// `Qualified` so the seal can qualify them; every other leaf is `Text`.
+    fn type_tokens(state: &ExtractionState, node: TsNode<'_>) -> GoTypeV1 {
+        let mut tokens = Vec::new();
+        Self::push_type_tokens(state, node, &mut tokens);
+        tokens
+    }
+
+    fn push_type_tokens(state: &ExtractionState, node: TsNode<'_>, tokens: &mut GoTypeV1) {
+        let text = |node: TsNode<'_>| state.node_text(node).to_string();
+        match node.kind() {
+            "comment" | ";" => {}
+            "type_identifier" if is_predeclared_type(state.node_text(node)) => {
+                tokens.push(GoTypeTokenV1::Text(text(node)));
+            }
+            "type_identifier" => tokens.push(GoTypeTokenV1::Local(text(node))),
+            "qualified_type" => {
+                if let (Some(package), Some(name)) = (
+                    node.child_by_field_name("package"),
+                    node.child_by_field_name("name"),
+                ) {
+                    tokens.push(GoTypeTokenV1::Qualified {
+                        package: text(package),
+                        name: text(name),
+                    });
+                }
+            }
+            "parenthesized_type" => {
+                if let Some(inner) = node.named_child(0) {
+                    Self::push_type_tokens(state, inner, tokens);
+                }
+            }
+            "parameter_list" => {
+                tokens.push(GoTypeTokenV1::Text("(".to_owned()));
+                for (index, param) in Self::parameter_types(state, node).into_iter().enumerate() {
+                    if index > 0 {
+                        tokens.push(GoTypeTokenV1::Text(",".to_owned()));
+                    }
+                    tokens.extend(param);
+                }
+                tokens.push(GoTypeTokenV1::Text(")".to_owned()));
+            }
+            "function_type" | "method_elem" => {
+                let result = node.child_by_field_name("result");
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    // `func() T` and `func() (T)` are one type.
+                    if Some(child) == result && child.kind() != "parameter_list" {
+                        tokens.push(GoTypeTokenV1::Text("(".to_owned()));
+                        Self::push_type_tokens(state, child, tokens);
+                        tokens.push(GoTypeTokenV1::Text(")".to_owned()));
+                    } else {
+                        Self::push_type_tokens(state, child, tokens);
+                    }
+                }
+            }
+            _ if node.child_count() == 0 => tokens.push(GoTypeTokenV1::Text(text(node))),
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    Self::push_type_tokens(state, child, tokens);
+                }
+            }
+        }
     }
 
     /// Extract type parameters (generics) from a function or method declaration.
@@ -1443,4 +1641,34 @@ fn go_default_package_name(path: &str) -> &str {
         Some((stem, version)) if is_version(version) => stem,
         _ => name,
     }
+}
+
+/// Whether `name` is one of Go's predeclared type identifiers, which name
+/// the same type in every package.
+fn is_predeclared_type(name: &str) -> bool {
+    matches!(
+        name,
+        "any"
+            | "bool"
+            | "byte"
+            | "comparable"
+            | "complex64"
+            | "complex128"
+            | "error"
+            | "float32"
+            | "float64"
+            | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "rune"
+            | "string"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+    )
 }

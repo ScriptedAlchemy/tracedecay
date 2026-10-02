@@ -322,6 +322,61 @@ pub struct ExtractedCallableArityV1 {
     pub arity: CallableArityV1,
 }
 
+/// One token of a Go type after parameter names and whitespace are
+/// normalized. The seal qualifies `Local` through the file's package and
+/// `Qualified` through the file's imports.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GoTypeTokenV1 {
+    /// Punctuation, keywords, predeclared identifiers, struct field names:
+    /// `[]`, `map[`, `]`, `*`, `chan `, `func(`, `,`, `)`, `...`, `int`.
+    Text(String),
+    /// A bare identifier that is not predeclared.
+    Local(String),
+    /// `pkg.Name`.
+    Qualified { package: String, name: String },
+}
+
+pub type GoTypeV1 = Vec<GoTypeTokenV1>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct GoMethodSignatureV1 {
+    pub name: String,
+    pub params: Vec<GoTypeV1>,
+    pub results: Vec<GoTypeV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum GoMethodSetRowV1 {
+    /// A method declared on receiver type `type_name` (pointer or value).
+    Receiver {
+        type_name: String,
+        method: GoMethodSignatureV1,
+    },
+    /// A method spec inside an interface body.
+    InterfaceMethod { method: GoMethodSignatureV1 },
+    /// An embedded type inside an interface body.
+    Embeds { embedded: GoTypeV1 },
+    /// An interface declared with a type parameter list.
+    GenericInterface,
+    /// A named type that can own a method set: `type T struct`, `type T U`,
+    /// `type T = U`. The row exists so chunking binds the declaration's
+    /// occurrence and span.
+    NamedType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedGoMethodSetRowV1 {
+    /// The declaring node: the `StructMethod`, the `InterfaceType` (for
+    /// `InterfaceMethod`, `Embeds`, `GenericInterface`), or the `Struct` /
+    /// `TypeAlias` node (for `NamedType`).
+    pub node_id: String,
+    pub row: GoMethodSetRowV1,
+}
+
 /// Legacy graph extraction plus structured evidence from the same traversal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,6 +390,10 @@ pub struct ExtractionArtifactV1 {
     /// call binds the overload that accepts its arguments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callable_arities: Vec<ExtractedCallableArityV1>,
+    /// Go receiver methods, interface bodies, and named types, from which
+    /// the seal derives implicit interface satisfaction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub go_method_sets: Vec<ExtractedGoMethodSetRowV1>,
 }
 
 impl ExtractionArtifactV1 {
@@ -345,6 +404,7 @@ impl ExtractionArtifactV1 {
             clone_bodies: Vec::new(),
             schema_evidence: None,
             callable_arities: Vec::new(),
+            go_method_sets: Vec::new(),
         }
     }
 
@@ -364,6 +424,7 @@ impl ExtractionArtifactV1 {
         self.imports.sort();
         crate::clone_body::canonicalize_clone_body_order(&mut self.clone_bodies);
         self.callable_arities.sort();
+        self.go_method_sets.sort();
         if let Some(evidence) = &mut self.schema_evidence {
             evidence.canonicalize_order();
         }
