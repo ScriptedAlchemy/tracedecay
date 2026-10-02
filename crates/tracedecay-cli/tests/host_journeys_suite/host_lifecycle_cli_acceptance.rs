@@ -674,8 +674,8 @@ fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)>
             vec![
                 (
                     "edit",
-                    "hook-opencode-event",
-                    packet_request(packet, "saved_edit"),
+                    "hook-opencode-tool-after",
+                    packet_request(packet, "post_tool_use"),
                 ),
                 (
                     "stop",
@@ -2450,11 +2450,11 @@ fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
         ),
     );
 
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["operatorConcurrentEdit"] = serde_json::json!({"preserve": true});
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    // The Core registration for OpenCode is the prompt-rules file.
+    let config_path = cli.home.path().join(".config/opencode/AGENTS.md");
+    let mut rules = fs::read_to_string(&config_path).unwrap();
+    rules.push_str("\noperator concurrent edit: preserve\n");
+    fs::write(&config_path, rules).unwrap();
     let active_receipt = latest_receipt(&cli, case.host);
     let artifact_snapshot = owned_bytes(&cli, &active_receipt, &originals);
     let receipt_snapshot = serde_json::to_vec(&active_receipt).unwrap();
@@ -2638,14 +2638,18 @@ fn newer_feedback_receipt_refuses_before_restore_effects() {
     assert_eq!(fs::read(&state).unwrap(), state_before);
 }
 
-/// Points the installed OpenCode LSP registration at another binary, so the
-/// next registration activation has a real rewrite to publish.
-fn stale_opencode_lsp_registration(cli: &IsolatedCli) {
-    let path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    config["lsp"]["tracedecay"]["command"] =
-        serde_json::json!(["stale-tracedecay", "lsp", "bridge", "--stdio"]);
-    fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+/// Ages the installed OpenCode Core registration (the marker-delimited prompt
+/// rules in `AGENTS.md`), so the next registration activation has a real
+/// rewrite to publish.
+fn stale_opencode_core_registration(cli: &IsolatedCli) {
+    let path = cli.home.path().join(".config/opencode/AGENTS.md");
+    let rules = fs::read_to_string(&path).unwrap();
+    assert!(rules.contains("`tracedecay_context`"), "{rules}");
+    fs::write(
+        &path,
+        rules.replacen("`tracedecay_context`", "`stale_tracedecay_context`", 1),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -2658,7 +2662,7 @@ fn killed_feedback_registration_recovers_without_applied_marker() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
-    stale_opencode_lsp_registration(&cli);
+    stale_opencode_core_registration(&cli);
     let receipt = latest_receipt(&cli, case.host);
     let before = owned_bytes(&cli, &receipt, &originals);
     let state = cli.home.path().join("killed-registration-feedback.json");
@@ -2709,7 +2713,7 @@ fn killed_feedback_registration_rejects_later_operator_edit() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
-    stale_opencode_lsp_registration(&cli);
+    stale_opencode_core_registration(&cli);
     let state = cli.home.path().join("killed-registration-stale.json");
     let mut command = cli.command(&[
         "feedback-rollback",
@@ -2730,11 +2734,11 @@ fn killed_feedback_registration_rejects_later_operator_edit() {
         .unwrap();
     assert!(!killed.status.success());
 
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["operatorAfterKill"] = serde_json::json!(true);
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    // The Core registration for OpenCode is the prompt-rules file.
+    let rules_path = cli.home.path().join(".config/opencode/AGENTS.md");
+    let mut rules = fs::read_to_string(&rules_path).unwrap();
+    rules.push_str("\noperator edit after kill\n");
+    fs::write(&rules_path, rules).unwrap();
     let receipt = latest_receipt(&cli, case.host);
     let before = owned_bytes(&cli, &receipt, &originals);
     let state_before = fs::read(&state).unwrap();
@@ -2764,7 +2768,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
         "initial install",
         cli.run(&["install", "--agent", case.id]),
     );
-    stale_opencode_lsp_registration(&cli);
+    stale_opencode_core_registration(&cli);
     let state = cli.home.path().join("killed-registration-metadata.json");
     let mut command = cli.command(&[
         "feedback-rollback",
@@ -2785,7 +2789,8 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
         .unwrap();
     assert!(!killed.status.success());
 
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
+    // The Core registration for OpenCode is the prompt-rules file.
+    let config_path = cli.home.path().join(".config/opencode/AGENTS.md");
     let current_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
     let drifted_mode = if current_mode == 0o600 { 0o640 } else { 0o600 };
     fs::set_permissions(&config_path, fs::Permissions::from_mode(drifted_mode)).unwrap();

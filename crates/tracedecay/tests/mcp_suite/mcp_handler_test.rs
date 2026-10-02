@@ -84,6 +84,8 @@ mod impact_behavior_test;
 mod implementations_test;
 #[cfg(feature = "test-transport")]
 mod index_path_settings_test;
+#[cfg(feature = "test-transport")]
+mod info_census_cost_test;
 mod info_file_request_test;
 mod info_health_request_test;
 mod inheritance_depth_test;

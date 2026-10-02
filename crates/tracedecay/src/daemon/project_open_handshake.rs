@@ -1,8 +1,8 @@
 //! Opening a project for one handshake, and how open failures are reported.
 //!
 //! Classifies the failure modes that first-touch bootstrap may repair -
-//! never-enrolled identity, a missing index, a read-only store - apart from
-//! genuine conflicts, and renders the client-visible refusal.
+//! never-enrolled identity and a missing index - apart from genuine
+//! conflicts, and renders the client-visible refusal.
 
 use super::*;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -12,13 +12,6 @@ use crate::test_support::hold_after_project_sessions_for_test;
 /// `cancellation` from inside; the token is checked between them so a
 /// draining daemon waits for at most the unit in flight, not the whole open.
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Handshake open is one identity-bind and route-publish sequence."
-    )
-)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
@@ -58,12 +51,13 @@ pub(super) async fn open_project_for_handshake(
             )
         }
         Err(err) if is_unregistered_identity_error(&err) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::project_open(
+                ProjectOpenFailureKind::IndexMissing,
+                format!(
                     "no TraceDecay index found at '{}'; run 'tracedecay init' first",
                     project_path.display()
                 ),
-            });
+            ));
         }
         Err(err) => return Err(err),
     };
@@ -116,26 +110,6 @@ pub(super) async fn open_project_for_handshake(
     .await;
     match open_result {
         Ok(cg) => Ok(cg),
-        Err(open_err) if is_readonly_database_error(&open_err) => {
-            match Box::pin(
-                tracedecay_project::project::TraceDecay::open_read_only_with_registered_configuration(
-                    project_path,
-                    open_options,
-                    store_layout,
-                    configuration_database,
-                    registry_database,
-                    runtime_registry,
-                ),
-            )
-            .await
-            {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
-                }
-                Err(_) => Err(open_err),
-            }
-        }
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
             // First-touch bootstrap creates the final registered store and
             // exact configuration authority only. The bounded code-index
@@ -186,34 +160,11 @@ fn refuse_enrollment_from_another_build(
 /// Whether `err` is the specific fail-closed error raised when identity
 /// resolution finds no enrollment marker or registry match for a project.
 fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains(
-                "registered configuration layout requires an enrolled or registry-resolved project identity"
-            )
-    )
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IdentityUnregistered)
 }
 
 pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Config { message }
-            if message.contains("no TraceDecay index found")
-                || message.contains("no TraceDecay database found")
-    )
-}
-
-fn is_readonly_database_error(err: &TraceDecayError) -> bool {
-    if !err.is_database_error() {
-        return false;
-    }
-    match err {
-        TraceDecayError::Database { message, .. } => {
-            message.to_ascii_lowercase().contains("readonly database")
-        }
-        _ => false,
-    }
+    err.project_open_failure_kind() == Some(ProjectOpenFailureKind::IndexMissing)
 }
 
 pub(super) async fn write_project_open_error(
@@ -315,20 +266,19 @@ pub(crate) fn project_open_error_response(
                 Some(data),
             )
         }
-        TraceDecayError::Config { message }
-            if message.contains(PROJECT_OPEN_FAILURE_RETRY_HINT) =>
-        {
-            JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                message.clone(),
-                Some(json!({
-                    "kind": "project_route_open_backoff",
-                    "retryable": true,
-                    "retry_after_ms": PROJECT_OPEN_FAILURE_RETRY_BACKOFF.as_millis() as u64,
-                })),
-            )
-        }
+        TraceDecayError::ProjectOpen {
+            kind: ProjectOpenFailureKind::BackedOff { retry_after_ms },
+            detail,
+        } => JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            detail.clone(),
+            Some(json!({
+                "kind": "project_route_open_backoff",
+                "retryable": true,
+                "retry_after_ms": retry_after_ms,
+            })),
+        ),
         _ => match tracedecay_mcp::reset_required_context(error) {
             Some((authority, reason)) => JsonRpcResponse::error_with_data(
                 id,

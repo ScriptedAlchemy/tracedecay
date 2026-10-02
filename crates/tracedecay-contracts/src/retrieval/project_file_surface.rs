@@ -9,6 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::code_index_freshness::CodeIndexOmittedSourcesV1;
+
 /// How `tracedecay_files` lays out its listing.
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +48,10 @@ pub struct FilesResultV1 {
     pub count: usize,
     pub layout: FilesLayoutV1,
     pub files: Vec<IndexedFileV1>,
+    /// Sources the serving snapshot captured for the whole worktree but does
+    /// not index, unfiltered by `path` or `pattern`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_omitted_sources: Option<CodeIndexOmittedSourcesV1>,
 }
 
 /// Exactly one of `path` or `glob` names the files to query.
