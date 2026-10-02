@@ -415,6 +415,13 @@ impl McpServer {
         cg: &Arc<TraceDecay>,
         live_branch: &tracedecay_runtime_core::branch::BranchMemo,
     ) {
+        eprintln!(
+            "READ_REFRESH root={} enabled={} admits={} branch_drifted={}",
+            cg.project_root().display(),
+            self.sync_config.read_refresh,
+            self.background_tasks.admits(),
+            cg.branch_drifted_with(live_branch)
+        );
         if !self.sync_config.read_refresh || !self.background_tasks.admits() {
             return;
         }
@@ -429,6 +436,7 @@ impl McpServer {
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let cooldown = self.sync_config.read_cooldown_secs as i64;
         let previous = self.last_background_refresh_at.load(Ordering::Acquire);
+        eprintln!("READ_REFRESH cooldown now={now} previous={previous} cooldown={cooldown}");
         if previous != 0 && now.saturating_sub(previous) < cooldown {
             return;
         }
@@ -443,9 +451,11 @@ impl McpServer {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            eprintln!("READ_REFRESH running occupied");
             return;
         }
 
+        eprintln!("READ_REFRESH spawned root={}", cg.project_root().display());
         self.spawn_read_refresh_task(cg);
     }
 
