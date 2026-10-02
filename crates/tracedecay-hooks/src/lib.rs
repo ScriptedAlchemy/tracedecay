@@ -46,8 +46,7 @@ pub use hook_v2_replay::{
 pub use native::{
     DecodedNativeHookEventV1, NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1,
     NativeHookDecodeError, OpenCodePluginSurfaceV1, ProfileScopedNativeHookAdmissionV1,
-    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_lsp_event,
-    decode_opencode_plugin_event,
+    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_plugin_event,
 };
 pub use runtime::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HOOK_SYNCHRONOUS_BUDGET,

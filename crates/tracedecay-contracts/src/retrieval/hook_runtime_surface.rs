@@ -29,8 +29,6 @@ pub enum HookRuntimeSurfaceRequestV1 {
         envelope: Value,
         feedback_notice: Value,
     },
-    /// Record an `OpenCode` `lsp.updated` event.
-    OpencodeLspUpdated { event: Value },
     /// Land a host transcript in the owning session store.
     IngestTranscript(HookIngestTranscriptRequestV1),
     /// Codex `PostCompact` pressure evidence.
@@ -107,19 +105,12 @@ pub enum HookRuntimeResultV1 {
     HookV2Admit(HookV2AdmissionResultV1),
     HookV2DeliveryReceipt { status: ContextScoutStoreStatusV1 },
     HookV2FeedbackNoticeDelivery(HookV2NoticeDeliveryResultV1),
-    OpencodeLspUpdated { status: HookRuntimeAcceptedV1 },
     IngestTranscript(Box<HookIngestTranscriptResultV1>),
     CodexCompact(HookCompactionResultV1),
     ClaudeCompact(HookCompactionResultV1),
     CursorCompact(HookCompactionResultV1),
     HermesReceipt { status: HermesReceiptStatusV1 },
     HookV2ProfileAdmit(HookV2ProfileAdmissionResultV1),
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookRuntimeAcceptedV1 {
-    Accepted,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]

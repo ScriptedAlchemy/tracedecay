@@ -1275,7 +1275,7 @@ jobs:
       # scripts/claude_stock_integration.sh and
       # scripts/opencode_stock_integration.sh against the new versions locally.
       CLAUDE_CODE_VERSION: 2.1.224
-      OPENCODE_VERSION: 1.18.4
+      OPENCODE_VERSION: 2.0.19
     steps:
       - uses: actions/checkout@v7
 
@@ -1289,7 +1289,7 @@ jobs:
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |
-          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@opencode/cli@${OPENCODE_VERSION}"
           claude --version
           opencode --version
 

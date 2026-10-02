@@ -1184,8 +1184,10 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
         &workspace_path,
         "hook-opencode-event",
         &json!({
-            "type": "session.idle",
-            "properties": {"sessionID": "ses_opencode"},
+            "id": "evt_opencode",
+            "created": 0,
+            "type": "session.execution.succeeded",
+            "data": {"sessionID": "ses_opencode"},
         }),
     );
     assert_eq!(opencode.status.code(), Some(0), "{opencode:?}");
@@ -1194,8 +1196,12 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
         &workspace_path,
         "hook-opencode-tool-after",
         &json!({
-            "input": {"tool": "edit", "sessionID": "ses_tool", "callID": "call-1"},
-            "output": {"title": "edit"},
+            "tool": "edit",
+            "sessionID": "ses_tool",
+            "id": "call-1",
+            "input": {"path": "src/lib.rs"},
+            "status": "completed",
+            "result": {"content": []},
         }),
     );
     assert_eq!(tool_after.status.code(), Some(0), "{tool_after:?}");
@@ -1219,7 +1225,7 @@ fn unenrolled_kimi_and_opencode_hooks_record_their_host_event_and_session() {
             attribution(
                 "hook_invoked",
                 "opencode",
-                "session.idle",
+                "session.execution.succeeded",
                 json!("ses_opencode"),
                 Value::Null
             ),

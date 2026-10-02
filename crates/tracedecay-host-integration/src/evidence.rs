@@ -424,8 +424,8 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         HostKindV1::OpenCode => (
             "opencode",
             "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
-            "file.edited,tool.execute.after,session.idle/session.status,lsp.updated",
-            &["saved_edit", "post_tool_use"][..],
+            "execute.after,session.execution.succeeded/failed/interrupted",
+            &["post_tool_use"][..],
         ),
         // The Pi extension forwards only its session boundaries; no edit
         // callback exists, so the edit boundary stays fixture-limited.

@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_component_set_carries_lsp_policy_and_hook_guidance_delivery() {
+    fn opencode_component_set_carries_native_mcp_registration_and_v2_hook_plugin() {
         let component_set = verified_embedded_default_host_component_set(
             HostKindV1::OpenCode,
             0,
@@ -1435,10 +1435,11 @@ mod tests {
         let registration: serde_json::Value = serde_json::from_slice(&registration.bytes).unwrap();
         assert_eq!(
             registration
-                .pointer("/lsp/tracedecay/initialization/tracedecay/competingAnalyzerPolicy")
+                .pointer("/mcp/servers/tracedecay/type")
                 .and_then(serde_json::Value::as_str),
-            Some("preflight-and-refuse-ambiguous")
+            Some("local")
         );
+        assert!(registration.get("lsp").is_none(), "V2 runs no LSP");
 
         let plugin = component_set
             .component_set
@@ -1449,9 +1450,11 @@ mod tests {
             .map(|asset| String::from_utf8(asset.bytes.clone()).unwrap())
             .expect("OpenCode set includes Hook V2 plugin");
         for marker in [
-            r#"dispatchAfterAck("hook-opencode-event", event, deliver)"#,
-            r#"dispatchAfterAck("hook-opencode-tool-after", { input, output }, deliver)"#,
-            r#""tool.execute.after": ("#,
+            r#""hook-opencode-event""#,
+            r#""hook-opencode-tool-after""#,
+            r#"ctx.tool.hook("execute.after""#,
+            r#"ctx.session.hook("context""#,
+            r#"ctx.event.subscribe("#,
             r#"id: "tracedecay-hooks""#,
         ] {
             assert!(plugin.contains(marker), "OpenCode plugin lacks {marker}");
