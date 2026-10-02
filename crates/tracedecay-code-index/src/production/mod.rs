@@ -14,12 +14,11 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
     CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
-    canonical_sha256,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
+    RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 
 use super::{
@@ -35,9 +34,7 @@ use super::{
     clones::{ClonePayloadBuildStatsV1, CodeIndexCloneBodyV1},
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{GenerationPlanner, GenerationPlanningErrorV1},
-    incremental::{
-        ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment,
-    },
+    incremental::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment},
     intake::{
         CodeIndexIntake, ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1,
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
@@ -107,12 +104,13 @@ mod graph_pages;
 mod memory_store;
 pub use memory_store::MemorySealedPublicationStoreV1;
 mod sealed_parent;
-pub use sealed_parent::{CodeIndexSealedGenerationV1, SealedSegmentReaderV1};
 use sealed_parent::SealedParentGenerationV1;
+pub use sealed_parent::{CodeIndexSealedGenerationV1, SealedSegmentReaderV1};
 mod sparse_increment;
-pub use sparse_increment::{CodeIndexColdBuildReasonV1, CodeIndexSparseGenerationV1};
 use sparse_increment::SparseBuildV1;
+pub use sparse_increment::{CodeIndexColdBuildReasonV1, CodeIndexSparseGenerationV1};
 mod sparse_resolution;
+mod sparse_successor;
 #[cfg(test)]
 pub(crate) use graph_page_store::CodeGraphPageBuildFootprintV1;
 pub(crate) use graph_page_store::{
@@ -430,9 +428,12 @@ pub trait CodeIndexAtomicPublicationPort {
 /// One generation ready for a publication store to seal.
 #[derive(Clone, Debug)]
 pub enum CodeIndexSealedPublicationV1 {
-    /// A generation built whole in memory; sealing encodes every segment a
-    /// parent does not already store.
-    Cold(Arc<CodeIndexPublishedGenerationV1>),
+    /// A generation built whole in memory, and why; sealing encodes every
+    /// segment a parent does not already store.
+    Cold(
+        Arc<CodeIndexPublishedGenerationV1>,
+        CodeIndexColdBuildReasonV1,
+    ),
     /// A successor built over its sealed parent; its new segments and its
     /// manifest are already encoded.
     Sparse(Arc<CodeIndexSparseGenerationV1>),
@@ -441,35 +442,35 @@ pub enum CodeIndexSealedPublicationV1 {
 impl CodeIndexSealedPublicationV1 {
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
         match self {
-            Self::Cold(generation) => generation.manifest(),
+            Self::Cold(generation, _) => generation.manifest(),
             Self::Sparse(generation) => generation.manifest(),
         }
     }
 
     pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
         match self {
-            Self::Cold(generation) => generation.snapshot(),
+            Self::Cold(generation, _) => generation.snapshot(),
             Self::Sparse(generation) => generation.snapshot(),
         }
     }
 
     pub fn projection(&self) -> &ProjectionPublicationHandoffV1 {
         match self {
-            Self::Cold(generation) => generation.projection(),
+            Self::Cold(generation, _) => generation.projection(),
             Self::Sparse(generation) => generation.projection(),
         }
     }
 
     pub fn statistics(&self) -> &CodeIndexGenerationStatisticsV1 {
         match self {
-            Self::Cold(generation) => &generation.statistics,
+            Self::Cold(generation, _) => &generation.statistics,
             Self::Sparse(generation) => generation.statistics(),
         }
     }
 
     pub fn chunk_count(&self) -> u64 {
         match self {
-            Self::Cold(generation) => {
+            Self::Cold(generation, _) => {
                 u64::try_from(generation.chunks().chunks().len()).unwrap_or(u64::MAX)
             }
             Self::Sparse(generation) => generation.chunk_count(),
@@ -480,15 +481,23 @@ impl CodeIndexSealedPublicationV1 {
     /// none.
     pub fn decoded(&self) -> Option<&Arc<CodeIndexPublishedGenerationV1>> {
         match self {
-            Self::Cold(generation) => Some(generation),
+            Self::Cold(generation, _) => Some(generation),
             Self::Sparse(_) => None,
         }
     }
 
     pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
         match self {
-            Self::Cold(generation) => generation.clone_update_statistics(),
+            Self::Cold(generation, _) => generation.clone_update_statistics(),
             Self::Sparse(generation) => generation.clone_update_statistics(),
+        }
+    }
+
+    /// Why the build ran whole; `None` for a sparse successor.
+    pub fn cold_reason(&self) -> Option<CodeIndexColdBuildReasonV1> {
+        match self {
+            Self::Cold(_, reason) => Some(*reason),
+            Self::Sparse(_) => None,
         }
     }
 
@@ -504,9 +513,8 @@ impl CodeIndexSealedPublicationV1 {
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         match self {
-            Self::Cold(generation) => {
-                generation.encode_partitioned_sealed_with_parent(parent_manifest_bytes, publish_segment)
-            }
+            Self::Cold(generation, _) => generation
+                .encode_partitioned_sealed_with_parent(parent_manifest_bytes, publish_segment),
             Self::Sparse(generation) => generation.replay(publish_segment),
         }
     }
@@ -520,14 +528,14 @@ pub struct CodeIndexPublishedBuildV1 {
     metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     manifest_bytes: Arc<[u8]>,
     lane_digest: ManifestDigest,
-    cold_reason: Option<CodeIndexColdBuildReasonV1>,
 }
 
 impl CodeIndexPublishedBuildV1 {
-    fn new(
+    /// Describe the generation a publication store sealed from
+    /// `publication` as `manifest_bytes`.
+    pub fn new(
         publication: CodeIndexSealedPublicationV1,
         manifest_bytes: Arc<[u8]>,
-        cold_reason: Option<CodeIndexColdBuildReasonV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let (metadata, lane_digest) =
             CodeIndexPublishedGenerationV1::partitioned_metadata_and_lane(&manifest_bytes)?;
@@ -541,7 +549,6 @@ impl CodeIndexPublishedBuildV1 {
             metadata: Arc::new(metadata),
             manifest_bytes,
             lane_digest,
-            cold_reason,
         })
     }
 
@@ -585,7 +592,7 @@ impl CodeIndexPublishedBuildV1 {
 
     /// Why the build ran whole; `None` for a sparse successor.
     pub fn cold_reason(&self) -> Option<CodeIndexColdBuildReasonV1> {
-        self.cold_reason
+        self.publication.cold_reason()
     }
 }
 
@@ -2064,7 +2071,6 @@ where
                             &scope,
                             lookup.cas_incumbent.as_ref(),
                             CodeIndexSealedPublicationV1::Sparse(Arc::new(sparse)),
-                            None,
                             started,
                         );
                     }
@@ -2106,8 +2112,7 @@ where
         self.publish(
             &scope,
             lookup.cas_incumbent.as_ref(),
-            CodeIndexSealedPublicationV1::Cold(Arc::new(candidate)),
-            Some(cold_reason),
+            CodeIndexSealedPublicationV1::Cold(Arc::new(candidate), cold_reason),
             started,
         )
     }
@@ -2154,9 +2159,8 @@ where
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
             );
-            let (edges, edge_abstentions, unresolved_calls) = hotpath::measure_block!(
-                "code_index.build.assemble.graph_outputs",
-                {
+            let (edges, edge_abstentions, unresolved_calls) =
+                hotpath::measure_block!("code_index.build.assemble.graph_outputs", {
                     let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
                     let unresolved = resolution_outputs::unresolved_calls_for_edges(
                         &staged.files,
@@ -2164,8 +2168,7 @@ where
                         &|| Ok(()),
                     )?;
                     Ok::<_, CodeIndexProductionErrorV1>((edges, abstentions, unresolved))
-                }
-            )?;
+                })?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
                 staged.symbols.symbols.len(),
@@ -2214,14 +2217,13 @@ where
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
         publication: CodeIndexSealedPublicationV1,
-        cold_reason: Option<CodeIndexColdBuildReasonV1>,
         started: crate::hotpath_observe::BuildToQueryableStart,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
         let manifest_bytes = hotpath::measure_block!("code_index.build.publish", {
             self.publication
                 .publish_atomically(scope, expected, &publication)
         })?;
-        let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes, cold_reason)?;
+        let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes)?;
         crate::hotpath_observe::record_generation_state("queryable");
         crate::hotpath_observe::record_build_to_queryable(started);
         Ok(published)
@@ -2389,11 +2391,9 @@ fn extract_file(
         let parser = extractor
             .resolve_parser(receipt_bound.validated_file(), descriptor)
             .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Extraction(
-                    ExtractionFailureV1::GrammarUnavailable {
-                        language: descriptor.language.clone(),
-                    },
-                )
+                CodeIndexProductionErrorV1::Extraction(ExtractionFailureV1::GrammarUnavailable {
+                    language: descriptor.language.clone(),
+                })
             })?;
         if crate::languages::canonical_language_id(parser.language_name())
             != descriptor.language.as_str()
@@ -2448,11 +2448,7 @@ fn extract_file(
             // A parse quantum is scheduling state, never evidence that the
             // source is unsupported. Only the enclosing operation can stop
             // admitted continuation, and it must not publish partial identity.
-            Err(
-                error @ CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut {
-                    ..
-                }),
-            ) => {
+            Err(error @ CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut { .. })) => {
                 lexical_page_source::checkpoint(control)?;
                 return Err(error);
             }
@@ -2515,11 +2511,9 @@ fn physical_reuse_key(
     })
 }
 
-
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod worker_tests;
-
 
 #[cfg(test)]
 #[path = "sparse_increment_tests.rs"]

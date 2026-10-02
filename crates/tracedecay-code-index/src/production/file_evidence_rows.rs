@@ -289,7 +289,11 @@ pub(super) fn compact_one_file_evidence(
 
 #[derive(Default)]
 struct PerFileInputsV1<'a> {
-    edges: Vec<(u32, (&'a str, &'a SymbolIdentityDigest), &'a CanonicalRelationEdgeV1)>,
+    edges: Vec<(
+        u32,
+        (&'a str, &'a SymbolIdentityDigest),
+        &'a CanonicalRelationEdgeV1,
+    )>,
     calls: Vec<&'a CodeIndexUnresolvedReferenceV1>,
     lineage: Vec<(u32, &'a SymbolLineageCandidateV1)>,
 }
@@ -538,7 +542,9 @@ impl PersistedFileEvidenceV1 {
         }
         if !self.explicit_lineage {
             if !self.lineage.is_empty() {
-                return Err(contract("sealed file evidence has lineage rows it does not claim"));
+                return Err(contract(
+                    "sealed file evidence has lineage rows it does not claim",
+                ));
             }
             evidence.lineage = identity_lineage(file, prior_generation, current_generation)?;
             return Ok(evidence);

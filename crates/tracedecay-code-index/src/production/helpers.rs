@@ -178,9 +178,13 @@ fn add_coverage(left: CoverageSummaryV1, right: CoverageSummaryV1) -> CoverageSu
         files_eligible: left.files_eligible.saturating_add(right.files_eligible),
         files_excluded: left.files_excluded.saturating_add(right.files_excluded),
         files_partial: left.files_partial.saturating_add(right.files_partial),
-        files_unsupported: left.files_unsupported.saturating_add(right.files_unsupported),
+        files_unsupported: left
+            .files_unsupported
+            .saturating_add(right.files_unsupported),
         ranges_excluded: left.ranges_excluded.saturating_add(right.ranges_excluded),
-        ranges_unsupported: left.ranges_unsupported.saturating_add(right.ranges_unsupported),
+        ranges_unsupported: left
+            .ranges_unsupported
+            .saturating_add(right.ranges_unsupported),
     }
 }
 
@@ -261,7 +265,9 @@ pub(crate) fn projection_request(
 ) -> Result<ProjectionBatchRequestV1, CodeIndexProductionErrorV1> {
     let replay_reason = match &previous_projection_key {
         None => ProjectionReplayReasonV1::InitialProjection,
-        Some(previous) if *previous == target_projection_key => ProjectionReplayReasonV1::SourceEdit,
+        Some(previous) if *previous == target_projection_key => {
+            ProjectionReplayReasonV1::SourceEdit
+        }
         Some(_) => {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "a source edit cannot change its projection key".to_owned(),
@@ -511,11 +517,12 @@ where
 {
     let modules = ResolutionModulesV1::new(files);
     let selected = || selected_references(files, selection);
-    let mut unresolved = if selected().any(|(index, _)| is_module_import_language(files[index].language())) {
-        modules.modules().call_gaps(selected())
-    } else {
-        Vec::new()
-    };
+    let mut unresolved =
+        if selected().any(|(index, _)| is_module_import_language(files[index].language())) {
+            modules.modules().call_gaps(selected())
+        } else {
+            Vec::new()
+        };
     let mut receiver_gaps = HashSet::new();
     for (index, reference) in selected() {
         if !is_typescript_family(files[index].language())

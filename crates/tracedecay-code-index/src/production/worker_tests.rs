@@ -226,8 +226,9 @@ fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
 #[test]
 fn unchanged_successor_carries_every_parent_segment() {
     let store = WorkerPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("production owner");
     let source = b"pub fn unchanged() -> u32 { 1 }\n";
     let first = owner
         .build_and_publish(
@@ -275,7 +276,8 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 
     let historical_import_digest =
         canonical_sha256(&"historical import row schema").expect("historical row digest");
-    let scope = CodeIndexGenerationScopeV1::for_snapshot(&worker_request("file.worker.v4", 0).snapshot);
+    let scope =
+        CodeIndexGenerationScopeV1::for_snapshot(&worker_request("file.worker.v4", 0).snapshot);
     {
         let mut active = store
             .decode_active(&scope)
@@ -305,17 +307,16 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         active.manifest.seal.expected_digest =
             expected_seal_digest(&active.manifest).expect("reseal historical manifest");
 
-        let file = Arc::make_mut(&mut active.files[0]);
-        file.extraction.extractor_revision =
-            ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
-        file.extraction.parser_import_rows_digest = historical_import_digest.clone();
         active.validated = OnceLock::new();
         let mut publisher = store.clone();
         publisher
             .publish_atomically(
                 &scope,
                 Some(&incumbent),
-                &CodeIndexSealedPublicationV1::Cold(Arc::new(active)),
+                &CodeIndexSealedPublicationV1::Cold(
+                    Arc::new(active),
+                    CodeIndexColdBuildReasonV1::NoParent,
+                ),
             )
             .expect("historical generation seals");
     }
@@ -330,7 +331,10 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         )
         .expect("extractor revision change re-extracts from source");
 
-    assert_eq!(rebuilt.cold_reason(), Some(CodeIndexColdBuildReasonV1::NoParent));
+    assert_eq!(
+        rebuilt.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::NoParent)
+    );
     let rebuilt = rebuilt.decoded().expect("cold build");
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
@@ -360,7 +364,9 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
             &UninterruptibleCodeIndexControlV1,
         )
         .expect("seed generation");
-    let mut stale = generation.decoded().expect("cold build").files[0].as_ref().clone();
+    let mut stale = generation.decoded().expect("cold build").files[0]
+        .as_ref()
+        .clone();
     stale.extraction.extractor_revision =
         ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
     stale.extraction.parser_import_rows_digest =

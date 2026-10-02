@@ -69,7 +69,10 @@ impl PartitionedResolutionIndexDescriptorV1 {
 
     pub(super) fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
         let pages = self.definitions.len();
-        if pages == 0 || pages > MAX_PAGES_V1 || !pages.is_power_of_two() || self.references.len() != pages
+        if pages == 0
+            || pages > MAX_PAGES_V1
+            || !pages.is_power_of_two()
+            || self.references.len() != pages
         {
             return Err(contract(
                 "sealed resolution index pages are not canonically sized",
@@ -163,10 +166,13 @@ fn encode_segment<T: Serialize>(
     };
     let canonical = serde_json::to_vec(value).map_err(|error| failed(&error))?;
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(PAGE_COMPRESSION_LEVEL_V1));
-    encoder.write_all(&canonical).map_err(|error| failed(&error))?;
+    encoder
+        .write_all(&canonical)
+        .map_err(|error| failed(&error))?;
     let bytes = encoder.finish().map_err(|error| failed(&error))?;
     let length = |bytes: &[u8]| {
-        u64::try_from(bytes.len()).map_err(|_| failed(&"sealed resolution index length exceeds u64"))
+        u64::try_from(bytes.len())
+            .map_err(|_| failed(&"sealed resolution index length exceeds u64"))
     };
     Ok((
         PartitionedIndexSegmentDescriptorV1 {
@@ -198,7 +204,8 @@ fn publish_pages<T: Serialize + Sync>(
     Ok(descriptors)
 }
 
-type BorrowedDefinitionPageV1<'a> = BTreeMap<&'a str, BTreeMap<&'a str, Vec<&'a LineageSymbolRecordV1>>>;
+type BorrowedDefinitionPageV1<'a> =
+    BTreeMap<&'a str, BTreeMap<&'a str, Vec<&'a LineageSymbolRecordV1>>>;
 type BorrowedReferencePageV1<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
 
 /// Seal the resolution index of a generation whose files are `files`.
@@ -209,7 +216,10 @@ pub(super) fn seal_resolution_index(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<PartitionedResolutionIndexDescriptorV1, CodeIndexProductionErrorV1> {
-    let rows = files.iter().map(|file| FileRowsV1::of(file)).collect::<Vec<_>>();
+    let rows = files
+        .iter()
+        .map(|file| FileRowsV1::of(file))
+        .collect::<Vec<_>>();
     let pages = planned_pages(rows.iter().map(|rows| rows.symbols.len()).sum());
     let mut definitions = vec![BorrowedDefinitionPageV1::new(); pages];
     let mut references = vec![BorrowedReferencePageV1::new(); pages];
@@ -285,7 +295,11 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             },
             &mut bytes,
         )?;
-        verify_index_segment(&bytes, &descriptor.segment_digest, descriptor.segment_size_bytes)?;
+        verify_index_segment(
+            &bytes,
+            &descriptor.segment_digest,
+            descriptor.segment_size_bytes,
+        )?;
         let canonical = inflate_index_segment(&bytes, descriptor.decoded_size_bytes)?;
         hotpath::gauge!("code_index.sparse.index_bytes_decoded").inc(canonical.len());
         serde_json::from_slice(&canonical)
@@ -335,8 +349,14 @@ pub(super) fn reseal_resolution_index(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<PartitionedResolutionIndexDescriptorV1, CodeIndexProductionErrorV1> {
-    let before = before.iter().map(|file| FileRowsV1::of(file)).collect::<Vec<_>>();
-    let after = after.iter().map(|file| FileRowsV1::of(file)).collect::<Vec<_>>();
+    let before = before
+        .iter()
+        .map(|file| FileRowsV1::of(file))
+        .collect::<Vec<_>>();
+    let after = after
+        .iter()
+        .map(|file| FileRowsV1::of(file))
+        .collect::<Vec<_>>();
     fn aliases<'a>(rows: &[FileRowsV1<'a>]) -> BTreeSet<(&'a str, &'a str)> {
         rows.iter()
             .flat_map(|file| file.aliases.iter().copied())

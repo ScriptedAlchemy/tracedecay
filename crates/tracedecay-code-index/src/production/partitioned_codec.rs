@@ -59,7 +59,6 @@ use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
     write_json_string,
 };
-use super::resolution_index::{PartitionedResolutionIndexDescriptorV1, seal_resolution_index};
 use super::file_evidence_rows::{
     FileEvidenceV1, PersistedFileEvidenceV1, compact_file_evidence, identity_lineage,
 };
@@ -68,6 +67,7 @@ use super::projection_rows::{
     FileChunkRostersV1, PersistedBatchReceiptRefV1, PersistedBatchReceiptV1,
     PersistedProjectionRequestRefV1, PersistedProjectionRequestV1,
 };
+use super::resolution_index::{PartitionedResolutionIndexDescriptorV1, seal_resolution_index};
 use super::sealed_codec::{
     DecodePeakProbeV1, FileScopeIdentityV1, PersistedFileGenerationArtifactsRefV2,
     PersistedFileGenerationArtifactsV1, PersistedFileGenerationArtifactsV2,
@@ -1148,7 +1148,6 @@ impl PartitionedSegmentEncoderV1 {
             symbol_identities_digest: symbol_identities_digest(&symbol_identities)?,
         })
     }
-
 }
 
 /// Write the generation evidence stream as bounded pages of one pack.
@@ -1725,6 +1724,16 @@ where
     Ok(())
 }
 
+impl PartitionedPublishedGenerationV1 {
+    fn sources(&self) -> super::lexical_page_source::SealedGenerationSourcesV1 {
+        super::lexical_page_source::SealedGenerationSourcesV1 {
+            repository_parse_identity: self.repository_parse_identity.clone(),
+            ignored_source_admissions: self.ignored_source_admissions.clone(),
+            ignored_source_admissions_digest: self.ignored_source_admissions_digest.clone(),
+        }
+    }
+}
+
 pub(super) fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<PartitionedPublishedGenerationV1, CodeIndexProductionErrorV1> {
@@ -2282,6 +2291,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let generation = parse_partitioned_manifest(manifest_bytes)?;
         let chunk_policy = generation.chunk_policy.clone();
+        let sources = generation.sources();
         let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
             snapshot_digest: generation.manifest.snapshot_digest.clone(),
@@ -2294,6 +2304,7 @@ impl VerifiedSealedLexicalPageSourceV1 {
             generation.snapshot,
             generation.statistics,
             chunk_policy,
+            sources,
             source,
             source_state_digest,
             maximum_page_chunks,
@@ -2363,6 +2374,16 @@ impl CodeIndexPublishedGenerationV1 {
                     .code_graph_pages
                     .iter()
                     .map(|page| page.page_digest.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let reusable_index_digests = parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .resolution_index
+                    .segments()
+                    .map(|page| page.segment_digest.clone())
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
@@ -2528,7 +2549,17 @@ impl CodeIndexPublishedGenerationV1 {
             )?);
             Ok(())
         })?;
-        let resolution_index = seal_resolution_index(&self.files, &mut publish_segment)?;
+        let resolution_index = seal_resolution_index(
+            &self.files,
+            &mut |publication: SealedGenerationSegmentPublicationV1<'_>| match publication {
+                SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, .. }
+                    if reusable_index_digests.contains(digest) =>
+                {
+                    Ok(())
+                }
+                publication => publish_segment(publication),
+            },
+        )?;
         let statistics = self.generation_statistics()?;
         seal_partitioned_manifest(&PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -2678,15 +2709,12 @@ impl CodeIndexPublishedGenerationV1 {
         probe.sample();
         let (projection_request, projection_receipt) =
             hotpath::measure_block!("code_index.restore.evidence_expand", {
-                let rosters = FileChunkRostersV1::new(
-                    generation
-                        .file_segments
-                        .iter()
-                        .zip(files)
-                        .map(|(descriptor, file)| {
+                let rosters =
+                    FileChunkRostersV1::new(generation.file_segments.iter().zip(files).map(
+                        |(descriptor, file)| {
                             (descriptor.file_key, file.artifacts.chunks.chunks.as_slice())
-                        }),
-                );
+                        },
+                    ));
                 let request = evidence.projection_request.expand(&rosters)?;
                 let receipt = evidence.projection_receipt.expand(&request)?;
                 Ok::<_, CodeIndexProductionErrorV1>((request, receipt))
@@ -2733,11 +2761,13 @@ impl CodeIndexPublishedGenerationV1 {
             &generation.file_segments,
             &generation.code_graph_pages,
         )?;
+        let sources = generation.sources();
         let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
             generation.statistics,
             generation.chunk_policy,
+            sources,
         )?;
         Ok((metadata, lane))
     }

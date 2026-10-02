@@ -39,36 +39,40 @@ impl MemorySealedPublicationStoreV1 {
     /// A reader over every segment this store holds.
     pub fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
         let state = Arc::clone(&self.state);
-        Arc::new(move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
-            let state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            let (digest, range) = match request {
-                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                    (digest, 0..size_bytes)
-                }
-                SealedGenerationSegmentReadV1::Range {
-                    digest,
-                    offset,
-                    length,
-                    ..
-                } => (digest, offset..offset.saturating_add(length)),
-            };
-            let bytes = state.segments.get(digest).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "in-memory sealed store has no such segment".to_owned(),
-                )
-            })?;
-            let range = usize::try_from(range.start).ok().zip(usize::try_from(range.end).ok());
-            let slice = range
-                .and_then(|(start, end)| bytes.get(start..end))
-                .ok_or_else(|| {
+        Arc::new(
+            move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let (digest, range) = match request {
+                    SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                        (digest, 0..size_bytes)
+                    }
+                    SealedGenerationSegmentReadV1::Range {
+                        digest,
+                        offset,
+                        length,
+                        ..
+                    } => (digest, offset..offset.saturating_add(length)),
+                };
+                let bytes = state.segments.get(digest).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
-                        "in-memory sealed segment read is out of range".to_owned(),
+                        "in-memory sealed store has no such segment".to_owned(),
                     )
                 })?;
-            buffer.clear();
-            buffer.extend_from_slice(slice);
-            Ok(())
-        })
+                let range = usize::try_from(range.start)
+                    .ok()
+                    .zip(usize::try_from(range.end).ok());
+                let slice = range
+                    .and_then(|(start, end)| bytes.get(start..end))
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "in-memory sealed segment read is out of range".to_owned(),
+                        )
+                    })?;
+                buffer.clear();
+                buffer.extend_from_slice(slice);
+                Ok(())
+            },
+        )
     }
 
     /// The manifest of the generation `generation` names, when this store
@@ -91,22 +95,44 @@ impl MemorySealedPublicationStoreV1 {
             .sum()
     }
 
+    /// Scopes with an active generation.
+    pub fn active_scopes(&self) -> usize {
+        self.state().active.len()
+    }
+
+    /// Whether `other` is a handle on this same store.
+    pub fn shares_state_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    /// Decode the generation `manifest` seals whole from this store's
+    /// segments.
+    pub fn decode(
+        &self,
+        manifest: &[u8],
+    ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
+        let read = self.segment_reader();
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            manifest,
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| read(request, buffer),
+        )
+    }
+
     /// Decode `scope`'s active generation whole.
     pub fn decode_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let Some(manifest) = self.state().active.get(scope).map(|(_, bytes)| Arc::clone(bytes))
+        let Some(manifest) = self
+            .state()
+            .active
+            .get(scope)
+            .map(|(_, bytes)| Arc::clone(bytes))
         else {
             return Ok(None);
         };
-        let read = self.segment_reader();
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-            &manifest,
-            &SharedDecodedContentPoolV1::default(),
-            |request, buffer| read(request, buffer),
-        )
-        .map(Some)
+        self.decode(&manifest).map(Some)
     }
 
     /// Seal `generation` and store its segments, without making it active.
@@ -130,7 +156,9 @@ impl MemorySealedPublicationStoreV1 {
                         staged.push((digest.clone(), Arc::from(bytes)));
                     }
                     SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                        page_digest, bytes, ..
+                        page_digest,
+                        bytes,
+                        ..
                     } => staged.push((page_digest.clone(), Arc::from(bytes))),
                     SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                         bytes, ..
@@ -138,7 +166,9 @@ impl MemorySealedPublicationStoreV1 {
                     SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
                         segment_digest,
                         ..
-                    } => staged.push((segment_digest.clone(), Arc::from(std::mem::take(&mut pack)))),
+                    } => {
+                        staged.push((segment_digest.clone(), Arc::from(std::mem::take(&mut pack))))
+                    }
                 }
                 Ok(())
             })
@@ -146,9 +176,10 @@ impl MemorySealedPublicationStoreV1 {
         let manifest: Arc<[u8]> = Arc::from(manifest);
         let mut state = self.state();
         state.segments.extend(staged);
-        state
-            .manifests
-            .insert(generation.manifest().generation_id.clone(), Arc::clone(&manifest));
+        state.manifests.insert(
+            generation.manifest().generation_id.clone(),
+            Arc::clone(&manifest),
+        );
         Ok(manifest)
     }
 }
@@ -163,7 +194,8 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
             .active
             .get(scope)
             .map(|(_, bytes)| Arc::clone(bytes));
-        Ok(manifest.map(|manifest| CodeIndexSealedGenerationV1::new(manifest, self.segment_reader())))
+        Ok(manifest
+            .map(|manifest| CodeIndexSealedGenerationV1::new(manifest, self.segment_reader())))
     }
 
     fn publish_atomically(
@@ -188,7 +220,10 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
         }
         state.active.insert(
             scope.clone(),
-            (generation.manifest().generation_id.clone(), Arc::clone(&manifest)),
+            (
+                generation.manifest().generation_id.clone(),
+                Arc::clone(&manifest),
+            ),
         );
         state.publications = state.publications.saturating_add(1);
         Ok(manifest)

@@ -57,8 +57,9 @@ fn written_evidence(published: &CodeIndexPublishedBuildV1) -> Vec<(String, usize
     let CodeIndexSealedPublicationV1::Sparse(sparse) = published.publication() else {
         panic!("the edit seals over its parent");
     };
-    let generation = super::partitioned_codec::parse_partitioned_manifest(published.manifest_bytes())
-        .expect("sealed manifest");
+    let generation =
+        super::partitioned_codec::parse_partitioned_manifest(published.manifest_bytes())
+            .expect("sealed manifest");
     let written = sparse
         .written_segments()
         .filter(|(kind, _, _)| *kind == "file_evidence")
@@ -99,10 +100,19 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
             "{language}: the fixture resolves cross-file edges"
         );
         let scope = CodeIndexGenerationScopeV1::for_snapshot(built.snapshot());
-        let restored = store.decode_active(&scope).expect("restores").expect("active");
+        let restored = store
+            .decode_active(&scope)
+            .expect("restores")
+            .expect("active");
         assert_eq!(restored.edges, built.edges, "{language} cold: edges");
-        assert_eq!(restored.unresolved_calls, built.unresolved_calls, "{language} cold: calls");
-        assert!(restored.lineage.is_empty(), "{language} cold: a cold build has no lineage");
+        assert_eq!(
+            restored.unresolved_calls, built.unresolved_calls,
+            "{language} cold: calls"
+        );
+        assert!(
+            restored.lineage.is_empty(),
+            "{language} cold: a cold build has no lineage"
+        );
 
         let with_symbols = built
             .files
@@ -121,8 +131,15 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
         let mut edited_tree = tree.clone();
         edited_tree[index].1 = format!("\n\n{}", tree[index].1);
         let edited = publish(&mut owner, &edited_tree, Some(index), true, 1_100_000);
-        assert_eq!(edited.cold_reason(), None, "{language}: the edit seals over its parent");
-        let restored = store.decode_active(&scope).expect("restores").expect("active");
+        assert_eq!(
+            edited.cold_reason(),
+            None,
+            "{language}: the edit seals over its parent"
+        );
+        let restored = store
+            .decode_active(&scope)
+            .expect("restores")
+            .expect("active");
         let continuations = restored
             .lineage
             .iter()
@@ -181,8 +198,9 @@ fn hub_tree(leaves: usize, edit: &str) -> Vec<(String, String)> {
 fn an_edit_reads_and_writes_only_what_it_changes() {
     const LEAVES: usize = 300;
     let store = CountingStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("production owner");
     let base_tree = hub_tree(LEAVES, "1");
     let edited_leaf = base_tree
         .iter()
@@ -215,13 +233,20 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
         );
         let written = written_evidence(&edited);
         assert_eq!(
-            written.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            written
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
             ["src/leaf_000.rs"]
         );
         assert!(written.iter().map(|(_, bytes)| bytes).sum::<usize>() < 4096);
     }
     let scope = CodeIndexGenerationScopeV1::for_snapshot(base.snapshot());
-    let restored = store.inner.decode_active(&scope).expect("restores").expect("active");
+    let restored = store
+        .inner
+        .decode_active(&scope)
+        .expect("restores")
+        .expect("active");
     assert_eq!(
         restored
             .edges

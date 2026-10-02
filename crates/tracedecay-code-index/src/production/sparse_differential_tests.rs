@@ -177,9 +177,14 @@ struct DifferentialCounts {
 fn restored_answers(
     store: &WorkerPublicationStore,
     published: &CodeIndexPublishedBuildV1,
-) -> (Vec<CanonicalRelationEdgeV1>, Vec<crate::chunks::CodeIndexUnresolvedReferenceV1>) {
+) -> (
+    Vec<CanonicalRelationEdgeV1>,
+    Vec<crate::chunks::CodeIndexUnresolvedReferenceV1>,
+) {
     let restored = store
-        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(published.snapshot()))
+        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(
+            published.snapshot(),
+        ))
         .expect("the published generation restores")
         .expect("an active generation");
     (restored.edges, restored.unresolved_calls)
@@ -199,8 +204,9 @@ fn assert_seals_like_cold(
     counts: &mut DifferentialCounts,
 ) {
     let store = WorkerPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("production owner");
     let parent = publish(&mut owner, base_tree, base_fresh, false, 1_100_000);
     let parent_answers = restored_answers(&store, &parent);
     super::helpers::take_seal_reference_resolutions();
@@ -210,8 +216,12 @@ fn assert_seals_like_cold(
 
     let cold_store = WorkerPublicationStore::default();
     let cold = publish(
-        &mut CodeIndexProductionOwnerV1::new(worker_config(), cold_store.clone(), WorkerProjectionSink)
-            .expect("cold production owner"),
+        &mut CodeIndexProductionOwnerV1::new(
+            worker_config(),
+            cold_store.clone(),
+            WorkerProjectionSink,
+        )
+        .expect("cold production owner"),
         edited_tree,
         Some(index),
         false,
@@ -219,7 +229,11 @@ fn assert_seals_like_cold(
     );
     super::helpers::take_seal_reference_resolutions();
     let answers = restored_answers(&store, &edited);
-    assert_eq!(answers, restored_answers(&cold_store, &cold), "restored answers after editing {path}");
+    assert_eq!(
+        answers,
+        restored_answers(&cold_store, &cold),
+        "restored answers after editing {path}"
+    );
     assert_eq!(
         edited.metadata().generation_statistics(),
         cold.metadata().generation_statistics(),
@@ -227,8 +241,15 @@ fn assert_seals_like_cold(
     );
     match edited.cold_reason() {
         None => {
-            assert_eq!(edited.lane_digest(), cold.lane_digest(), "segments and pages after editing {path}");
-            assert_eq!(build_resolutions, 0, "the build over the parent after editing {path}");
+            assert_eq!(
+                edited.lane_digest(),
+                cold.lane_digest(),
+                "segments and pages after editing {path}"
+            );
+            assert_eq!(
+                build_resolutions, 0,
+                "the build over the parent after editing {path}"
+            );
             counts.sparse += 1;
             if answers != parent_answers {
                 counts.moved += 1;
@@ -409,7 +430,11 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         let mut shifted = tree.clone();
         shifted[index].1 = format!("\n\n{}", tree[index].1);
         let edited = publish(&mut restarted, &shifted, Some(index), true, 1_100_000);
-        assert_eq!(edited.cold_reason(), None, "{language}: the edit seals over its parent");
+        assert_eq!(
+            edited.cold_reason(),
+            None,
+            "{language}: the edit seals over its parent"
+        );
         assert_eq!(
             super::helpers::take_seal_reference_resolutions(),
             0,

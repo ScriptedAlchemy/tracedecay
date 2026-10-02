@@ -20,7 +20,9 @@ use crate::graph_projection::{
 use crate::lineage::LineageSymbolRecordV1;
 
 use super::graph_page_store::CodeGraphPageBuildFootprintV1;
-use super::{CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1};
+use super::{
+    CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -273,7 +275,12 @@ pub(super) fn owned_occurrences(file: &FileGenerationArtifactsV1) -> BTreeSet<&S
         .chunks
         .iter()
         .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
-        .chain(file.artifacts.symbols.iter().map(|symbol| &symbol.occurrence))
+        .chain(
+            file.artifacts
+                .symbols
+                .iter()
+                .map(|symbol| &symbol.occurrence),
+        )
         .collect()
 }
 

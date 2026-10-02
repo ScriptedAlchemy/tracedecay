@@ -122,31 +122,6 @@ impl GenerationChunkManifestV1 {
         })
     }
 
-    /// Wrap an already-sorted, duplicate-free Arc chunk list under a serving
-    /// generation id. Callers must keep extraction provenance on the rows.
-    #[cfg(test)]
-    pub(crate) fn from_sorted_arcs(
-        generation_id: CodeGenerationId,
-        chunks: Vec<Arc<CodeSearchChunkV1>>,
-    ) -> Result<Self, ChunkIncrementErrorV1> {
-        generation_id.validate().map_err(|error| {
-            ChunkIncrementErrorV1::NonCanonical(crate::noncanonical::noncanonical_from_domain(
-                error,
-            ))
-        })?;
-        if let Some(duplicate) = chunks
-            .windows(2)
-            .find(|pair| pair[0].id >= pair[1].id)
-            .map(|pair| pair[0].id.clone())
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateChunk(duplicate));
-        }
-        Ok(Self {
-            generation_id,
-            chunks,
-        })
-    }
-
     pub fn new(
         generation_id: CodeGenerationId,
         files: Vec<CodeFileChunksV1>,

@@ -344,10 +344,8 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             ) => false,
             None => {
                 reference.reference_name.contains('.')
-                    || (matches!(
-                        self.files[index].language(),
-                        "java" | "ruby"
-                    ) && identifier_path(&reference.reference_name, &["::"]).is_some())
+                    || (matches!(self.files[index].language(), "java" | "ruby")
+                        && identifier_path(&reference.reference_name, &["::"]).is_some())
             }
         }
     }
@@ -496,7 +494,8 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             }
         }
         if let Some(file_index) = module_file
-            && let Some(found) = self.python_glob_member(self.files[file_index].as_ref(), name, depth + 1)
+            && let Some(found) =
+                self.python_glob_member(self.files[file_index].as_ref(), name, depth + 1)
         {
             return found;
         }
@@ -811,11 +810,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             .into_iter()
             .flatten()
             .find_map(|file_index| {
-                match self.member(
-                    *file_index,
-                    self.files[*file_index].logical_path(),
-                    simple,
-                )? {
+                match self.member(*file_index, self.files[*file_index].logical_path(), simple)? {
                     TargetV1::Symbol(symbol) => Some(symbol),
                     _ => None,
                 }

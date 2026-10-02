@@ -49,7 +49,11 @@ impl<'a> FileChunkRostersV1<'a> {
         }
     }
 
-    fn chunk(&self, file_key: u32, position: u32) -> Result<&'a CodeSearchChunkV1, CodeIndexProductionErrorV1> {
+    fn chunk(
+        &self,
+        file_key: u32,
+        position: u32,
+    ) -> Result<&'a CodeSearchChunkV1, CodeIndexProductionErrorV1> {
         usize::try_from(position)
             .ok()
             .and_then(|position| self.files.get(&file_key)?.get(position))

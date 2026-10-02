@@ -26,7 +26,8 @@ use super::resolution_view::ResolutionFileV1;
 use super::sealed_codec::{FileScopeIdentityV1, restore_file_pages};
 use super::{
     ChunkPolicyRevisionSummaryV1, CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1,
-    FileGenerationArtifactsV1,
+    CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
+    VerifiedSealedTextGenerationMetadataV1,
 };
 
 /// Reads one sealed segment's bytes into the buffer it is handed. Shared by
@@ -62,6 +63,14 @@ impl CodeIndexSealedGenerationV1 {
 
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
+    }
+
+    /// The authenticated manifest, snapshot, and statistics this generation
+    /// seals, parsed without decoding any segment.
+    pub fn metadata(
+        &self,
+    ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&self.manifest_bytes)
     }
 }
 
@@ -342,18 +351,18 @@ impl<'p> SparseFileV1<'p> {
     pub(super) fn artifacts(&self) -> &Arc<FileGenerationArtifactsV1> {
         match &self.artifacts {
             SparseArtifactsV1::Decoded(artifacts) => artifacts,
-            SparseArtifactsV1::Carried { decoded, source } => decoded.get_or_init(|| {
-                match source.parent.decode_file(
+            SparseArtifactsV1::Carried { decoded, source } => decoded.get_or_init(|| match source
+                .parent
+                .decode_file(
                     source.descriptor,
                     source.file_occurrence_id,
                     source.generation_id,
                     source.snapshot_digest,
                 ) {
-                    Ok(file) => file,
-                    Err(error) => {
-                        source.failure.record(error);
-                        Arc::clone(source.stand_in)
-                    }
+                Ok(file) => file,
+                Err(error) => {
+                    source.failure.record(error);
+                    Arc::clone(source.stand_in)
                 }
             }),
         }

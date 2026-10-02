@@ -15,7 +15,7 @@
 //! the edited files, those referencing files, and the files a lookup walks
 //! into.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map};
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
@@ -151,7 +151,11 @@ impl ChangedNamesV1 {
     /// same placement. A lookup only ever follows an import from its local
     /// name to the name it imports.
     fn new(
-        edited: &[(usize, Arc<FileGenerationArtifactsV1>, Arc<FileGenerationArtifactsV1>)],
+        edited: &[(
+            usize,
+            Arc<FileGenerationArtifactsV1>,
+            Arc<FileGenerationArtifactsV1>,
+        )],
         aliases: &BTreeSet<(String, String)>,
     ) -> Self {
         let mut names = Self {
@@ -159,7 +163,12 @@ impl ChangedNamesV1 {
             last: HashSet::new(),
         };
         for (_, before, after) in edited {
-            for symbol in before.artifacts.symbols.iter().chain(&after.artifacts.symbols) {
+            for symbol in before
+                .artifacts
+                .symbols
+                .iter()
+                .chain(&after.artifacts.symbols)
+            {
                 let placed = if symbol.kind == NodeKind::Module.as_str() {
                     &mut names.last
                 } else {
@@ -309,7 +318,6 @@ pub(super) struct ResolvedFileV1 {
 /// The edit's resolution: every successor file whose evidence it re-decided.
 pub(super) struct SparseResolutionV1 {
     pub(super) files: BTreeMap<usize, ResolvedFileV1>,
-    pub(super) references_resolved: usize,
 }
 
 /// Re-decide the sites the edited files can move. `files` is the successor's
@@ -317,12 +325,17 @@ pub(super) struct SparseResolutionV1 {
 /// successor artifacts, and `occurrence_of_path` the successor file each
 /// logical path names.
 #[hotpath::measure(label = "code_index.sparse.resolve")]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edit(
     parent: &SealedParentGenerationV1,
     index: &ResolutionIndexReaderV1<'_>,
     files: &[SparseFileV1<'_>],
     by_name: &SparseSymbolsByNameV1<'_>,
-    edited: &[(usize, Arc<FileGenerationArtifactsV1>, Arc<FileGenerationArtifactsV1>)],
+    edited: &[(
+        usize,
+        Arc<FileGenerationArtifactsV1>,
+        Arc<FileGenerationArtifactsV1>,
+    )],
     index_of_path: &HashMap<&str, usize>,
     occurrence_of_path: &HashMap<&str, &FileOccurrenceId>,
     parent_key_of_path: &HashMap<&str, u32>,
@@ -336,13 +349,13 @@ pub(super) fn resolve_edit(
     let mut pages = BTreeMap::new();
     for name in names.all() {
         let page = index.page_of(name);
-        if !pages.contains_key(&page) {
-            pages.insert(page, index.reference_page(page)?);
+        if let btree_map::Entry::Vacant(entry) = pages.entry(page) {
+            entry.insert(index.reference_page(page)?);
         }
         for path in pages[&page].get(name.as_str()).into_iter().flatten() {
-            let file_index = index_of_path
-                .get(path.as_str())
-                .ok_or_else(|| contract("sealed resolution index names a file outside its successor"))?;
+            let file_index = index_of_path.get(path.as_str()).ok_or_else(|| {
+                contract("sealed resolution index names a file outside its successor")
+            })?;
             if !edited_indices.contains(file_index) {
                 referencing.insert(*file_index);
             }
@@ -350,7 +363,12 @@ pub(super) fn resolve_edit(
     }
     drop(pages);
     let mut selection = Vec::new();
-    for file_index in edited_indices.iter().chain(&referencing).copied().collect::<BTreeSet<_>>() {
+    for file_index in edited_indices
+        .iter()
+        .chain(&referencing)
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
         let references = &files[file_index].as_ref().artifacts.unresolved_references;
         let picks = if edited_indices.contains(&file_index) {
             (0..references.len()).collect::<Vec<_>>()
@@ -377,7 +395,12 @@ pub(super) fn resolve_edit(
         )
         .collect::<HashSet<_>>();
     let resolved = resolve_selected_cross_file_references(files, by_name, &selection)?;
-    let references_resolved = selection.iter().map(|(_, picks)| picks.len()).sum();
+    hotpath::gauge!("code_index.sparse.references_resolved").set(
+        selection
+            .iter()
+            .map(|(_, picks)| picks.len())
+            .sum::<usize>() as u64,
+    );
 
     // A resolved edge's target is a symbol some lookup read: a page row, or a
     // symbol of a file resolution decoded.
@@ -437,9 +460,12 @@ pub(super) fn resolve_edit(
             }
             let target_file = occurrence_of_path
                 .get(sealed.target_path.as_str())
-                .ok_or_else(|| contract("sealed cross-file edge targets a file outside its successor"))?;
-            let to_occurrence = crate::chunks::symbol_occurrence_id(target_file, &sealed.target_identity)
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                .ok_or_else(|| {
+                    contract("sealed cross-file edge targets a file outside its successor")
+                })?;
+            let to_occurrence =
+                crate::chunks::symbol_occurrence_id(target_file, &sealed.target_identity)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
             entry.edges.push((
                 CanonicalRelationEdgeV1 {
                     from_occurrence: sealed.from_occurrence,
@@ -459,7 +485,9 @@ pub(super) fn resolve_edit(
         }
     }
     for entry in result.values_mut() {
-        entry.edges.sort_by(|left, right| edge_order(&left.0, &right.0));
+        entry
+            .edges
+            .sort_by(|left, right| edge_order(&left.0, &right.0));
         entry.edges.dedup_by(|left, right| left.0 == right.0);
     }
     // A site's limitations depend only on its own references and the edges
@@ -471,8 +499,9 @@ pub(super) fn resolve_edit(
         .iter()
         .map(|(_, reference)| site(reference))
         .collect::<HashSet<_>>();
-    let at_sites =
-        |edge: &&CanonicalRelationEdgeV1| sites.contains(&(&edge.from_occurrence, edge.evidence_span));
+    let at_sites = |edge: &&CanonicalRelationEdgeV1| {
+        sites.contains(&(&edge.from_occurrence, edge.evidence_span))
+    };
     let file_edges = selection
         .iter()
         .flat_map(|(file_index, _)| files[*file_index].as_ref().artifacts.edges.iter())
@@ -494,14 +523,15 @@ pub(super) fn resolve_edit(
         let owner = owner_of
             .get(&call.from_occurrence)
             .ok_or_else(|| contract("a re-derived call limitation leaves the selection"))?;
-        result.entry(*owner).or_default().unresolved_calls.push(call);
+        result
+            .entry(*owner)
+            .or_default()
+            .unresolved_calls
+            .push(call);
     }
     for entry in result.values_mut() {
         entry.unresolved_calls.sort();
         entry.unresolved_calls.dedup();
     }
-    Ok(SparseResolutionV1 {
-        files: result,
-        references_resolved,
-    })
+    Ok(SparseResolutionV1 { files: result })
 }

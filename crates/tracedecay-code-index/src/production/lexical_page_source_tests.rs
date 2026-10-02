@@ -17,9 +17,8 @@ use super::*;
 use crate::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
-        CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexInterruptionV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     },
     projection::{
@@ -695,7 +694,11 @@ fn fixture_for_source_files(
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
-    let generation = Arc::clone(generation.decoded().expect("a cold seal holds its generation"));
+    let generation = Arc::clone(
+        generation
+            .decoded()
+            .expect("a cold seal holds its generation"),
+    );
     let mut segments = BTreeMap::new();
     let manifest = generation
         .encode_partitioned_sealed(|request| {

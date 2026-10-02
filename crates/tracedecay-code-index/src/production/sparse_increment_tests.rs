@@ -4,9 +4,7 @@
 //! and call limitations.
 
 use sha2::Digest as _;
-use tracedecay_domain::{
-    LanguageId, ProjectionKeyV1, ProjectionKindV1, SanitizationReceiptId,
-};
+use tracedecay_domain::{LanguageId, ProjectionKeyV1, ProjectionKindV1, SanitizationReceiptId};
 
 use super::worker_tests::{WorkerProjectionSink, worker_config, worker_id};
 use super::*;
@@ -89,9 +87,16 @@ fn owner(store: &MemorySealedPublicationStoreV1) -> Owner {
         .expect("production owner")
 }
 
-fn publish(owner: &mut Owner, files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexPublishedBuildV1 {
+fn publish(
+    owner: &mut Owner,
+    files: &[(&str, &str, &str)],
+    sealed_at: i64,
+) -> CodeIndexPublishedBuildV1 {
     owner
-        .build_and_publish(request(files, sealed_at), &UninterruptibleCodeIndexControlV1)
+        .build_and_publish(
+            request(files, sealed_at),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect("published generation")
 }
 
@@ -122,7 +127,12 @@ fn answers(store: &MemorySealedPublicationStoreV1) -> RestoredAnswersV1 {
             .chunks()
             .chunks()
             .iter()
-            .map(|chunk| (chunk.id.as_str().to_owned(), chunk.content_digest.as_str().to_owned()))
+            .map(|chunk| {
+                (
+                    chunk.id.as_str().to_owned(),
+                    chunk.content_digest.as_str().to_owned(),
+                )
+            })
             .collect(),
         symbols: generation
             .symbols()
@@ -138,7 +148,10 @@ fn answers(store: &MemorySealedPublicationStoreV1) -> RestoredAnswersV1 {
     }
 }
 
-fn resolution_index(store: &MemorySealedPublicationStoreV1, published: &CodeIndexPublishedBuildV1) -> super::resolution_index::PartitionedResolutionIndexDescriptorV1 {
+fn resolution_index(
+    store: &MemorySealedPublicationStoreV1,
+    published: &CodeIndexPublishedBuildV1,
+) -> super::resolution_index::PartitionedResolutionIndexDescriptorV1 {
     let manifest = store
         .manifest_bytes(&published.manifest().generation_id)
         .expect("sealed manifest");
@@ -156,16 +169,33 @@ fn assert_sparse_matches_cold(
     let store = MemorySealedPublicationStoreV1::default();
     let mut incremental = owner(&store);
     let parent = publish(&mut incremental, before, 1_100_000);
-    assert_eq!(parent.cold_reason(), Some(CodeIndexColdBuildReasonV1::NoParent));
+    assert_eq!(
+        parent.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::NoParent)
+    );
     let sparse = publish(&mut incremental, after, 1_200_000);
-    assert_eq!(sparse.cold_reason(), None, "an in-place edit seals over its parent");
-    assert!(sparse.decoded().is_none(), "a sparse successor holds no decoded generation");
+    assert_eq!(
+        sparse.cold_reason(),
+        None,
+        "an in-place edit seals over its parent"
+    );
+    assert!(
+        sparse.decoded().is_none(),
+        "a sparse successor holds no decoded generation"
+    );
 
     let cold_store = MemorySealedPublicationStoreV1::default();
     let cold = publish(&mut owner(&cold_store), after, 1_200_000);
-    assert_eq!(cold.cold_reason(), Some(CodeIndexColdBuildReasonV1::NoParent));
+    assert_eq!(
+        cold.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::NoParent)
+    );
 
-    assert_eq!(sparse.lane_digest(), cold.lane_digest(), "segments and graph pages");
+    assert_eq!(
+        sparse.lane_digest(),
+        cold.lane_digest(),
+        "segments and graph pages"
+    );
     assert_eq!(
         sparse.metadata().generation_statistics(),
         cold.metadata().generation_statistics()
@@ -234,7 +264,11 @@ fn successive_edits_reseal_explicit_parent_lineage_as_identity() {
     assert_eq!(second.cold_reason(), None);
 
     let cold_store = MemorySealedPublicationStoreV1::default();
-    let cold = publish(&mut owner(&cold_store), &rust_tree(&first, &main), 1_300_000);
+    let cold = publish(
+        &mut owner(&cold_store),
+        &rust_tree(&first, &main),
+        1_300_000,
+    );
     assert_eq!(second.lane_digest(), cold.lane_digest());
     assert_eq!(answers(&store), answers(&cold_store));
     let restored = store
@@ -290,7 +324,11 @@ fn python_module_calls_resolve_over_the_parent() {
         vec![
             ("pkg/__init__.py", "python", ""),
             ("pkg/a.py", "python", a),
-            ("pkg/b.py", "python", "from pkg.a import helper\n\ndef run():\n    return helper()\n"),
+            (
+                "pkg/b.py",
+                "python",
+                "from pkg.a import helper\n\ndef run():\n    return helper()\n",
+            ),
             ("pkg/c.py", "python", "C = 1\n"),
             ("pkg/d.py", "python", "D = 1\n"),
             ("pkg/e.py", "python", "E = 1\n"),
@@ -323,7 +361,10 @@ fn import_and_file_set_changes_build_cold() {
         added.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved)
     );
-    assert!(added.decoded().is_some(), "a cold build holds its decoded generation");
+    assert!(
+        added.decoded().is_some(),
+        "a cold build holds its decoded generation"
+    );
 }
 
 #[test]

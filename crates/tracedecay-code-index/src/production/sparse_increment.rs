@@ -20,31 +20,22 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
-    CodeGenerationManifestV1, CodeGenerationSourceCommitmentsV1, FileOccurrenceId, ManifestDigest,
-    ProjectionKeyV1, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    SymbolIdentityDigest,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeGenerationManifestV1,
+    CodeGenerationSourceCommitmentsV1, FileOccurrenceId, ManifestDigest, ProjectionKeyV1,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
 };
 
-use super::file_evidence_rows::{
-    PersistedFileEvidenceV1, compact_one_file_evidence, identity_lineage,
-};
-use super::graph_pages::{CodeGraphPageInputsV1, owned_occurrences, seal_code_graph_page};
 use super::ignored_sources::IgnoredSourceRosterV1;
 use super::partitioned_codec::{
-    PartitionedCodeGraphPageDescriptorV1, PartitionedFileEvidenceDescriptorV1,
-    PartitionedFileSegmentDescriptorV1, PartitionedGenerationEvidenceRefV1,
-    PartitionedPublishedGenerationRefV1, SealedGenerationSegmentPublicationV1,
-    encode_file_evidence_segment, encode_file_segment, publish_code_graph_page,
-    seal_partitioned_manifest, snapshot_file_keys, write_generation_evidence,
+    PartitionedCodeGraphPageDescriptorV1, PartitionedFileSegmentDescriptorV1,
+    PartitionedGenerationEvidenceRefV1, PartitionedPublishedGenerationRefV1,
+    SealedGenerationSegmentPublicationV1, seal_partitioned_manifest, write_generation_evidence,
 };
 use super::projection_rows::FileChunkRostersV1;
 use super::resolution_index::reseal_resolution_index;
-use super::sealed_codec::FileScopeIdentityV1;
-use super::sealed_parent::{DecodeFailureV1, SealedParentGenerationV1, SparseFileSourceV1, SparseFileV1};
-use super::sparse_resolution::{
-    ResolvedFileV1, SparseSymbolsByNameV1, moves_name_lookups, resolve_edit,
-};
+use super::sealed_parent::SealedParentGenerationV1;
+use super::sparse_resolution::moves_name_lookups;
+use super::sparse_successor::{CrossFileEdgeCountsV1, SealedSuccessorV1};
 use super::*;
 use crate::generations::GenerationIncrementPlanV1;
 
@@ -126,7 +117,9 @@ impl SparseSegmentV1 {
 
     fn publication(&self) -> SealedGenerationSegmentPublicationV1<'_> {
         match self {
-            Self::File(digest, bytes) => SealedGenerationSegmentPublicationV1::File { digest, bytes },
+            Self::File(digest, bytes) => {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes }
+            }
             Self::FileEvidence(digest, bytes) => {
                 SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
             }
@@ -216,7 +209,9 @@ impl CodeIndexSparseGenerationV1 {
     /// Every segment this successor wrote: its kind, content address, and
     /// stored size.
     #[cfg(test)]
-    pub(super) fn written_segments(&self) -> impl Iterator<Item = (&'static str, &ManifestDigest, usize)> {
+    pub(super) fn written_segments(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &ManifestDigest, usize)> {
         self.segments.iter().filter_map(|segment| match segment {
             SparseSegmentV1::File(digest, bytes) => Some(("file", digest, bytes.len())),
             SparseSegmentV1::FileEvidence(digest, bytes) => {
@@ -272,19 +267,19 @@ fn present_paths(files: &[SanitizedCodeFileV1]) -> BTreeSet<&str> {
 
 /// One edited file: its successor snapshot row, and its artifacts before
 /// and after the edit.
-struct EditedFileV1<'s> {
-    file: &'s SanitizedCodeFileV1,
-    before: Arc<FileGenerationArtifactsV1>,
-    after: Arc<FileGenerationArtifactsV1>,
+pub(super) struct EditedFileV1<'s> {
+    pub(super) file: &'s SanitizedCodeFileV1,
+    pub(super) before: Arc<FileGenerationArtifactsV1>,
+    pub(super) after: Arc<FileGenerationArtifactsV1>,
     clone_stats: ClonePayloadBuildStatsV1,
     stale_invalidations: u64,
 }
 
-fn contract(message: &str) -> CodeIndexProductionErrorV1 {
+pub(super) fn contract(message: &str) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(message.to_owned())
 }
 
-fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
+pub(super) fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
     u64::try_from(value).map_err(|_| contract("sparse generation count exceeds u64"))
 }
 
@@ -298,17 +293,22 @@ impl SparseBuildV1<'_> {
         plan: &GenerationIncrementPlanV1,
         mut manifest: CodeGenerationManifestV1,
         snapshot: &SanitizedCodeSnapshotV1,
-    ) -> Result<Result<CodeIndexSparseGenerationV1, CodeIndexColdBuildReasonV1>, CodeIndexProductionErrorV1>
-    {
+    ) -> Result<
+        Result<CodeIndexSparseGenerationV1, CodeIndexColdBuildReasonV1>,
+        CodeIndexProductionErrorV1,
+    > {
         let control = self.control;
         if plan.is_full_rebuild() {
             return Ok(Err(CodeIndexColdBuildReasonV1::FullRebuild));
         }
         let parent_evidence = parent.generation_evidence()?;
-        if parent_evidence.projection_request.target_projection_key() != self.target_projection_key {
+        if parent_evidence.projection_request.target_projection_key() != self.target_projection_key
+        {
             return Ok(Err(CodeIndexColdBuildReasonV1::ProjectionKeyChange));
         }
-        if plan.deleted > 0 || present_paths(&snapshot.files) != present_paths(&parent.snapshot().files) {
+        if plan.deleted > 0
+            || present_paths(&snapshot.files) != present_paths(&parent.snapshot().files)
+        {
             return Ok(Err(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved));
         }
         let parent_rows = parent
@@ -355,8 +355,11 @@ impl SparseBuildV1<'_> {
             .full_replay_digest
             .clone();
         manifest.source_commitments = Some(
-            CodeGenerationSourceCommitmentsV1::from_changed_chunks(Some(&parent_full_replay), &changes.set)
-                .map_err(|error| contract(&error.to_string()))?,
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(
+                Some(&parent_full_replay),
+                &changes.set,
+            )
+            .map_err(|error| contract(&error.to_string()))?,
         );
         manifest.seal.expected_digest =
             expected_seal_digest(&manifest).map_err(|error| contract(&error.to_string()))?;
@@ -392,7 +395,12 @@ impl SparseBuildV1<'_> {
         let carried_symbols = parent
             .statistics()
             .symbol_count
-            .checked_sub(count(edited.iter().map(|file| file.before.artifacts.symbols.len()).sum())?)
+            .checked_sub(count(
+                edited
+                    .iter()
+                    .map(|file| file.before.artifacts.symbols.len())
+                    .sum(),
+            )?)
             .ok_or_else(|| contract("sealed parent counts fewer symbols than it carries"))?;
         let lineage_prior = (carried_symbols > 0 || !lineage.is_empty()).then_some(&parent_id);
 
@@ -413,14 +421,25 @@ impl SparseBuildV1<'_> {
         let code_graph_pages = sealed.graph_pages(parent, &edited, &resolution, &mut publish)?;
         let resolution_index = reseal_resolution_index(
             &parent.resolution_index()?,
-            &edited.iter().map(|file| file.before.as_ref()).collect::<Vec<_>>(),
-            &edited.iter().map(|file| file.after.as_ref()).collect::<Vec<_>>(),
+            &edited
+                .iter()
+                .map(|file| file.before.as_ref())
+                .collect::<Vec<_>>(),
+            &edited
+                .iter()
+                .map(|file| file.after.as_ref())
+                .collect::<Vec<_>>(),
             &mut publish,
         )?;
         let rosters = FileChunkRostersV1::new(
             edited
                 .iter()
-                .map(|file| Ok((sealed.key_of(file.file)?, file.after.artifacts.chunks.chunks.as_slice())))
+                .map(|file| {
+                    Ok((
+                        sealed.key_of(file.file)?,
+                        file.after.artifacts.chunks.chunks.as_slice(),
+                    ))
+                })
                 .collect::<Result<Vec<_>, CodeIndexProductionErrorV1>>()?
                 .into_iter(),
         );
@@ -459,12 +478,7 @@ impl SparseBuildV1<'_> {
             code_graph_pages: &code_graph_pages,
             resolution_index: &resolution_index,
         })?;
-        #[cfg(feature = "hotpath")]
-        {
-            hotpath::gauge!("code_index.sparse.references_resolved")
-                .set(resolution.references_resolved as u64);
-            hotpath::gauge!("code_index.sparse.segments_written").set(segments.len() as u64);
-        }
+        hotpath::gauge!("code_index.sparse.segments_written").set(segments.len() as u64);
         let (mut reused, mut computed, mut stale) = (0_u64, 0_u64, 0_u64);
         for file in &edited {
             reused = reused.saturating_add(file.clone_stats.reused);
@@ -513,7 +527,13 @@ impl SparseBuildV1<'_> {
                 worker,
             )?;
             let stale_invalidations = before.stale_clone_bindings(&after);
-            Ok::<_, CodeIndexProductionErrorV1>((reuse_key, before, after, clone_stats, stale_invalidations))
+            Ok::<_, CodeIndexProductionErrorV1>((
+                reuse_key,
+                before,
+                after,
+                clone_stats,
+                stale_invalidations,
+            ))
         })?;
         let mut edited = Vec::with_capacity(extracted.len());
         for (file, (reuse_key, before, after, clone_stats, stale_invalidations)) in
@@ -642,7 +662,11 @@ fn edited_lineage(
             .collect(),
     )
     .map_err(CodeIndexProductionErrorV1::Lineage)?;
-    let fresh = current.symbols.iter().map(Arc::as_ptr).collect::<HashSet<_>>();
+    let fresh = current
+        .symbols
+        .iter()
+        .map(Arc::as_ptr)
+        .collect::<HashSet<_>>();
     SymbolLineageResolver::new()
         .resolve_fresh_symbol_ptrs(&prior, &current, &fresh)
         .map_err(CodeIndexProductionErrorV1::Lineage)
@@ -665,9 +689,9 @@ fn successor_statistics(
             .ok_or_else(|| contract("generation file coverage byte total overflowed"))
     };
     let shrink = |total: u64, removed: u64| {
-        total
-            .checked_sub(removed)
-            .ok_or_else(|| contract("sealed parent statistics do not contain the files its successor replaces"))
+        total.checked_sub(removed).ok_or_else(|| {
+            contract("sealed parent statistics do not contain the files its successor replaces")
+        })
     };
     let grow = |total: u64, added: u64| {
         total
@@ -675,8 +699,11 @@ fn successor_statistics(
             .ok_or_else(|| contract("sparse generation statistics overflowed"))
     };
     let parent = parent.statistics();
-    let (mut source_total_bytes, mut symbol_count, mut edge_count) =
-        (parent.source_total_bytes, parent.symbol_count, parent.edge_count);
+    let (mut source_total_bytes, mut symbol_count, mut edge_count) = (
+        parent.source_total_bytes,
+        parent.symbol_count,
+        parent.edge_count,
+    );
     for file in edited {
         source_total_bytes = grow(
             shrink(source_total_bytes, source_bytes(&file.before)?)?,
@@ -702,503 +729,6 @@ fn successor_statistics(
     })
 }
 
-/// Cross-file edges the re-decided files sealed in the parent and seal now.
-#[derive(Default)]
-struct CrossFileEdgeCountsV1 {
-    before: u64,
-    after: u64,
-}
-
-/// The successor's file set as sealing reads it.
-struct SealedSuccessorV1<'p> {
-    snapshot: &'p SanitizedCodeSnapshotV1,
-    generation_id: &'p CodeGenerationId,
-    snapshot_digest: &'p ManifestDigest,
-    scope: FileScopeIdentityV1,
-    /// Present files in file-occurrence order, the order resolution indexes.
-    present: Vec<&'p SanitizedCodeFileV1>,
-    keys: HashMap<&'p FileOccurrenceId, u32>,
-    index_of_path: HashMap<&'p str, usize>,
-    occurrence_of_path: HashMap<&'p str, &'p FileOccurrenceId>,
-    parent_key_of_path: HashMap<&'p str, u32>,
-    edited_index: HashMap<&'p str, usize>,
-    failure: DecodeFailureV1,
-}
-
-impl<'p> SealedSuccessorV1<'p> {
-    fn new(
-        parent: &'p SealedParentGenerationV1,
-        manifest: &'p CodeGenerationManifestV1,
-        snapshot: &'p SanitizedCodeSnapshotV1,
-        edited: &[EditedFileV1<'p>],
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let keys = snapshot_file_keys(snapshot.files.iter().map(|file| &file.file_occurrence_id))?;
-        let mut present = snapshot
-            .files
-            .iter()
-            .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
-            .collect::<Vec<_>>();
-        present.sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
-        let index_of_path = present
-            .iter()
-            .enumerate()
-            .map(|(index, file)| (file.logical_path.as_str(), index))
-            .collect::<HashMap<_, _>>();
-        let occurrence_of_path = present
-            .iter()
-            .map(|file| (file.logical_path.as_str(), &file.file_occurrence_id))
-            .collect();
-        let parent_key_of_path = parent
-            .generation()
-            .file_segments
-            .iter()
-            .map(|descriptor| {
-                parent
-                    .snapshot()
-                    .files
-                    .get(descriptor.file_key as usize)
-                    .map(|file| (file.logical_path.as_str(), descriptor.file_key))
-                    .ok_or_else(|| contract("sealed file segment is outside its snapshot"))
-            })
-            .collect::<Result<_, _>>()?;
-        let edited_index = edited
-            .iter()
-            .map(|file| {
-                index_of_path
-                    .get(file.file.logical_path.as_str())
-                    .map(|index| (file.file.logical_path.as_str(), *index))
-                    .ok_or_else(|| contract("an edited file is not present in its successor"))
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self {
-            snapshot,
-            generation_id: &manifest.generation_id,
-            snapshot_digest: &manifest.snapshot_digest,
-            scope: FileScopeIdentityV1::of(manifest, snapshot),
-            present,
-            keys,
-            index_of_path,
-            occurrence_of_path,
-            parent_key_of_path,
-            edited_index,
-            failure: DecodeFailureV1::default(),
-        })
-    }
-
-    fn key_of(&self, file: &SanitizedCodeFileV1) -> Result<u32, CodeIndexProductionErrorV1> {
-        self.keys
-            .get(&file.file_occurrence_id)
-            .copied()
-            .ok_or_else(|| contract("a successor file is absent from its snapshot"))
-    }
-
-    /// The successor's present files for resolution: edited files decoded,
-    /// every other file decoded from its parent segment on first read.
-    fn view<'v>(
-        &'v self,
-        parent: &'v SealedParentGenerationV1,
-        edited: &'v [EditedFileV1<'p>],
-    ) -> Result<Vec<SparseFileV1<'v>>, CodeIndexProductionErrorV1> {
-        let edited_by_path = edited
-            .iter()
-            .map(|file| (file.file.logical_path.as_str(), &file.after))
-            .collect::<HashMap<_, _>>();
-        let stand_in = edited
-            .first()
-            .map(|file| &file.after)
-            .ok_or_else(|| contract("a sparse resolution view needs an edited file"))?;
-        self.present
-            .iter()
-            .map(|file| {
-                let language = file
-                    .language
-                    .as_ref()
-                    .map(|language| language.as_str())
-                    .ok_or_else(|| contract("present snapshot file has no declared language"))?;
-                Ok(match edited_by_path.get(file.logical_path.as_str()) {
-                    Some(after) => SparseFileV1::decoded(&file.logical_path, language, Arc::clone(after)),
-                    None => SparseFileV1::carried(
-                        &file.logical_path,
-                        language,
-                        SparseFileSourceV1 {
-                            parent,
-                            descriptor: parent
-                                .file_segment(&file.logical_path)
-                                .ok_or_else(|| contract("a carried file has no parent segment"))?,
-                            file_occurrence_id: &file.file_occurrence_id,
-                            generation_id: self.generation_id,
-                            snapshot_digest: self.snapshot_digest,
-                            stand_in,
-                            failure: &self.failure,
-                        },
-                    ),
-                })
-            })
-            .collect()
-    }
-
-    /// Re-decide the edited files' sites; a file whose resolution decoded
-    /// a carried file is reported in `decoded`.
-    fn resolve(
-        &self,
-        parent: &SealedParentGenerationV1,
-        edited: &[EditedFileV1<'p>],
-    ) -> Result<SuccessorResolutionV1, CodeIndexProductionErrorV1> {
-        if edited.is_empty() {
-            return Ok(SuccessorResolutionV1::default());
-        }
-        let view = self.view(parent, edited)?;
-        let index = parent.resolution_index()?;
-        let by_name = SparseSymbolsByNameV1::new(
-            &index,
-            &self.index_of_path,
-            edited.iter().map(|file| {
-                (
-                    self.edited_index[file.file.logical_path.as_str()],
-                    file.file.logical_path.as_str(),
-                    &file.after,
-                )
-            }),
-            &self.failure,
-        );
-        let pairs = edited
-            .iter()
-            .map(|file| {
-                (
-                    self.edited_index[file.file.logical_path.as_str()],
-                    Arc::clone(&file.before),
-                    Arc::clone(&file.after),
-                )
-            })
-            .collect::<Vec<_>>();
-        let resolution = resolve_edit(
-            parent,
-            &index,
-            &view,
-            &by_name,
-            &pairs,
-            &self.index_of_path,
-            &self.occurrence_of_path,
-            &self.parent_key_of_path,
-        )?;
-        if let Some(error) = self.failure.take() {
-            return Err(error);
-        }
-        let mut files = BTreeMap::new();
-        for (file_index, resolved) in resolution.files {
-            let file = self.present[file_index];
-            files.insert(
-                file.logical_path.clone(),
-                (Arc::clone(view[file_index].artifacts()), resolved),
-            );
-        }
-        Ok(SuccessorResolutionV1 {
-            files,
-            references_resolved: resolution.references_resolved,
-        })
-    }
-
-    /// Every present file's segment descriptor: the edited files encoded
-    /// anew, every other file's parent descriptor rekeyed.
-    fn file_segments(
-        &self,
-        parent: &SealedParentGenerationV1,
-        edited: &[EditedFileV1<'_>],
-        publish: &mut impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<Vec<PartitionedFileSegmentDescriptorV1>, CodeIndexProductionErrorV1> {
-        let edited_by_path = edited
-            .iter()
-            .map(|file| (file.file.logical_path.as_str(), &file.after))
-            .collect::<HashMap<_, _>>();
-        let mut descriptors = Vec::with_capacity(self.present.len());
-        for (key, file) in self.snapshot.files.iter().enumerate() {
-            if file.disposition != SnapshotFileDispositionV1::Present {
-                continue;
-            }
-            let key = u32::try_from(key).map_err(|_| contract("sealed generation file key exceeds u32"))?;
-            let descriptor = match edited_by_path.get(file.logical_path.as_str()) {
-                Some(after) => {
-                    let (descriptor, bytes) =
-                        encode_file_segment(self.generation_id, &self.scope, after, key)?;
-                    publish(SealedGenerationSegmentPublicationV1::File {
-                        digest: &descriptor.segment_digest,
-                        bytes: &bytes,
-                    })?;
-                    descriptor
-                }
-                None => {
-                    let parent = parent
-                        .file_segment(&file.logical_path)
-                        .ok_or_else(|| contract("a carried file has no parent segment"))?;
-                    if parent.file_occurrence_id != file.file_occurrence_id {
-                        return Err(contract("a carried file changed its occurrence"));
-                    }
-                    let mut descriptor = parent.clone();
-                    descriptor.file_key = key;
-                    descriptor
-                }
-            };
-            descriptors.push(descriptor);
-        }
-        Ok(descriptors)
-    }
-
-    /// Every present file's evidence descriptor: the evidence of each file
-    /// resolution re-decided and of each edited file sealed anew, a carried
-    /// file's explicit parent lineage resealed as identity lineage, and every
-    /// other file's parent descriptor rekeyed.
-    fn file_evidence(
-        &self,
-        parent: &SealedParentGenerationV1,
-        edited: &[EditedFileV1<'_>],
-        resolution: &SuccessorResolutionV1,
-        lineage: &[SymbolLineageCandidateV1],
-        lineage_prior: Option<&CodeGenerationId>,
-        publish: &mut impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<(Vec<PartitionedFileEvidenceDescriptorV1>, CrossFileEdgeCountsV1), CodeIndexProductionErrorV1>
-    {
-        let edited_by_path = edited
-            .iter()
-            .map(|file| (file.file.logical_path.as_str(), file))
-            .collect::<HashMap<_, _>>();
-        let mut lineage_by_file = HashMap::<&FileOccurrenceId, Vec<&SymbolLineageCandidateV1>>::new();
-        for file in edited {
-            for candidate in lineage
-                .iter()
-                .filter(|candidate| file.after.artifacts.symbols.iter().any(|symbol| symbol.occurrence == candidate.current_occurrence))
-            {
-                lineage_by_file
-                    .entry(&file.file.file_occurrence_id)
-                    .or_default()
-                    .push(candidate);
-            }
-        }
-        let mut counts = CrossFileEdgeCountsV1::default();
-        let mut stored = parent
-            .generation()
-            .file_evidence
-            .iter()
-            .map(|descriptor| descriptor.segment_digest.clone())
-            .collect::<BTreeSet<_>>();
-        let mut descriptors = Vec::new();
-        for (key, file) in self.snapshot.files.iter().enumerate() {
-            if file.disposition != SnapshotFileDispositionV1::Present {
-                continue;
-            }
-            let key = u32::try_from(key).map_err(|_| contract("sealed generation file key exceeds u32"))?;
-            let parent_key = self
-                .parent_key_of_path
-                .get(file.logical_path.as_str())
-                .copied()
-                .ok_or_else(|| contract("a successor file has no parent segment"))?;
-            let parent_descriptor = parent.file_evidence_descriptor(parent_key);
-            let resolved = resolution.files.get(&file.logical_path);
-            let edited_file = edited_by_path.get(file.logical_path.as_str());
-            let evidence = if resolved.is_some() || edited_file.is_some() {
-                if let Some(parent_evidence) = parent.file_evidence(parent_key)? {
-                    counts.before = counts
-                        .before
-                        .saturating_add(count(parent_evidence.cross_file_edge_count())?);
-                }
-                let artifacts = match (resolved, edited_file) {
-                    (_, Some(edited)) => Arc::clone(&edited.after),
-                    (Some((artifacts, _)), None) => Arc::clone(artifacts),
-                    (None, None) => return Err(contract("a re-decided file has no artifacts")),
-                };
-                let edges = resolved
-                    .map(|(_, resolved)| {
-                        resolved
-                            .edges
-                            .iter()
-                            .map(|(edge, path, identity)| (edge, path.as_str(), identity))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                counts.after = counts.after.saturating_add(count(edges.len())?);
-                let calls = resolved
-                    .map(|(_, resolved)| resolved.unresolved_calls.iter().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                let identity;
-                let file_lineage = match edited_file {
-                    Some(_) => lineage_by_file
-                        .remove(&file.file_occurrence_id)
-                        .unwrap_or_default(),
-                    None => {
-                        identity = identity_lineage(&artifacts, lineage_prior, self.generation_id)?;
-                        identity.iter().collect()
-                    }
-                };
-                Some(compact_one_file_evidence(
-                    &artifacts,
-                    &edges,
-                    &calls,
-                    &file_lineage,
-                    lineage_prior,
-                    self.generation_id,
-                )?)
-            } else if parent_descriptor.is_some_and(|descriptor| descriptor.explicit_lineage) {
-                parent
-                    .file_evidence(parent_key)?
-                    .map(PersistedFileEvidenceV1::with_identity_lineage)
-            } else {
-                if let Some(descriptor) = parent_descriptor {
-                    if descriptor.file_occurrence_id != file.file_occurrence_id {
-                        return Err(contract("a carried file changed its occurrence"));
-                    }
-                    let mut descriptor = descriptor.clone();
-                    descriptor.file_key = key;
-                    descriptors.push(descriptor);
-                }
-                continue;
-            };
-            let Some(evidence) = evidence.filter(|evidence| !evidence.is_empty()) else {
-                continue;
-            };
-            let (descriptor, bytes) =
-                encode_file_evidence_segment(key, &file.file_occurrence_id, &evidence)?;
-            if stored.insert(descriptor.segment_digest.clone()) {
-                publish(SealedGenerationSegmentPublicationV1::FileEvidence {
-                    digest: &descriptor.segment_digest,
-                    bytes: &bytes,
-                })?;
-            }
-            descriptors.push(descriptor);
-        }
-        Ok((descriptors, counts))
-    }
-
-    /// Every snapshot file's graph page: the pages of edited and re-decided
-    /// files and of rows the snapshot changed rebuilt, every other page's
-    /// parent descriptor rekeyed.
-    fn graph_pages(
-        &self,
-        parent: &SealedParentGenerationV1,
-        edited: &[EditedFileV1<'_>],
-        resolution: &SuccessorResolutionV1,
-        publish: &mut impl FnMut(SealedGenerationSegmentPublicationV1<'_>) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<Vec<PartitionedCodeGraphPageDescriptorV1>, CodeIndexProductionErrorV1> {
-        let parent_pages = parent.graph_pages_by_path();
-        let parent_rows = parent
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| (file.logical_path.as_str(), file))
-            .collect::<HashMap<_, _>>();
-        let reusable = parent
-            .generation()
-            .code_graph_pages
-            .iter()
-            .map(|page| page.page_digest.clone())
-            .collect::<BTreeSet<_>>();
-        let edited_by_path = edited
-            .iter()
-            .map(|file| (file.file.logical_path.as_str(), &file.after))
-            .collect::<HashMap<_, _>>();
-        let files_by_occurrence = self
-            .snapshot
-            .files
-            .iter()
-            .map(|file| (&file.file_occurrence_id, file))
-            .collect::<BTreeMap<_, _>>();
-        let mut pages = Vec::with_capacity(self.snapshot.files.len());
-        for (key, file) in self.snapshot.files.iter().enumerate() {
-            let key = u32::try_from(key).map_err(|_| contract("code graph page file key exceeds u32"))?;
-            let path = file.logical_path.as_str();
-            let resolved = resolution.files.get(&file.logical_path);
-            let edited_file = edited_by_path.get(path);
-            let row_unchanged = parent_rows.get(path) == Some(&file);
-            if resolved.is_none() && edited_file.is_none() && row_unchanged {
-                let parent_page = parent_pages
-                    .get(path)
-                    .ok_or_else(|| contract("a carried file has no parent graph page"))?;
-                let mut descriptor = (*parent_page).clone();
-                descriptor.file_key = key;
-                pages.push(descriptor);
-                continue;
-            }
-            let artifacts = match (edited_file, resolved) {
-                (Some(after), _) => Some(Arc::clone(after)),
-                (None, Some((artifacts, _))) => Some(Arc::clone(artifacts)),
-                (None, None) if file.disposition == SnapshotFileDispositionV1::Present => {
-                    return Err(contract("a present file's graph page changed without its artifacts"));
-                }
-                (None, None) => None,
-            };
-            let inputs = match artifacts.as_deref() {
-                Some(artifacts) => {
-                    let cross_file = resolved.map(|(_, resolved)| resolved.edges.as_slice()).unwrap_or_default();
-                    self.page_inputs(key, file, artifacts, cross_file, resolved.map(|(_, resolved)| resolved.unresolved_calls.clone()).unwrap_or_default())?
-                }
-                None => CodeGraphPageInputsV1 {
-                    file_key: key,
-                    snapshot_file: file,
-                    artifacts: None,
-                    edges: Vec::new(),
-                    unresolved_calls: Vec::new(),
-                    target_files: BTreeMap::new(),
-                    placeholder_targets: BTreeSet::new(),
-                    owned_placeholders: BTreeSet::new(),
-                },
-            };
-            let page = seal_code_graph_page(inputs, &files_by_occurrence, self.generation_id)?;
-            pages.push(publish_code_graph_page(page, &reusable, publish)?);
-        }
-        Ok(pages)
-    }
-
-    /// One present file's page inputs: its own edges and its cross-file
-    /// edges in canonical order, cross-file targets owned by their files,
-    /// and its own edges' unowned targets as placeholders it owns.
-    fn page_inputs<'f>(
-        &self,
-        file_key: u32,
-        snapshot_file: &'f SanitizedCodeFileV1,
-        artifacts: &'f FileGenerationArtifactsV1,
-        cross_file: &[(CanonicalRelationEdgeV1, String, SymbolIdentityDigest)],
-        unresolved_calls: Vec<crate::chunks::CodeIndexUnresolvedReferenceV1>,
-    ) -> Result<CodeGraphPageInputsV1<'f>, CodeIndexProductionErrorV1> {
-        let owned = owned_occurrences(artifacts);
-        let mut edges = artifacts.artifacts.edges.clone();
-        let mut target_files = BTreeMap::new();
-        for (edge, path, _) in cross_file {
-            if !owned.contains(&edge.to_occurrence) {
-                let target = self
-                    .occurrence_of_path
-                    .get(path.as_str())
-                    .ok_or_else(|| contract("a cross-file edge targets a file outside its successor"))?;
-                target_files.insert(edge.to_occurrence.clone(), (*target).clone());
-            }
-            edges.push(edge.clone());
-        }
-        edges.sort_by(edge_order);
-        let placeholder_targets = artifacts
-            .artifacts
-            .edges
-            .iter()
-            .filter(|edge| !owned.contains(&edge.to_occurrence))
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<BTreeSet<_>>();
-        Ok(CodeGraphPageInputsV1 {
-            file_key,
-            snapshot_file,
-            artifacts: Some(artifacts),
-            edges,
-            unresolved_calls,
-            target_files,
-            owned_placeholders: placeholder_targets.clone(),
-            placeholder_targets,
-        })
-    }
-}
-
-/// The files whose cross-file evidence the edit re-decided, by logical path,
-/// with the artifacts resolution read them as.
-#[derive(Default)]
-struct SuccessorResolutionV1 {
-    files: BTreeMap<String, (Arc<FileGenerationArtifactsV1>, ResolvedFileV1)>,
-    references_resolved: usize,
-}
-
 /// The digest determinism checks compare: the successor's content identity,
 /// its file segments, and its graph pages, which hold every edge. Cold and
 /// sparse seals of one tree agree on it.
@@ -1218,5 +748,6 @@ pub(super) fn lane_digest(
         hasher.update(b"\0p");
         hasher.update(page.page_digest.as_str().as_bytes());
     }
-    ManifestDigest::from_sha256_bytes(&hasher.finalize()).map_err(|error| contract(&error.to_string()))
+    ManifestDigest::from_sha256_bytes(&hasher.finalize())
+        .map_err(|error| contract(&error.to_string()))
 }

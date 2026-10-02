@@ -22,7 +22,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::{PartitionedSealV1, id},
+    support::{PartitionedSealV1, cold_generation, id},
 };
 
 const IMPORT_SOURCE: &str = concat!(
@@ -68,9 +68,11 @@ fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    owner
-        .build_and_publish(import_request(), &ActiveControl)
-        .expect("parser-backed import generation publishes")
+    cold_generation(
+        &owner
+            .build_and_publish(import_request(), &ActiveControl)
+            .expect("parser-backed import generation publishes"),
+    )
 }
 
 fn expected_import() -> CodeIndexImportEvidenceV1 {
@@ -314,18 +316,20 @@ fn published_call_generation() -> Arc<CodeIndexPublishedGenerationV1> {
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    owner
-        .build_and_publish(
-            request_with_source(
-                "file.graph-calls",
-                1_600_000,
-                "commit.graph-calls",
-                "tree.graph-calls",
-                CALL_SOURCE,
-            ),
-            &ActiveControl,
-        )
-        .expect("parser-backed call generation publishes")
+    cold_generation(
+        &owner
+            .build_and_publish(
+                request_with_source(
+                    "file.graph-calls",
+                    1_600_000,
+                    "commit.graph-calls",
+                    "tree.graph-calls",
+                    CALL_SOURCE,
+                ),
+                &ActiveControl,
+            )
+            .expect("parser-backed call generation publishes"),
+    )
 }
 
 /// Each code edge is one relation row from its source symbol to its target
