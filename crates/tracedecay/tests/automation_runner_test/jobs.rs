@@ -748,6 +748,11 @@ async fn scheduled_pre_run_spawn_failure_is_retried_after_cooldown() {
     );
 }
 
+#[cfg(windows)]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input 1>&2 & exit 3";
+#[cfg(not(windows))]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input >&2; exit 3";
+
 #[tokio::test]
 async fn scheduled_pre_run_nonzero_exit_is_not_retried() {
     let temp = tempdir().unwrap();
@@ -755,7 +760,7 @@ async fn scheduled_pre_run_nonzero_exit_is_not_retried() {
     fs::create_dir_all(&project_root).unwrap();
 
     let (job, record) =
-        run_scheduled_pre_run_failure("cmd-exit", "echo bad-input >&2; exit 3", project_root).await;
+        run_scheduled_pre_run_failure("cmd-exit", NONZERO_EXIT_PRE_RUN_COMMAND, project_root).await;
 
     assert_eq!(
         record.error_classification,
