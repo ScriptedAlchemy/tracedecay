@@ -47,10 +47,9 @@ test("only the owning location dispatches an unlocated execution boundary", () =
 
 test("guidance waits for its own session's next model request and is delivered once", () => {
   const pending = new PendingGuidance()
-  const deliverA = pending.deliveryFor("ses_a")
-  deliverA("first")
-  deliverA(undefined)
-  deliverA("second")
+  pending.deliveryFor("ses_a")("first")
+  pending.deliveryFor("ses_a")(undefined)
+  pending.deliveryFor("ses_a")("second")
   pending.deliveryFor("ses_b")("other")
 
   expect(pending.drain("ses_a")).toEqual(["first", "second"])
@@ -60,8 +59,8 @@ test("guidance waits for its own session's next model request and is delivered o
 
 test("session deletion discards queued guidance and invalidates in-flight delivery", () => {
   const pending = new PendingGuidance()
+  pending.deliveryFor("ses_deleted")("queued before deletion")
   const deliver = pending.deliveryFor("ses_deleted")
-  deliver("queued before deletion")
   pending.delete("ses_deleted")
   deliver("late callback after deletion")
 
@@ -72,8 +71,9 @@ test("session deletion discards queued guidance and invalidates in-flight delive
 
 test("draining a turn does not invalidate guidance still in flight for a live session", () => {
   const pending = new PendingGuidance()
+  const first = pending.deliveryFor("ses_active")
   const deliver = pending.deliveryFor("ses_active")
-  deliver("first turn")
+  first("first turn")
   expect(pending.drain("ses_active")).toEqual(["first turn"])
   deliver("next turn")
   expect(pending.drain("ses_active")).toEqual(["next turn"])
@@ -115,10 +115,44 @@ test("empty sessions cannot evict undelivered guidance", () => {
   expect(pending.drain("ses_new")).toEqual(["new guidance"])
 })
 
+test("capacity pressure does not invalidate an unfinished hook delivery", () => {
+  const pending = new PendingGuidance()
+  pending.deliveryFor("ses_oldest")("oldest guidance")
+  const unfinished = pending.deliveryFor("ses_unfinished")
+  for (let index = 0; index < 126; index++) {
+    pending.deliveryFor(`ses_ready_${index}`)("ready")
+  }
+  pending.deliveryFor("ses_new")("new guidance")
+  unfinished("late guidance")
+
+  expect(pending.drain("ses_unfinished")).toEqual(["late guidance"])
+  expect(pending.drain("ses_new")).toEqual(["new guidance"])
+})
+
+test("all outstanding hooks can finish even when they exceed idle retention capacity", () => {
+  const pending = new PendingGuidance()
+  const deliveries = Array.from({ length: 256 }, (_, index) => pending.deliveryFor(`ses_${index}`))
+  for (let index = 0; index < deliveries.length; index++) {
+    deliveries[index]("completed")
+    expect(pending.drain(`ses_${index}`)).toEqual(["completed"])
+  }
+})
+
+test("each hook delivery settles once without releasing another outstanding hook", () => {
+  const pending = new PendingGuidance()
+  const first = pending.deliveryFor("ses_active")
+  const second = pending.deliveryFor("ses_active")
+  first("first")
+  first("duplicate")
+  expect(pending.drain("ses_active")).toEqual(["first"])
+  second("second")
+  expect(pending.drain("ses_active")).toEqual(["second"])
+})
+
 test("plugin disposal clears guidance and invalidates every in-flight delivery", () => {
   const pending = new PendingGuidance()
+  pending.deliveryFor("ses_active")("queued")
   const deliver = pending.deliveryFor("ses_active")
-  deliver("queued")
   pending.clear()
   deliver("late")
 

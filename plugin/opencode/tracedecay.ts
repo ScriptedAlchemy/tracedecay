@@ -3,7 +3,7 @@ import type { Plugin } from "@opencode/plugin"
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 const MAX_GUIDANCE_BYTES = 8 * 1024
 const MAX_PENDING_GUIDANCE_PER_SESSION = 16
-const MAX_PENDING_GUIDANCE_SESSIONS = 128
+const MAX_IDLE_GUIDANCE_SESSIONS = 128
 
 // Durable session boundaries on OpenCode's public event stream. The
 // deprecated `session.idle` / `session.status` pair is not emitted for V2
@@ -68,43 +68,59 @@ export class SessionLocations {
 // UI channel, so guidance waits for the owning session's next model request
 // and is injected there as system context.
 export class PendingGuidance {
-  private readonly bySession = new Map<string, string[]>()
+  private readonly bySession = new Map<string, { guidance: string[]; inFlight: number }>()
+  private readonly idle = new Set<string>()
 
   deliveryFor(sessionID: string): (guidance: string | undefined) => void {
-    let queue = this.bySession.get(sessionID)
-    if (!queue) {
-      queue = []
+    let session = this.bySession.get(sessionID)
+    if (!session) {
+      session = { guidance: [], inFlight: 0 }
+      this.bySession.set(sessionID, session)
     }
-    this.bySession.delete(sessionID)
-    this.bySession.set(sessionID, queue)
-    if (this.bySession.size > MAX_PENDING_GUIDANCE_SESSIONS) {
-      let evicted = this.bySession.keys().next().value
-      for (const [id, guidance] of this.bySession) {
-        if (id !== sessionID && guidance.length === 0) {
-          evicted = id
-          break
-        }
-      }
-      if (evicted !== undefined) this.bySession.delete(evicted)
-    }
-    const captured = queue
+    this.idle.delete(sessionID)
+    session.inFlight++
+    const captured = session
+    let settled = false
     return (guidance) => {
-      if (!guidance || this.bySession.get(sessionID) !== captured) return
-      if (captured.length >= MAX_PENDING_GUIDANCE_PER_SESSION) captured.shift()
-      captured.push(guidance)
+      if (settled) return
+      settled = true
+      captured.inFlight--
+      if (this.bySession.get(sessionID) !== captured) return
+      if (guidance) {
+        if (captured.guidance.length >= MAX_PENDING_GUIDANCE_PER_SESSION) captured.guidance.shift()
+        captured.guidance.push(guidance)
+      }
+      if (captured.inFlight !== 0) return
+      if (captured.guidance.length === 0) {
+        this.delete(sessionID)
+        return
+      }
+      // Active hooks retain their delivery tokens. Only completed, undrained
+      // sessions count toward the idle retention limit; the oldest expires first.
+      this.idle.add(sessionID)
+      if (this.idle.size > MAX_IDLE_GUIDANCE_SESSIONS) {
+        const oldest = this.idle.values().next()
+        if (!oldest.done) this.delete(oldest.value)
+      }
     }
   }
 
   delete(sessionID: string): void {
     this.bySession.delete(sessionID)
+    this.idle.delete(sessionID)
   }
 
   clear(): void {
     this.bySession.clear()
+    this.idle.clear()
   }
 
   drain(sessionID: string): string[] {
-    return this.bySession.get(sessionID)?.splice(0) ?? []
+    const session = this.bySession.get(sessionID)
+    if (!session) return []
+    const guidance = session.guidance.splice(0)
+    if (session.inFlight === 0) this.delete(sessionID)
+    return guidance
   }
 }
 
@@ -143,7 +159,7 @@ export function dispatchAfterAck(
   // hook process owns the event before OpenCode receives this callback's ack.
   void dispatch(command, payload, executable, cwd)
     .then(deliver)
-    .catch(() => undefined)
+    .catch(() => deliver(undefined))
 }
 
 async function readBoundedGuidance(
