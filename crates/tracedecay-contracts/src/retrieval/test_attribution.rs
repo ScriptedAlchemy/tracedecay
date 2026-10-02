@@ -7,7 +7,7 @@ use tracedecay_domain::UtcMicros;
 
 use crate::context::RequestContext;
 use crate::handlers::ApplicationOperation;
-use crate::result::{OpaqueCursor, OperationBudgetUsage};
+use crate::result::{ApplicationProblem, OpaqueCursor, OperationBudgetUsage};
 
 use super::RetrievalRequestMeta;
 
@@ -126,6 +126,7 @@ pub enum TestPrimitivePortOutcome<T> {
         finished_at: UtcMicros,
         budget: OperationBudgetUsage,
     },
+    Refused(Box<ApplicationProblem>),
 }
 
 pub type TestPrimitivePortFuture<'a, T> =
