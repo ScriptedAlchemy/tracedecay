@@ -168,6 +168,27 @@ test("dispatch returns guidance only after the hook child exits successfully", a
   expect(guidance).toBe("TraceDecay guidance")
 })
 
+test("stalled hook children are killed and their delivery settles", async () => {
+  const pending = new PendingGuidance()
+  const deliver = pending.deliveryFor("ses_stalled")
+  const result = await new Promise<string | undefined>((resolve) => {
+    dispatchAfterAck("60", {}, (guidance) => {
+      deliver(guidance)
+      resolve(guidance)
+    }, "/usr/bin/sleep")
+  })
+  expect(result).toBeUndefined()
+  pending.deliveryFor("ses_stalled")("subsequent guidance")
+  expect(pending.drain("ses_stalled")).toEqual(["subsequent guidance"])
+}, 15_000)
+
+test("plugin cancellation terminates an outstanding hook child", async () => {
+  const controller = new AbortController()
+  const result = dispatch("60", {}, "/usr/bin/sleep", undefined, controller.signal)
+  controller.abort()
+  expect(await result).toBeUndefined()
+})
+
 test("dispatch runs the hook child in the plugin location so the daemon resolves the project", async () => {
   const guidance = await dispatch("", {}, "/bin/pwd", "/tmp")
 

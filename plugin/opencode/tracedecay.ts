@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode/plugin"
 
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 const MAX_GUIDANCE_BYTES = 8 * 1024
+const HOOK_TIMEOUT_MS = 10_000
 const MAX_PENDING_GUIDANCE_PER_SESSION = 16
 const MAX_IDLE_GUIDANCE_SESSIONS = 128
 
@@ -129,6 +130,7 @@ export async function dispatch(
   payload: unknown,
   executable = TRACEDECAY_BIN,
   cwd?: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   let process: Bun.Subprocess<Blob, "pipe", "ignore">
   try {
@@ -137,6 +139,9 @@ export async function dispatch(
       stdin: new Blob([JSON.stringify(payload)]),
       stdout: "pipe",
       stderr: "ignore",
+      timeout: HOOK_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      signal,
     })
   } catch {
     return undefined
@@ -154,10 +159,11 @@ export function dispatchAfterAck(
   deliver: (guidance: string | undefined) => void,
   executable = TRACEDECAY_BIN,
   cwd?: string,
+  signal?: AbortSignal,
 ): void {
   // `dispatch` spawns synchronously before its first await, so the native
   // hook process owns the event before OpenCode receives this callback's ack.
-  void dispatch(command, payload, executable, cwd)
+  void dispatch(command, payload, executable, cwd, signal)
     .then(deliver)
     .catch(() => deliver(undefined))
 }
@@ -201,6 +207,7 @@ export const TraceDecayPlugin: Plugin.Plugin = {
     const cwd = ctx.location.directory
     const sessions = new SessionLocations(cwd)
     const pending = new PendingGuidance()
+    const controller = new AbortController()
 
     await ctx.session.hook("context", (event) => {
       for (const text of pending.drain(event.sessionID)) {
@@ -215,10 +222,10 @@ export const TraceDecayPlugin: Plugin.Plugin = {
         pending.deliveryFor(event.sessionID),
         TRACEDECAY_BIN,
         cwd,
+        controller.signal,
       )
     })
 
-    const controller = new AbortController()
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
@@ -233,6 +240,7 @@ export const TraceDecayPlugin: Plugin.Plugin = {
             pending.deliveryFor(sessionID),
             TRACEDECAY_BIN,
             cwd,
+            controller.signal,
           )
         }
       } catch {
