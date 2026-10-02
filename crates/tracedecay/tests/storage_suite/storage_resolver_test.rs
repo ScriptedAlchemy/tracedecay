@@ -205,6 +205,7 @@ async fn register_observation_store(
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from("sessions.db"),
             branch_meta_relpath: PathBuf::from("branch-meta.json"),
+            sessions_schema_digest: None,
         },
     )
     .unwrap();

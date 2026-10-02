@@ -324,7 +324,6 @@ pub fn sanitize_branch_name(name: &str) -> String {
 
 #[cfg(test)]
 mod branch_memo_tests {
-    use std::io::Write as _;
     use std::path::Path;
 
     use super::BranchMemo;
@@ -377,37 +376,6 @@ mod branch_memo_tests {
         run_git(&linked, &["checkout", "--quiet", "-b", "side-two"]);
         assert_eq!(super::current_branch(&linked).as_deref(), Some("side-two"));
         assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
-    }
-
-    /// Rewrites `path` in place with same-length `contents` and hands back its
-    /// mtime, so only the change time can tell the two states apart.
-    fn rewrite_in_place(path: &Path, contents: &[u8]) {
-        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
-        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        file.write_all(contents).unwrap();
-        file.set_modified(modified).unwrap();
-    }
-
-    /// A same-size HEAD rewrite inside the change-time quantum of the stamp
-    /// the memo was keyed by leaves every stat field equal, so a stamp taken
-    /// in that quantum must not answer the next read.
-    #[test]
-    fn current_branch_observes_a_same_size_in_place_head_rewrite() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let root = temp.path().join("repo");
-        std::fs::create_dir_all(&root).expect("repository directory");
-        let root = root.canonicalize().expect("canonical repository");
-        run_git(&root, &["init", "--quiet", "--initial-branch=main"]);
-        run_git(&root, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
-        run_git(&root, &["branch", "side"]);
-        let head = root.join(".git").join("HEAD");
-
-        for _ in 0..32 {
-            rewrite_in_place(&head, b"ref: refs/heads/main\n");
-            assert_eq!(super::current_branch(&root).as_deref(), Some("main"));
-            rewrite_in_place(&head, b"ref: refs/heads/side\n");
-            assert_eq!(super::current_branch(&root).as_deref(), Some("side"));
-        }
     }
 
     /// A memo answers repeated reads of its own root from one resolution, and

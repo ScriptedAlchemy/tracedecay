@@ -71,7 +71,6 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
@@ -87,8 +86,8 @@ use crate::runtime::jsonl_observation_admission::{
 use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    run_blocking_transcript_section,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource, jsonl_change_token_settled,
+    jsonl_file_change_token, run_blocking_transcript_section,
 };
 
 #[cfg(test)]
@@ -216,12 +215,11 @@ impl SettledFileWitness {
         let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
             return Ok(None);
         };
-        let changed = change_stamp(&metadata);
-        if !metadata.is_file() || !changed.is_settled() {
+        if !metadata.is_file() || !jsonl_change_token_settled(jsonl_file_change_token(&metadata)) {
             return Ok(None);
         }
         Ok(Some(Self {
-            identity: codex_corpus_identity(path, &metadata, changed)?,
+            identity: codex_corpus_identity(path, &metadata)?,
             len: metadata.len(),
         }))
     }
@@ -1842,8 +1840,7 @@ impl CodexSource {
                     }
                 };
                 if !metadata.is_file()
-                    || codex_corpus_identity(&source.path, &metadata, change_stamp(&metadata))?
-                        != source.identity
+                    || codex_corpus_identity(&source.path, &metadata)? != source.identity
                 {
                     valid = false;
                     break;
@@ -1919,8 +1916,7 @@ impl CodexSource {
                         }
                     };
                     if !metadata.is_file()
-                        || codex_corpus_identity(&file.path, &metadata, change_stamp(&metadata))?
-                            != file.identity
+                        || codex_corpus_identity(&file.path, &metadata)? != file.identity
                     {
                         changed = true;
                         break;
@@ -2654,7 +2650,7 @@ fn retained_scan_step(
                     discovery_limit = Some(FileDiscoveryLimit::DiscoveryBytes);
                     break;
                 }
-                let identity = codex_corpus_identity(&path, &metadata, change_stamp(&metadata))?;
+                let identity = codex_corpus_identity(&path, &metadata)?;
                 scan.epoch.observe(identity)?;
                 retain_active_file(
                     &mut scan.active_files,
@@ -2727,9 +2723,11 @@ fn codex_directory_changed(
     let Some(stored) = stored else {
         return Ok(true);
     };
-    // An unsettled stat proves nothing either way; the entry names do.
+    if current.stat != stored.stat {
+        return Ok(true);
+    }
     if current.settled {
-        return Ok(current.stat != stored.stat);
+        return Ok(false);
     }
     Ok(directory_entry_fingerprint(path)? != stored.entries)
 }
@@ -2758,10 +2756,9 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
             ),
         });
     }
-    let changed = change_stamp(&metadata);
     Ok(Some(DirectoryStatWitness {
-        stat: codex_corpus_identity(path, &metadata, changed)?,
-        settled: changed.is_settled(),
+        stat: codex_corpus_identity(path, &metadata)?,
+        settled: jsonl_change_token_settled(jsonl_file_change_token(&metadata)),
     }))
 }
 
@@ -2829,28 +2826,20 @@ fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult
         })
 }
 
-/// The change stamp a corpus identity carries, settled against the clock now:
-/// after the stat, before any read of the bytes the identity stands for.
-fn change_stamp(metadata: &std::fs::Metadata) -> ChangeStamp {
-    RewriteWitness::NATIVE.stamp(metadata, ChangeClockReading::now())
-}
-
-/// Discovery skips re-delivering a file whose identity is unchanged, so an
-/// identity carrying an unsettled stamp matches no later one.
 fn codex_corpus_identity(
     path: &Path,
     metadata: &std::fs::Metadata,
-    changed: ChangeStamp,
 ) -> TranscriptIngestResult<[u8; 32]> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-codex-discovery-identity-v3");
+    hasher.update(b"tracedecay-codex-discovery-identity-v2");
     hash_path(&mut hasher, path);
     hasher.update(metadata.len().to_le_bytes());
-    hasher.update(changed.to_le_bytes());
     #[cfg(unix)]
     {
         hasher.update(metadata.dev().to_le_bytes());
         hasher.update(metadata.ino().to_le_bytes());
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
         hasher.update(metadata.mtime().to_le_bytes());
         hasher.update(metadata.mtime_nsec().to_le_bytes());
         // Ext4 reuses the inode inside one coarse timestamp quantum, and a

@@ -18,9 +18,6 @@ pub(super) struct StagedReplayUnlink {
     fingerprint: StagedFileFingerprint,
 }
 
-/// Binds a seal's path to its open handle across one stage-verify-finalize
-/// operation. The seal's bytes are proven by their digest, never by an equal
-/// fingerprint, so no change-time settledness is needed here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StagedFileFingerprint {
     len: u64,

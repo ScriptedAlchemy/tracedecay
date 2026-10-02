@@ -657,9 +657,6 @@ impl Drop for ScratchDirectory {
     }
 }
 
-/// One family member's stat, captured before and compared after a single
-/// backup or copy to refuse a family that visibly moved during it. The bytes
-/// come from that operation itself, never from a cache this state vouches for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     path: PathBuf,

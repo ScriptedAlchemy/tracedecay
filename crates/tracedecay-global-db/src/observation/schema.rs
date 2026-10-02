@@ -14,6 +14,13 @@ const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrem
 /// instead of decoding them.
 const OBSERVATION_UNIFIED_IDENTITY_MIGRATION: &str = "observations-unified-identity-v1";
 
+/// The markers observation admission reads to decide whether a store's rows
+/// are admissible.
+pub(crate) const OBSERVATION_ADMISSION_MARKERS: [&str; 2] = [
+    OBSERVATION_SCHEMA_MIGRATION,
+    OBSERVATION_UNIFIED_IDENTITY_MIGRATION,
+];
+
 /// The observation authority of a store written before the unified
 /// observation identity. The store's other authorities stay admissible; its
 /// session features are refused until the store is reset.

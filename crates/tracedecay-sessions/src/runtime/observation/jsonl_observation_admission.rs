@@ -36,7 +36,6 @@ use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,
 };
-use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
@@ -488,8 +487,6 @@ struct SharedJsonlPageKey {
     preparation: SharedJsonlFramePreparation,
 }
 
-/// A transcript's stat identity. Caches serve bytes read under an equal
-/// identity, so it compares equal only while its change stamp is settled.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::runtime) struct SharedJsonlFileIdentity {
     len: u64,
@@ -498,7 +495,10 @@ pub(in crate::runtime) struct SharedJsonlFileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    changed: ChangeStamp,
+    #[cfg(unix)]
+    changed_secs: i64,
+    #[cfg(unix)]
+    changed_nanos: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -1054,7 +1054,6 @@ fn shared_jsonl_path_is_pinned(path: &Path) -> bool {
 pub(in crate::runtime) fn shared_jsonl_file_identity(
     path: &Path,
 ) -> TranscriptIngestResult<SharedJsonlFileIdentity> {
-    let sampled_at = ChangeClockReading::now();
     let metadata = std::fs::metadata(path).map_err(|source| TranscriptIngestError::ScanIo {
         operation: "stat shared JSONL page",
         path: path.to_path_buf(),
@@ -1072,7 +1071,10 @@ pub(in crate::runtime) fn shared_jsonl_file_identity(
         device: metadata.dev(),
         #[cfg(unix)]
         inode: metadata.ino(),
-        changed: RewriteWitness::NATIVE.stamp(&metadata, sampled_at),
+        #[cfg(unix)]
+        changed_secs: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanos: metadata.ctime_nsec(),
     })
 }
 

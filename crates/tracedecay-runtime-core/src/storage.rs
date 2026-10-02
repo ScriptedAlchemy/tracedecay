@@ -395,6 +395,11 @@ pub struct StoreManifest {
     pub graph_db_relpath: PathBuf,
     pub sessions_db_relpath: PathBuf,
     pub branch_meta_relpath: PathBuf,
+    /// Registered-schema admission digest the sessions database was last
+    /// admitted under. Absent until its first admission: the startup census
+    /// then inspects the store in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_schema_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

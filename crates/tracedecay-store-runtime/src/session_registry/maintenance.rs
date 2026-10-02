@@ -555,6 +555,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .as_ref()
             .ok()
             .and_then(RegisteredGlobalDbOwnerV1::reset_required);
+        if let (Ok(_), None, StoreShardScopeV1::ProjectSessions { project_id }) =
+            (&attached, &refused_authority, &shard_id.scope)
+        {
+            self.stamp_project_sessions_admission(project_id.as_str());
+        }
         self.record_registered_admission(
             shard_id,
             attached.as_ref().err().or(refused_authority.as_ref()),

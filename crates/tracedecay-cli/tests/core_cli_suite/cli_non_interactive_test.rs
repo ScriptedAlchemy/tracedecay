@@ -738,6 +738,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
         branch_meta_relpath: "branch-meta.json".into(),
+        sessions_schema_digest: None,
     };
     std::fs::write(
         shard_root.join(STORE_MANIFEST_FILENAME),

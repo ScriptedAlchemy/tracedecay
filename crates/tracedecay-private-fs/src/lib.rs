@@ -13,7 +13,7 @@ mod inode_generation;
 mod lock_admission;
 mod rename_noreplace;
 
-pub use coarse_time::{ChangeClockReading, ChangeStamp, RewriteWitness, change_time_settled};
+pub use coarse_time::{RewriteWitness, change_time_settled};
 pub use inode_generation::inode_generation;
 
 pub use file_lease::FileLease;
