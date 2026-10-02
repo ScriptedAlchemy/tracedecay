@@ -5,6 +5,7 @@
 //! claim, and every waiter on the same key must either receive the settled
 //! result or elect a replacement fill.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +22,7 @@ use super::*;
 use crate::admission::HostAdmission;
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+use crate::runtime::source::spin_until_jsonl_change_settled;
 
 const SESSION_ID: &str = "meta-cache-session";
 
@@ -88,6 +90,8 @@ fn fixture(name: &str, with_meta: bool) -> (TempDir, PathBuf, GateGuard) {
     install_test_shared_jsonl_preparation_authority();
     let tmp = TempDir::new().unwrap();
     let path = write_rollout(tmp.path(), name, with_meta);
+    // Lookups and `cache_key` share one key only once its change time settles.
+    spin_until_jsonl_change_settled(&path);
     let gate = GateGuard(install_session_meta_parse_gate_for_test(&path));
     (tmp, path, gate)
 }
@@ -130,6 +134,39 @@ async fn wait_in_flight_waits(key: &CodexMetaCacheKey, count: usize) {
     })
     .await
     .expect("a lookup must park behind the live fill");
+}
+
+/// Rewrites `path` in place with same-length `contents` and hands back its
+/// mtime, so only the change time can tell the two states apart.
+fn rewrite_in_place(path: &Path, contents: &[u8]) {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(contents).unwrap();
+    file.set_modified(modified).unwrap();
+}
+
+/// A fill is keyed by the file identity it read under. A same-size rewrite
+/// inside that identity's change-time quantum leaves every stat field equal,
+/// so the fill must not answer for the rewritten bytes.
+#[tokio::test]
+async fn a_same_size_in_place_rewrite_is_not_answered_from_the_cache() {
+    install_test_shared_jsonl_preparation_authority();
+    let tmp = TempDir::new().unwrap();
+    let path = write_rollout(tmp.path(), "rewritten.jsonl", true);
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    for round in 0..32 {
+        let session_id = if round % 2 == 0 {
+            "meta-cache-rewrite"
+        } else {
+            SESSION_ID
+        };
+        rewrite_in_place(&path, original.replace(SESSION_ID, session_id).as_bytes());
+        let meta = shared_session_meta_with_provenance(&path, &ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(meta.meta.session_id, session_id);
+    }
 }
 
 #[tokio::test]

@@ -2315,20 +2315,11 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
         "doctor reads the verdict status reports"
     );
 
-    // The read that finds the engine away starts its re-warm and waits on
-    // what is left of its own deadline; the context above carries an
-    // unbounded deadline, so a re-warm that finishes in time serves it
-    // instead of refusing (project_reads `await_rewarm`). Windows re-warms
-    // this one-symbol graph inside the budget, so both contract outcomes
-    // count here while the restore is proven below.
-    match resolve_alpha().await {
-        Err(tracedecay_graph_query::CodeGraphReadError::Unavailable { detail }) => assert_eq!(
-            detail,
-            "code graph engine was released and is re-warming in the background"
-        ),
-        Ok(symbols) => assert_eq!(symbols, warm),
-        other => panic!("the read neither reported re-warming nor restored: {other:?}"),
-    }
+    assert_eq!(
+        resolve_alpha().await,
+        Ok(warm.clone()),
+        "the read that finds the engine away waits out the re-warm within its budget"
+    );
     until_ready("re-warm").await;
     assert_eq!(resolve_alpha().await, Ok(warm));
 

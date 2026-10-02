@@ -147,12 +147,6 @@ pub(in crate::runtime) struct JsonlFileChangeToken {
     changed_nanos: Option<i128>,
 }
 
-pub(in crate::runtime) fn jsonl_file_change_token(
-    metadata: &std::fs::Metadata,
-) -> JsonlFileChangeToken {
-    jsonl_file_change_token_under(metadata, RewriteWitness::NATIVE)
-}
-
 pub(in crate::runtime) fn jsonl_file_change_token_under(
     metadata: &std::fs::Metadata,
     witness: RewriteWitness,
@@ -395,8 +389,8 @@ pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) {
             std::thread::yield_now();
             continue;
         };
-        let token = jsonl_file_change_token(&metadata);
-        if !token.witnesses_rewrites() || jsonl_change_token_settled(token) {
+        let witness = RewriteWitness::NATIVE;
+        if !witness.proves_unchanged_bytes() || witness.vouches_for_unchanged_bytes(&metadata) {
             return;
         }
         std::thread::yield_now();

@@ -2540,6 +2540,27 @@ impl tracedecay_sessions::admission::HostAdmission for ProductionJsonlAdmission 
         })
     }
 
+    // This seam drains no projection, so a rewrite has nothing to retire.
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _previous: tracedecay_domain::ObservationSourceGenerationV1,
+        _generation: tracedecay_domain::ObservationSourceGenerationV1,
+        _retained_through: u64,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _generation: tracedecay_domain::ObservationSourceGenerationV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, u64> {
+        Box::pin(async { Ok(0) })
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         _provider: &'a str,

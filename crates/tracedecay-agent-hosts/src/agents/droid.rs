@@ -289,6 +289,9 @@ impl AgentIntegration for DroidIntegration {
         }
         let hooks_path = droid_hooks_path(&ctx.home);
         match droid_hooks_registration_state(&ctx.home) {
+            HostBundleRegistrationStateV1::Unverifiable => {
+                dc.info("Factory Droid hooks registration is unverifiable")
+            }
             HostBundleRegistrationStateV1::Current => dc.pass(&format!(
                 "TraceDecay hooks merged into {}",
                 hooks_path.display()

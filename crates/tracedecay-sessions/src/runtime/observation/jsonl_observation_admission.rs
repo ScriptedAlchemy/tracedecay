@@ -36,6 +36,7 @@ use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,
 };
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
@@ -487,6 +488,8 @@ struct SharedJsonlPageKey {
     preparation: SharedJsonlFramePreparation,
 }
 
+/// A transcript's stat identity. Caches serve bytes read under an equal
+/// identity, so it compares equal only while its change stamp is settled.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::runtime) struct SharedJsonlFileIdentity {
     len: u64,
@@ -495,10 +498,7 @@ pub(in crate::runtime) struct SharedJsonlFileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    #[cfg(unix)]
-    changed_secs: i64,
-    #[cfg(unix)]
-    changed_nanos: i64,
+    changed: ChangeStamp,
 }
 
 #[derive(Clone, Copy)]
@@ -1054,6 +1054,7 @@ fn shared_jsonl_path_is_pinned(path: &Path) -> bool {
 pub(in crate::runtime) fn shared_jsonl_file_identity(
     path: &Path,
 ) -> TranscriptIngestResult<SharedJsonlFileIdentity> {
+    let sampled_at = ChangeClockReading::now();
     let metadata = std::fs::metadata(path).map_err(|source| TranscriptIngestError::ScanIo {
         operation: "stat shared JSONL page",
         path: path.to_path_buf(),
@@ -1071,10 +1072,7 @@ pub(in crate::runtime) fn shared_jsonl_file_identity(
         device: metadata.dev(),
         #[cfg(unix)]
         inode: metadata.ino(),
-        #[cfg(unix)]
-        changed_secs: metadata.ctime(),
-        #[cfg(unix)]
-        changed_nanos: metadata.ctime_nsec(),
+        changed: RewriteWitness::NATIVE.stamp(&metadata, sampled_at),
     })
 }
 
@@ -2347,6 +2345,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
+    let previous_generation = expected_cursor
+        .as_ref()
+        .map(ObservationSourceCursorV1::generation);
     let mut prefix_recovery = JsonlPrefixRecovery::Report;
     let mut divergence_io = JsonlIoAccounting::default();
     let (raw, shared_page_hit) = loop {
@@ -2424,6 +2425,22 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         return Err(TranscriptIngestError::Cancelled { provider });
     }
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
+    // Recorded before any record of the new generation is captured, so an
+    // interrupted pass still leaves the rewrite for a later pass to complete.
+    if let Some(previous) = previous_generation
+        && previous != generation
+    {
+        admission
+            .begin_source_rewrite(&source, &scope, previous, generation, raw.start_offset)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    host_admission_error(provider, outcome)
+                }
+            })?;
+    }
     let mut state = initialize(JsonlObservationScan {
         resumed: had_expected_cursor && raw.start_offset > 0,
         // Derived from the scanned generation rather than this batch's first
@@ -2912,6 +2929,22 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     } else {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
+    // A rewrite retires what its generation stopped offering only once that
+    // generation was read to the end; until then the source stays deferred.
+    let mut records_retired = 0;
+    if !progress.source_deferred {
+        records_retired = active
+            .admission
+            .complete_source_rewrite(&active.source, &active.scope, generation)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &active.cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    host_admission_error(provider, outcome)
+                }
+            })?;
+    }
     tracing::debug!(
         event = "transcript_admission_batch",
         phase = "complete",
@@ -2921,6 +2954,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         retained_frame_bytes,
         bytes_consumed = progress.bytes_consumed,
         source_deferred = progress.source_deferred,
+        records_retired,
         "transcript admission batch finished"
     );
     crate::runtime::pipeline_metrics::record_admission_progress(

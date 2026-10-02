@@ -5,7 +5,7 @@ pub mod retention;
 mod schema;
 
 pub use refusal_census::ingest_refusal_read_from_censuses;
-pub(super) use schema::ensure_observation_schema;
+pub(super) use schema::{OBSERVATION_ADMISSION_MARKERS, ensure_observation_schema};
 
 use tracedecay_domain::{
     AnchorSourceGeneration, CanonicalObservationIdV1, ObservationScopeV1,

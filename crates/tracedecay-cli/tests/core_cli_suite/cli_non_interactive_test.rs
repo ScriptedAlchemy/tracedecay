@@ -738,6 +738,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
         branch_meta_relpath: "branch-meta.json".into(),
+        sessions_schema_digest: None,
     };
     std::fs::write(
         shard_root.join(STORE_MANIFEST_FILENAME),
@@ -2697,9 +2698,8 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
         );
     } else {
         assert!(
-            (admitted.starts_with("  feature/new [current], ")
-                || admitted.starts_with("  feature/new [current, serving], "))
-                && admitted.contains(" (from main), synced "),
+            admitted.starts_with("  feature/new [current] (from main), synced ")
+                || admitted.starts_with("  feature/new [current, serving] (from main), synced "),
             "admitted branch must read as pending or synced: {admitted}"
         );
         assert!(

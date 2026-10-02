@@ -76,6 +76,14 @@ pub(crate) fn discard_candidate_rows_sql(table: &SharedGenerationTable) -> Strin
     )
 }
 
+/// Deletes every row the generations through `?2` introduced for session `?1`.
+pub(crate) fn discard_session_rows_sql(table: &SharedGenerationTable) -> String {
+    format!(
+        "DELETE FROM {} WHERE session_id = ?1 AND generation <= ?2",
+        table.name
+    )
+}
+
 /// Deletes the older version of every key the activating generation
 /// re-versioned, bound as `(?1 session, ?2 generation)`. Only the active
 /// generation is read, so a superseded version has no reader once its
@@ -97,6 +105,55 @@ pub(crate) fn retire_superseded_versions_sql(table: &SharedGenerationTable) -> S
                AND older.session_id = ?1 AND {matches} AND older.generation < ?2
          )",
         name = table.name,
+    )
+}
+
+/// Predicate over a `session_temporal_observation_effects` row aliased
+/// `effect`: whether its output is still canonical through the source
+/// frontier bound at `frontier`. A source rewrite may have retired the
+/// observation, or a later observation through the frontier may own its
+/// message. The owner follows the projection's rule: the newest owner when
+/// the projector created the message, the oldest otherwise. An effect without
+/// projection provenance is canonical.
+pub(crate) fn live_effect_predicate(frontier: &str) -> String {
+    let version = tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
+    let retired_reason = tracedecay_store::ProjectionSkipReason::SourceRecordRetired.as_str();
+    format!(
+        "NOT EXISTS (
+             SELECT 1 FROM observation_projection_dispositions AS retired
+             WHERE retired.projector_version = '{version}'
+               AND retired.observation_id = effect.observation_id
+               AND retired.reason = '{retired_reason}'
+         )
+         AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_provenance AS own
+             WHERE own.projector_version = '{version}'
+               AND own.observation_id = effect.observation_id
+               AND own.observation_id IS NOT (
+                   SELECT owner.observation_id
+                   FROM observation_projection_provenance AS owner
+                   JOIN observations AS owner_observation
+                     ON owner_observation.observation_id = owner.observation_id
+                   WHERE owner.projector_version = own.projector_version
+                     AND owner.output_provider = own.output_provider
+                     AND owner.output_message_id = own.output_message_id
+                     AND owner_observation.sequence <= {frontier}
+                   ORDER BY CASE WHEN EXISTS (
+                                SELECT 1
+                                FROM observation_projection_provenance AS created
+                                JOIN observations AS created_observation
+                                  ON created_observation.observation_id = created.observation_id
+                                WHERE created.projector_version = own.projector_version
+                                  AND created.output_provider = own.output_provider
+                                  AND created.output_message_id = own.output_message_id
+                                  AND created.message_created = 1
+                                  AND created_observation.sequence <= {frontier}
+                            )
+                            THEN -owner_observation.sequence
+                            ELSE owner_observation.sequence END
+                   LIMIT 1
+               )
+         )"
     )
 }
 

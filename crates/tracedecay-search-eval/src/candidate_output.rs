@@ -15,7 +15,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -26,12 +26,12 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSymbolDisplayV1,
+    MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -44,16 +44,15 @@ use tracedecay_contracts::historical_query::{
 };
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeSearchChunkV1, ComponentRevision,
-    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId,
-    LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
-    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    ChunkerRevision, CodeSearchChunkV1, ComponentRevision, EphemeralSanitizedQueryViewV1,
+    ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
+    RepositoryDirtyStateV1, RepositoryId, RetrievalFailure, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
@@ -109,48 +108,6 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     /// Authoritative identity for `repo_root`, injected by the composing
     /// binary. See [`AdmittedCorpusScopeFn`].
     pub admitted_scope: AdmittedCorpusScopeFn,
-}
-
-#[derive(Clone, Default)]
-struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        let active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "candidate-output publication lock is poisoned".to_owned(),
-            )
-        })?;
-        Ok(active.get(scope).map(Arc::clone))
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "candidate-output publication lock is poisoned".to_owned(),
-            )
-        })?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
 }
 
 #[derive(Default)]
@@ -272,7 +229,8 @@ fn seal_lexical_artifact(
         .encode_partitioned_sealed(|publication| {
             match publication {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -1418,14 +1376,17 @@ fn publish_scope_generation(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let generation = CodeIndexProductionOwnerV1::new(
+    let published = CodeIndexProductionOwnerV1::new(
         config,
-        SharedPublicationStore::default(),
+        MemorySealedPublicationStoreV1::default(),
         ApplyingProjectionSink,
     )
     .map_err(|error| CandidateOutputError::Contract(format!("open production owner: {error}")))?
     .build_and_publish(request, &ActiveControl)
     .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
+    let generation = published.decoded().map(Arc::clone).ok_or_else(|| {
+        CandidateOutputError::Contract("a generation without a parent builds cold".to_owned())
+    })?;
     Ok(Some((generation, file_to_document)))
 }
 
@@ -1628,6 +1589,7 @@ pub(crate) mod tests {
     };
     use super::*;
     use crate::packaged_assets::PackagedEvaluatorAssets;
+    use std::sync::Mutex;
     use tracedecay_query::search_quality::candidate_output::{
         ResourceMeasurementPendingReasonV1, ResourceMeasurementStatusV1,
     };
