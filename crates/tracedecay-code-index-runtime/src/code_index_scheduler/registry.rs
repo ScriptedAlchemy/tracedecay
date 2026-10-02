@@ -114,9 +114,8 @@ pub(crate) fn retained_noop_requires_follow_up_wake(
     serving_empty && !activation_deferred && consumed_external_arrival && source_is_noop
 }
 
-/// The verified head belongs to a different generation than the retained
-/// manifest this pass tried to recover. Replaying that manifest publishes a
-/// second graph over the generation that owns the head.
+/// The verified head generation differs from the retained manifest this pass
+/// tried to recover.
 pub(crate) fn graph_head_belongs_to_another_generation(error: &CodeIndexSchedulerErrorV1) -> bool {
     error.activation_conflict_context().is_some_and(|context| {
         context.site == "code_graph.recover_verified_snapshot_from_head.generation"
