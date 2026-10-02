@@ -451,11 +451,22 @@ impl SymbolLineageResolver {
     /// Resolve lineage for an Arc-shared increment.
     ///
     /// Every Arc-shared symbol emits its own [`LineageKindV1::Unchanged`]
-    /// candidate (current occurrence order among shared rows, then fresh).
-    /// Fresh ancestors exclude only symbols whose prior file is still
-    /// Arc-shared; deleted or renamed prior files stay eligible so moves
-    /// across file identity can resolve.
+    /// candidate. Fresh ancestors exclude only symbols whose prior file is
+    /// still Arc-shared; deleted or renamed prior files stay eligible so moves
+    /// across file identity can resolve. Candidates are returned in canonical
+    /// current-occurrence order, as [`Self::resolve`] returns them.
     pub fn resolve_fresh_symbol_ptrs(
+        &self,
+        prior: &GenerationSymbolIndexV1,
+        current: &GenerationSymbolIndexV1,
+        fresh_symbol_ptrs: &HashSet<*const LineageSymbolRecordV1>,
+    ) -> Result<Vec<SymbolLineageCandidateV1>, LineageResolutionErrorV1> {
+        let mut candidates = self.resolve_shared_then_fresh(prior, current, fresh_symbol_ptrs)?;
+        candidates.sort_by(|left, right| left.current_occurrence.cmp(&right.current_occurrence));
+        Ok(candidates)
+    }
+
+    fn resolve_shared_then_fresh(
         &self,
         prior: &GenerationSymbolIndexV1,
         current: &GenerationSymbolIndexV1,
@@ -1746,14 +1757,17 @@ mod tests {
         let candidates = resolver()
             .resolve_fresh_symbol_ptrs(&prior, &current, &fresh_ptrs)
             .expect("ordered resolve");
-        // Shared Unchanged rows first (current shared order), then fresh.
         let order: Vec<_> = candidates
             .iter()
-            .map(|candidate| candidate.current_occurrence.as_str())
+            .map(|candidate| (candidate.current_occurrence.as_str(), candidate.kind))
             .collect();
-        assert_eq!(order, vec!["sym.a", "sym.b", "sym.af"]);
-        assert_eq!(candidates[0].kind, LineageKindV1::Unchanged);
-        assert_eq!(candidates[1].kind, LineageKindV1::Unchanged);
-        assert_eq!(candidates[2].kind, LineageKindV1::StructuralContinuity);
+        assert_eq!(
+            order,
+            vec![
+                ("sym.a", LineageKindV1::Unchanged),
+                ("sym.af", LineageKindV1::StructuralContinuity),
+                ("sym.b", LineageKindV1::Unchanged),
+            ]
+        );
     }
 }

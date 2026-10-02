@@ -2937,6 +2937,9 @@ fn collect_published_segments<'a>(
                 *published_files += 1;
                 segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
+            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+            }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {
                 page_digest, bytes, ..
             } => {
@@ -3004,7 +3007,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:ac3b75376f07a86524d45a5e1f6dfe14b1a63d0a8a3d1da399e4a2503f75ce84";
+    "sha256:4782468f156875fa1594ddd15231c2aa2e2e9350c3184e38f18d00ff0469a3bd";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:8e9ad377067c5f3b8f967a8b6e0ebe75c061683b6a33e83502b7a324373fec72",
@@ -3019,8 +3022,20 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         1_311,
     ),
     (
-        "sha256:708872cc052de2eba0b77c777813a7838420413b244305a035c702a6b212a6a7",
-        2_911,
+        "sha256:503071aa2c514bfd4eb177635588bd79a397c3450786253e7ca72240a012e745",
+        154,
+    ),
+    (
+        "sha256:8ae06385771d7dd84fce8fcc8b5d121e61377d51cdeaee9d476108642b961340",
+        453,
+    ),
+    (
+        "sha256:d1e36c4262092e3559137ea442b600d4e36211663ed0f1d533f30c40d7e0119b",
+        54,
+    ),
+    (
+        "sha256:7fb4402e22813952a093efba38018d1f10a28e05c9924ab6ab5b8d4c3c4852b5",
+        1_921,
     ),
     (
         "sha256:43cb26ecd5d8a87a7907b2cad1f77466b080a8d5cd504d5ef5869fcc51d5fe3f",
@@ -3181,8 +3196,25 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         "the fixture must span more file segments than one decode window"
     );
 
+    let file_evidence_digests = envelope["generation"]["file_evidence"]
+        .as_array()
+        .expect("file evidence descriptors")
+        .iter()
+        .map(|evidence| {
+            evidence["segment_digest"]
+                .as_str()
+                .expect("file evidence digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !file_evidence_digests.is_empty(),
+        "the fixture must seal file evidence"
+    );
     // Buffer address -> its capacity after the last read it served.
     let mut file_buffers = BTreeMap::new();
+    let mut file_evidence_buffers = BTreeMap::new();
+    let largest_file_evidence = Cell::new(0_usize);
     let evidence_buffer_address = Cell::new(None);
     let segment_reads = RefCell::new(BTreeSet::new());
     let largest_file_segment = Cell::new(0_usize);
@@ -3211,7 +3243,10 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             let end = start + usize::try_from(length).expect("segment range length");
             buffer.clear();
             buffer.extend_from_slice(&bytes[start..end]);
-            if reading_file {
+            if reading_file && file_evidence_digests.contains(digest.as_str()) {
+                largest_file_evidence.set(largest_file_evidence.get().max(bytes.len()));
+                file_evidence_buffers.insert(address, buffer.capacity());
+            } else if reading_file {
                 largest_file_segment.set(largest_file_segment.get().max(bytes.len()));
                 file_buffers.insert(address, buffer.capacity());
             } else {
@@ -3263,6 +3298,14 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     assert!(
         file_buffers.values().sum::<usize>() <= window * largest_file_segment.next_power_of_two(),
         "the file allocation must be bounded by {window} decode slots x the largest file segment"
+    );
+    let largest_file_evidence = largest_file_evidence.get();
+    assert!(
+        file_evidence_buffers.len() <= window
+            && file_evidence_buffers
+                .values()
+                .all(|&capacity| capacity <= largest_file_evidence.next_power_of_two()),
+        "file evidence reads must reuse one buffer per decode window slot, bounded by the largest file evidence segment"
     );
     assert!(
         evidence_buffer_capacity.get() >= largest_evidence_page.get()
@@ -3344,7 +3387,8 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     let reencoded_manifest = restored
         .encode_partitioned_sealed(|publication| {
             match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
                     reencoded_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
                 SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -3579,6 +3623,9 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
                 match publication {
                     SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                         file_segments += 1;
+                        segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::CodeGraphPage {
@@ -4007,7 +4054,8 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     published_files.push((digest.as_str().to_owned(), bytes.len()));
                 }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
+                SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {}
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                     page_ordinal,
                     ..

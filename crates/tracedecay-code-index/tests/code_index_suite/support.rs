@@ -103,7 +103,8 @@ impl PartitionedSealV1 {
         let manifest = generation
             .encode_partitioned_sealed(|publication| {
                 match publication {
-                    SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::CodeGraphPage {
