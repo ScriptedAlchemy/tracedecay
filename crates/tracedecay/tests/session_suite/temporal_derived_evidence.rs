@@ -8,18 +8,18 @@ use tracedecay_domain::{
     RetrievalGrainV1, SessionId, TemporalModeV1,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_session_temporal_store::SessionRefreshRecoveryV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
-    ObservationProjectionStore, ObservationStore, SessionGenerationActivationRequestV1,
-    SessionRetrievalStore, SessionTemporalProjectionStore, SessionTemporalRetrievalRequestV1,
-    SessionTemporalSnapshotRequestV1,
+    ObservationProjectionStore, ObservationStore, SessionRetrievalStore,
+    SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::temporal_projection::{
-    assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,
-    persist_observation, persist_observation_with_lineage, profile_runtime, rows_runtime,
-    scalar_runtime, session, snapshot,
+    TemporalStore, assertion, batch, begin_candidate, complete_candidate, occurrence,
+    persist_batch, persist_observation, persist_observation_with_lineage, profile_runtime,
+    rows_runtime, scalar_runtime, session,
 };
 
 async fn derived_identity_rows(
@@ -48,16 +48,14 @@ async fn derived_identity_rows(
     .await
 }
 
-async fn project_and_activate<O, T>(
+async fn project_and_activate<O>(
     runtime: &HostAdmissionTestRuntimeV1,
     observation_store: &O,
-    temporal_store: &T,
+    temporal_store: &TemporalStore<'_>,
     session_name: &str,
-    candidate_generation: u64,
 ) -> (SessionId, Vec<String>, Vec<MessageOccurrenceRecordV1>)
 where
     O: ObservationStore + ObservationProjectionStore,
-    T: SessionTemporalProjectionStore,
 {
     let session_id = session(session_name);
     let first = occurrence(
@@ -120,41 +118,28 @@ where
         source_frontier > 0,
         "projected sessions must have durable observation sequences"
     );
-    begin_candidate(
+    let candidate = begin_candidate(temporal_store, &session_id, source_frontier).await;
+    persist_batch(
         temporal_store,
-        &session_id,
-        candidate_generation,
-        source_frontier,
-    )
-    .await;
-    temporal_store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            candidate_generation,
-            source_frontier,
+        &candidate,
+        batch(
+            &candidate,
             vec![first.clone(), second.clone(), copied.clone()],
             vec![copy],
             vec![assertion(&second, &first)],
-        ))
+        ),
+    )
+    .await
+    .unwrap();
+    complete_candidate(temporal_store, &candidate)
         .await
         .unwrap();
-    temporal_store
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(candidate_generation),
-                snapshot(
-                    &session_id,
-                    candidate_generation.saturating_sub(1).max(1),
-                    source_frontier,
-                ),
-                ExecutionControl::default(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let derived = derived_identity_rows(runtime, session_id.as_str(), candidate_generation).await;
+    let derived = derived_identity_rows(
+        runtime,
+        session_id.as_str(),
+        candidate.candidate_generation().value(),
+    )
+    .await;
     assert!(
         !derived.is_empty(),
         "expected generation-bound span/burst rows after activation"
@@ -171,14 +156,14 @@ where
     (session_id, derived, vec![first, second, copied])
 }
 
-/// Projects the identity fixture into candidate generation 2 of `runtime`,
+/// Projects the identity fixture into the refresh candidate of `runtime`,
 /// either as one batch or as two checkpointed batches, and returns the
-/// derived identities that generation reads before activation.
+/// derived identities that candidate reads before activation.
 async fn project_identity_fixture(
     runtime: &HostAdmissionTestRuntimeV1,
     session_id: &SessionId,
     incremental: bool,
-) -> Vec<String> {
+) -> (Vec<String>, SessionRefreshRecoveryV1) {
     let observation_store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -202,43 +187,45 @@ async fn project_identity_fixture(
         )
         .await,
     );
-    let edge = parent_message_copy(&second, &first);
     let assertion = assertion(&second, &first);
-    begin_candidate(&store, session_id, 2, 2).await;
+    let candidate = begin_candidate(&store, session_id, 2).await;
     if incremental {
-        store
-            .persist_session_temporal_projection_batch(batch(
-                session_id,
-                2,
-                2,
-                vec![first],
-                vec![],
-                vec![],
-            ))
-            .await
-            .unwrap();
-        store
-            .persist_session_temporal_projection_batch(
-                batch(session_id, 2, 2, vec![second], vec![edge], vec![assertion])
-                    .with_checkpoint(1, 2, 2)
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        persist_batch(
+            &store,
+            &candidate,
+            batch(&candidate, vec![first], vec![], vec![])
+                .with_checkpoint(0, 1, 1)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        persist_batch(
+            &store,
+            &candidate,
+            batch(&candidate, vec![second], vec![], vec![assertion])
+                .with_checkpoint(1, 2, 2)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     } else {
-        store
-            .persist_session_temporal_projection_batch(batch(
-                session_id,
-                2,
-                2,
-                vec![first, second],
-                vec![edge],
-                vec![assertion],
-            ))
-            .await
-            .unwrap();
+        persist_batch(
+            &store,
+            &candidate,
+            batch(&candidate, vec![first, second], vec![], vec![assertion]),
+        )
+        .await
+        .unwrap();
     }
-    derived_identity_rows(runtime, session_id.as_str(), 2).await
+    (
+        derived_identity_rows(
+            runtime,
+            session_id.as_str(),
+            candidate.candidate_generation().value(),
+        )
+        .await,
+        candidate,
+    )
 }
 
 #[tokio::test]
@@ -247,7 +234,9 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
     let oneshot_profile = TempDir::new().unwrap();
     let oneshot = {
         let runtime = profile_runtime(&oneshot_profile).await;
-        project_identity_fixture(&runtime, &session_id, false).await
+        project_identity_fixture(&runtime, &session_id, false)
+            .await
+            .0
     };
     let kinds = oneshot
         .iter()
@@ -264,25 +253,19 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
     let database_identity = runtime
         .session_database_identity_for_test(HostAdmissionScope::Profile)
         .unwrap();
-    let incremental = project_identity_fixture(&runtime, &session_id, true).await;
+    let (incremental, candidate) = project_identity_fixture(&runtime, &session_id, true).await;
     assert_eq!(
         oneshot, incremental,
-        "one-shot and incremental rebuilds must mint identical derived identities"
+        "one-shot and incremental refreshes must mint identical derived identities"
     );
-    runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap()
-        .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(
-                session_id.clone(),
-                generation(2),
-                snapshot(&session_id, 1, 2),
-                ExecutionControl::default(),
-            )
+    complete_candidate(
+        &runtime
+            .session_temporal_store(HostAdmissionScope::Profile)
             .unwrap(),
-        )
-        .await
-        .unwrap();
+        &candidate,
+    )
+    .await
+    .unwrap();
     drop(runtime);
 
     let reopened = profile_runtime(&tmp).await;
@@ -319,7 +302,6 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
         &observation_store,
         &store,
         "session.temporal.derived.page",
-        2,
     )
     .await;
     let snapshot = store

@@ -164,17 +164,3 @@ fn requests_accept_what_hosts_send_and_refuse_anything_else() {
             .contains("unknown variant `hook_v2_status`")
     );
 }
-
-#[test]
-fn only_a_counter_reset_skips_the_session_stores() {
-    let needs = |arguments: Value| {
-        super::hook_runtime_needs_session_stores(arguments.as_object().expect("object arguments"))
-    };
-    assert!(!needs(json!({"action": "reset_counter"})));
-    assert!(needs(
-        json!({"action": "ingest_transcript", "user_scope": false})
-    ));
-    assert!(needs(json!({"action": "hook_v2_admit"})));
-    assert!(needs(json!({"action": 42})));
-    assert!(needs(json!({})));
-}

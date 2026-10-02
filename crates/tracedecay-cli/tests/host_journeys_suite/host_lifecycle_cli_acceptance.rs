@@ -1071,6 +1071,112 @@ print(module.dashboard_upstream("http://127.0.0.1:7341/?token=ab12"))
     }
 }
 
+/// Hermes imports the deployed plugin package and dashboard `plugin_api.py`
+/// with bytecode caching on, so `__pycache__` appears beside them; opt-out and
+/// uninstall must still remove the generated directories.
+#[cfg(unix)]
+#[test]
+fn hermes_opt_out_and_uninstall_remove_plugin_after_python_imported_it() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    seed_host(case, &cli);
+    let python = std::env::split_paths(&hermetic_path::<&Path>(&[]))
+        .map(|dir| dir.join("python3"))
+        .find(|candidate| candidate.is_file())
+        .expect("python3 in a system dir");
+    let plugin = cli.home.path().join(".hermes/plugins/tracedecay");
+    let cached_modules = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir.join("__pycache__"))
+            .unwrap()
+            .map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                name.split('.').next().unwrap().to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    };
+
+    assert_success(
+        case.id,
+        "install",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    let hermes_loader = r#"
+import importlib, importlib.util, sys, types
+from pathlib import Path
+plugin = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "tracedecay_plugin", plugin / "__init__.py", submodule_search_locations=[str(plugin)]
+)
+package = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = package
+spec.loader.exec_module(package)
+importlib.import_module("tracedecay_plugin.cli")
+
+class Router:
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: (lambda handler: handler)
+
+fastapi = types.ModuleType("fastapi")
+fastapi.APIRouter, fastapi.HTTPException, fastapi.Request = Router, Exception, object
+concurrency = types.ModuleType("fastapi.concurrency")
+concurrency.run_in_threadpool = None
+responses = types.ModuleType("fastapi.responses")
+responses.JSONResponse = responses.Response = responses.StreamingResponse = object
+sys.modules.update(
+    {"fastapi": fastapi, "fastapi.concurrency": concurrency, "fastapi.responses": responses}
+)
+spec = importlib.util.spec_from_file_location("tracedecay_api", plugin / "dashboard/plugin_api.py")
+spec.loader.exec_module(importlib.util.module_from_spec(spec))
+"#;
+    let output = Command::new(&python)
+        .args(["-I", "-c", hermes_loader])
+        .arg(&plugin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        cached_modules(&plugin),
+        ["__init__", "cli", "schemas", "tools"]
+    );
+    assert_eq!(
+        cached_modules(&plugin.join("dashboard")),
+        ["embed_proxy", "plugin_api"]
+    );
+
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    assert!(plugin.join("plugin.yaml").is_file());
+    assert!(
+        !plugin.join("dashboard").exists(),
+        "opt-out left {:?}",
+        fs::read_dir(plugin.join("dashboard")).map(|entries| entries
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>())
+    );
+
+    assert_success(
+        case.id,
+        "uninstall",
+        cli.run(&["uninstall", "--agent", case.id]),
+    );
+    assert!(
+        !plugin.exists(),
+        "uninstall left {:?}",
+        fs::read_dir(&plugin).map(|entries| entries
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>())
+    );
+}
+
 #[test]
 fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     let cli = IsolatedCli::new();
