@@ -311,15 +311,28 @@ struct UnchangedGenerationProof {
     physical_identity: u64,
     /// Digest of `[0, key.position)`.
     digest: ResumeDigest,
+    /// More than one cursor resumed this exact checkpoint. One of them can
+    /// advance without taking the proof from the cursor that is still here.
+    shared: bool,
 }
 
-/// Proofs kept per file, newest first: a project scope and the profile scope
-/// each catch the same rollout up under their own cursor, so one proof per
-/// file would let each batch evict the proof the other's next batch needs.
+impl UnchangedGenerationProof {
+    fn same_cached_file(&self, other: &Self) -> bool {
+        other.key.size == self.key.size
+            && other.key.change == self.key.change
+            && other.key.generation == self.key.generation
+            && other.key.stable_file_identity == self.key.stable_file_identity
+    }
+}
+
+/// Cursors that can resume one file without rehashing its prefix. A project
+/// scope and the profile scope each catch the same rollout up under their own
+/// cursor. A batch moves the proof it alone resumed from; a checkpoint two
+/// cursors share stays until the last of them advances.
 ///
-/// ponytail: a file read under more scopes than this rehashes on eviction;
+/// ponytail: a file read under more cursors than this rehashes on eviction;
 /// key proofs by scope if that shows up.
-const UNCHANGED_GENERATION_PROOFS_PER_FILE: usize = 1;
+const UNCHANGED_GENERATION_PROOFS_PER_FILE: usize = 2;
 
 type UnchangedGenerationCache =
     BoundedLatestProofCache<JsonlNativeFileIdentity, Vec<UnchangedGenerationProof>>;
@@ -413,7 +426,11 @@ fn cached_unchanged_generation(
         .cloned()
 }
 
-fn remember_unchanged_generation_if_settled(path: &Path, proof: UnchangedGenerationProof) {
+fn remember_unchanged_generation_if_settled(
+    path: &Path,
+    proof: UnchangedGenerationProof,
+    resumed_position: u64,
+) {
     if !unchanged_generation_cache_serves(path) {
         return;
     }
@@ -429,8 +446,43 @@ fn remember_unchanged_generation_if_settled(path: &Path, proof: UnchangedGenerat
     };
     let native_identity = proof.key.native_identity;
     let mut proofs = cache.get(&native_identity).cloned().unwrap_or_default();
-    proofs.retain(|kept| kept.key != proof.key);
-    proofs.insert(0, proof);
+    proofs.retain(|kept| proof.same_cached_file(kept));
+    // A cursor that was the only one at `resumed_position` takes that slot
+    // with it. A shared checkpoint stays for the cursor that has not moved.
+    if resumed_position != proof.key.position {
+        let source_shared = proofs
+            .iter()
+            .find(|kept| kept.key.position == resumed_position)
+            .is_some_and(|kept| kept.shared);
+        if source_shared {
+            if let Some(source) = proofs
+                .iter_mut()
+                .find(|kept| kept.key.position == resumed_position)
+            {
+                source.shared = false;
+            }
+        } else {
+            proofs.retain(|kept| kept.key.position != resumed_position);
+        }
+    }
+    if let Some(index) = proofs.iter().position(|kept| kept.key == proof.key) {
+        let mut existing = proofs.remove(index);
+        existing.digest = proof.digest;
+        existing.physical_identity = proof.physical_identity;
+        // Arriving from a different cursor, not refreshing this same one.
+        if resumed_position != proof.key.position {
+            existing.shared = true;
+        }
+        proofs.insert(0, existing);
+    } else {
+        proofs.insert(
+            0,
+            UnchangedGenerationProof {
+                shared: false,
+                ..proof
+            },
+        );
+    }
     proofs.truncate(UNCHANGED_GENERATION_PROOFS_PER_FILE);
     cache.insert(native_identity, proofs);
 }
@@ -1536,7 +1588,9 @@ impl<'a> PreparedJsonlScan<'a> {
                             key,
                             physical_identity: self.generation.physical_identity,
                             digest,
+                            shared: false,
                         },
+                        self.generation.seek_to,
                     );
                 }
             }
@@ -1954,7 +2008,9 @@ impl<'a> RawJsonlBatchScanner<'a> {
                     key,
                     physical_identity: self.generation.physical_identity,
                     digest: offset_digest,
+                    shared: false,
                 },
+                self.generation.seek_to,
             );
         }
         Ok(RawNewJsonl {
@@ -2262,6 +2318,25 @@ mod tests {
         assert!(second.io.scan_payload_read_bytes >= first.new_cursor.position);
     }
 
+    fn resume_next_batch(
+        path: &Path,
+        previous: Option<&RawNewJsonl>,
+        max_new_bytes: u64,
+    ) -> RawNewJsonl {
+        try_stream_new_jsonl_raw_strict_with_resume(
+            path,
+            previous.map_or_else(StoredCursor::default, |scan| scan.new_cursor),
+            Some(max_new_bytes),
+            MAX_JSONL_RECORD_BYTES,
+            previous.map(|scan| JsonlResumeState {
+                generation: scan.new_cursor.file_id,
+                file_identity: scan.file_identity,
+                fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+            }),
+        )
+        .unwrap()
+    }
+
     /// Two scopes catch one file up batch by batch under their own cursors.
     /// However their batches interleave, each resumes from the digest its own
     /// previous batch proved instead of rehashing the prefix.
@@ -2272,24 +2347,13 @@ mod tests {
         let path = dir.path().join("two-scopes.jsonl");
         std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
         spin_until_jsonl_change_settled(&path);
-        let batch = |previous: Option<&RawNewJsonl>, max_new_bytes| {
-            try_stream_new_jsonl_raw_strict_with_resume(
-                &path,
-                previous.map_or_else(StoredCursor::default, |scan| scan.new_cursor),
-                Some(max_new_bytes),
-                MAX_JSONL_RECORD_BYTES,
-                previous.map(|scan| JsonlResumeState {
-                    generation: scan.new_cursor.file_id,
-                    file_identity: scan.file_identity,
-                    fingerprint: scan.frames.last().unwrap().resume_fingerprint,
-                }),
-            )
-            .unwrap()
-        };
-        let mut scopes = [(batch(None, 1_024), 1_024), (batch(None, 1_536), 1_536)];
+        let mut scopes = [
+            (resume_next_batch(&path, None, 1_024), 1_024),
+            (resume_next_batch(&path, None, 1_536), 1_536),
+        ];
         for _ in 0..8 {
             for (scope, max_new_bytes) in &mut scopes {
-                let next = batch(Some(scope), *max_new_bytes);
+                let next = resume_next_batch(&path, Some(scope), *max_new_bytes);
                 assert_eq!(next.start_offset, scope.new_cursor.position);
                 assert_eq!(
                     next.io.prefix_validation_bytes, 0,
@@ -2299,6 +2363,32 @@ mod tests {
                 *scope = next;
             }
         }
+    }
+
+    /// One scope can catch up many batches before the other resumes. Advancing
+    /// replaces the proof that scope resumed from, so the idle scope still
+    /// continues from its own digest.
+    #[test]
+    fn a_cursor_running_ahead_does_not_evict_the_other_scopes_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hold = HoldUnchangedGenerationCache::enter(dir.path());
+        let path = dir.path().join("ahead.jsonl");
+        std::fs::write(&path, b"{\"v\":0}\n".repeat(4_096)).unwrap();
+        spin_until_jsonl_change_settled(&path);
+        let mut ahead = resume_next_batch(&path, None, 1_024);
+        let behind = resume_next_batch(&path, None, 1_536);
+        for _ in 0..6 {
+            let next = resume_next_batch(&path, Some(&ahead), 1_024);
+            assert_eq!(next.start_offset, ahead.new_cursor.position);
+            assert_eq!(next.io.prefix_validation_bytes, 0);
+            ahead = next;
+        }
+        let resumed = resume_next_batch(&path, Some(&behind), 1_536);
+        assert_eq!(resumed.start_offset, behind.new_cursor.position);
+        assert_eq!(
+            resumed.io.prefix_validation_bytes, 0,
+            "the idle cursor rehashed its prefix after the other ran ahead"
+        );
     }
 
     #[test]
