@@ -388,6 +388,7 @@ fn build_generation(
             content_identity,
             captured_at: UtcMicros(1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files: BTreeSet::new(),

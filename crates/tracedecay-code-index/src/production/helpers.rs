@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
-use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeSourceOmissionReasonV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
@@ -262,6 +264,12 @@ pub(crate) fn coverage_summary(
             SnapshotFileDispositionV1::Deleted | SnapshotFileDispositionV1::Renamed => {}
         }
     }
+    // Withheld sources already count through their `Ignored` row.
+    coverage.files_unsupported += snapshot
+        .omitted_sources
+        .iter()
+        .filter(|source| source.reason == CodeSourceOmissionReasonV1::UnrepresentablePath)
+        .count() as u64;
     for file in files {
         coverage.ranges_unsupported += u64::try_from(
             file.extraction.error_ranges.len() + file.extraction.unsupported_ranges.len(),

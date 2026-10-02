@@ -14,22 +14,21 @@ use std::task::{Context, Poll};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, TryLockError, broadcast, watch};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget,
-    LegalAction, OpaqueCursor, OperationReceipt, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken,
-    RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
-    StreamTermination, now_micros,
+    LegalAction, OperationReceipt, ProblemOwningLayer, RequestContext, RequestId, ResolvedScope,
+    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
+    StreamFrontier, StreamGap, StreamTermination, now_micros,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ContentDigest, CursorBindingMismatchV1, CursorBindingV1,
-    ProjectId, RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
-    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
+    ActorId, CursorBindingMismatchV1, CursorBindingV1, ProjectId, RetrievalGrainV1,
+    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
+    UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -170,9 +169,6 @@ enum OperationAuthorization {
     },
     ProjectRoot {
         root_uri: String,
-        head_commit_id: Option<CommitId>,
-        code_generation_id: Option<CodeGenerationId>,
-        document_content_digests: BTreeMap<String, ContentDigest>,
         deadline: Deadline,
     },
 }
@@ -332,206 +328,23 @@ impl OperationEventError {
     }
 }
 
+/// What the live stream reports about a managed run it is still executing.
+/// The run's source identity and terminal result live in its durable record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ManagedTestRunResult {
-    pub(crate) test: String,
-    pub(crate) passed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ManagedTestRunSnapshot {
-    pub(crate) operation_id: OperationId,
-    pub(crate) generation: u64,
-    pub(crate) source_revision: u64,
-    pub(crate) head_commit_id: Option<CommitId>,
-    pub(crate) code_generation_id: Option<CodeGenerationId>,
-    pub(crate) document_content_digests: BTreeMap<String, ContentDigest>,
-    pub(crate) deadline: Deadline,
-    pub(crate) results: Vec<ManagedTestRunResult>,
-    pub(crate) result_offset: usize,
-    pub(crate) available_results: usize,
-    pub(crate) next_cursor: Option<OpaqueCursor>,
+pub(crate) struct ManagedTestRunProgress {
     pub(crate) completed: u64,
     pub(crate) total: Option<u64>,
-    pub(crate) termination: Option<OperationTermination>,
-    /// The terminal authority receipt, if the retained run has completed.
-    pub(crate) receipt: Option<OperationReceipt>,
+    pub(crate) deadline: Deadline,
 }
 
+/// Identifies the newest managed run the live stream holds for one root and
+/// how many events it has published. A managed run's durable record changes
+/// only while its live stream publishes, so an unchanged value means there is
+/// nothing new to read back.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ManagedTestRunCurrentScope {
-    pub(crate) root_uri: String,
-    pub(crate) head_commit_id: Option<CommitId>,
-    pub(crate) code_generation_id: Option<CodeGenerationId>,
-    /// The identity a managed run recorded the document's digest under: the
-    /// canonical project root joined with the project-relative path, never a
-    /// client's alias spelling of the same file.
-    pub(crate) document_uri: Option<String>,
-    pub(crate) document_content_digest: Option<ContentDigest>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ManagedTestRunUnavailableReason {
-    FrontierExpired,
-    CurrentHeadUnbound,
-    CurrentCodeGenerationUnbound,
-    RetainedHeadUnbound,
-    RetainedCodeGenerationUnbound,
-    CurrentDocumentUnbound,
-    RetainedDocumentUnbound,
-    AuthorityFailure,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ManagedTestRunStaleReason {
-    SourceIdentity,
-    DocumentContent,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-// Current carries the full snapshot; boxing would ripple through reader match sites.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum ManagedTestRunReadOutcome {
-    Current(ManagedTestRunSnapshot),
-    Stale(ManagedTestRunStaleReason),
-    Unavailable(ManagedTestRunUnavailableReason),
-}
-
-/// Canonical generation- and content-bound reader for retained managed test
-/// runs. Adapters project this result; they do not read the event authority or
-/// decide current identity independently.
-#[derive(Clone)]
-pub(crate) struct CanonicalManagedTestRunReader {
-    events: OperationEventAuthority,
-}
-
-impl CanonicalManagedTestRunReader {
-    pub(crate) fn new(events: OperationEventAuthority) -> Self {
-        Self { events }
-    }
-
-    #[hotpath::measure(label = "usecases.operation.read_test_run", future = true)]
-    pub(crate) async fn latest_current(
-        &self,
-        current: &ManagedTestRunCurrentScope,
-    ) -> ManagedTestRunReadOutcome {
-        let snapshot = match self.events.latest_managed_test_run(&current.root_uri).await {
-            Ok(snapshot) => snapshot,
-            Err(OperationEventError::FrontierExpired) => {
-                return ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::FrontierExpired,
-                );
-            }
-            Err(_) => {
-                return ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::AuthorityFailure,
-                );
-            }
-        };
-        current_managed_test_run(snapshot, current)
-    }
-
-    pub(crate) fn try_latest_current(
-        &self,
-        current: &ManagedTestRunCurrentScope,
-    ) -> Option<ManagedTestRunReadOutcome> {
-        let snapshot = match self.events.try_latest_managed_test_run(&current.root_uri)? {
-            Ok(snapshot) => snapshot,
-            Err(OperationEventError::FrontierExpired) => {
-                return Some(ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::FrontierExpired,
-                ));
-            }
-            Err(_) => {
-                return Some(ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::AuthorityFailure,
-                ));
-            }
-        };
-        Some(current_managed_test_run(snapshot, current))
-    }
-
-    #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
-    pub(crate) async fn latest_current_page(
-        &self,
-        current: &ManagedTestRunCurrentScope,
-        page: &PageRequest,
-    ) -> ManagedTestRunReadOutcome {
-        let snapshot = match self.latest_current(current).await {
-            ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
-            outcome => return outcome,
-        };
-        match self.events.page_managed_test_run(snapshot, page).await {
-            Ok(snapshot) => ManagedTestRunReadOutcome::Current(snapshot),
-            Err(_) => ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::AuthorityFailure,
-            ),
-        }
-    }
-}
-
-/// The refusal outcome when a retained run's head or code generation is
-/// unbound or differs from the current one; `None` when both are current.
-pub(crate) fn managed_test_run_source_refusal(
-    retained_head: Option<&CommitId>,
-    retained_generation: Option<&CodeGenerationId>,
-    current: &ManagedTestRunCurrentScope,
-) -> Option<ManagedTestRunReadOutcome> {
-    let unavailable = |reason| Some(ManagedTestRunReadOutcome::Unavailable(reason));
-    let Some(current_head) = current.head_commit_id.as_ref() else {
-        return unavailable(ManagedTestRunUnavailableReason::CurrentHeadUnbound);
-    };
-    let Some(current_generation) = current.code_generation_id.as_ref() else {
-        return unavailable(ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound);
-    };
-    let Some(retained_head) = retained_head else {
-        return unavailable(ManagedTestRunUnavailableReason::RetainedHeadUnbound);
-    };
-    let Some(retained_generation) = retained_generation else {
-        return unavailable(ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound);
-    };
-    (retained_head != current_head || retained_generation != current_generation).then_some(
-        ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity),
-    )
-}
-
-pub(crate) fn current_managed_test_run(
-    snapshot: ManagedTestRunSnapshot,
-    current: &ManagedTestRunCurrentScope,
-) -> ManagedTestRunReadOutcome {
-    if let Some(outcome) = managed_test_run_source_refusal(
-        snapshot.head_commit_id.as_ref(),
-        snapshot.code_generation_id.as_ref(),
-        current,
-    ) {
-        return outcome;
-    }
-    match (
-        current.document_uri.as_ref(),
-        current.document_content_digest.as_ref(),
-    ) {
-        (None, None) => {}
-        (Some(document_uri), Some(current_digest)) => {
-            let Some(retained_digest) =
-                snapshot.document_content_digests.get(document_uri.as_str())
-            else {
-                return ManagedTestRunReadOutcome::Unavailable(
-                    ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
-                );
-            };
-            if retained_digest != current_digest {
-                return ManagedTestRunReadOutcome::Stale(
-                    ManagedTestRunStaleReason::DocumentContent,
-                );
-            }
-        }
-        _ => {
-            return ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::CurrentDocumentUnbound,
-            );
-        }
-    }
-    ManagedTestRunReadOutcome::Current(snapshot)
+pub(crate) struct ManagedTestRunActivity {
+    operation_id: OperationId,
+    published_events: u64,
 }
 
 #[derive(Clone)]
@@ -645,63 +458,6 @@ impl OperationResumeAuthority {
             return Err(OperationEventError::NotFoundOrNotAuthorized);
         }
         Ok(())
-    }
-
-    fn issue_test_result_cursor(
-        &self,
-        binding: &OperationBinding,
-        generation: u64,
-        completed: u64,
-        next_offset: usize,
-        page_size: u32,
-    ) -> Result<OpaqueCursor, OperationEventError> {
-        let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
-        let encoded = encode_cursor(
-            &snapshot,
-            &test_result_binding(page_size)?,
-            &StableSortKey {
-                normalized_score_micros: u64::try_from(next_offset)
-                    .map_err(|_| OperationEventError::ResumeUnavailable)?,
-                knowledge_at_micros: i64::try_from(completed)
-                    .map_err(|_| OperationEventError::ResumeUnavailable)?,
-                stable_id: binding.operation_id.to_string(),
-            },
-            &self.authenticator,
-        )
-        .map_err(|_| OperationEventError::ResumeUnavailable)?;
-        OpaqueCursor::new(encoded).map_err(|_| OperationEventError::ResumeUnavailable)
-    }
-
-    fn verify_test_result_cursor(
-        &self,
-        cursor: &OpaqueCursor,
-        record: &OperationRecord,
-        completed: u64,
-        page_size: u32,
-    ) -> Result<usize, OperationEventError> {
-        let snapshot =
-            operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
-        let sort_key = verify_cursor(
-            cursor.as_str(),
-            &snapshot,
-            &test_result_binding(page_size)?,
-            &self.authenticator,
-        )
-        .map_err(|error| match error {
-            CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
-            CursorError::Malformed | CursorError::Tampered => {
-                OperationEventError::CursorRefused(CursorBindingMismatchV1::Foreign)
-            }
-            error => operation_resume_verification_error(error),
-        })?;
-        if sort_key.stable_id != record.binding.operation_id.to_string()
-            || sort_key.knowledge_at_micros
-                != i64::try_from(completed).map_err(|_| OperationEventError::ResumeUnavailable)?
-        {
-            return Err(OperationEventError::NotFoundOrNotAuthorized);
-        }
-        usize::try_from(sort_key.normalized_score_micros)
-            .map_err(|_| OperationEventError::NotFoundOrNotAuthorized)
     }
 }
 
@@ -917,9 +673,6 @@ impl OperationEventAuthority {
         &self,
         root_uri: String,
         request_id: RequestId,
-        head_commit_id: Option<CommitId>,
-        code_generation_id: Option<CodeGenerationId>,
-        document_content_digests: BTreeMap<String, ContentDigest>,
         deadline: Deadline,
     ) -> Result<OperationEmitter, OperationEventError> {
         if root_uri.len() > 4_096 || !root_uri.starts_with("file:") {
@@ -931,13 +684,7 @@ impl OperationEventAuthority {
             originating_request_id: request_id.clone(),
             operation: OperationKind::TestRun,
             event_disclosure: DisclosureClass::Metadata,
-            authorization: OperationAuthorization::ProjectRoot {
-                root_uri,
-                head_commit_id,
-                code_generation_id,
-                document_content_digests,
-                deadline,
-            },
+            authorization: OperationAuthorization::ProjectRoot { root_uri, deadline },
         };
         let mut state = self.inner.state.lock().await;
         if let Some(record) = state.operations.get(&operation_id) {
@@ -994,68 +741,55 @@ impl OperationEventAuthority {
         })
     }
 
-    /// Returns the newest retained managed test run for exactly one admitted
-    /// project root. Absence after restart or eviction is `FrontierExpired`.
-    pub(crate) async fn latest_managed_test_run(
+    /// Progress of `operation_id` while the live stream still executes it
+    /// under `root_uri`. `None` once it published its terminal receipt, and
+    /// when the stream no longer holds it: the daemon restarted, or its
+    /// producer ended without settling.
+    pub(crate) async fn managed_test_run_progress(
         &self,
         root_uri: &str,
-    ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
+        operation_id: &str,
+    ) -> Option<ManagedTestRunProgress> {
         let state = self.inner.state.lock().await;
-        managed_test_run_snapshot(&state, root_uri)
-    }
-
-    pub(crate) fn try_latest_managed_test_run(
-        &self,
-        root_uri: &str,
-    ) -> Option<Result<ManagedTestRunSnapshot, OperationEventError>> {
-        let state = self.inner.state.try_lock().ok()?;
-        Some(managed_test_run_snapshot(&state, root_uri))
-    }
-
-    async fn page_managed_test_run(
-        &self,
-        mut snapshot: ManagedTestRunSnapshot,
-        page: &PageRequest,
-    ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
-        let state = self.inner.state.lock().await;
-        let record = state
-            .operations
-            .get(&snapshot.operation_id)
-            .ok_or(OperationEventError::NotFoundOrNotAuthorized)?;
-        if record.generation != snapshot.generation {
-            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        let record = managed_test_runs_newest_first(&state, root_uri)
+            .find(|record| record.binding.operation_id.to_string() == operation_id)?;
+        if record.terminal.is_some() {
+            return None;
         }
-        let available_results = snapshot.results.len();
-        let offset = match page.cursor.as_ref() {
-            Some(cursor) => self.inner.resume.verify_test_result_cursor(
-                cursor,
-                record,
-                snapshot.completed,
-                page.page_size,
-            )?,
-            None => 0,
+        let OperationAuthorization::ProjectRoot { deadline, .. } = &record.binding.authorization
+        else {
+            return None;
         };
-        if offset > available_results {
-            return Err(OperationEventError::NotFoundOrNotAuthorized);
-        }
-        let page_size = usize::try_from(page.page_size)
-            .map_err(|_| OperationEventError::NotFoundOrNotAuthorized)?;
-        let end = offset.saturating_add(page_size).min(available_results);
-        snapshot.results = snapshot.results[offset..end].to_vec();
-        snapshot.result_offset = offset;
-        snapshot.available_results = available_results;
-        snapshot.next_cursor = (end < available_results)
-            .then(|| {
-                self.inner.resume.issue_test_result_cursor(
-                    &record.binding,
-                    record.generation,
-                    snapshot.completed,
-                    end,
-                    page.page_size,
-                )
+        let (completed, total) = record
+            .history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                StreamEventKind::Progress { completed, total } => Some((*completed, *total)),
+                _ => None,
             })
-            .transpose()?;
-        Ok(snapshot)
+            .unwrap_or((0, None));
+        Some(ManagedTestRunProgress {
+            completed,
+            total,
+            deadline: deadline.clone(),
+        })
+    }
+
+    /// The activity of the newest managed run held for `root_uri`, without
+    /// waiting on the authority: `Ok(None)` when it holds no run for the root,
+    /// and `Err` while another caller holds it.
+    pub(crate) fn try_managed_test_run_activity(
+        &self,
+        root_uri: &str,
+    ) -> Result<Option<ManagedTestRunActivity>, TryLockError> {
+        let state = self.inner.state.try_lock()?;
+        Ok(managed_test_runs_newest_first(&state, root_uri)
+            .next()
+            .map(|record| ManagedTestRunActivity {
+                operation_id: record.binding.operation_id.clone(),
+                published_events: record.next_sequence,
+            }))
     }
 
     /// Requests cancellation for one exact trusted project-local test run.
@@ -1350,93 +1084,26 @@ impl OperationEventAuthority {
     }
 }
 
-fn managed_test_run_snapshot(
-    state: &AuthorityState,
+fn managed_test_runs_newest_first<'state>(
+    state: &'state AuthorityState,
     root_uri: &str,
-) -> Result<ManagedTestRunSnapshot, OperationEventError> {
-    let record = state
+) -> impl Iterator<Item = &'state OperationRecord> {
+    let root_uri = root_uri.trim_end_matches('/').to_owned();
+    state
         .insertion_order
         .iter()
         .rev()
         .filter_map(|operation_id| state.operations.get(operation_id))
-        .find(|record| {
+        .filter(move |record| {
             record.binding.operation == OperationKind::TestRun
                 && matches!(
                     &record.binding.authorization,
                     OperationAuthorization::ProjectRoot {
                         root_uri: retained,
                         ..
-                    } if retained.trim_end_matches('/') == root_uri.trim_end_matches('/')
+                    } if retained.trim_end_matches('/') == root_uri
                 )
         })
-        .ok_or(OperationEventError::FrontierExpired)?;
-    let results = record
-        .history
-        .iter()
-        .filter_map(|event| match &event.kind {
-            StreamEventKind::Item(OperationEventItem::TestRunResult { test, passed }) => {
-                Some(ManagedTestRunResult {
-                    test: test.clone(),
-                    passed: *passed,
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let available_results = results.len();
-    let (completed, total) = record
-        .history
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            StreamEventKind::Progress { completed, total } => Some((*completed, *total)),
-            _ => None,
-        })
-        .unwrap_or((0, None));
-    let receipt = record
-        .terminal
-        .as_ref()
-        .and_then(|event| match &event.kind {
-            StreamEventKind::Terminal(terminal) => Some(terminal.receipt.clone()),
-            _ => None,
-        });
-    let termination = receipt.as_ref().map(|receipt| receipt.termination);
-    Ok(ManagedTestRunSnapshot {
-        operation_id: record.binding.operation_id.clone(),
-        generation: record.generation,
-        source_revision: record.next_sequence,
-        head_commit_id: match &record.binding.authorization {
-            OperationAuthorization::ProjectRoot { head_commit_id, .. } => head_commit_id.clone(),
-            OperationAuthorization::Request { .. } => None,
-        },
-        code_generation_id: match &record.binding.authorization {
-            OperationAuthorization::ProjectRoot {
-                code_generation_id, ..
-            } => code_generation_id.clone(),
-            OperationAuthorization::Request { .. } => None,
-        },
-        document_content_digests: match &record.binding.authorization {
-            OperationAuthorization::ProjectRoot {
-                document_content_digests,
-                ..
-            } => document_content_digests.clone(),
-            OperationAuthorization::Request { .. } => BTreeMap::new(),
-        },
-        deadline: match &record.binding.authorization {
-            OperationAuthorization::ProjectRoot { deadline, .. } => deadline.clone(),
-            OperationAuthorization::Request { .. } => {
-                return Err(OperationEventError::InvalidTestRunEvent);
-            }
-        },
-        results,
-        result_offset: 0,
-        available_results,
-        next_cursor: None,
-        completed,
-        total,
-        termination,
-        receipt,
-    })
 }
 
 #[derive(Clone)]
@@ -1779,13 +1446,6 @@ fn resume_binding() -> Result<CursorBindingV1, OperationEventError> {
         .map_err(|_| OperationEventError::ResumeUnavailable)
 }
 
-fn test_result_binding(page_size: u32) -> Result<CursorBindingV1, OperationEventError> {
-    CursorBindingV1::builder("test_results")
-        .parameter("page_size", &page_size)
-        .build()
-        .map_err(|_| OperationEventError::ResumeUnavailable)
-}
-
 fn operation_resume_verification_error(error: CursorError) -> OperationEventError {
     match error {
         CursorError::Binding(mismatch) => OperationEventError::CursorRefused(mismatch),
@@ -1821,19 +1481,14 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use tracedecay_contracts::{
-        ApplicationProblemKind, Deadline, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
-        OperationTermination, PageRequest, RequestId,
+        ApplicationProblemKind, Deadline, OperationBudgetUsage, OperationReceipt, RequestId,
     };
-    use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, UtcMicros};
+    use tracedecay_domain::UtcMicros;
 
     use super::{
-        CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-        ManagedTestRunStaleReason, ManagedTestRunUnavailableReason, OperationCancelOutcome,
-        OperationEventAuthority, OperationEventError, OperationEventItem, OperationId,
-        StreamEventKind,
+        ManagedTestRunProgress, OperationCancelOutcome, OperationEventAuthority,
+        OperationEventError, OperationEventItem, OperationId, StreamEventKind,
     };
 
     #[test]
@@ -1857,63 +1512,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_test_snapshot_retains_operation_generation() {
+    async fn a_live_managed_run_reports_progress_until_its_terminal_receipt() {
         let authority = OperationEventAuthority::default();
+        let request_id = RequestId::new("request.test-run.progress").expect("request id");
+        let operation_id = OperationId::from_request(request_id.clone()).to_string();
+        let deadline = Deadline::new(UtcMicros(10_000)).expect("deadline");
         let emitter = authority
-            .begin_managed_test_run(
-                "file:///workspace".to_owned(),
-                RequestId::new("request.test-run.generation").expect("request id"),
-                Some(
-                    CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit"),
-                ),
-                Some(CodeGenerationId::new("generation.test.current").expect("code generation")),
-                BTreeMap::new(),
-                Deadline::new(UtcMicros(10_000)).expect("deadline"),
-            )
+            .begin_managed_test_run("file:///workspace".to_owned(), request_id, deadline.clone())
             .await
             .expect("managed test run");
+        let admitted = authority
+            .try_managed_test_run_activity("file:///workspace/")
+            .expect("idle authority");
+        assert_eq!(
+            authority
+                .managed_test_run_progress("file:///workspace", &operation_id)
+                .await,
+            Some(ManagedTestRunProgress {
+                completed: 0,
+                total: None,
+                deadline: deadline.clone(),
+            })
+        );
+
         emitter
             .test_result("suite::passes".to_owned(), true)
             .await
             .expect("test result");
         emitter.progress(1, Some(1)).await.expect("test progress");
+        assert_eq!(
+            authority
+                .managed_test_run_progress("file:///workspace/", &operation_id)
+                .await,
+            Some(ManagedTestRunProgress {
+                completed: 1,
+                total: Some(1),
+                deadline: deadline.clone(),
+            })
+        );
+        let progressed = authority
+            .try_managed_test_run_activity("file:///workspace")
+            .expect("idle authority");
+        assert_ne!(progressed, admitted);
+        assert_eq!(
+            authority
+                .managed_test_run_progress("file:///workspace/other", &operation_id)
+                .await,
+            None,
+            "a run is reported only under the root that admitted it"
+        );
+
         let receipt = OperationReceipt::completed(
             UtcMicros(1),
             UtcMicros(2),
-            Deadline::new(UtcMicros(10_000)).expect("deadline"),
-            OperationBudgetUsage {
-                units_consumed: 1,
-                bytes_consumed: 37,
-                elapsed_micros: 1,
-            },
+            deadline,
+            OperationBudgetUsage::default(),
         )
         .expect("receipt");
-        emitter
-            .terminal(receipt.clone())
-            .await
-            .expect("terminal receipt");
-
-        let snapshot = authority
-            .latest_managed_test_run("file:///workspace")
-            .await
-            .expect("managed test snapshot");
-
-        assert_eq!(snapshot.generation, 1);
+        emitter.terminal(receipt).await.expect("terminal receipt");
         assert_eq!(
-            snapshot.head_commit_id.as_ref().map(CommitId::as_str),
-            Some("0123456789abcdef0123456789abcdef01234567")
+            authority
+                .managed_test_run_progress("file:///workspace", &operation_id)
+                .await,
+            None,
+            "a run that published its terminal receipt no longer executes"
         );
-        assert_eq!(
-            snapshot
-                .code_generation_id
-                .as_ref()
-                .map(CodeGenerationId::as_str),
-            Some("generation.test.current")
+        assert_ne!(
+            authority
+                .try_managed_test_run_activity("file:///workspace")
+                .expect("idle authority"),
+            progressed
         );
-        assert_eq!(snapshot.deadline.expires_at, UtcMicros(10_000));
-        assert_eq!(snapshot.completed, 1);
-        assert_eq!(snapshot.termination, Some(OperationTermination::Completed));
-        assert_eq!(snapshot.receipt, Some(receipt));
     }
 
     /// A daemon composition shutting down in the same process (the harness
@@ -1928,9 +1597,6 @@ mod tests {
             .begin_managed_test_run(
                 "file:///workspace/live".to_owned(),
                 live_request.clone(),
-                None,
-                None,
-                BTreeMap::new(),
                 Deadline::new(UtcMicros(10_000)).expect("deadline"),
             )
             .await
@@ -1940,9 +1606,6 @@ mod tests {
                 .begin_managed_test_run(
                     "file:///workspace/abandoned".to_owned(),
                     RequestId::new("request.test-run.abandoned-producer").expect("request id"),
-                    None,
-                    None,
-                    BTreeMap::new(),
                     Deadline::new(UtcMicros(10_000)).expect("deadline"),
                 )
                 .await
@@ -1979,10 +1642,9 @@ mod tests {
         drop(state);
         assert_eq!(
             authority
-                .latest_managed_test_run("file:///workspace/abandoned")
-                .await
-                .err(),
-            Some(OperationEventError::FrontierExpired)
+                .try_managed_test_run_activity("file:///workspace/abandoned")
+                .expect("idle authority"),
+            None
         );
     }
 
@@ -1995,9 +1657,6 @@ mod tests {
             .begin_managed_test_run(
                 "file:///workspace".to_owned(),
                 request_id,
-                None,
-                None,
-                BTreeMap::new(),
                 Deadline::new(UtcMicros(10_000)).expect("deadline"),
             )
             .await
@@ -2011,161 +1670,5 @@ mod tests {
             OperationCancelOutcome::Requested
         );
         assert!(emitter.is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn canonical_test_run_reader_rejects_document_content_drift() {
-        let authority = OperationEventAuthority::default();
-        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
-        let generation = CodeGenerationId::new("generation.test.current").expect("code generation");
-        let document_uri = "file:///workspace/src/lib.rs";
-        let retained_digest =
-            ContentDigest::new(format!("sha256:{}", "a".repeat(64))).expect("retained digest");
-        authority
-            .begin_managed_test_run(
-                "file:///workspace".to_owned(),
-                RequestId::new("request.test-run.document-drift").expect("request id"),
-                Some(head.clone()),
-                Some(generation.clone()),
-                BTreeMap::from([(document_uri.to_owned(), retained_digest.clone())]),
-                Deadline::new(UtcMicros(10_000)).expect("deadline"),
-            )
-            .await
-            .expect("managed test run");
-        let reader = CanonicalManagedTestRunReader::new(authority);
-        let mut current = ManagedTestRunCurrentScope {
-            root_uri: "file:///workspace".to_owned(),
-            head_commit_id: Some(head),
-            code_generation_id: Some(generation),
-            document_uri: Some(document_uri.to_owned()),
-            document_content_digest: Some(retained_digest),
-        };
-
-        assert!(matches!(
-            reader.latest_current(&current).await,
-            ManagedTestRunReadOutcome::Current(_)
-        ));
-        current.document_content_digest =
-            Some(ContentDigest::new(format!("sha256:{}", "b".repeat(64))).expect("changed digest"));
-        assert_eq!(
-            reader.latest_current(&current).await,
-            ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent)
-        );
-    }
-
-    #[tokio::test]
-    async fn canonical_test_run_reader_rejects_exact_source_identity_drift() {
-        let authority = OperationEventAuthority::default();
-        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
-        let generation = CodeGenerationId::new("generation.test.current").expect("code generation");
-        authority
-            .begin_managed_test_run(
-                "file:///workspace".to_owned(),
-                RequestId::new("request.test-run.source-drift").expect("request id"),
-                Some(head.clone()),
-                Some(generation.clone()),
-                BTreeMap::new(),
-                Deadline::new(UtcMicros(10_000)).expect("deadline"),
-            )
-            .await
-            .expect("managed test run");
-        let reader = CanonicalManagedTestRunReader::new(authority);
-
-        for current in [
-            ManagedTestRunCurrentScope {
-                root_uri: "file:///workspace".to_owned(),
-                head_commit_id: Some(
-                    CommitId::new("fedcba9876543210fedcba9876543210fedcba98")
-                        .expect("changed head"),
-                ),
-                code_generation_id: Some(generation.clone()),
-                document_uri: None,
-                document_content_digest: None,
-            },
-            ManagedTestRunCurrentScope {
-                root_uri: "file:///workspace".to_owned(),
-                head_commit_id: Some(head.clone()),
-                code_generation_id: Some(
-                    CodeGenerationId::new("generation.test.changed")
-                        .expect("changed code generation"),
-                ),
-                document_uri: None,
-                document_content_digest: None,
-            },
-        ] {
-            assert_eq!(
-                reader.latest_current(&current).await,
-                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn canonical_test_run_reader_pages_with_an_authenticated_stable_cursor() {
-        let authority = OperationEventAuthority::default();
-        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
-        let generation = CodeGenerationId::new("generation.test.page").expect("code generation");
-        let emitter = authority
-            .begin_managed_test_run(
-                "file:///workspace".to_owned(),
-                RequestId::new("request.test-run.page").expect("request id"),
-                Some(head.clone()),
-                Some(generation.clone()),
-                BTreeMap::new(),
-                Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
-            )
-            .await
-            .expect("managed test run");
-        for index in 0..3 {
-            emitter
-                .test_result(format!("suite::test_{index}"), index != 1)
-                .await
-                .expect("test result");
-        }
-        emitter.progress(3, Some(3)).await.expect("test progress");
-        let reader = CanonicalManagedTestRunReader::new(authority);
-        let current = ManagedTestRunCurrentScope {
-            root_uri: "file:///workspace".to_owned(),
-            head_commit_id: Some(head),
-            code_generation_id: Some(generation),
-            document_uri: None,
-            document_content_digest: None,
-        };
-
-        let ManagedTestRunReadOutcome::Current(first) = reader
-            .latest_current_page(&current, &PageRequest::first(2).expect("page"))
-            .await
-        else {
-            panic!("first page must be current");
-        };
-        assert_eq!(first.results.len(), 2);
-        assert_eq!(first.result_offset, 0);
-        assert_eq!(first.available_results, 3);
-        let cursor = first.next_cursor.expect("continuation");
-        let tampered = OpaqueCursor::new(format!("{}x", cursor.as_str())).expect("opaque cursor");
-        assert_eq!(
-            reader
-                .latest_current_page(
-                    &current,
-                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
-                )
-                .await,
-            ManagedTestRunReadOutcome::Unavailable(
-                ManagedTestRunUnavailableReason::AuthorityFailure,
-            )
-        );
-        let ManagedTestRunReadOutcome::Current(second) = reader
-            .latest_current_page(
-                &current,
-                &PageRequest::new(2, Some(cursor)).expect("continuation page"),
-            )
-            .await
-        else {
-            panic!("second page must be current");
-        };
-        assert_eq!(second.results.len(), 1);
-        assert_eq!(second.results[0].test, "suite::test_2");
-        assert_eq!(second.result_offset, 2);
-        assert!(second.next_cursor.is_none());
     }
 }
