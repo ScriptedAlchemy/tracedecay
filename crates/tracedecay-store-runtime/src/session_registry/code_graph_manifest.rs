@@ -1329,7 +1329,7 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, read_verified_seal_manifest,
         spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
         verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
         verify_sealed_generation_source_from_roots,
