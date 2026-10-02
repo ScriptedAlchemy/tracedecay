@@ -19,6 +19,7 @@
 //! at all are eligible for collection, and only once older than the retention
 //! window.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
@@ -141,6 +142,21 @@ fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
         .chain(entry.alias_roots.iter().map(PathBuf::as_path))
 }
 
+/// A project root with a live owner is live even once it is gone from disk:
+/// the owner can still write into the store until it is retired and joined.
+/// Only the exact registered root counts.
+fn classify_owned(entry: &StoreCensusEntry, owner_roots: &BTreeSet<PathBuf>) -> StoreDisposition {
+    if std::iter::once(&entry.canonical_root)
+        .chain(entry.display_root.as_ref())
+        .chain(&entry.alias_roots)
+        .any(|root| owner_roots.contains(root))
+    {
+        return StoreDisposition::Live;
+    }
+    classify_one(entry)
+}
+
+/// The disposition the store's roots and manifest prove on disk.
 fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     if entry.expected_data_root_fence == StoreDirectoryFence::Unverifiable {
         return StoreDisposition::Unverifiable {
@@ -192,15 +208,20 @@ fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
     StoreDisposition::Orphaned
 }
 
-/// Classify every census entry. Pure: no filesystem writes, no deletion.
-pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStoreFinding> {
+/// Classify every census entry against the project roots that still have a
+/// live owner. Pure: no filesystem writes, no deletion.
+pub fn classify_stores(
+    census: &[StoreCensusEntry],
+    now: i64,
+    owner_roots: &BTreeSet<PathBuf>,
+) -> Vec<OrphanStoreFinding> {
     census
         .iter()
         .map(|entry| OrphanStoreFinding {
             project_id: entry.project_id.clone(),
             store_id: entry.store_id.clone(),
             data_root: entry.data_root.clone(),
-            disposition: classify_one(entry),
+            disposition: classify_owned(entry, owner_roots),
             age_secs: now.saturating_sub(entry.last_write_secs).max(0),
             size_bytes: entry.size_bytes,
             expected_store_relpath: entry.expected_store_relpath.clone(),

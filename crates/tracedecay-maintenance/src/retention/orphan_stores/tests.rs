@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -196,7 +197,7 @@ fn live_root_is_never_collected() {
         0,
         4096,
     )];
-    let findings = classify_stores(&census, 1_000 * DAY);
+    let findings = classify_stores(&census, 1_000 * DAY, &BTreeSet::new());
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
 
     let plan = plan_collection(findings, 0);
@@ -223,7 +224,7 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
     );
     census_entry.alias_roots = vec![live_alias];
 
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
     assert_eq!(
         findings[0].disposition,
         StoreDisposition::Live,
@@ -253,7 +254,7 @@ fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
     );
     census_entry.git_common_dir = Some(shared_common_dir);
 
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
     assert!(plan_collection(findings, 0).collect.is_empty());
 }

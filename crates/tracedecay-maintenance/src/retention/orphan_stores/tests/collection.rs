@@ -23,7 +23,10 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
     .await;
 
     let census = build_store_census(&db, &profile_root).await.unwrap();
-    let plan = plan_collection(classify_stores(&census, 1_700_000_000), 7 * DAY);
+    let plan = plan_collection(
+        classify_stores(&census, 1_700_000_000, &BTreeSet::new()),
+        7 * DAY,
+    );
     assert_eq!(
         plan.collect.len(),
         1,
@@ -94,7 +97,10 @@ async fn registered_collection_rejects_profile_contained_data_root_symlink() {
     .await;
 
     let census = build_store_census(&db, &profile_root).await.unwrap();
-    let plan = plan_collection(classify_stores(&census, 1_700_000_000), 7 * DAY);
+    let plan = plan_collection(
+        classify_stores(&census, 1_700_000_000, &BTreeSet::new()),
+        7 * DAY,
+    );
     assert_eq!(
         plan.collect.len(),
         1,
@@ -688,6 +694,70 @@ async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
     );
 }
 
+/// The cold-store page over stores whose roots were removed from disk keeps
+/// the one whose exact registered root still has a live owner, which can
+/// still write into it, and collects the rest, including the store of a root
+/// that merely shares a prefix with the owned one.
+#[tokio::test]
+async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_has_an_owner() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(profile_root.join("projects")).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .cast_signed();
+    let removed_root = |name: &str| tmp.path().join("removed-worktrees").join(name);
+    for (project_id, store_id, root) in [
+        ("proj_owned", "store_owned", "wt"),
+        ("proj_unowned", "store_unowned", "other"),
+        ("proj_prefix", "store_prefix", "wt-old"),
+    ] {
+        seed_store(
+            &db,
+            &profile_root,
+            project_id,
+            store_id,
+            &removed_root(root),
+            now,
+        )
+        .await;
+    }
+
+    let page = crate::retention::cold_store::run_cold_store_page(
+        &profile_root,
+        &db,
+        Some(0),
+        &BTreeSet::from([removed_root("wt")]),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        page.outcome,
+        crate::retention::cold_store::ColdStorePageOutcomeV1::Processed
+    );
+    let mut kept = std::fs::read_dir(profile_root.join("stores"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    kept.sort_unstable();
+    assert_eq!(kept, ["store_owned"]);
+    for (project_id, registered) in [("proj_owned", 1), ("proj_unowned", 0), ("proj_prefix", 0)] {
+        assert_eq!(
+            db.try_list_store_instances_for_project(project_id)
+                .await
+                .unwrap()
+                .len(),
+            registered,
+            "{project_id}"
+        );
+    }
+}
+
 /// Production journey over one profile: a live registered store carrying a
 /// stray `branches/*.db` is reported by Doctor, the maintenance cold-store
 /// orphan-collection page deletes it without a copy, Doctor is then clean, and
@@ -727,6 +797,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     let before = crate::retention::diagnostics::collect_profile_storage_findings(
         &db,
         &profile_root,
+        &BTreeSet::new(),
         7 * DAY,
         now,
     )
@@ -750,6 +821,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
         &profile_root,
         &db,
         Some(7),
+        &BTreeSet::new(),
         &CancellationToken::new(),
     )
     .await
@@ -785,6 +857,7 @@ async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     let after = crate::retention::diagnostics::collect_profile_storage_findings(
         &db,
         &profile_root,
+        &BTreeSet::new(),
         7 * DAY,
         now,
     )

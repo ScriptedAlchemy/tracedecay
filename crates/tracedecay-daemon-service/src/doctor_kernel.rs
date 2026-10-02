@@ -1048,9 +1048,14 @@ pub fn production_doctor_report_reader(
                 .unwrap_or(i64::MAX);
             let now = now_secs();
             let profile_storage_reads = async {
+                let mut owner_roots =
+                    tracedecay_maintenance::store_maintenance::scheduler_owner_roots(&schedulers)
+                        .await;
+                owner_roots.insert(project_root.clone());
                 tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
                     registry.as_ref(),
                     &profile_root,
+                    &owner_roots,
                     retention_secs,
                     now,
                 )
