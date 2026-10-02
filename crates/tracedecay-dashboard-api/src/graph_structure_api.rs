@@ -1189,6 +1189,12 @@ fn graph_error_response<T: Serialize>(
             "code_index_parked",
             &parked.to_string(),
         ),
+        rewarming @ CodeGraphReadError::Rewarming { .. } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            &rewarming.to_string(),
+        ),
     }
 }
 

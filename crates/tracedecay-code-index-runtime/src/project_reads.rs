@@ -56,6 +56,51 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
     }
 }
 
+/// A graph whose engine or catalog was released re-warms in the background;
+/// the read waits for it within what is left of its budget, so a re-warm
+/// that finishes in time serves the read instead of refusing it. Past the
+/// budget it answers the measured warm-up still needed.
+async fn await_rewarm(
+    store: &Arc<CodeGraphProjectionStore>,
+    request: &CodeGraphReadRequest<'_>,
+) -> Result<(), CodeGraphReadError> {
+    // A zero budget never blocks: it starts the re-warm and reports it.
+    if store.await_rewarm(Duration::ZERO).is_ok() {
+        return Ok(());
+    }
+    let now = now_micros();
+    let expires_at =
+        request
+            .deadline
+            .as_ref()
+            .map_or(request.context.deadline().expires_at, |deadline| {
+                deadline
+                    .expires_at
+                    .min(request.context.deadline().expires_at)
+            });
+    let budget =
+        Duration::from_micros(u64::try_from(expires_at.0.saturating_sub(now.0)).unwrap_or(0));
+    let waiting = Arc::clone(store);
+    let wait = tokio::task::spawn_blocking(move || waiting.await_rewarm(budget));
+    let settled = match request.live_cancellation {
+        Some(signal) => tokio::select! {
+            biased;
+            () = signal.cancelled() => return Err(CodeGraphReadError::Cancelled),
+            settled = wait => settled,
+        },
+        None => wait.await,
+    };
+    match settled {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(pending)) => Err(CodeGraphReadError::Rewarming {
+            retry_after_millis: u64::try_from(pending.retry_after.as_millis()).unwrap_or(u64::MAX),
+        }),
+        Err(error) => Err(CodeGraphReadError::Unavailable {
+            detail: format!("the code graph re-warm wait did not finish: {error}"),
+        }),
+    }
+}
+
 pub(crate) async fn sleep_until_deadline(deadline: &Deadline) {
     let now = now_micros();
     if deadline.is_elapsed_at(now) {
@@ -265,6 +310,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 }
             }?;
             refuse_projection_wait(&request)?;
+            await_rewarm(&projection.store, &request).await?;
             VerifiedCodeGraphRead::new(
                 self.authority.scope.clone(),
                 projection.store,

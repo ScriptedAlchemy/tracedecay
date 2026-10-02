@@ -322,6 +322,10 @@ export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" |
 
 export type ApplicationProblemDetailV1 = 
   | {
+    kind: "code_graph_rewarming";
+    retry_after_millis: number;
+  }
+  | {
     kind: "daemon_unreachable";
     named_by: string | null;
     service_unit: DaemonServiceUnitObservationV1;

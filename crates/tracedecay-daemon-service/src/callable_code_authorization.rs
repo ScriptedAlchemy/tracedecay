@@ -238,6 +238,9 @@ fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
         Err(CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Refused { .. }) => {
             hotpath::gauge!("daemon.code_authorization.admit.refused.unavailable").inc(1.0);
         }
+        Err(CodeGraphReadError::Rewarming { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.rewarming").inc(1.0);
+        }
         Err(CodeGraphReadError::ResetRequired { .. }) => {
             hotpath::gauge!("daemon.code_authorization.admit.refused.reset_required").inc(1.0);
         }

@@ -352,7 +352,7 @@ pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFa
             "application.code-graph.registry-missing",
             "The code index has not registered this project's code graph yet.",
         ),
-        CodeGraphReadError::Unavailable { .. } => (
+        CodeGraphReadError::Unavailable { .. } | CodeGraphReadError::Rewarming { .. } => (
             PrimitiveFailureKind::Unavailable,
             "application.code-graph.unavailable",
             "The project's verified code graph is not serving yet; retry after the code index \
@@ -414,6 +414,14 @@ pub(super) fn code_graph_read_failure(error: &CodeGraphReadError) -> PrimitiveFa
         kind,
         code: code.to_owned(),
         message: message.to_owned(),
+        detail: match error {
+            CodeGraphReadError::Rewarming { retry_after_millis } => {
+                Some(Box::new(ApplicationProblemDetailV1::CodeGraphRewarming {
+                    retry_after_millis: *retry_after_millis,
+                }))
+            }
+            _ => None,
+        },
     }
 }
 

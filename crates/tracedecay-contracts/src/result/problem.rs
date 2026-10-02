@@ -954,6 +954,7 @@ impl ApplicationProblem {
                 detail: Some(Box::new(detail)),
             },
             ApplicationProblemDetailV1::DiagnosticsPending { .. }
+            | ApplicationProblemDetailV1::CodeGraphRewarming { .. }
             | ApplicationProblemDetailV1::DaemonUnreachable { .. } => Self::Unavailable {
                 classification: ApplicationUnavailableClassV1::Authority,
                 diagnostic,
