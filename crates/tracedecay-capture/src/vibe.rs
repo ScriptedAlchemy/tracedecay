@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
