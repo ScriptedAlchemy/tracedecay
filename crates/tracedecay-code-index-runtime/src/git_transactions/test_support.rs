@@ -10,15 +10,14 @@ use tracedecay_contracts::{
     OperationTermination, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, GitBlobExpectationV1, GitCoverageV1,
-    GitHeadStateV1, GitIndexEntryExpectationV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId,
-    RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, ComponentVersion, GitBlobExpectationV1, GitCoverageV1, GitHeadStateV1,
+    GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitObjectFormatV1, GitOidV1, GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest,
+    ProjectId, RefId, RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1,
+    RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_store::GitIndexTransactionStore;

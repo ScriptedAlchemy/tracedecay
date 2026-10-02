@@ -758,12 +758,10 @@ where
         GitIndexReceiptOutcomeV1::AbortedNoChange | GitIndexReceiptOutcomeV1::NeedsInspection => {
             &[]
         }
-        GitIndexReceiptOutcomeV1::Committed => {
-            &[
-                GitIndexJournalPhaseV1::IndexCommitted,
-                GitIndexJournalPhaseV1::Verifying,
-            ]
-        }
+        GitIndexReceiptOutcomeV1::Committed => &[
+            GitIndexJournalPhaseV1::IndexCommitted,
+            GitIndexJournalPhaseV1::Verifying,
+        ],
     };
     for phase in phases {
         journal = durable.advance(idempotency_key, &journal, *phase, observed_at)?;

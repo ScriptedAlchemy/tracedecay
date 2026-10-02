@@ -820,8 +820,8 @@ mod gc_tests {
     ) -> GitIndexPreviewInputV1 {
         let template =
             super::super::test_support::preview_input(&super::super::test_support::preview());
-        let preview_id = GitIndexPreviewId::new(format!("preview.gc.{suffix}"))
-            .expect("preview id");
+        let preview_id =
+            GitIndexPreviewId::new(format!("preview.gc.{suffix}")).expect("preview id");
         let hunks = template
             .hunks
             .iter()

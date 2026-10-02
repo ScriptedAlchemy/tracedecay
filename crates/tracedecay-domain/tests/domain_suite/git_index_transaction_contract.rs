@@ -4,13 +4,13 @@ use tracedecay_domain::git::repository_state::{
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
 };
 use tracedecay_domain::{
-    GitBlobExpectationV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1,
-    GitIndexEntryExpectationV1, GitIndexJournalPhaseV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS,
-    ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    GitBlobExpectationV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1, GitIndexEntryExpectationV1,
+    GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitObjectFormatV1, GitOidV1, GitOperationStateV1, HunkDirectionV1, HunkRefV1,
+    MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS, ManifestDigest, ProjectId, RepositoryId, UtcMicros,
+    WorktreeId,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -253,13 +253,13 @@ fn restart_recovery_requires_post_boundary_phase_evidence() {
         );
     }
 
-    assert!(GitIndexJournalPhaseV1::IndexCommitted.permits_recovered_outcome(
-        GitIndexReceiptOutcomeV1::Committed,
-    ));
     assert!(
-        !GitIndexJournalPhaseV1::NeedsInspection.permits_recovered_outcome(
-            GitIndexReceiptOutcomeV1::Committed,
-        ),
+        GitIndexJournalPhaseV1::IndexCommitted
+            .permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed,)
+    );
+    assert!(
+        !GitIndexJournalPhaseV1::NeedsInspection
+            .permits_recovered_outcome(GitIndexReceiptOutcomeV1::Committed,),
         "inspection records must be reconciled under a separate proven-clear path"
     );
 }

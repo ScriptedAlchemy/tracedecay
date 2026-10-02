@@ -1009,8 +1009,7 @@ mod tests {
         }
         assert!(contribution.bindings().iter().all(|binding| {
             let operation = binding.operation().as_str();
-            !operation.contains("stage_hunks")
-                && !operation.contains("unstage_hunks")
+            !operation.contains("stage_hunks") && !operation.contains("unstage_hunks")
         }));
     }
 

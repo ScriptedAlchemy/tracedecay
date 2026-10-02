@@ -535,4 +535,3 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
         "The Work application request is invalid",
     )
 }
-

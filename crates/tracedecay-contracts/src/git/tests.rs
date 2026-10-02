@@ -3,11 +3,10 @@ use std::collections::BTreeSet;
 use tracedecay_domain::{
     ActorId, ComponentVersion, GitBlobExpectationV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1,
     GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId,
-    RepositoryId, RepositoryIndexSnapshotV1,
-    RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
-    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
+    GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1,
+    HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RefId, RepositoryId,
+    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
+    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 

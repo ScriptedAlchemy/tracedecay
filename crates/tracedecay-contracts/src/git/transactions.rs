@@ -8,10 +8,10 @@
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, ManifestDigest, RepositoryId, RepositoryStateSnapshotV1,
-    RetrievalAnchorId, UtcMicros, canonical_sha256,
+    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, RepositoryId, RepositoryStateSnapshotV1, RetrievalAnchorId, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, UseCaseId};
 

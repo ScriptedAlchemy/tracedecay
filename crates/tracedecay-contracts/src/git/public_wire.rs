@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     GitBlameV1, GitCoverageV1, GitDiffScopeV1, GitDiffV1, GitHeadStateV1, GitHistoryV1,
-    GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1,
-    GitOperationStateV1, HunkRefV1, ManifestDigest, RepositoryId, UtcMicros,
+    GitIndexPreviewId, GitIndexTransactionOperationV1, GitOidV1, GitOperationStateV1, HunkRefV1,
+    ManifestDigest, RepositoryId, UtcMicros,
 };
 
 use crate::IdempotencyKey;

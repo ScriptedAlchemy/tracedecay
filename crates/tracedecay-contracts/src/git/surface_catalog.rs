@@ -392,10 +392,11 @@ mod tests {
         ] {
             assert!(operations.iter().any(|name| name == expected), "{expected}");
         }
-        assert!(!operations.iter().any(|name| {
-            name.contains("stage_hunks")
-                || name.contains("unstage_hunks")
-        }));
+        assert!(
+            !operations
+                .iter()
+                .any(|name| { name.contains("stage_hunks") || name.contains("unstage_hunks") })
+        );
         assert!(contribution.bindings().iter().all(|binding| {
             binding.surface() != BindingSurface::Http
                 || !matches!(binding.operation().as_str(), "git_preview" | "git_apply")

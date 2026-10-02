@@ -2,11 +2,11 @@ use tracedecay_domain::{
     GitBlobExpectationV1, GitCoverageV1, GitHeadStateV1, GitIndexEntryExpectationV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,
     GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    GitObjectFormatV1, GitOidV1, HunkDirectionV1, HunkRefV1, ProjectId, RepositoryId,
-    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
+    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
+    HunkDirectionV1, HunkRefV1, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
+    RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
+    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
@@ -353,8 +353,7 @@ async fn canonical_schema_exposes_only_transaction_tables() {
         .expect("read preview row")
         .expect("stored preview row");
     let encoded = row.get::<String>(0).expect("preview json");
-    let stored: GitIndexPreviewV1 =
-        serde_json::from_str(&encoded).expect("stored preview decodes");
+    let stored: GitIndexPreviewV1 = serde_json::from_str(&encoded).expect("stored preview decodes");
     assert_eq!(stored, preview);
 }
 

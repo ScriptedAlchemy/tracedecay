@@ -750,7 +750,11 @@ async fn preview_unstage_hunks_via_mcp(
     let request = GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::UnstageHunks,
         preview_input_id: Some(input.preview_input_id),
-        selected_hunk_digests: input.hunks.iter().map(|entry| entry.digest.clone()).collect(),
+        selected_hunk_digests: input
+            .hunks
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect(),
     };
     let result = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
@@ -1829,8 +1833,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
 
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
-    let hunks_input =
-        staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks").await;
+    let hunks_input = staged_hunks_input_via_mcp(&fixture, "request.git-parity.hunks").await;
     let preview_request = GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::UnstageHunks,
         preview_input_id: Some(hunks_input.preview_input_id),

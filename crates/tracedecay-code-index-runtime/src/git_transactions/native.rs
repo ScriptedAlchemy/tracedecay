@@ -14,13 +14,13 @@ use tracedecay_contracts::{
     GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt, OperationTermination,
 };
 use tracedecay_domain::{
-    GitDegradationV1, GitDiffScopeV1, GitHeadStateV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
-    GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
-    RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
-    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256, parse_hunk_header,
+    GitDegradationV1, GitDiffScopeV1, GitHeadStateV1, GitIndexPreviewDispositionV1,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitIndexUnsupportedStateV1, GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId,
+    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
+    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
+    canonical_sha256, parse_hunk_header,
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store::GitIndexTransactionRecordV1;
@@ -404,11 +404,8 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
         transaction_id: &GitIndexTransactionId,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError> {
-        self.for_preview(&preview.preview)?.finalize(
-            preview,
-            transaction_id,
-            request,
-        )
+        self.for_preview(&preview.preview)?
+            .finalize(preview, transaction_id, request)
     }
 
     fn reconcile(
@@ -1079,8 +1076,6 @@ fn same_stable_native_evidence(
     // Every underlying stable authority is compared explicitly above.
 }
 
-
-
 /// Fixed native implementation used by the daemon coordinator. It accepts
 /// only preview-bound durable input and rematerializes exact patches after
 /// restart without accepting transport-supplied native state.
@@ -1370,9 +1365,9 @@ mod tests {
         RequestContext, RequestId, ResolvedScope,
     };
     use tracedecay_domain::{
-        ActorId, ComponentVersion, GitCoverageV1, GitIndexIdempotencyKey,
-        GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexTransactionId,
-        GitIndexTransactionJournalV1, GitObjectFormatV1, GitOperationStateV1, RefId,
+        ActorId, ComponentVersion, GitCoverageV1, GitIndexIdempotencyKey, GitIndexJournalPhaseV1,
+        GitIndexPreviewId, GitIndexTransactionId, GitIndexTransactionJournalV1, GitObjectFormatV1,
+        GitOperationStateV1, RefId,
     };
     use tracedecay_store::GitIndexTransactionRecordV1;
 
@@ -1740,9 +1735,7 @@ mod tests {
             GitDiffScopeV1::WorkingTree,
             "git-index-preview.fresh-native-blocker",
         );
-        let materialized = assembler
-            .materialize(&fresh)
-            .expect("materialized preview");
+        let materialized = assembler.materialize(&fresh).expect("materialized preview");
         assert_eq!(materialized.preview.repository_snapshot, fresh_snapshot);
         assert_eq!(
             materialized.preview.disposition,

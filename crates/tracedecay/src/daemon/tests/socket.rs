@@ -1284,8 +1284,8 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
 async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
     use std::process::Command;
 
-    use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
     use tracedecay_contracts::git::GitReadRequestV1;
+    use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
     use tracedecay_daemon_protocol::surface::GitReadSurfaceRequest;
     use tracedecay_domain::{GitIndexTransactionOperationV1, UtcMicros};
 
@@ -1361,9 +1361,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     async fn read_hunks(
         writer: &mut tokio::net::unix::OwnedWriteHalf,
-        lines: &mut tokio::io::Lines<
-            tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-        >,
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
         request_id: &str,
         observed_at: UtcMicros,
         deadline: &Deadline,
@@ -1389,7 +1387,11 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             .await
             .unwrap();
         writer.write_all(b"\n").await.unwrap();
-        let line = lines.next_line().await.unwrap().expect("hunks read response");
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("hunks read response");
         let response: Value = serde_json::from_str(&line).expect("read JSON");
         assert_eq!(response["status"], "git_read", "{response:#}");
         serde_json::from_value(response["result"]["payload"]["result"]["value"].clone())

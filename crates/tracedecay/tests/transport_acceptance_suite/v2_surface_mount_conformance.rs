@@ -286,9 +286,7 @@ fn dashboard_operation_route(operation: &str) -> Option<(&'static str, String)> 
         "feedback_expand" => Some(("POST", "/api/feedback/expand".to_owned())),
         "feedback_list" => Some(("POST", "/api/feedback/list".to_owned())),
         "feedback_proximity" => Some(("POST", "/api/feedback/proximity".to_owned())),
-        "native_integration_status" => {
-            Some(("GET", "/api/native-integration/status".to_owned()))
-        }
+        "native_integration_status" => Some(("GET", "/api/native-integration/status".to_owned())),
         _ => None,
     }
 }
@@ -325,9 +323,7 @@ impl DashboardProbe {
         let token = query
             .split('&')
             .find_map(|pair| pair.strip_prefix("token="))
-            .unwrap_or_else(|| {
-                panic!("dashboard launch URL carried no access token: {url}")
-            });
+            .unwrap_or_else(|| panic!("dashboard launch URL carried no access token: {url}"));
         let probe = Self {
             agent: common::http_agent_with_timeout(Duration::from_secs(30)),
             base_url: format!("http://tracedecay:{token}@{authority}"),
@@ -338,11 +334,9 @@ impl DashboardProbe {
 
     fn request_status(&self, method: &str, path: &str) -> u16 {
         let url = format!("{}{path}", self.base_url);
-        let response = common::http_call_with_retry(&format!("{method} {url}"), || {
-            match method {
-                "GET" => self.agent.get(&url).call(),
-                _ => self.agent.post(&url).send_json(serde_json::json!({})),
-            }
+        let response = common::http_call_with_retry(&format!("{method} {url}"), || match method {
+            "GET" => self.agent.get(&url).call(),
+            _ => self.agent.post(&url).send_json(serde_json::json!({})),
         });
         response.status().as_u16()
     }
@@ -568,8 +562,7 @@ impl LspBridgeProbe {
     /// per-deployment availability of a mounted method, not a mount gap.
     fn verdict_is_mounted(response: &Value) -> bool {
         response["error"]["code"].as_i64() != Some(-32601)
-            || response["error"]["data"]["reason"].as_str()
-                != Some("explicitlyUnavailable")
+            || response["error"]["data"]["reason"].as_str() != Some("explicitlyUnavailable")
     }
 
     fn operation_is_mounted(&mut self, operation: &str) -> bool {
