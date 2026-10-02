@@ -1164,44 +1164,66 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay_domain::errors::Result<T>)
     }
 }
 
-/// The JSON-RPC `error` every tool transport answers for arguments the tool's
-/// reviewed application schema refuses before dispatch.
+/// The refusal every tool transport answers for arguments the tool's reviewed
+/// application schema refuses before dispatch, as [`route_refusal`] reads it.
 #[cfg(feature = "test-transport")]
-pub(crate) fn application_invalid_request_error(tool: &str, detail: &str) -> Value {
-    application_surface_refusal_error(
-        tool,
-        &format!("application surface request does not match its reviewed schema: {detail}"),
-    )
+pub(crate) fn application_invalid_request_error(detail: &str) -> Value {
+    application_surface_refusal_error(&format!(
+        "application surface request does not match its reviewed schema: {detail}"
+    ))
 }
 
-/// Asserts a JSON-RPC response is `tool`'s reviewed-schema refusal.
+/// Asserts a JSON-RPC response is a reviewed-schema refusal.
 #[cfg(feature = "test-transport")]
-pub(crate) fn assert_application_invalid_request(response: &Value, tool: &str, detail: &str) {
+pub(crate) fn assert_application_invalid_request(response: &Value, detail: &str) {
     assert_eq!(
-        response["error"],
-        application_invalid_request_error(tool, detail),
+        route_refusal(response),
+        application_invalid_request_error(detail),
         "{response}"
     );
 }
 
-/// The JSON-RPC `error` for any `application_surface_invalid_request`
-/// refusal, with its whole `detail`.
+/// Any `application_surface_invalid_request` refusal, with its whole
+/// `detail`, as [`route_refusal`] reads it.
 #[cfg(feature = "test-transport")]
-pub(crate) fn application_surface_refusal_error(tool: &str, detail: &str) -> Value {
+pub(crate) fn application_surface_refusal_error(detail: &str) -> Value {
+    route_problem(
+        "invalid_request",
+        "application_surface_invalid_request",
+        detail,
+    )
+}
+
+/// A settled route refusal of `kind` with diagnostic `code` and `detail`, as
+/// [`route_refusal`] reads it.
+#[cfg(feature = "test-transport")]
+pub(crate) fn route_problem(kind: &str, code: &str, detail: &str) -> Value {
     json!({
-        "code": -32602,
-        "message": format!(
-            "tool project route failed: reason_code=application_surface_invalid_request \
-             retryable=false: {detail}"
-        ),
-        "data": {
-            "tool": tool,
-            "code": "application_surface_invalid_request",
-            "reason_code": "application_surface_invalid_request",
-            "kind": "invalid_request",
-            "retryable": false,
-            "detail": detail,
-        },
+        "kind": kind,
+        "retryable": false,
+        "diagnostic": {"code": code, "message": detail},
+    })
+}
+
+/// The kind, retry verdict, and diagnostic of the typed problem a JSON-RPC
+/// `tools/call` response settled its refusal with. A settled route refusal
+/// is an `isError` tool result on every transport, never a JSON-RPC error.
+#[cfg(feature = "test-transport")]
+pub(crate) fn route_refusal(response: &Value) -> Value {
+    assert!(
+        response.get("error").is_none(),
+        "a settled route refusal is a tool result, not a JSON-RPC error: {response}"
+    );
+    refusal_summary(refusal_problem(&response["result"]))
+}
+
+/// The kind, retry verdict, and diagnostic of a typed problem record.
+#[cfg(feature = "test-transport")]
+pub(crate) fn refusal_summary(problem: &Value) -> Value {
+    json!({
+        "kind": problem["kind"],
+        "retryable": problem["retryable"],
+        "diagnostic": problem["diagnostic"],
     })
 }
 

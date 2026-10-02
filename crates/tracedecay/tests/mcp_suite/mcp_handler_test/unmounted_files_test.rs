@@ -243,14 +243,9 @@ async fn unmounted_files_refuses_arguments_that_are_not_an_object() {
         .await
         .expect("production MCP answers a tools/call");
 
-    assert!(response.result.is_none(), "{response:?}");
-    let error = response
-        .error
-        .expect("non-object arguments are a tool error");
     assert_eq!(
-        json!({"code": error.code, "message": error.message, "data": error.data}),
+        crate::support::route_refusal(&serde_json::to_value(&response).expect("response")),
         crate::support::application_invalid_request_error(
-            TOOL,
             "invalid arguments: tracedecay_unmounted_files expects a JSON object"
         )
     );

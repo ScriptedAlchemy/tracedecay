@@ -14,7 +14,7 @@ use tracedecay::mcp::McpServer;
 
 use crate::support::{
     ProductionCompositionFixture, application_invalid_request_error,
-    handle_real_server_tool_call_raw, production_composition_fixture,
+    handle_real_server_tool_call_raw, production_composition_fixture, route_refusal,
 };
 
 const TOOL: &str = "tracedecay_fact_store_add";
@@ -583,8 +583,8 @@ fn assert_argument_error(response: &Value, detail: &str) {
     );
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(
-        response["error"],
-        application_invalid_request_error(TOOL, detail)
+        route_refusal(&response),
+        application_invalid_request_error(detail)
     );
 }
 

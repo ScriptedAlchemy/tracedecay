@@ -14,7 +14,7 @@ use super::memory_facts_test::{
 };
 use crate::support::{
     application_invalid_request_error, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw,
+    handle_real_server_tool_call_raw, route_refusal,
 };
 
 const FRIDAY: &str = "Northwind closes the ledger on Friday";
@@ -348,18 +348,10 @@ async fn fact_store_probe_reads_only_the_selected_registered_project() {
         }),
     )
     .await;
-    let error = &missing["error"];
-    assert_eq!(error["code"], -32602, "{missing}");
     assert_eq!(
-        error["message"],
-        "tool project route failed: reason_code=project_route_not_found retryable=false: registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
-    );
-    assert_eq!(error["data"]["tool"], "tracedecay_fact_store_probe");
-    assert_eq!(error["data"]["reason_code"], "project_route_not_found");
-    assert_eq!(error["data"]["retryable"], false);
-    assert_eq!(
-        error["data"]["detail"],
-        "registered project not found for project_selector.project_id=project.missing; run tracedecay_project_search"
+        crate::support::route_refusal(&missing),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
+        "{missing}"
     );
 
     fixture.harness.shutdown().await;
@@ -444,8 +436,8 @@ fn assert_invalid_request(result: &Value) {
 
 fn assert_schema_refusal(response: &Value, detail: &str) {
     assert_eq!(
-        response["error"],
-        application_invalid_request_error("tracedecay_fact_store_probe", detail),
+        route_refusal(&response),
+        application_invalid_request_error(detail),
         "{response}"
     );
 }

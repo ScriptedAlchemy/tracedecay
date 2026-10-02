@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::support::{
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call,
-    handle_real_server_tool_call_raw, real_mcp_server, setup_empty_project,
+    handle_real_server_tool_call_raw, real_mcp_server, route_refusal, setup_empty_project,
 };
 
 fn empty_project_doctor_report() -> Value {
@@ -101,11 +101,8 @@ async fn lcm_doctor_refuses_a_repair_argument_and_keeps_the_same_diagnosis() {
     )
     .await;
     assert_eq!(
-        refused["error"],
-        application_invalid_request_error(
-            "tracedecay_lcm_doctor",
-            "apply: unknown field `apply`, there are no fields"
-        )
+        route_refusal(&refused),
+        application_invalid_request_error("apply: unknown field `apply`, there are no fields")
     );
 
     let after = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;
@@ -135,11 +132,8 @@ async fn lcm_doctor_rejects_an_unknown_storage_scope() {
     .await;
 
     assert_eq!(
-        refused["error"],
-        application_invalid_request_error(
-            "tracedecay_lcm_doctor",
-            "storage_scope must be one of project, user"
-        )
+        route_refusal(&refused),
+        application_invalid_request_error("storage_scope must be one of project, user")
     );
 
     let after = handle_real_server_tool_call(&server, "tracedecay_lcm_doctor", json!({})).await;

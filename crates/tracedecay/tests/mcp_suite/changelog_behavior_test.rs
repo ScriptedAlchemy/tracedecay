@@ -115,19 +115,11 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
     );
 
     // A non-object argument list never reaches the owner's typed parser: the
-    // MCP boundary rejects it as a malformed call.
+    // MCP boundary refuses it as a malformed call.
     let not_object = call_changelog(&repo, json!(["HEAD", "HEAD"])).await;
-    let not_object = not_object
-        .error
-        .expect("a non-object argument list is a JSON-RPC error");
     assert_eq!(
-        json!({
-            "code": not_object.code,
-            "message": not_object.message,
-            "data": not_object.data,
-        }),
+        crate::support::route_refusal(&serde_json::to_value(&not_object).expect("response")),
         crate::support::application_invalid_request_error(
-            "tracedecay_changelog",
             "invalid arguments: tracedecay_changelog expects a JSON object"
         )
     );
