@@ -134,10 +134,7 @@ impl ProjectCodeGraphServingAuthorityV1 {
             .latest_complete_serving_for_root_scope(&self.project_root, &self.scope, lease)
             .await
         else {
-            return Err(CodeGraphReadError::Unavailable {
-                detail: "the verified code graph is not ready for the exact project root"
-                    .to_owned(),
-            });
+            return Err(self.unseated_graph_error().await);
         };
         let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
             sealed_at: seated.generation().manifest().seal.sealed_at,
@@ -147,6 +144,27 @@ impl ProjectCodeGraphServingAuthorityV1 {
                 .await,
         };
         Self::complete_projection(seated, freshness)
+    }
+
+    /// Why no graph is seated. A park no wake retries is why it never seats;
+    /// reporting that as not-ready-yet invites a retry that cannot change.
+    async fn unseated_graph_error(&self) -> CodeGraphReadError {
+        match self
+            .schedulers
+            .convergence_park(&self.project_root)
+            .await
+            .filter(|parked| !parked.retries_on_wake)
+        {
+            Some(parked) => CodeGraphReadError::Parked {
+                cause: parked.reason,
+                remedy: parked.remediation,
+                retries_on_wake: parked.retries_on_wake,
+            },
+            None => CodeGraphReadError::Unavailable {
+                detail: "the verified code graph is not ready for the exact project root"
+                    .to_owned(),
+            },
+        }
     }
 
     fn complete_projection(
