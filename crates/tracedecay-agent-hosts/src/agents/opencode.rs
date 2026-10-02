@@ -879,6 +879,19 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRo
     }
 
     let config = load_json_file(&config_path);
+    if config
+        .pointer(&format!("/mcp/{LEGACY_MCP_SERVER_KEY}"))
+        .is_some()
+    {
+        dc.fail(
+            "V1-era `mcp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
+        );
+    }
+    if config.pointer("/lsp/tracedecay").is_some() {
+        dc.fail(
+            "retired `lsp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
+        );
+    }
     let Some(mcp_entry) = config
         .pointer(MCP_SERVER_POINTER)
         .filter(|entry| entry.is_object())
@@ -900,19 +913,6 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRo
         dc.pass("MCP server args include \"serve\"");
     } else {
         dc.fail("MCP server args missing \"serve\", run `tracedecay install --agent opencode`");
-    }
-    if config
-        .pointer(&format!("/mcp/{LEGACY_MCP_SERVER_KEY}"))
-        .is_some()
-    {
-        dc.fail(
-            "V1-era `mcp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
-        );
-    }
-    if config.pointer("/lsp/tracedecay").is_some() {
-        dc.fail(
-            "retired `lsp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
-        );
     }
 }
 
@@ -1072,34 +1072,58 @@ mod tests {
         let profile = ProfileRoot::under_home(home.path());
         let config = opencode_config_path(home.path(), &profile);
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config,
-            serde_json::to_vec(&json!({
-                "mcp": {
+        for (mcp, legacy_mcp) in [
+            (
+                json!({
                     "servers": {
                         "tracedecay": {
                             "type": "local",
                             "command": ["tracedecay", "serve"]
                         }
                     }
-                },
-                "lsp": {
+                }),
+                false,
+            ),
+            (
+                json!({
                     "tracedecay": {
-                        "command": ["tracedecay", "lsp"]
+                        "type": "local",
+                        "command": ["tracedecay", "serve"]
                     }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+                }),
+                true,
+            ),
+            (Value::Null, false),
+        ] {
+            std::fs::write(
+                &config,
+                serde_json::to_vec(&json!({
+                    "mcp": mcp,
+                    "lsp": {
+                        "tracedecay": {
+                            "command": ["tracedecay", "lsp"]
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
 
-        let mut counters = DoctorCounters::new();
-        doctor_check_config(&mut counters, home.path(), &profile);
+            let mut counters = DoctorCounters::new();
+            doctor_check_config(&mut counters, home.path(), &profile);
 
-        assert!(counters.checks.iter().any(|check| {
-            check.level == crate::agents::DoctorCheckLevelV1::Issue
-                && check.message.contains("lsp.tracedecay")
-        }));
+            assert!(counters.checks.iter().any(|check| {
+                check.level == crate::agents::DoctorCheckLevelV1::Issue
+                    && check.message.contains("lsp.tracedecay")
+            }));
+            assert_eq!(
+                counters.checks.iter().any(|check| {
+                    check.level == crate::agents::DoctorCheckLevelV1::Issue
+                        && check.message.contains("mcp.tracedecay")
+                }),
+                legacy_mcp
+            );
+        }
     }
 
     /// The profile's `$XDG_CONFIG_HOME` is honored only inside the home being
