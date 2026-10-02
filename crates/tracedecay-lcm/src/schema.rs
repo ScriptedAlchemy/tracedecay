@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shipped_v13_profile_remains_admissible_for_projector_rebuild() -> Result<(), String> {
+    async fn shipped_v13_profile_refuses_typed_without_upgrading() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
@@ -805,11 +805,39 @@ mod tests {
         .await
         .map_err(|error| error.to_string())?;
 
+        let refusal = |error: LcmError| match error {
+            LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => Ok((found_version, required_version)),
+            other => Err(format!("expected a typed reset refusal, got {other}")),
+        };
         assert_eq!(
-            require_admissible_lcm_schema(&*conn)
-                .await
-                .map_err(|error| error.to_string())?,
-            LcmSchemaAdmission::Current
+            refusal(
+                require_admissible_lcm_schema(&*conn)
+                    .await
+                    .expect_err("a shipped v13 store must refuse admission")
+            )?,
+            (Some(13), 14)
+        );
+        assert_eq!(
+            refusal(
+                ensure_lcm_schema(&conn)
+                    .await
+                    .expect_err("opening a shipped v13 store must refuse, not upgrade it")
+            )?,
+            (Some(13), 14)
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker version",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            13
         );
         Ok(())
     }
