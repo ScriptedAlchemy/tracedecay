@@ -881,9 +881,14 @@ impl GitRepositoryAuthority {
             crate::git_open::discover(path)
         )
         .map_err(|error| match error {
-            gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
-                ..
-            }) => GitRepositoryError::NotARepository {
+            // Like git without GIT_DISCOVERY_ACROSS_FILESYSTEM, a walk that
+            // stops at a mount boundary (a tmpfs /tmp, say) or a ceiling has
+            // found no repository; nothing on disk was unreadable.
+            gix::discover::Error::Discover(
+                gix::discover::upwards::Error::NoGitRepository { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. },
+            ) => GitRepositoryError::NotARepository {
                 path: path.display().to_string(),
             },
             error => GitRepositoryError::UnreadableRepository {

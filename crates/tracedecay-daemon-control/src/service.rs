@@ -213,7 +213,7 @@ impl QuiescedDaemonLifecycle {
             profile,
             operation,
             expected_version,
-            ServiceRunner::current(profile)?,
+            ServiceRunner::current_for_installed_unit(profile)?,
             timeout,
         )
     }
@@ -1164,7 +1164,7 @@ fn refresh_installed_service_with_state(
     expected_version: &str,
 ) -> Result<Option<PathBuf>> {
     refresh_installed_service_with_state_and_runner(
-        &ServiceRunner::current(&spec.profile)?,
+        &ServiceRunner::current_for_installed_unit(&spec.profile)?,
         spec,
         previous_state,
         expected_version,
@@ -1217,7 +1217,7 @@ pub fn quiesce_installed_service_before_lease(
 ) -> Result<DaemonServiceState> {
     quiesce_installed_service_before_lease_with_runner(
         profile,
-        &ServiceRunner::current(profile)?,
+        &ServiceRunner::current_for_installed_unit(profile)?,
         expected_version,
     )
 }
@@ -1273,7 +1273,7 @@ pub fn verify_installed_service_quiesced_under_lease(
 ) -> Result<DaemonServiceState> {
     verify_installed_service_quiesced_under_lease_with_runner(
         profile,
-        &ServiceRunner::current(profile)?,
+        &ServiceRunner::current_for_installed_unit(profile)?,
     )
 }
 
@@ -1331,7 +1331,7 @@ pub fn restore_installed_service_after_update(
 ) -> Result<()> {
     restore_installed_service_after_update_with_runner(
         profile,
-        &ServiceRunner::current(profile)?,
+        &ServiceRunner::current_for_installed_unit(profile)?,
         previous_state,
         expected_version,
     )
