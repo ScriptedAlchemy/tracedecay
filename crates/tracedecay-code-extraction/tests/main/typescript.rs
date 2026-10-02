@@ -430,6 +430,43 @@ namespace MyNamespace {
 }
 
 #[test]
+fn test_ts_exported_nested_and_module_namespaces() {
+    let source = r#"
+export namespace Outer {
+    function hidden(): void {}
+    export namespace Inner {
+        export function deep(): void {}
+    }
+}
+module Legacy {
+    export function old(): void {}
+}
+namespace A.B {
+    export function dotted(): void {}
+}
+"#;
+    let result = TypeScriptExtractor.extract_artifact("ns.ts", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let mut functions: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .map(|n| (n.qualified_name.as_str(), n.visibility.clone()))
+        .collect();
+    functions.sort_by_key(|(name, _)| *name);
+    assert_eq!(
+        functions,
+        [
+            ("ns.ts::A::B::dotted", Visibility::Pub),
+            ("ns.ts::Legacy::old", Visibility::Pub),
+            ("ns.ts::Outer::Inner::deep", Visibility::Pub),
+            ("ns.ts::Outer::hidden", Visibility::Private),
+        ]
+    );
+}
+
+#[test]
 fn test_ts_jsdoc_docstring() {
     let source = r#"
 /** Adds two numbers together. */

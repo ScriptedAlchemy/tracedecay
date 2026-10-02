@@ -20,7 +20,7 @@ eval-helpers = []
 
 # Opt-in tiered graph storage (never in `default`).
 #
-# Split in two on purpose, because grafeo 0.5.42 bundles two unrelated
+# Split in two on purpose, because grafeo bundles two unrelated
 # things under the "tiered" name and only one of them is usable here.
 #
 # `graph-disk-tier` is the half that *could* be disk-backed:
