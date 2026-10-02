@@ -1054,20 +1054,6 @@ impl RowBlockV1 {
     }
 }
 
-/// Scoring preface of one stored block, without inflating its rows.
-pub(super) fn scoring_preface_rows(
-    first_document: i64,
-    stored: &[u8],
-) -> Result<Vec<ScoringPrefaceRowV1>, CodeLexicalArtifactErrorV1> {
-    let (preface, _) = split_scoring_preface(stored)?;
-    decode_preface_rows(first_document, preface)
-}
-
-/// The file-dictionary reference at the start of one stored row.
-pub(super) fn row_file_reference(row: &[u8]) -> Result<i64, CodeLexicalArtifactErrorV1> {
-    RowCursorV1 { bytes: row }.take_reference()
-}
-
 /// Every row of one stored block.
 pub(super) fn decode_row_block(
     first_document: i64,
