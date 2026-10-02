@@ -83,7 +83,7 @@ fn write_claude_session(home: &Path, project: &Path, session: &str, day: &str) {
 async fn import_and_converge(home: &Path, db: &ProjectSessionTestRuntime, project: &Path) {
     ingest_global_sources_for_provider(home, db, project, None).await;
     db.runtime()
-        .converge_git_evidence_for_test(&SystemGit)
+        .converge_git_evidence_for_test(&SystemGit, Some(project))
         .await
         .unwrap();
 }

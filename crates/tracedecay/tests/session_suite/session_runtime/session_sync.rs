@@ -144,7 +144,7 @@ fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() 
             },
             committed: true,
             frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-                activity_timestamp: 1_723_456_789,
+                change_sequence: 1_723_456_789,
                 source_rowid: 417,
             },
             remaining_sessions: 1,
@@ -182,7 +182,7 @@ fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() 
         serde_json::from_str::<serde_json::Value>(&source_frontiers[0].committed_cursor_json)
             .unwrap(),
         serde_json::json!({
-            "activity_timestamp": 1_723_456_789,
+            "change_sequence": 1_723_456_789,
             "source_rowid": 417,
         })
     );
@@ -215,7 +215,7 @@ fn deadline_after_first_git_commit_preserves_progress_and_timed_out_termination(
             },
             committed: true,
             frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
-                activity_timestamp: 1_723_456_790,
+                change_sequence: 1_723_456_790,
                 source_rowid: 418,
             },
             remaining_sessions: 0,
@@ -253,7 +253,7 @@ fn deadline_after_first_git_commit_preserves_progress_and_timed_out_termination(
         serde_json::from_str::<serde_json::Value>(&source_frontiers[0].committed_cursor_json)
             .unwrap(),
         serde_json::json!({
-            "activity_timestamp": 1_723_456_790,
+            "change_sequence": 1_723_456_790,
             "source_rowid": 418,
         })
     );
@@ -834,14 +834,14 @@ fn completed_alias_replay_survives_its_original_deadline() {
 fn git_recovery_frontier_preserves_the_exact_committed_tuple() {
     let frontier = git_history_frontier_from_meta(Some(1_723_456_789), Some(417)).unwrap();
 
-    assert_eq!(frontier.activity_timestamp, 1_723_456_789);
+    assert_eq!(frontier.change_sequence, 1_723_456_789);
     assert_eq!(frontier.source_rowid, 417);
     let receipt_frontier =
         git_history_source_frontier(&ProjectId::new("project.fixture").unwrap(), frontier);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&receipt_frontier.committed_cursor_json).unwrap(),
         serde_json::json!({
-            "activity_timestamp": 1_723_456_789,
+            "change_sequence": 1_723_456_789,
             "source_rowid": 417,
         })
     );
