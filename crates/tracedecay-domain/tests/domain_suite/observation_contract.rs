@@ -113,6 +113,26 @@ fn nested_arrays(depth: usize) -> Value {
 }
 
 #[test]
+fn tool_invocation_without_a_host_id_round_trips_without_inventing_one() {
+    let fact: CanonicalObservationFactV1 = serde_json::from_value(json!({
+        "kind": "tool_invocation",
+        "name": "Read",
+        "arguments": {"path": "src/lib.rs"}
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        &fact,
+        CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: None,
+            ..
+        }
+    ));
+    let encoded = serde_json::to_value(fact).unwrap();
+    assert!(encoded.get("invocation_id").is_none());
+}
+
+#[test]
 fn uncorrelated_usage_retains_native_evidence_and_requires_missing_dimensions() {
     let fact = |missing_dimensions| CanonicalObservationFactV1::UncorrelatedUsage {
         input_tokens: Some(11),
