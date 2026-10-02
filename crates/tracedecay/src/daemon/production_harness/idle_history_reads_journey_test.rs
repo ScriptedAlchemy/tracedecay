@@ -278,7 +278,9 @@ async fn converged_messages(
                 return status;
             }
             "converged" => {
-                panic!("history converged on the wrong message count (expected {expected}): {status}")
+                panic!(
+                    "history converged on the wrong message count (expected {expected}): {status}"
+                )
             }
             other => panic!("history settled as {other} before converging: {status}"),
         }
