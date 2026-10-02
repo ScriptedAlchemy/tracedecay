@@ -148,6 +148,105 @@ pub enum HookDeliveryRetentionV1 {
     Staged,
 }
 
+/// What became of the delivery receipt of a hook output the host received.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookDeliveryReceiptOutcomeV1 {
+    /// The receipt is retained for the daemon to settle.
+    Delivered(HookDeliveryRetentionV1),
+    /// The receipt was refused, so the daemon never settles this delivery.
+    Refused {
+        reason: HookDeliveryReceiptRefusalV1,
+    },
+    /// Retaining the receipt failed.
+    Failed { cause: HookDeliveryReceiptFailureV1 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookDeliveryReceiptRefusalV1 {
+    /// The delivery's settlement identity could not be derived.
+    IdentityUnavailable,
+    /// The receipt failed validation.
+    InvalidReceipt,
+    /// The spool holds its bound of pending receipts.
+    Full,
+    /// The spool stayed locked past the hook's budget.
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookDeliveryReceiptFailureV1 {
+    UnsafePath,
+    Corrupt,
+    Io,
+}
+
+impl HookDeliveryReceiptOutcomeV1 {
+    /// Retains `receipt` in the spool at `root` within `wait_budget`.
+    pub fn retain(
+        root: impl Into<PathBuf>,
+        wait_budget: Duration,
+        receipt: &HookDeliverySourceReceiptV1,
+    ) -> Self {
+        HookDeliveryReceiptWriterV1::open_within(root, wait_budget)
+            .and_then(|writer| writer.retain(receipt))
+            .into()
+    }
+
+    /// The `hook_completed` reason code of a spooled event with this receipt.
+    pub const fn spooled_reason_code(&self) -> &'static str {
+        match self {
+            Self::Delivered(_) => "hook_v2_spooled",
+            Self::Refused { reason } => match reason {
+                HookDeliveryReceiptRefusalV1::IdentityUnavailable => {
+                    "hook_v2_spooled_delivery_receipt_refused_identity_unavailable"
+                }
+                HookDeliveryReceiptRefusalV1::InvalidReceipt => {
+                    "hook_v2_spooled_delivery_receipt_refused_invalid"
+                }
+                HookDeliveryReceiptRefusalV1::Full => {
+                    "hook_v2_spooled_delivery_receipt_refused_full"
+                }
+                HookDeliveryReceiptRefusalV1::Busy => {
+                    "hook_v2_spooled_delivery_receipt_refused_busy"
+                }
+            },
+            Self::Failed { cause } => match cause {
+                HookDeliveryReceiptFailureV1::UnsafePath => {
+                    "hook_v2_spooled_delivery_receipt_failed_unsafe_path"
+                }
+                HookDeliveryReceiptFailureV1::Corrupt => {
+                    "hook_v2_spooled_delivery_receipt_failed_corrupt"
+                }
+                HookDeliveryReceiptFailureV1::Io => "hook_v2_spooled_delivery_receipt_failed_io",
+            },
+        }
+    }
+}
+
+impl From<Result<HookDeliveryRetentionV1, HookDeliverySpoolError>>
+    for HookDeliveryReceiptOutcomeV1
+{
+    fn from(retained: Result<HookDeliveryRetentionV1, HookDeliverySpoolError>) -> Self {
+        let refused = |reason| Self::Refused { reason };
+        let failed = |cause| Self::Failed { cause };
+        match retained {
+            Ok(retention) => Self::Delivered(retention),
+            Err(HookDeliverySpoolError::InvalidReceipt) => {
+                refused(HookDeliveryReceiptRefusalV1::InvalidReceipt)
+            }
+            Err(HookDeliverySpoolError::Full) => refused(HookDeliveryReceiptRefusalV1::Full),
+            Err(HookDeliverySpoolError::Busy | HookDeliverySpoolError::AdmissionTimedOut) => {
+                refused(HookDeliveryReceiptRefusalV1::Busy)
+            }
+            Err(HookDeliverySpoolError::UnsafePath) => {
+                failed(HookDeliveryReceiptFailureV1::UnsafePath)
+            }
+            Err(HookDeliverySpoolError::Corrupt) => failed(HookDeliveryReceiptFailureV1::Corrupt),
+            Err(HookDeliverySpoolError::Io) => failed(HookDeliveryReceiptFailureV1::Io),
+        }
+    }
+}
+
 /// One hook callback's writer for its host's delivery receipts.
 ///
 /// Writers share the staging lease, so concurrent callbacks never wait on

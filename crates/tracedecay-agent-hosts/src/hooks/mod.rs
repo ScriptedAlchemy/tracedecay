@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracedecay_contracts::retrieval::{HookIngestTranscriptRequestV1, HookRuntimeSurfaceRequestV1};
 use tracedecay_hooks::DaemonHookEvent;
+use tracedecay_hooks::delivery_spool::HookDeliveryReceiptOutcomeV1;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -143,25 +144,26 @@ pub fn record_native_capture_stdin_refused(
 pub struct NativeCaptureTelemetryV1(analytics::HookTimingSpan);
 
 impl NativeCaptureTelemetryV1 {
-    /// Notes where the capture landed. A delivery receipt the hook could not
-    /// retain after the event spooled is recorded here, not as a lost event.
+    /// Notes where the capture landed. `receipt` is the delivery receipt of a
+    /// spooled event; one the hook could not retain is recorded here, not as
+    /// a lost event.
     pub fn note_capture_outcome(
         &self,
         outcome: &tracedecay_hooks::NativeHookCaptureOutcomeV1,
-        delivery_receipt_retained: bool,
+        receipt: Option<&HookDeliveryReceiptOutcomeV1>,
     ) {
         use tracedecay_hooks::NativeHookCaptureOutcomeV1 as Outcome;
         use tracedecay_sessions::admission::{
             HostAdmissionStatus as Status, HostAdmissionTelemetryDisposition as Disposition,
         };
         let (status, retryable, reason) = match outcome {
-            Outcome::Captured if delivery_receipt_retained => {
-                (Status::AcceptedForReplay, true, "hook_v2_spooled")
-            }
             Outcome::Captured => (
                 Status::AcceptedForReplay,
                 true,
-                "hook_v2_spooled_delivery_receipt_unavailable",
+                receipt.map_or(
+                    "hook_v2_spooled_delivery_receipt_unattempted",
+                    HookDeliveryReceiptOutcomeV1::spooled_reason_code,
+                ),
             ),
             Outcome::Unsupported => (Status::Degraded, false, "native_capture_unsupported"),
             Outcome::Unbound => (Status::Unavailable, true, "native_capture_unbound"),
@@ -394,10 +396,15 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    if let Some(layout) = layout
-        && let Err(error) = retain_output_receipt(&layout.data_root, host, event_json, output)
-    {
-        tracing::warn!(host = host.hook_key(), %error, "Hook output was delivered but its delivery receipt was not retained");
+    if let Some(layout) = layout {
+        let receipt = retain_output_receipt(&layout.data_root, host, event_json, output);
+        if !matches!(receipt, HookDeliveryReceiptOutcomeV1::Delivered(_)) {
+            tracing::warn!(
+                host = host.hook_key(),
+                ?receipt,
+                "Hook output was delivered but its delivery receipt was not retained"
+            );
+        }
     }
     true
 }
@@ -410,18 +417,23 @@ fn retain_output_receipt(
     host: NativeHostIdentityV1,
     event_json: &str,
     output: &str,
-) -> Result<tracedecay_hooks::HookDeliveryRetentionV1, String> {
+) -> HookDeliveryReceiptOutcomeV1 {
+    let identity_unavailable = HookDeliveryReceiptOutcomeV1::Refused {
+        reason: tracedecay_hooks::delivery_spool::HookDeliveryReceiptRefusalV1::IdentityUnavailable,
+    };
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
     let session = event_session_id(&parsed).unwrap_or_else(|| "session-unavailable".to_owned());
     let settled_at = daemon_ports::now_utc();
-    let owner = hook_output_owner_event_id(host, event_json, output)
-        .ok_or("delivery identity could not be derived")?;
-    let channel = tracedecay_domain::canonical_sha256(&(
+    let Some(owner) = hook_output_owner_event_id(host, event_json, output) else {
+        return identity_unavailable;
+    };
+    let Ok(channel) = tracedecay_domain::canonical_sha256(&(
         "tracedecay.hook-output-channel.v1",
         host.hook_key(),
         session,
-    ))
-    .map_err(|_| "delivery channel identity could not be derived")?;
+    )) else {
+        return identity_unavailable;
+    };
     let settlement = tracedecay_domain::DeliverySettlementV1 {
         attempt: tracedecay_domain::DeliverySettlementAttemptV1 {
             owner_event_id: owner,
@@ -443,14 +455,14 @@ fn retain_output_receipt(
         settled_at,
         drop_reason: None,
     };
-    let receipt = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement)
-        .map_err(|error| error.to_string())?;
-    tracedecay_hooks::HookDeliveryReceiptWriterV1::open_within(
-        tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
-        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    )
-    .and_then(|writer| writer.retain(&receipt))
-    .map_err(|error| error.to_string())
+    match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
+        Ok(receipt) => HookDeliveryReceiptOutcomeV1::retain(
+            tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host),
+            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+            &receipt,
+        ),
+        Err(error) => Err(error).into(),
+    }
 }
 
 fn hook_output_owner_event_id(

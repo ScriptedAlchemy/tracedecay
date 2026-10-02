@@ -24,7 +24,7 @@ mod entry_tests;
 mod test_support;
 
 pub use admission::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
+    HookV2AdmissionLedgerUnavailable, HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
     admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };
 pub use envelope::daemon_mint_hook_v2_file_id;

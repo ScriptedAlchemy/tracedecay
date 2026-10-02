@@ -6,13 +6,15 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
+use tracedecay_contracts::retrieval::{
+    StatusHookReplayFailureV1, StatusHookReplaySpoolV1, StatusHookReplayV1,
+};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_hooks::delivery_spool::HookDeliverySpoolError;
 use tracedecay_hooks::{
     HookDeliveryReceiptSpoolV1, HookReplayAdmissionOutcomeV1, HookReplayPassReportV1,
     HookSpoolConfigV1, HookSpoolV1, admit_replayed_envelope_with_authoritative_session,
@@ -34,8 +36,8 @@ pub(in crate::daemon) use spool_opener::spawn_spooled_hook_opener;
 /// The longest a retained record or receipt waits for its next delivery
 /// attempt. Every append and receipt publication wakes the drain, and startup
 /// opens every project holding either, so this sweep only retries work a pass
-/// retained (for example a settlement the authority refused) or a wake the
-/// spool watch could not deliver.
+/// retained (for example a settlement the authority refused), a spool a pass
+/// could not drain, or a wake the spool watch could not deliver.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmissionOutcomeV1 {
@@ -51,77 +53,75 @@ fn replay_admission_outcome(outcome: HookV2AdmissionOutcomeV1) -> HookReplayAdmi
     }
 }
 
+/// Settles and releases one host's delivery receipts. The drain shares the
+/// spool with hook callbacks, which write it while the daemon is down; a
+/// drain woken by a publication waits out the publishing writer. A receipt
+/// that is not settled stays durable for the next sweep, and the failure
+/// names its cause.
 #[hotpath::measure(label = "daemon.hook_replay.receipt_drain", future = true)]
 async fn drain_hook_delivery_receipts(
     data_root: &Path,
     host: NativeHostIdentityV1,
     authority: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
-) {
+) -> Result<(), String> {
     let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
     if !root.is_dir() {
-        return;
+        return Ok(());
     }
-    let Some(spool) = open_delivery_receipt_spool_for_drain(&root, host) else {
-        return;
+    let open = || {
+        HookDeliveryReceiptSpoolV1::open(&root, tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET)
+            .map_err(|error| error.to_string())
     };
-    let receipts = match spool.pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS)) {
-        Ok(receipts) => receipts,
-        Err(error) => {
-            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not read pending receipts");
-            return;
-        }
-    };
-    drop(spool);
+    let receipts = open()?
+        .pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS))
+        .map_err(|error| error.to_string())?;
 
     let mut settled = Vec::new();
+    let mut unsettled = None;
     for receipt in receipts {
         let receipt_hex = encode_lowercase_hex(&receipt.receipt_id);
         let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
-        if authority
+        let settlement = match authority
             .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
             .await
-            .is_err()
         {
-            continue;
-        }
-        let Ok(_emission) = authority.settle(&receipt.settlement).await else {
-            continue;
+            Ok(_claim) => authority.settle(&receipt.settlement).await.map(drop),
+            Err(error) => Err(error),
         };
-        // A successful durable settlement is enough to release the source
-        // receipt.  Early recipients legitimately return `observability: None`
-        // while their fan-out census is partial; only the final recipient
-        // emits the complete owner fact.  Retaining those partial files would
-        // replay immutable attempts forever after the database already owns
-        // them.
-        settled.push(receipt.receipt_id);
+        match settlement {
+            // A successful durable settlement is enough to release the source
+            // receipt.  Early recipients legitimately return `observability: None`
+            // while their fan-out census is partial; only the final recipient
+            // emits the complete owner fact.  Retaining those partial files would
+            // replay immutable attempts forever after the database already owns
+            // them.
+            Ok(()) => settled.push(receipt.receipt_id),
+            Err(error) => {
+                unsettled.get_or_insert_with(|| format!("delivery settlement failed: {error}"));
+            }
+        }
     }
-    if settled.is_empty() {
-        return;
+    if !settled.is_empty() {
+        open()?
+            .acknowledge_many(&settled)
+            .map_err(|error| error.to_string())?;
     }
-    let Some(spool) = open_delivery_receipt_spool_for_drain(&root, host) else {
-        return;
-    };
-    if let Err(error) = spool.acknowledge_many(&settled) {
-        tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not acknowledge settled receipts");
-    }
+    unsettled.map_or(Ok(()), Err)
 }
 
-/// The drain shares each delivery spool with hook callbacks, which legitimately
-/// write it while the daemon is down. A drain woken by a publication waits
-/// out the publishing writer; a lock held past the hook budget is skipped and
-/// retried by the next wake or sweep; any other failure is reported, not
-/// swallowed.
-fn open_delivery_receipt_spool_for_drain(
-    root: &Path,
-    host: NativeHostIdentityV1,
-) -> Option<HookDeliveryReceiptSpoolV1> {
-    match HookDeliveryReceiptSpoolV1::open(root, tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET) {
-        Ok(spool) => Some(spool),
-        Err(HookDeliverySpoolError::Busy) => None,
-        Err(error) => {
-            tracing::warn!(host = host.hook_key(), %error, "hook delivery receipt drain could not open the spool");
-            None
-        }
+/// What one sweep over every host left behind.
+#[derive(Default)]
+struct HookReplaySweepV1 {
+    /// A pass settled a full batch, so the next sweep runs at once.
+    more_pending: bool,
+    failures: Vec<StatusHookReplayFailureV1>,
+}
+
+impl HookReplaySweepV1 {
+    fn fail(&mut self, host: NativeHostIdentityV1, spool: StatusHookReplaySpoolV1, cause: String) {
+        tracing::warn!(host = host.hook_key(), ?spool, %cause, "hook spool drain failed");
+        self.failures
+            .push(StatusHookReplayFailureV1 { host, spool, cause });
     }
 }
 
@@ -149,9 +149,9 @@ async fn drain_all_hosts(
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-) -> bool {
+) -> HookReplaySweepV1 {
     let _sweep = HookReplaySweepObservation::begin();
-    let mut more_pending = false;
+    let mut sweep = HookReplaySweepV1::default();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
     // Worktree identity needs only the hook runtime's scope resolver; the
@@ -165,14 +165,31 @@ async fn drain_all_hosts(
                 graph.hook_store_layout(),
             )
         })
-        .ok();
+        .map_err(|error| format!("hook worktree identity is unavailable: {error}"));
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
-        drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
-        for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
+        if let Err(cause) =
+            drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await
+        {
+            sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause);
+        }
+        let pending_work = match hook_v2_pending_work_envelopes(data_root, *host, now) {
+            Ok(pending_work) => pending_work,
+            Err(error) => {
+                sweep.fail(
+                    *host,
+                    StatusHookReplaySpoolV1::PendingWork,
+                    error.to_string(),
+                );
+                Vec::new()
+            }
+        };
+        for envelope in pending_work {
             if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
                 continue;
             }
+            // Owed work the daemon cannot admit now stays in the ledger and
+            // is redriven by the next sweep.
             let _ = admit_replayed_envelope_with_authoritative_session(
                 envelope,
                 None,
@@ -191,22 +208,23 @@ async fn drain_all_hosts(
             )
             .await;
         }
-        let Some(project_id) = project_id else {
-            continue;
-        };
-        let Some(worktree_id) = worktree_id else {
-            continue;
-        };
-        let report = Box::pin(drain_admitted_host_spool(
+        let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
-            worktree_id,
+            &worktree_id,
             now,
             graph,
             project_sessions,
             background_cpu,
         ))
-        .await;
+        .await
+        {
+            Ok(report) => report,
+            Err(cause) => {
+                sweep.fail(*host, StatusHookReplaySpoolV1::Records, cause);
+                None
+            }
+        };
         if let Some(report) = report
             && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
         {
@@ -221,35 +239,40 @@ async fn drain_all_hosts(
             );
             // A pass settles a bounded batch; records behind it replay now,
             // not a full interval later.
-            more_pending |=
-                HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)).unwrap_or(false);
+            match HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)) {
+                Ok(more) => sweep.more_pending |= more,
+                Err(error) => {
+                    sweep.fail(*host, StatusHookReplaySpoolV1::Records, error.to_string())
+                }
+            }
         }
     }
-    more_pending
+    sweep
 }
 
+/// Replays one host's spooled records, or `None` when it holds none.
 async fn drain_admitted_host_spool(
     host: NativeHostIdentityV1,
-    project_id: [u8; 16],
-    worktree_id: [u8; 16],
+    project_id: Option<[u8; 16]>,
+    worktree_id: &Result<[u8; 16], String>,
     now: UtcMicros,
     graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-) -> Option<HookReplayPassReportV1> {
+) -> Result<Option<HookReplayPassReportV1>, String> {
     let data_root = &graph.hook_store_layout().data_root;
     let root = hook_v2_spool_root(data_root, host);
-    if !root.is_dir() {
-        return None;
-    }
     // An absent/empty records file needs neither recovery nor replay, so do
     // not acquire the cross-process writer lease merely to prove it again.
-    // A hook that appends after this observation publishes its record and is
-    // picked up by the next bounded sweep; non-empty spools still take
-    // the lease before interpreting acknowledgement or recovery state.
-    if !HookSpoolV1::has_records(&root).ok()? {
-        return None;
+    // A hook that appends after this observation publishes its record and
+    // wakes the next sweep; non-empty spools still take the lease before
+    // interpreting acknowledgement or recovery state.
+    if !root.is_dir() || !HookSpoolV1::has_records(&root).map_err(|error| error.to_string())? {
+        return Ok(None);
     }
+    let project_id =
+        project_id.ok_or_else(|| "the project layout has no hook project identity".to_owned())?;
+    let worktree_id = worktree_id.clone()?;
     let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
     let pass = Box::pin(drain_host_spool_once(
             &root,
@@ -289,15 +312,7 @@ async fn drain_admitted_host_spool(
             },
         ))
         .await;
-    // A writer still holding the lease past its own lease is stale, so its
-    // spool waits for the next sweep; every failure is reported, not swallowed.
-    match pass {
-        Ok(pass) => Some(pass),
-        Err(error) => {
-            tracing::warn!(host = host.hook_key(), %error, "hook spool replay could not open the spool");
-            None
-        }
-    }
+    pass.map(Some).map_err(|error| error.to_string())
 }
 
 fn hook_replay_now() -> UtcMicros {
@@ -313,11 +328,44 @@ struct RegisteredReplayConsumer {
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// The failures of the last finished sweep; `None` before the first.
+    last_sweep: Option<Vec<StatusHookReplayFailureV1>>,
 }
 
 fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>> {
     static ROOTS: OnceLock<StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>>> = OnceLock::new();
     ROOTS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+/// The replay drain of the project whose hook data root is `data_root`, as
+/// its consumer's last sweep left it.
+pub(crate) fn hook_replay_status(data_root: &Path) -> StatusHookReplayV1 {
+    let roots = registered_replay_roots()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match roots.get(data_root).map(|consumer| &consumer.last_sweep) {
+        None => StatusHookReplayV1::Unowned,
+        Some(None) => StatusHookReplayV1::Starting,
+        Some(Some(failures)) if failures.is_empty() => StatusHookReplayV1::Drained,
+        Some(Some(failures)) => StatusHookReplayV1::Failed {
+            failures: failures.clone(),
+        },
+    }
+}
+
+fn publish_sweep(
+    data_root: &Path,
+    graph: &Weak<tracedecay_project::project::TraceDecay>,
+    failures: Vec<StatusHookReplayFailureV1>,
+) {
+    let mut roots = registered_replay_roots()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(registered) = roots.get_mut(data_root)
+        && Weak::ptr_eq(&registered.graph, graph)
+    {
+        registered.last_sweep = Some(failures);
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +403,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
                     graph: graph.clone(),
                     delivery_settlements: delivery_settlements.clone(),
                     task: None,
+                    last_sweep: None,
                 },
             );
         }
@@ -374,7 +423,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
             else {
                 break;
             };
-            let more_pending = Box::pin(drain_all_hosts(
+            let sweep = Box::pin(drain_all_hosts(
                 &graph_owner,
                 &task_data_root,
                 delivery_settlements.as_ref(),
@@ -384,12 +433,13 @@ pub(crate) fn register_hook_v2_replay_consumer(
             .await;
             drop(graph_owner);
             drop(delivery_settlements);
-            if more_pending {
+            publish_sweep(&task_data_root, &task_graph, sweep.failures);
+            if sweep.more_pending {
                 tokio::task::yield_now().await;
                 continue;
             }
-            // Retained records wait at most this interval for their next
-            // delivery attempt; a hook append wakes the drain sooner. Keep
+            // Retained records and failed spools wait at most this interval
+            // for their next attempt; a hook append wakes the drain sooner. Keep
             // the pacing WAIT separate from sweep WORK.
             hotpath::future!(
                 async {

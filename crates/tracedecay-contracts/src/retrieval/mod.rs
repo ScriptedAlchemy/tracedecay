@@ -252,11 +252,11 @@ pub use project_info_surface::{
     ProjectSearchSurfaceRequestV1, ProjectStatusV1, RegisteredProjectIdSelectorV1,
     RemoteStatusSurfaceRequestV1, RuntimeDoctorReportV1, RuntimeResultV1, RuntimeSurfaceRequestV1,
     StatusAdmissionV1, StatusBranchMismatchV1, StatusCodeIndexFreshnessV1,
-    StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusMemoryOwnerV1,
-    StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1,
-    StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1, StatusServingConditionV1,
-    StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1,
-    StatusSurfaceRequestV1,
+    StatusGitStalenessUnavailableV1, StatusGitStalenessV1, StatusHookReplayFailureV1,
+    StatusHookReplaySpoolV1, StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1,
+    StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

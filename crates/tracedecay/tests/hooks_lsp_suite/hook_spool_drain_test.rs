@@ -166,6 +166,42 @@ fn drain_latency(records: &Path, limit: Duration) -> Option<Duration> {
     latency_until(limit, || spooled_bytes(records) == 0)
 }
 
+/// The project's `hook_replay` status section, read through the daemon as
+/// an agent reads it.
+fn hook_replay_status(home: &Path, project: &Path) -> serde_json::Value {
+    let output = tracedecay_command_with_home(home)
+        .args(["tool", "tracedecay_status", "--json"])
+        .current_dir(project)
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "tracedecay_status must answer JSON\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    envelope["structuredContent"]["hook_replay"].clone()
+}
+
+/// The `hook_replay` status once it reads `expected`, or the last reading
+/// at `limit`.
+fn await_hook_replay_status(
+    home: &Path,
+    project: &Path,
+    expected: &serde_json::Value,
+    limit: Duration,
+) -> serde_json::Value {
+    let started = Instant::now();
+    loop {
+        let status = hook_replay_status(home, project);
+        if &status == expected || started.elapsed() >= limit {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn latency_until(limit: Duration, drained: impl Fn() -> bool) -> Option<Duration> {
     let started = Instant::now();
     while started.elapsed() < limit {
@@ -220,6 +256,49 @@ fn spooled_capture_events_drain_promptly_while_open_and_after_a_restart() {
         drain_latency(&records, PROMPT_DRAIN).is_some(),
         "an append after the restart must drain within {PROMPT_DRAIN:?}"
     );
+}
+
+#[test]
+fn a_failed_receipt_drain_is_reported_on_status_and_clears_when_the_spool_drains() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let project = init_git_project(&home);
+    let _daemon = spawn_tracedecay_daemon(&home);
+    tracedecay(&home, &project, &["init"]);
+    let layout = default_profile_sharded_layout(&project, &home.join(".tracedecay")).unwrap();
+    let receipts =
+        hook_delivery_receipt_spool_root(&layout.data_root, NativeHostIdentityV1::CursorDesktop);
+    drop(HookDeliveryReceiptWriterV1::open_within(&receipts, HOOK_SYNCHRONOUS_BUDGET).unwrap());
+    let corrupt = receipts.join(format!("{:032x}.delivery.v1.json", 7));
+    std::fs::write(&corrupt, b"not a delivery receipt").unwrap();
+
+    let failed = json!({
+        "status": "failed",
+        "failures": [{
+            "host": "cursor_desktop",
+            "spool": "delivery_receipts",
+            "cause": "hook delivery receipt spool is corrupt",
+        }],
+    });
+    assert_eq!(
+        await_hook_replay_status(&home, &project, &failed, PROMPT_DRAIN),
+        failed
+    );
+    assert!(
+        corrupt.is_file(),
+        "a receipt the drain could not settle stays durable"
+    );
+
+    // Once the spool is readable again, the next publication drains it and
+    // the failure clears.
+    std::fs::remove_file(&corrupt).unwrap();
+    capture_stop(&home, &project, "after-repair");
+    let drained = json!({ "status": "drained" });
+    assert_eq!(
+        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
+        drained
+    );
+    assert_eq!(published_receipts(&receipts), Vec::<PathBuf>::new());
 }
 
 #[test]
