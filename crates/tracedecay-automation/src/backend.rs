@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use tracedecay_contracts::automation::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::errors::TraceDecayError;
 
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
@@ -128,84 +129,20 @@ impl AgentTaskFailureDisposition {
     }
 }
 
+/// How the scheduler judges a recorded failure on a later run. The recorded
+/// class is the authority: it was typed where the failure was observed.
 pub fn agent_task_failure_disposition(
     recorded_classification: Option<AgentTaskFailureClass>,
     recorded_retryable: Option<bool>,
-    error: Option<&str>,
 ) -> AgentTaskFailureDisposition {
-    let classification = error
-        .map(|message| {
-            if is_oversized_backend_input(message) {
-                AgentTaskFailureClass::Retryable
-            } else {
-                classify_agent_task_error_message(message)
-            }
-        })
-        .or(recorded_classification);
-    let retryable = classification
+    let retryable = recorded_classification
         .map(AgentTaskFailureClass::is_retryable_on_later_run)
         .or(recorded_retryable);
 
     AgentTaskFailureDisposition {
-        classification,
+        classification: recorded_classification,
         retryable,
     }
-}
-
-pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass {
-    let normalized = message.to_ascii_lowercase();
-    if normalized.contains("timed out") || normalized.contains("timeout") {
-        return AgentTaskFailureClass::Timeout;
-    }
-    if normalized.contains("denied")
-        || normalized.contains("unauthorized")
-        || normalized.contains("forbidden")
-    {
-        return AgentTaskFailureClass::Denied;
-    }
-    if normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("closed stdout")
-        || normalized.contains("disconnect")
-    {
-        return AgentTaskFailureClass::Disconnected;
-    }
-    if normalized.contains("not found")
-        || normalized.contains("no such file")
-        || normalized.contains("failed to spawn")
-        || normalized.contains("failed to start")
-        || normalized.contains("executable")
-        || normalized.contains("connection refused")
-    {
-        return AgentTaskFailureClass::Unavailable;
-    }
-    if normalized.contains("json error")
-        || normalized.contains("expected value")
-        || normalized.contains("expected ident")
-        || normalized.contains("trailing characters")
-        || normalized.contains("backend output")
-        || normalized.contains("json fence")
-        || normalized.contains("empty summary")
-        || normalized.contains("empty output")
-        || normalized.contains("output must include")
-    {
-        return AgentTaskFailureClass::MalformedOutput;
-    }
-    if normalized.contains("temporarily unavailable")
-        || normalized.contains("rate limit")
-        || normalized.contains("429")
-        || normalized.contains("503")
-        || normalized.contains("try again")
-    {
-        return AgentTaskFailureClass::Retryable;
-    }
-    AgentTaskFailureClass::Permanent
-}
-
-fn is_oversized_backend_input(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
-    normalized.contains("input_too_large")
-        || normalized.contains("input exceeds the maximum length")
 }
 
 pub fn agent_task_contract(task: AgentTaskKind) -> AgentTaskContract {
@@ -564,8 +501,8 @@ fn request_input_hash(
 /// Denial, disconnect, and unavailability are distinct truthful states: a
 /// denied task must not be retried as if the backend were merely absent, and
 /// a mid-task disconnect is not a failure to reach the backend at all.
-/// Rendered transport messages enter the taxonomy exactly once, through
-/// [`AgentTaskError::from_backend_message`]; everything above the backend
+/// Each backend types the failure where it observes it (process spawn,
+/// deadline, stdio, JSON-RPC error data); everything above the backend
 /// consumes the typed variant.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentTaskError {
@@ -584,30 +521,34 @@ pub enum AgentTaskError {
     /// The backend completed but its output violated the response contract.
     #[error("agent task returned malformed output: {reason}")]
     MalformedOutput { reason: String },
+    /// The backend refused the request as larger than its input limit.
+    #[error("agent task input is too large: {reason}")]
+    InputTooLarge { reason: String },
+    /// The backend reported a transient condition (rate limit, overload).
+    #[error("agent task backend asked to retry: {reason}")]
+    Retryable { reason: String },
     /// The task failed in a way that has no dedicated typed state.
     #[error("agent task failed: {reason}")]
     Failed { reason: String },
 }
 
 impl AgentTaskError {
-    /// Classifies one rendered transport failure message into the typed
-    /// state. This is the single string-evidence boundary of the taxonomy.
-    pub fn from_backend_message(reason: impl Into<String>) -> Self {
+    /// The typed state for a failure a backend observed as `class`.
+    pub fn new(class: AgentTaskFailureClass, reason: impl Into<String>) -> Self {
         let reason = reason.into();
-        match classify_agent_task_error_message(&reason) {
+        match class {
             AgentTaskFailureClass::Denied => Self::Denied { reason },
             AgentTaskFailureClass::Disconnected => Self::Disconnected { reason },
             AgentTaskFailureClass::Unavailable => Self::Unavailable { reason },
             AgentTaskFailureClass::Timeout => Self::Timeout { reason },
             AgentTaskFailureClass::MalformedOutput => Self::MalformedOutput { reason },
-            AgentTaskFailureClass::Retryable | AgentTaskFailureClass::Permanent => {
-                Self::Failed { reason }
-            }
+            AgentTaskFailureClass::InputTooLarge => Self::InputTooLarge { reason },
+            AgentTaskFailureClass::Retryable => Self::Retryable { reason },
+            AgentTaskFailureClass::Permanent => Self::Failed { reason },
         }
     }
 
-    /// The retry/report classification of this typed state. Only the
-    /// residual [`Self::Failed`] state consults its message.
+    /// The retry/report classification of this typed state.
     pub fn failure_class(&self) -> AgentTaskFailureClass {
         match self {
             Self::Denied { .. } => AgentTaskFailureClass::Denied,
@@ -615,7 +556,9 @@ impl AgentTaskError {
             Self::Unavailable { .. } => AgentTaskFailureClass::Unavailable,
             Self::Timeout { .. } => AgentTaskFailureClass::Timeout,
             Self::MalformedOutput { .. } => AgentTaskFailureClass::MalformedOutput,
-            Self::Failed { reason } => classify_agent_task_error_message(reason),
+            Self::InputTooLarge { .. } => AgentTaskFailureClass::InputTooLarge,
+            Self::Retryable { .. } => AgentTaskFailureClass::Retryable,
+            Self::Failed { .. } => AgentTaskFailureClass::Permanent,
         }
     }
 }
@@ -623,6 +566,12 @@ impl AgentTaskError {
 impl From<AgentTaskError> for AutomationError {
     fn from(error: AgentTaskError) -> Self {
         Self::config(error.to_string())
+    }
+}
+
+impl From<AgentTaskError> for TraceDecayError {
+    fn from(error: AgentTaskError) -> Self {
+        AutomationError::from(error).into()
     }
 }
 
@@ -794,101 +743,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_backend_failures_for_retry_policy() {
-        for (message, expected, retryable) in [
-            (
-                "timed out waiting for codex app-server response",
-                AgentTaskFailureClass::Timeout,
-                true,
-            ),
-            (
-                "codex app-server backend executable 'codex' was not found",
-                AgentTaskFailureClass::Unavailable,
-                true,
-            ),
-            (
-                "permission denied by the codex host policy",
-                AgentTaskFailureClass::Denied,
-                false,
-            ),
-            (
-                "connection reset by peer while streaming the turn",
-                AgentTaskFailureClass::Disconnected,
-                true,
-            ),
-            (
-                "json error: expected value at line 1 column 1",
-                AgentTaskFailureClass::MalformedOutput,
-                false,
-            ),
-            (
-                "temporarily unavailable, try again later",
-                AgentTaskFailureClass::Retryable,
-                true,
-            ),
-            (
-                "model refused the request because policy rejected the prompt",
-                AgentTaskFailureClass::Permanent,
-                false,
-            ),
-        ] {
-            let classification = classify_agent_task_error_message(message);
-            assert_eq!(classification, expected, "message: {message}");
-            assert_eq!(
-                classification.is_retryable(),
-                retryable,
-                "message: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn typed_backend_states_map_to_distinct_failure_classes() {
-        let reason = "typed state".to_string();
+    fn every_failure_class_round_trips_through_its_typed_state() {
         let classes = [
-            AgentTaskError::Denied {
-                reason: reason.clone(),
-            },
-            AgentTaskError::Disconnected {
-                reason: reason.clone(),
-            },
-            AgentTaskError::Unavailable {
-                reason: reason.clone(),
-            },
-            AgentTaskError::Timeout {
-                reason: reason.clone(),
-            },
-            AgentTaskError::MalformedOutput { reason },
-        ]
-        .map(|error| error.failure_class());
+            AgentTaskFailureClass::Retryable,
+            AgentTaskFailureClass::Permanent,
+            AgentTaskFailureClass::Timeout,
+            AgentTaskFailureClass::Unavailable,
+            AgentTaskFailureClass::Denied,
+            AgentTaskFailureClass::Disconnected,
+            AgentTaskFailureClass::MalformedOutput,
+            AgentTaskFailureClass::InputTooLarge,
+        ];
+        let rendered = classes.map(|class| {
+            let error = AgentTaskError::new(class, "observed failure");
+            (error.failure_class(), error.to_string())
+        });
 
         assert_eq!(
-            classes,
+            rendered,
             [
-                AgentTaskFailureClass::Denied,
-                AgentTaskFailureClass::Disconnected,
-                AgentTaskFailureClass::Unavailable,
-                AgentTaskFailureClass::Timeout,
-                AgentTaskFailureClass::MalformedOutput,
+                (
+                    AgentTaskFailureClass::Retryable,
+                    "agent task backend asked to retry: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::Permanent,
+                    "agent task failed: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::Timeout,
+                    "agent task timed out: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::Unavailable,
+                    "agent task backend unavailable: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::Denied,
+                    "agent task denied: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::Disconnected,
+                    "agent task backend disconnected: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::MalformedOutput,
+                    "agent task returned malformed output: observed failure".to_owned(),
+                ),
+                (
+                    AgentTaskFailureClass::InputTooLarge,
+                    "agent task input is too large: observed failure".to_owned(),
+                ),
             ]
         );
-        for window in classes.windows(2) {
-            assert_ne!(window[0], window[1], "typed states must stay distinct");
-        }
     }
 
     #[test]
-    fn failure_disposition_prefers_current_error_evidence() {
-        let disposition = agent_task_failure_disposition(
-            Some(AgentTaskFailureClass::Permanent),
-            Some(false),
-            Some("timed out waiting for backend"),
-        );
+    fn failure_disposition_reads_the_recorded_class_not_its_message() {
+        let oversized =
+            agent_task_failure_disposition(Some(AgentTaskFailureClass::InputTooLarge), Some(false));
+        let permanent =
+            agent_task_failure_disposition(Some(AgentTaskFailureClass::Permanent), Some(false));
+        let unclassified = agent_task_failure_disposition(None, Some(false));
 
-        assert_eq!(
-            disposition.classification,
-            Some(AgentTaskFailureClass::Timeout)
-        );
-        assert_eq!(disposition.retryable, Some(true));
+        assert_eq!(oversized.retryable, Some(true));
+        assert!(!oversized.is_non_retryable());
+        assert_eq!(permanent.retryable, Some(false));
+        assert!(permanent.is_non_retryable());
+        assert_eq!(unclassified.classification, None);
+        assert_eq!(unclassified.retryable, Some(false));
     }
 }

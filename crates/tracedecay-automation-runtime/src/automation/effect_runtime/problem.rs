@@ -95,10 +95,12 @@ fn failure_class_problem(
             ApplicationExecutionFailureClassV1::MalformedOutput,
             diagnostic,
         ),
-        Some(AgentTaskFailureClass::Permanent) | None => ApplicationProblem::execution_failed(
-            ApplicationExecutionFailureClassV1::Permanent,
-            diagnostic,
-        ),
+        Some(AgentTaskFailureClass::Permanent | AgentTaskFailureClass::InputTooLarge) | None => {
+            ApplicationProblem::execution_failed(
+                ApplicationExecutionFailureClassV1::Permanent,
+                diagnostic,
+            )
+        }
     };
     problem.map_err(contract_error)
 }

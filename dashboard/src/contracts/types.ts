@@ -77,7 +77,7 @@ export type AdmitWorkSynthesisCommand = {
 
 export type AgentInstanceId = string;
 
-export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable";
+export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large";
 
 export type AgentTaskKind = "combined_review" | "memory_curator" | "session_reflector" | "skill_writer" | "user_job";
 

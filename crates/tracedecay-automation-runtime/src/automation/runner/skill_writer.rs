@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::automation::artifacts::sha256_json;
-use crate::automation::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskResponse};
+use crate::automation::backend::{
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskResponse,
+};
 use crate::automation::config::AutomationConfig;
 use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
@@ -417,6 +419,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                         evidence_hash,
                         Some(proposed_ops),
                         error.to_string(),
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await?;
@@ -459,11 +462,12 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                             evidence_hash,
                             Some(proposed_ops),
                             error.to_string(),
+                            error.failure_class(),
                             &retry_report,
                         )
                         .await?;
                     return Err(AutomationRunError::RecordedFailure {
-                        error,
+                        error: error.into(),
                         ledger_record: Box::new(ledger_record),
                     });
                 }
@@ -518,6 +522,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                         evidence_hash,
                         Some(proposed_ops),
                         err.to_string(),
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await?;
@@ -723,8 +728,7 @@ pub(super) async fn finalize_skill_writer_success(
         );
         record.status = crate::automation::run_ledger::AutomationRunStatus::Failed;
         record.error = Some(error.to_string());
-        record.error_classification =
-            Some(crate::automation::backend::AgentTaskFailureClass::Permanent);
+        record.error_classification = Some(AgentTaskFailureClass::Permanent);
         record.error_retryable = Some(false);
         record.applied_ops = Some(json!({
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),

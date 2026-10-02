@@ -182,8 +182,9 @@ impl ContextScoutModelAssistantV1 for UnavailableContextScoutModelAssistantV1 {
 
 /// Maps each typed backend failure onto its truthful Scout model state.
 /// Denial, disconnect, and unavailability stay distinct outcomes end to end;
-/// only the residual untyped `Failed` state collapses to `Unavailable`
-/// because the Scout taxonomy has no generic-failure outcome.
+/// an oversized input exceeds the route's token budget, and the transient
+/// `Retryable` and residual `Failed` states collapse to `Unavailable` because
+/// the Scout taxonomy has no retry or generic-failure outcome.
 fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModelErrorV1 {
     match error {
         AgentTaskError::Denied { .. } => ContextScoutModelErrorV1::Denied,
@@ -191,7 +192,10 @@ fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModel
         AgentTaskError::Unavailable { .. } => ContextScoutModelErrorV1::Unavailable,
         AgentTaskError::Timeout { .. } => ContextScoutModelErrorV1::DeadlineExceeded,
         AgentTaskError::MalformedOutput { .. } => ContextScoutModelErrorV1::InvalidOutput,
-        AgentTaskError::Failed { .. } => ContextScoutModelErrorV1::Unavailable,
+        AgentTaskError::InputTooLarge { .. } => ContextScoutModelErrorV1::TokenBudgetExceeded,
+        AgentTaskError::Retryable { .. } | AgentTaskError::Failed { .. } => {
+            ContextScoutModelErrorV1::Unavailable
+        }
     }
 }
 

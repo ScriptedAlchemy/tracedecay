@@ -4,13 +4,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_automation::AutomationError;
 use tracedecay_automation::backend as leaf_backend;
 pub use tracedecay_automation::backend::{
     AgentBackendAvailability, AgentTaskBackend, AgentTaskContract, AgentTaskError,
     AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind, AgentTaskRequest,
-    AgentTaskResponse, agent_task_contract, agent_task_failure_disposition,
-    classify_agent_task_error_message, prompt_version, task_key,
+    AgentTaskResponse, agent_task_contract, agent_task_failure_disposition, prompt_version,
+    task_key,
 };
 pub use tracedecay_contracts::automation::AgentTaskRetryAttempt;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
@@ -133,7 +132,7 @@ pub async fn run_agent_task_with_retry(
     backend: &dyn AgentTaskBackend,
     request: &AgentTaskRequest,
     policy: &BackendRetryPolicy,
-) -> Result<AgentTaskResponse> {
+) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
     run_agent_task_with_retry_report(
         backend,
         request,
@@ -149,7 +148,7 @@ pub async fn run_agent_task_with_retry_report(
     request: &AgentTaskRequest,
     policy: &BackendRetryPolicy,
     report: &mut AgentTaskRetryReport,
-) -> Result<AgentTaskResponse> {
+) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
     report.attempts.clear();
     let start = Instant::now();
     let max_attempts = policy.max_attempts.max(1);
@@ -182,7 +181,7 @@ pub async fn run_agent_task_with_retry_report(
                     },
                 });
                 if !should_retry {
-                    return Err(AutomationError::config(error.to_string()).into());
+                    return Err(error);
                 }
                 if !backoff.is_zero() {
                     tokio::time::sleep(backoff).await;
@@ -262,8 +261,6 @@ impl AgentTaskBackend for CodexAppServerBackend {
                 .map_err(|error| AgentTaskError::Failed {
                     reason: error.to_string(),
                 })?;
-        // The app-server port renders its failure as one message; the typed
-        // taxonomy admits that string exactly once, at this boundary.
         let summary = run_prompt_with_codex_app_server(
             &backend_message,
             config,
@@ -273,8 +270,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
                 AgentTaskKind::SkillWriter | AgentTaskKind::CombinedReview
             )
             .then_some(&request.contract.response_schema),
-        )
-        .map_err(AgentTaskError::from_backend_message)?;
+        )?;
         let output_json = request
             .contract
             .strict_json
@@ -384,9 +380,12 @@ mod tests {
             report.attempts()[0].failure_classification,
             Some(AgentTaskFailureClass::Denied)
         );
-        assert!(
-            error.to_string().contains("agent task denied"),
-            "denial must survive the retry boundary: {error}"
+        assert_eq!(
+            error,
+            AgentTaskError::Denied {
+                reason: "workspace write scope was denied".to_string(),
+            },
+            "denial must survive the retry boundary"
         );
     }
 

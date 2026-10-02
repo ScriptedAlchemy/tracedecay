@@ -9,8 +9,8 @@ use super::ExternalSkillDeploymentDisposition;
 #[cfg(test)]
 use super::artifacts::sha256_json;
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
-    BackendRetryPolicy, run_agent_task_with_retry_report,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
@@ -646,14 +646,14 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 let reflector_result = reflector_finalizer
                     .append_backend_fallback_record(
                         reflector_bundle.evidence_hash.clone(),
-                        err.to_string(),
+                        &err,
                         &retry_report,
                     )
                     .await;
                 let skill_result = skill_finalizer
                     .append_backend_fallback_record(
                         skill_bundle.evidence_hash.clone(),
-                        err.to_string(),
+                        &err,
                         &retry_report,
                     )
                     .await;
@@ -677,10 +677,10 @@ fn run_combined_review_for_retrieval_inner<'a>(
                                     committed_receipt: None,
                                 },
                             }),
-                            error: err,
+                            error: err.into(),
                         }))
                     }
-                    (reflector, skill) => combined_asymmetric_failure(reflector, skill, err),
+                    (reflector, skill) => combined_asymmetric_failure(reflector, skill, err.into()),
                 });
             }
         };
@@ -695,6 +695,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                     &evidence_bundles,
                     None,
                     &err,
+                    AgentTaskFailureClass::MalformedOutput,
                     &retry_report,
                 )
                 .await;
@@ -738,6 +739,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                     &evidence_bundles,
                     Some(&output),
                     &err,
+                    AgentTaskFailureClass::Permanent,
                     &retry_report,
                 )
                 .await;
@@ -773,6 +775,8 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 Ok(response) => response,
                 Err(err) => {
                     retry_report.append(repair_retry_report);
+                    let class = err.failure_class();
+                    let err = TraceDecayError::from(err);
                     let records = append_combined_failed_records(
                         &reflector_finalizer,
                         &skill_finalizer,
@@ -780,6 +784,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                         &evidence_bundles,
                         Some(&output),
                         &err,
+                        class,
                         &retry_report,
                     )
                     .await;
@@ -797,6 +802,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                         &evidence_bundles,
                         None,
                         &err,
+                        AgentTaskFailureClass::MalformedOutput,
                         &retry_report,
                     )
                     .await;
@@ -839,6 +845,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                             skill_bundle.evidence_hash.clone(),
                             Some(combined_skill_failure_projection(&output)),
                             detail.to_owned(),
+                            AgentTaskFailureClass::Permanent,
                             &retry_report,
                         )
                         .await
@@ -866,6 +873,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                         &evidence_bundles,
                         Some(&output),
                         &err,
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await;
@@ -953,6 +961,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
                             skill_bundle.evidence_hash.clone(),
                             Some(combined_skill_failure_projection(&output)),
                             err.to_string(),
+                            AgentTaskFailureClass::Permanent,
                             &retry_report,
                         )
                         .await;
@@ -1082,6 +1091,7 @@ async fn append_combined_failed_records(
     evidence: &CombinedReviewEvidence<'_>,
     proposed_ops: Option<&Value>,
     err: &TraceDecayError,
+    classification: AgentTaskFailureClass,
     retry_report: &AgentTaskRetryReport,
 ) -> CombinedFailedRecords {
     let reflector = reflector_finalizer
@@ -1090,6 +1100,7 @@ async fn append_combined_failed_records(
             evidence.reflector.evidence_hash.clone(),
             proposed_ops.cloned(),
             err.to_string(),
+            classification,
             retry_report,
         )
         .await;
@@ -1100,6 +1111,7 @@ async fn append_combined_failed_records(
             evidence.skill.evidence_hash.clone(),
             skill_projection,
             err.to_string(),
+            classification,
             retry_report,
         )
         .await;

@@ -98,6 +98,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
         accepted_count: 1,
         rejected_count: 0,
         error: None,
+        error_classification: None,
     };
 
     let record = finalizer
@@ -122,6 +123,7 @@ fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
                 accepted_count: 1,
                 rejected_count: 0,
                 error: None,
+                error_classification: None,
             },
             pre_epoch,
         )

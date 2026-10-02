@@ -1059,7 +1059,7 @@ export const AdmitWorkSynthesisCommandSchema: z.ZodObject<{
 /** Strongly typed canonical identity: `AgentInstanceId`. */
 export const AgentInstanceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
 
-export const AgentTaskFailureClassSchema: z.ZodEnum<["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]> = z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]);
+export const AgentTaskFailureClassSchema: z.ZodType<"denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large", z.ZodTypeDef, unknown> = z.union([z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]), z.literal("input_too_large")]);
 
 export const AgentTaskKindSchema: z.ZodEnum<["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
 

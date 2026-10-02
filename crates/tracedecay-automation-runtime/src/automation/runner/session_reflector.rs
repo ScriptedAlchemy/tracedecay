@@ -10,7 +10,8 @@ use crate::automation::automatic_facts::{
     record_session_automatic_facts,
 };
 use crate::automation::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
@@ -493,6 +494,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
                 evidence_hash,
                 Some(proposed_summary),
                 error.to_string(),
+                AgentTaskFailureClass::Permanent,
                 retry_report,
                 Some(json!({
                     "automatic_fact_receipts": settled_values,
@@ -831,6 +833,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
                                 &rejected_facts,
                             )?),
                             error.to_string(),
+                            error.failure_class(),
                             &retry_report,
                             None,
                             Some(fact_collection_summary(&rejected_facts)?),
@@ -844,7 +847,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
                         )
                         .await?;
                     return Err(AutomationRunError::RecordedFailure {
-                        error,
+                        error: error.into(),
                         ledger_record: Box::new(ledger_record),
                     });
                 }
@@ -902,6 +905,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
                         evidence_hash,
                         Some(session_fact_finalization_failure_summary(&proposals)?),
                         err.to_string(),
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await?;

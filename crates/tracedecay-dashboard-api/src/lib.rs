@@ -2005,11 +2005,23 @@ async fn project_scoped_api_gateway(
 
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
-        Err(err) if projects::is_registry_unavailable_error(&err) => {
-            return projects::registry_unavailable_response(&runtime.active_state().await, &err)
-                .into_response();
+        Err(projects::SelectedProjectError::RegistryNotMounted) => {
+            return projects::registry_unavailable_response(
+                &runtime.active_state().await,
+                "tracedecay project registry is unavailable".to_owned(),
+            )
+            .into_response();
         }
-        Err(err) => {
+        Err(projects::SelectedProjectError::Failed(err))
+            if projects::is_registry_unavailable_error(&err) =>
+        {
+            return projects::registry_unavailable_response(
+                &runtime.active_state().await,
+                err.to_string(),
+            )
+            .into_response();
+        }
+        Err(projects::SelectedProjectError::Failed(err)) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({

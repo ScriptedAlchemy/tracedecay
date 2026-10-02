@@ -9,10 +9,9 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract,
-    classify_agent_task_error_message, extract_json_object_prefix, prompt_version,
-    run_agent_task_with_retry_report, task_key,
+    AgentTaskError, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, extract_json_object_prefix,
+    prompt_version, run_agent_task_with_retry_report, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::config_error;
@@ -693,6 +692,7 @@ async fn append_skipped_record_with_validation(
         accepted_count: 0,
         rejected_count: 0,
         error: Some(reason.to_string()),
+        error_classification: None,
     })?;
     record.validation_report = validation_report;
     // Scheduler ticks re-evaluate every task every few seconds, so a standing
@@ -815,6 +815,7 @@ struct RunRecordOutcome {
     accepted_count: usize,
     rejected_count: usize,
     error: Option<String>,
+    error_classification: Option<AgentTaskFailureClass>,
 }
 
 pub(crate) struct AgentRunFinalizer<'a> {
@@ -912,7 +913,7 @@ impl<'a> AgentRunFinalizer<'a> {
     pub(crate) async fn append_backend_fallback_record(
         &self,
         evidence_hash: Option<String>,
-        error: String,
+        error: &AgentTaskError,
         retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         let fallback_output = noop_output_for_task(self.task);
@@ -923,18 +924,13 @@ impl<'a> AgentRunFinalizer<'a> {
             proposed_ops: Some(fallback_output),
             accepted_count: 0,
             rejected_count: 0,
-            error: Some(error),
+            error: Some(error.to_string()),
+            error_classification: Some(error.failure_class()),
         })?;
         record.input_hash.clone_from(&self.input_hash);
         record.output_hash = record.proposed_ops.as_ref().map(sha256_json).transpose()?;
         record.fallback_status = Some("backend_failed_noop".to_string());
         apply_retry_report(&mut record, retry_report);
-        let exact_failure_class = retry_report
-            .attempts()
-            .last()
-            .and_then(|attempt| attempt.failure_classification);
-        record.error_classification = exact_failure_class;
-        record.error_retryable = exact_failure_class.map(AgentTaskFailureClass::is_retryable);
         self.annotate_combined_run(&mut record);
         self.publish_terminal_record(&record).await?;
         Ok(record)
@@ -958,7 +954,7 @@ impl<'a> AgentRunFinalizer<'a> {
                 retry_report,
             }),
             Err(err) => self
-                .append_backend_fallback_record(evidence_hash, err.to_string(), &retry_report)
+                .append_backend_fallback_record(evidence_hash, &err, &retry_report)
                 .await
                 .map(Box::new)
                 .map(BackendTaskRun::Fallback),
@@ -971,6 +967,7 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
         proposed_ops: Option<Value>,
         error: String,
+        classification: AgentTaskFailureClass,
         retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         let mut record = self.record(RunRecordOutcome {
@@ -981,6 +978,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count: 0,
             rejected_count: 0,
             error: Some(error),
+            error_classification: Some(classification),
         })?;
         apply_retry_report(&mut record, retry_report);
         self.finish_record(&mut record)?;
@@ -998,6 +996,7 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
         proposed_ops: Option<Value>,
         error: String,
+        classification: AgentTaskFailureClass,
         retry_report: &AgentTaskRetryReport,
         applied_ops: Option<Value>,
         rejected_ops: Option<Value>,
@@ -1013,6 +1012,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count,
             rejected_count,
             error: Some(error),
+            error_classification: Some(classification),
         })?;
         record.applied_ops = applied_ops;
         record.rejected_ops = rejected_ops;
@@ -1039,6 +1039,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count,
             rejected_count,
             error: None,
+            error_classification: None,
         })
     }
 
@@ -1064,6 +1065,7 @@ impl<'a> AgentRunFinalizer<'a> {
                 accepted_count,
                 rejected_count,
                 error: None,
+                error_classification: None,
             },
             completed_at_micros,
         )
@@ -1121,6 +1123,7 @@ impl<'a> AgentRunFinalizer<'a> {
                         evidence_hash,
                         None,
                         err.to_string(),
+                        AgentTaskFailureClass::MalformedOutput,
                         retry_report,
                     )
                     .await?;
@@ -1156,6 +1159,7 @@ impl<'a> AgentRunFinalizer<'a> {
                 evidence_hash,
                 Some(failed_output_projection(self.task, field, &output)?),
                 err.to_string(),
+                AgentTaskFailureClass::MalformedOutput,
                 retry_report,
             )
             .await?;
@@ -1192,14 +1196,7 @@ impl<'a> AgentRunFinalizer<'a> {
     ) -> AutomationRunLedgerRecord {
         super::scheduler_metrics::observe_run_terminal(outcome.status);
         let completed_at = (completed_at_micros / 1_000_000).to_string();
-        let error_classification = (outcome.status == AutomationRunStatus::Failed)
-            .then(|| {
-                outcome
-                    .error
-                    .as_deref()
-                    .map(classify_agent_task_error_message)
-            })
-            .flatten();
+        let error_classification = outcome.error_classification;
         let contract = agent_task_contract(self.task);
         AutomationRunLedgerRecord {
             schema_version: 2,
@@ -1239,8 +1236,7 @@ impl<'a> AgentRunFinalizer<'a> {
             error: outcome.error,
             session_evidence_budget_stage: None,
             error_classification,
-            error_retryable: error_classification
-                .map(super::backend::AgentTaskFailureClass::is_retryable),
+            error_retryable: error_classification.map(AgentTaskFailureClass::is_retryable),
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             report_ref: Some(json!({
@@ -1351,6 +1347,7 @@ mod recorded_failure_tests {
             accepted_count: 0,
             rejected_count: 0,
             error: Some("interval_not_elapsed".to_owned()),
+            error_classification: None,
         })
         .expect("prior scheduler skip");
         let settlement_guard = AutomationRunSettlementGuard::new();
