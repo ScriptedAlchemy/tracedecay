@@ -33,7 +33,7 @@ type ProjectHandle = {
   readonly session: ServeSession;
   readonly client: TraceDecayClient;
   /** Daemon process run the HTTP token belongs to; a restart invalidates it. */
-  readonly process_run_id: string;
+  readonly authority: DaemonAuthorityRecord;
 };
 
 /**
@@ -106,11 +106,12 @@ export class DaemonBridge {
   }
 
   async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
-    const existing = this.#projects.get(projectId);
-    if (existing !== undefined) return existing.project;
     const projects = await this.listProjects(signal);
     const match = projects.find((project) => project.project_id === projectId);
     if (match === undefined) {
+      const cached = this.#projects.get(projectId);
+      this.#projects.delete(projectId);
+      await cached?.session.close();
       throw new DaemonFailure({
         kind: "denied",
         code: "project_not_registered",
@@ -122,13 +123,14 @@ export class DaemonBridge {
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
     if (this.#closing) throw bridgeClosed();
+    const project = await this.resolveProject(projectId, signal);
     let pending = this.#pending.get(projectId);
     if (pending === undefined) {
       // One acquisition at a time per project: two concurrent callers must not
       // each spawn a serve child and orphan the loser's process. The shared
       // work takes no caller's signal — one cancelled request must not abort
       // an acquisition its other waiters still need.
-      const acquire = this.#acquire(projectId).finally(() => {
+      const acquire = this.#acquire(project).finally(() => {
         if (this.#pending.get(projectId) === acquire) this.#pending.delete(projectId);
       });
       // Every waiter races its own signal, so the stored promise can settle
@@ -140,15 +142,15 @@ export class DaemonBridge {
     return await withSignal(pending, signal);
   }
 
-  async #acquire(projectId: string): Promise<ProjectHandle> {
+  async #acquire(project: ProjectRef): Promise<ProjectHandle> {
+    const projectId = project.project_id;
     const record = await this.#requireAuthority();
     const cached = this.#projects.get(projectId);
     if (cached !== undefined) {
-      if (!cached.session.closed && cached.process_run_id === record.process_run_id) return cached;
+      if (!cached.session.closed && cached.authority.process_run_id === record.process_run_id && cached.project.project_root === project.project_root) return cached;
       this.#projects.delete(projectId);
       await cached.session.close();
     }
-    const project = await this.resolveProject(projectId);
     const baseUrl = httpBaseUrl(record);
     if (baseUrl === null) {
       throw new DaemonFailure({
@@ -171,7 +173,7 @@ export class DaemonBridge {
         callTool: (toolName, request, options) => session.callJson(toolName, asRecord(request), options.signal),
       },
     });
-    const handle: ProjectHandle = { project, session, client, process_run_id: record.process_run_id };
+    const handle: ProjectHandle = { project, session, client, authority: record };
     if (this.#closing) {
       // Shutdown raced this acquisition: never cache the child or let it
       // outlive close().
@@ -182,9 +184,9 @@ export class DaemonBridge {
     return handle;
   }
 
-  async status(projectId: string, signal?: AbortSignal): Promise<OperationApplicationStatusResult> {
-    const { client } = await this.#handle(projectId, signal);
-    return runSdk(() => client.operations.status({}, optional(signal)));
+  async status(projectId: string, signal?: AbortSignal): Promise<{ status: OperationApplicationStatusResult; authority: DaemonAuthorityRecord }> {
+    const { client, authority } = await this.#handle(projectId, signal);
+    return { status: await runSdk(() => client.operations.status({}, optional(signal))), authority };
   }
 
   async search(projectId: string, query: string, limit: number, signal?: AbortSignal): Promise<OperationApplicationSearchResult> {

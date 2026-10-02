@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { UI_RESOURCE_URI } from "../src/server/register.js";
@@ -394,6 +394,43 @@ export function taxTotal(invoices: Invoice[]): number {
         await once(child, "exit");
       }
     }
+  });
+
+  it("retains the status responder's authority when the daemon restarts before symbol reads", async () => {
+    const before = await fixture.readAuthority();
+    const original = bridge.status.bind(bridge);
+    const status = vi.spyOn(bridge, "status").mockImplementationOnce(async (...args) => {
+      const response = await original(...args);
+      await fixture.stopDaemon();
+      await fixture.startDaemon();
+      return response;
+    });
+    try {
+      const state = await call("tracedecay_inspect_symbol", { project_id: billingProjectId, node_id: "symbol.v1.sha256:0000" });
+      expect(state.page).toBe("symbol");
+      if (state.page !== "symbol") throw new Error(JSON.stringify(state));
+      expect((await fixture.readAuthority())?.pid).not.toBe(before?.pid);
+      expect(state.provenance?.authority?.daemon_pid).toBe(before?.pid);
+    } finally {
+      status.mockRestore();
+    }
+  });
+
+  it("denies a previously cached project after its registry enrollment is forgotten", async () => {
+    const repo = await fixture.createRepo("retired", { "src/billing.ts": BILLING_SOURCE });
+    fixture.initProject(repo.root);
+    fixture.sync(repo.root);
+    const project = (await bridge.listProjects()).find((entry) => entry.project_root === repo.root)!;
+    await bridge.search(project.project_id, "computeTotal", 20);
+    await fixture.stopDaemon();
+    const forgotten = spawnSync(fixture.binary, ["--yes", "projects", "forget", project.project_id], {
+      env: fixture.env, cwd: fixture.home, encoding: "utf8",
+    });
+    expect(forgotten.status, forgotten.stderr).toBe(0);
+    await fixture.startDaemon();
+    expect((await bridge.listProjects()).some((entry) => entry.project_id === project.project_id)).toBe(false);
+    await expect(bridge.resolveProject(project.project_id)).rejects.toMatchObject({ failure: { kind: "denied", code: "project_not_registered" } });
+    await expect(bridge.search(project.project_id, "computeTotal", 20)).rejects.toMatchObject({ failure: { kind: "denied", code: "project_not_registered" } });
   });
 
   it("reports disconnected states truthfully: absent profile, unstartable serve binary, dead daemon", async () => {

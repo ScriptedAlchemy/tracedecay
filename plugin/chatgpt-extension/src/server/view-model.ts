@@ -30,7 +30,6 @@ import type {
   ViewState,
 } from "../shared/view.js";
 import { deepLinkPath } from "../shared/view.js";
-import type { DaemonAuthorityRecord } from "./authority.js";
 import type { DaemonBridge } from "./bridge.js";
 import { DaemonFailure, toFailure } from "./serve-client.js";
 
@@ -84,8 +83,7 @@ export async function searchView(bridge: DaemonBridge, projectId: string, query:
       return searchSection(result);
     }),
   ]);
-  const authority = await bridge.authority();
-  return { page: "search", project, query, results, provenance: withAuthority(provenanceFrom(project, status), authority.kind === "available" ? authority.record : null) };
+  return { page: "search", project, query, results, provenance: provenanceFrom(project, status) };
 }
 
 export async function symbolView(bridge: DaemonBridge, projectId: string, nodeId: string, signal?: AbortSignal): Promise<ViewState> {
@@ -124,11 +122,9 @@ export async function symbolView(bridge: DaemonBridge, projectId: string, nodeId
       return { state: "ready", data: { nodes, complete: result.complete, max_depth: IMPACT_DEPTH } };
     }),
   ]);
-  const authority = await bridge.authority();
-  const observedProvenance = withAuthority(provenance, authority.kind === "available" ? authority.record : null);
   const graph = graphSection(symbol, callers, callees);
-  const evidence = symbol.state === "ready" ? buildEvidence(project, symbol.data, callers, callees, impact, observedProvenance) : null;
-  return { page: "symbol", project, symbol, callers, callees, impact, graph, provenance: observedProvenance, evidence };
+  const evidence = symbol.state === "ready" ? buildEvidence(project, symbol.data, callers, callees, impact, provenance) : null;
+  return { page: "symbol", project, symbol, callers, callees, impact, graph, provenance: provenance, evidence };
 }
 
 type Settled<T> = { ok: true; value: T } | { ok: false; failure: Failure };
@@ -149,9 +145,10 @@ function isProjectStatus(status: OperationApplicationStatusResult): status is Pr
   return "code_index_freshness" in status;
 }
 
-export function provenanceFrom(project: ProjectRef, status: Settled<OperationApplicationStatusResult>): Provenance | null {
-  if (!status.ok || !isProjectStatus(status.value)) return null;
-  const value = status.value;
+export function provenanceFrom(project: ProjectRef, status: Settled<Awaited<ReturnType<DaemonBridge["status"]>>>): Provenance | null {
+  if (!status.ok || !isProjectStatus(status.value.status)) return null;
+  const value = status.value.status;
+  const record = status.value.authority;
   const freshness = value.code_index_freshness;
   if (!("worktree" in freshness)) return null;
   const worktree = freshness.worktree;
@@ -173,14 +170,6 @@ export function provenanceFrom(project: ProjectRef, status: Settled<OperationApp
       detail: "reason" in freshness && typeof freshness.reason === "string" ? freshness.reason : stalenessDetail,
     },
     coverage: { recall: coverageDetail === "complete" ? "full" : "partial", detail: coverageDetail },
-    authority: null,
-  };
-}
-
-export function withAuthority(provenance: Provenance | null, record: DaemonAuthorityRecord | null): Provenance | null {
-  if (provenance === null || record === null) return provenance;
-  return {
-    ...provenance,
     authority: { profile_root: record.profile_root, daemon_version: record.version, daemon_pid: record.pid },
   };
 }
