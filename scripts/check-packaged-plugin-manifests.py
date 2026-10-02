@@ -238,6 +238,65 @@ def validate_opencode(root: Path) -> None:
     )
 
 
+def require_packaged_asset(root: Path, relative: str, referenced_by: Path) -> None:
+    path = root / relative
+    if not path.is_file():
+        fail(f"missing asset {relative} referenced by {referenced_by}")
+    if path.stat().st_size == 0:
+        fail(f"empty asset {relative} referenced by {referenced_by}")
+
+
+def validate_chatgpt(root: Path) -> None:
+    manifest_path = root / "plugin.json"
+    mcp_path = root / "mcp.json"
+    manifest = load(manifest_path)
+    validate_common(manifest, manifest_path)
+    openai = require_object(
+        require_object(manifest.get("extensions"), "extensions", manifest_path)
+        .get("com.openai"),
+        "extensions.com.openai",
+        manifest_path,
+    )
+    interface = require_object(
+        openai.get("interface"), "extensions.com.openai.interface", manifest_path
+    )
+    require_string(interface, "displayName", manifest_path)
+    require_string(interface, "shortDescription", manifest_path)
+    require_string(interface, "longDescription", manifest_path)
+    for icon_field in ("composerIcon", "logo"):
+        icon = require_string(interface, icon_field, manifest_path)
+        require_packaged_asset(
+            root, icon.removeprefix("./"), manifest_path
+        )
+
+    mcp = load(mcp_path)
+    servers = require_object(mcp.get("mcpServers"), "mcpServers", mcp_path)
+    graph = require_object(servers.get("graph"), "mcpServers.graph", mcp_path)
+    require_equal(graph, "type", "stdio", mcp_path)
+    require_string(graph, "command", mcp_path)
+    graph_args = require_string_list(graph.get("args"), "mcpServers.graph.args", mcp_path)
+    if "serve" not in graph_args:
+        fail(f"{mcp_path} mcpServers.graph.args must include 'serve'")
+    explorer = require_object(
+        servers.get("tracedecay-explorer"), "mcpServers.tracedecay-explorer", mcp_path
+    )
+    require_equal(explorer, "type", "stdio", mcp_path)
+    require_equal(explorer, "command", "node", mcp_path)
+    explorer_args = require_string_list(
+        explorer.get("args"), "mcpServers.tracedecay-explorer.args", mcp_path
+    )
+    server_args = [
+        arg.split("${PLUGIN_ROOT}/")[-1].removeprefix("./")
+        for arg in explorer_args
+    ]
+    embedded = "chatgpt-extension/embedded/server.mjs"
+    if embedded not in server_args:
+        fail(f"{mcp_path} tracedecay-explorer args must launch {embedded!r}")
+    require_packaged_asset(root, embedded, mcp_path)
+    require_packaged_asset(root, "chatgpt-extension/embedded/app.html", mcp_path)
+    require_packaged_asset(root, "README-chatgpt.md", manifest_path)
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: check-packaged-plugin-manifests.py <packaged-plugin-root>")
@@ -246,6 +305,7 @@ def main() -> None:
     validate_codex(root / ".codex-plugin/plugin.json")
     validate_cursor(root / ".cursor-plugin/plugin.json")
     validate_kimi(root / ".kimi-plugin/plugin.json")
+    validate_chatgpt(root)
     validate_opencode(root)
     validate_host_skill_inventories(root)
 

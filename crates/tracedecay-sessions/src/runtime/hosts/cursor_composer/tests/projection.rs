@@ -193,6 +193,26 @@ impl HostAdmission for PostFirstDrainAdmission {
         panic!("projection-only sweep attempted committed cursor read")
     }
 
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _previous: ObservationSourceGenerationV1,
+        _generation: ObservationSourceGenerationV1,
+        _retained_through: u64,
+    ) -> AdmissionFuture<'a, ()> {
+        panic!("projection-only sweep attempted source rewrite")
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        _source: &'a ObservationSourceIdentityV1,
+        _scope: &'a ObservationScopeV1,
+        _generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64> {
+        panic!("projection-only sweep attempted source rewrite completion")
+    }
+
     fn drain_projection_queue<'a>(
         &'a self,
         provider: &'a str,

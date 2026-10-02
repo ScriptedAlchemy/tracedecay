@@ -185,7 +185,7 @@ fn production_tool_payload(response: serde_json::Value) -> Value {
 /// An owner result's body, read back through `tracedecay_retrieve` the way a
 /// host recovers it when the response budget truncated it to a handle.
 #[cfg(feature = "test-transport")]
-async fn recovered_owner_payload(
+pub(super) async fn recovered_owner_payload(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     response: Value,

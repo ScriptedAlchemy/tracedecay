@@ -24,9 +24,9 @@ use super::projection::{
     validate_final_projection_receipt,
 };
 use super::query::{
-    decode_generation_i64, discard_candidate_rows, encode_watermarks, frontier_i64, generation_i64,
-    now_micros, read_generation, require_no_open_candidate, retire_superseded_versions, storage,
-    storage_message,
+    decode_generation_i64, discard_candidate_rows, discard_session_rows, encode_watermarks,
+    frontier_i64, generation_i64, now_micros, read_generation, require_no_open_candidate,
+    retire_superseded_versions, storage, storage_message,
 };
 use super::rebuild::{
     checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
@@ -169,13 +169,15 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await
                 .map_err(|error| storage(BEGIN_REFRESH, error))?
         });
+        apply_requested_reset(&transaction, request.session_id()).await?;
         let request = match read_active_generation(&transaction, request.session_id()).await? {
             Some((_, active_watermarks)) => {
                 rebase_on_committed_frontier(request, active_watermarks.projection_frontier())?
             }
             None => request,
         };
-        let request_digest = refresh_binding_digest(&request)?;
+        let reset_generation = read_reset_generation(&transaction, request.session_id()).await?;
+        let request_digest = refresh_binding_digest(&request, reset_generation)?;
 
         if let Some(existing) =
             read_joinable_operation_by_digest(&transaction, request.session_id(), &request_digest)
@@ -926,10 +928,14 @@ struct RefreshBinding {
     binding_digest: String,
 }
 
+/// A reset replaces the active generation with an empty one at frontier
+/// zero, so the frontiers alone would join the rebuild that the reset just
+/// discarded; the digest names the reset the refresh rebuilds from.
 fn refresh_binding_digest(
     request: &SessionRefreshBeginOrJoinRequestV1,
+    reset_generation: Option<i64>,
 ) -> SessionStoreResult<String> {
-    let encoded = serde_json::to_vec(&json!({
+    let mut binding = json!({
         "config": CONFIG_VERSION,
         "projector": PROJECTOR_VERSION,
         "scope": {"kind": "session_store"},
@@ -937,8 +943,11 @@ fn refresh_binding_digest(
         "source_frontier": request.target_frontier().committed_through(),
         "target_frontier": request.target_frontier().observed_through(),
         "refresh_key": request.refresh_key(),
-    }))
-    .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    });
+    if let Some(reset_generation) = reset_generation {
+        binding["reset_generation"] = json!(reset_generation);
+    }
+    let encoded = serde_json::to_vec(&binding).map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok(digest_bytes(&encoded))
 }
 
@@ -1270,6 +1279,135 @@ async fn ensure_active_generation(
     .await
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok((generation, watermarks))
+}
+
+/// Rebuilds a session observation projection asked to reset, once no refresh
+/// owns it: the active generation's rows are deleted and an empty generation
+/// activates in its place, so the refresh begun next projects every live
+/// effect against an empty base. Receipts at or below the reset generation
+/// describe the deleted rows, so base frontiers and coverage skip them.
+async fn apply_requested_reset(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+) -> SessionStoreResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM session_temporal_resets
+             WHERE session_id = ?1 AND requested_at IS NOT NULL",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    let requested = rows
+        .next()
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?
+        .is_some();
+    drop(rows);
+    if !requested || read_running_operation(conn, session_id).await?.is_some() {
+        return Ok(());
+    }
+    require_no_open_candidate(conn, session_id, None, BEGIN_REFRESH).await?;
+    let Some((active_generation, active_watermarks)) =
+        read_active_generation(conn, session_id).await?
+    else {
+        conn.execute(
+            "DELETE FROM session_temporal_resets
+             WHERE session_id = ?1 AND reset_generation IS NULL",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        conn.execute(
+            "UPDATE session_temporal_resets SET requested_at = NULL WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        return Ok(());
+    };
+    discard_session_rows(conn, session_id, active_generation, BEGIN_REFRESH).await?;
+    let reset_generation = next_generation(conn, session_id).await?;
+    let mut watermarks = SessionFrozenWatermarksV1::new(
+        reset_generation,
+        0,
+        0,
+        active_watermarks.summary_frontier(),
+    );
+    if let Some(cursor_key) = active_watermarks.cursor_key() {
+        watermarks = watermarks.with_cursor_key(cursor_key.clone());
+    }
+    let encoded = encode_watermarks(&watermarks, BEGIN_REFRESH)?;
+    let reset_at = now_micros(BEGIN_REFRESH)?;
+    let reset = generation_i64(reset_generation, BEGIN_REFRESH)?;
+    let active = generation_i64(active_generation, BEGIN_REFRESH)?;
+    for (sql, params) in [
+        (
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES (?1, ?2, 'building', ?3, ?4)",
+            params![session_id.as_str(), reset, encoded.as_str(), reset_at.0],
+        ),
+        (
+            "UPDATE session_temporal_generations SET state = 'ready', ready_at = ?3
+             WHERE session_id = ?1 AND generation = ?2 AND state = 'building'",
+            params![session_id.as_str(), reset, reset_at.0],
+        ),
+        (
+            "UPDATE session_temporal_generations SET state = 'superseded', completed_at = ?3
+             WHERE session_id = ?1 AND generation = ?2 AND state = 'active'",
+            params![session_id.as_str(), active, reset_at.0],
+        ),
+        (
+            "UPDATE session_temporal_generations SET state = 'active', activated_at = ?3
+             WHERE session_id = ?1 AND generation = ?2 AND state = 'ready'",
+            params![session_id.as_str(), reset, reset_at.0],
+        ),
+        (
+            "INSERT INTO session_summary_availability (
+                session_id, generation, summary_id, availability,
+                source_horizon_json, reason, checked_at
+             )
+             SELECT session_id, ?2, summary_id, availability, source_horizon_json, reason, ?3
+             FROM session_summary_availability
+             WHERE session_id = ?1 AND generation = ?4",
+            params![session_id.as_str(), reset, reset_at.0, active],
+        ),
+        (
+            "UPDATE session_temporal_resets
+             SET requested_at = NULL, reset_generation = ?2
+             WHERE session_id = ?1",
+            params![session_id.as_str(), reset],
+        ),
+    ] {
+        conn.execute(sql, params)
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    }
+    Ok(())
+}
+
+async fn read_reset_generation(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &SessionId,
+) -> SessionStoreResult<Option<i64>> {
+    let mut rows = conn
+        .query(
+            "SELECT reset_generation FROM session_temporal_resets WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    match rows
+        .next()
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?
+    {
+        Some(row) => row
+            .get::<Option<i64>>(0)
+            .map_err(|error| storage(BEGIN_REFRESH, error)),
+        None => Ok(None),
+    }
 }
 
 async fn next_generation(

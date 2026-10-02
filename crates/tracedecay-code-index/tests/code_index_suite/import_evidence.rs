@@ -22,7 +22,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::{PartitionedSealV1, id},
+    support::{PartitionedSealV1, cold_generation, id},
 };
 
 const FIRST_SOURCE: &str = concat!(
@@ -82,9 +82,11 @@ fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    owner
-        .build_and_publish(import_request(), &ActiveControl)
-        .expect("parser-backed import generation publishes")
+    cold_generation(
+        &owner
+            .build_and_publish(import_request(), &ActiveControl)
+            .expect("parser-backed import generation publishes"),
+    )
 }
 
 fn published_rust_workspace(sources: &[(&str, &str, &str)]) -> Arc<CodeIndexPublishedGenerationV1> {
@@ -143,14 +145,16 @@ fn published_workspace(
         .validate()
         .expect("workspace snapshot is canonical");
 
-    CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
+    cold_generation(
+        &CodeIndexProductionOwnerV1::new(
+            config(),
+            SharedPublicationStore::default(),
+            ApplyingProjectionSink,
+        )
+        .expect("production owner")
+        .build_and_publish(request, &ActiveControl)
+        .expect("workspace generation publishes"),
     )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("workspace generation publishes")
 }
 
 fn symbol_occurrence(
