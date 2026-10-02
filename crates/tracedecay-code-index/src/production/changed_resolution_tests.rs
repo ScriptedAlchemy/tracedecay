@@ -3,7 +3,7 @@ use std::path::Path;
 use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
 use super::changed_resolution::{ChangedSitesV1, pair_edited_files};
-use super::graph_inputs::resolve_files;
+use super::resolution_outputs::resolve_files;
 use super::worker_tests::{
     WorkerProjectionSink, WorkerPublicationStore, partitioned_restore, partitioned_seal,
     worker_config, worker_id, worker_request_with_source,

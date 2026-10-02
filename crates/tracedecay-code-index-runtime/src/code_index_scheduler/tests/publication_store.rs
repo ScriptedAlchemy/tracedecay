@@ -37,7 +37,7 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryPressureV1,
 };
 
-use super::super::publication_store::{ActiveGenerationDecodeChargeV1, ActiveGenerationWorkV1};
+use super::super::publication_store::ActiveGenerationDecodeChargeV1;
 
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
@@ -46,8 +46,8 @@ use super::{
 };
 use crate::{
     code_index::production::{
-        CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
-        CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
+        CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
         SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
         UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
@@ -59,7 +59,7 @@ use crate::{
 };
 
 #[test]
-fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_release() {
+fn selected_graph_build_bound_reserves_transient_memory_and_retries_after_release() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let mut scheduler = scheduler(
@@ -73,23 +73,20 @@ fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_rel
             .expect("publish cached generation"),
     );
     let decoder = scheduler.active_generation_decoder().expect("decoder");
-    let _cached = decoder
+    let cached = decoder
         .load_active_shared()
         .expect("load generation")
         .expect("published generation");
     assert_eq!(
-        decoder
-            .active_generation_charge(ActiveGenerationWorkV1::Decode)
-            .expect("decode charge"),
+        decoder.active_generation_charge().expect("decode charge"),
         ActiveGenerationDecodeChargeV1::Decoded,
         "the fixture really has a decoded generation in the active cache"
     );
-    let ActiveGenerationDecodeChargeV1::Measured { bytes, .. } = decoder
-        .active_generation_charge(ActiveGenerationWorkV1::SealedGraphBuild)
-        .expect("graph build charge")
-    else {
-        panic!("a cached decode does not contain the graph build's transient working set");
+    let bound = CodeGraphBuildBoundV1 {
+        store_bytes: cached.retained_bytes(),
+        ..CodeGraphBuildBoundV1::default()
     };
+    let bytes = bound.peak_bytes();
     assert!(bytes > 0);
     let limit = NonZeroU64::new(bytes * 4).expect("memory limit");
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
@@ -113,10 +110,10 @@ fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_rel
         .expect("other owner fits");
     assert!(
         matches!(
-            decoder.admit_sealed_graph_build(),
+            decoder.admit_sealed_graph_build_bound(bound),
             Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
         ),
-        "cached graph builds still respect another owner's reservation"
+        "the selected graph build still respects another owner's reservation"
     );
     assert_eq!(
         memory.snapshot().used_bytes,
@@ -125,9 +122,9 @@ fn cached_generation_graph_build_reserves_transient_memory_and_retries_after_rel
     );
     drop(other_owner);
     let admitted = decoder
-        .admit_sealed_graph_build()
+        .admit_sealed_graph_build_bound(bound)
         .expect("released headroom admits the graph build")
-        .expect("graph build owns a reservation even with a cached decode");
+        .expect("the selected graph build owns a reservation");
     assert_eq!(memory.snapshot().used_bytes, bytes);
     drop(admitted);
     assert_eq!(memory.snapshot().used_bytes, 0);
@@ -309,6 +306,18 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
                 .as_u64()
                 .expect("evidence segment size"),
         );
+        for page in manifest["generation"]["code_graph_pages"]
+            .as_array()
+            .expect("code graph page descriptors")
+        {
+            components.insert(
+                page["page_digest"]
+                    .as_str()
+                    .expect("code graph page digest")
+                    .to_owned(),
+                page["size_bytes"].as_u64().expect("code graph page size"),
+            );
+        }
         components
     };
     let first_components = component_sizes(&first_manifest);
@@ -354,8 +363,12 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         .collect::<Vec<_>>();
     assert_eq!(
         segment_sizes.len(),
-        5,
-        "three shared/edited file segments plus one evidence segment per generation"
+        first_components
+            .keys()
+            .chain(second_components.keys())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        "the segment directory must hold exactly the unique addressed components"
     );
     let first_generation_segment_bytes = first_segments
         .iter()
@@ -2792,9 +2805,13 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
     );
 }
 
-/// The segment digests one scope's active manifest names: its file segments
-/// and, last, its evidence pack.
-fn active_segment_digests(scope: &Path) -> Vec<String> {
+struct ActiveSegmentDigests {
+    files: BTreeSet<String>,
+    graph_pages: BTreeSet<String>,
+    evidence: String,
+}
+
+fn active_segment_digests_by_kind(scope: &Path) -> ActiveSegmentDigests {
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &std::fs::read(scope.join("active-code-generation-v1.json")).expect("active pointer"),
     )
@@ -2805,14 +2822,38 @@ fn active_segment_digests(scope: &Path) -> Vec<String> {
             .join(&pointer.generation_file),
     )
     .expect("active manifest");
-    CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
-        .expect("segment identities")
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("decode active manifest");
+    let digest = |value: &serde_json::Value| {
+        sha256_hex_suffix(value.as_str().expect("sha256 segment digest"))
+            .expect("sha256 segment digest")
+            .to_owned()
+    };
+    ActiveSegmentDigests {
+        files: manifest["generation"]["file_segments"]
+            .as_array()
+            .expect("active file segments")
+            .iter()
+            .map(|segment| digest(&segment["segment_digest"]))
+            .collect(),
+        graph_pages: manifest["generation"]["code_graph_pages"]
+            .as_array()
+            .expect("active graph pages")
+            .iter()
+            .map(|page| digest(&page["page_digest"]))
+            .collect(),
+        evidence: digest(&manifest["generation"]["generation_evidence"]["segment_digest"]),
+    }
+}
+
+/// Every content-addressed component named by one scope's active manifest.
+fn active_segment_digests(scope: &Path) -> Vec<String> {
+    let segments = active_segment_digests_by_kind(scope);
+    segments
+        .files
         .into_iter()
-        .map(|identity| {
-            sha256_hex_suffix(identity.digest.as_str())
-                .expect("sha256 segment digest")
-                .to_owned()
-        })
+        .chain(segments.graph_pages)
+        .chain(std::iter::once(segments.evidence))
         .collect()
 }
 
@@ -2973,18 +3014,23 @@ fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
         );
     }
 
-    let mut first = active_segment_digests(&scopes.first_scope);
-    let mut linked = active_segment_digests(&scopes.linked_scope);
-    let first_evidence = first.pop().expect("first evidence pack");
-    let linked_evidence = linked.pop().expect("linked evidence pack");
-    assert_eq!(first.len(), 2, "one file segment per source file");
+    let first = active_segment_digests_by_kind(&scopes.first_scope);
+    let linked = active_segment_digests_by_kind(&scopes.linked_scope);
     assert_eq!(
-        first, linked,
+        first.files, linked.files,
         "identical files seal to identical, worktree-independent segments"
     );
-    assert_ne!(first_evidence, linked_evidence);
-    let mut expected = first.into_iter().collect::<BTreeSet<_>>();
-    expected.extend([first_evidence, linked_evidence]);
+    assert!(
+        !first.files.is_empty(),
+        "the fixture must publish shared file segments"
+    );
+    assert_ne!(first.evidence, linked.evidence);
+    let mut expected = first.files;
+    expected.extend(first.graph_pages);
+    expected.insert(first.evidence);
+    expected.extend(linked.files);
+    expected.extend(linked.graph_pages);
+    expected.insert(linked.evidence);
     assert_eq!(
         segment_files(&segments_root),
         expected,

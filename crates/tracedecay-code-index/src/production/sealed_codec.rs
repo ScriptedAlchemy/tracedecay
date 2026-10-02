@@ -1066,6 +1066,7 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
     pub(super) projection_receipt: ProjectionBatchReceiptV1,
     /// The edges sealing derived across files, restored as sealed.
     pub(super) cross_file_edges: Vec<CanonicalRelationEdgeV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -1147,6 +1148,7 @@ pub(super) fn assemble_published_generation(
         projection_request,
         projection_receipt,
         cross_file_edges,
+        unresolved_calls,
     } = generation;
     let files = content.files.clone();
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
@@ -1231,6 +1233,7 @@ pub(super) fn assemble_published_generation(
         lineage,
         imports,
         edges,
+        unresolved_calls,
         edge_abstentions,
         clone_payloads_reused: 0,
         clone_payloads_computed: 0,

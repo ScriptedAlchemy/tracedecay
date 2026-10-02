@@ -565,6 +565,11 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
                 SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
                     segments.insert(digest.as_str().to_owned(), bytes.to_vec());
                 }
+                SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                    page_digest, bytes, ..
+                } => {
+                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                }
                 SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
                     evidence_pack.extend_from_slice(bytes);
                 }
