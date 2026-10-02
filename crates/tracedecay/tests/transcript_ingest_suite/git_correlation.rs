@@ -4,7 +4,6 @@ use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery, SystemGit, normalize_worktree,
 };
 
-use crate::claude::write_claude_transcript;
 use crate::restart_atomicity::{ingest_global_sources_for_provider, open_project_session_db};
 use crate::support::{init_project_at, run_git};
 
@@ -30,7 +29,25 @@ async fn sessions_for_lists_a_claude_session_by_its_cwd() {
         ],
     );
     init_project_at(&project);
-    write_claude_transcript(&home, &project, "claude-sess");
+    let transcripts = home.join(".claude/projects/-project");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let rows = [
+        serde_json::json!({
+            "type": "user", "cwd": project, "gitBranch": "main", "sessionId": "claude-sess",
+            "uuid": "u1", "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": "Investigate the billing pipeline regression"}
+        }),
+        serde_json::json!({
+            "type": "assistant", "cwd": project, "gitBranch": "main", "sessionId": "claude-sess",
+            "uuid": "u2", "parentUuid": "u1", "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Tracing it."}]}
+        }),
+    ];
+    std::fs::write(
+        transcripts.join("claude-sess.jsonl"),
+        rows.map(|row| format!("{row}\n")).concat(),
+    )
+    .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
     ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Claude)).await;
