@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use crate::ApplicationProblemDetailV1;
@@ -69,6 +71,20 @@ pub enum TraceDecayError {
         "host CLI `{program}` is unavailable for {lifecycle}; install it or add it to PATH and retry"
     )]
     HostCliUnavailable { program: String, lifecycle: String },
+
+    /// The service manager resolves this profile's unit name to a unit file
+    /// the profile did not install, so any control command would act on
+    /// another profile's daemon.
+    #[error(
+        "the service manager resolves `{unit}` to {}, not to this profile's unit '{}'; refusing to control a service this profile does not own",
+        .loaded.as_ref().map_or_else(|| "no unit file".to_owned(), |path| format!("'{}'", path.display())),
+        .owned.display()
+    )]
+    ServiceUnitNotOwned {
+        unit: String,
+        owned: PathBuf,
+        loaded: Option<PathBuf>,
+    },
 
     #[error(
         "{component} profile schema {} is incompatible with required schema \

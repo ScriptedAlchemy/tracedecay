@@ -3474,8 +3474,8 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     assert!(
         lines.contains(
             &"service manager: unreachable from this shell (check XDG_RUNTIME_DIR and \
-              DBUS_SESSION_BUS_ADDRESS): systemctl --user is-active tracedecay.service reported \
-              no unit state (exit status: 1): Failed to connect to bus: No medium found"
+              DBUS_SESSION_BUS_ADDRESS): systemctl --user show --property=FragmentPath \
+              tracedecay.service failed (exit status: 1): Failed to connect to bus: No medium found"
         ),
         "{stdout}"
     );

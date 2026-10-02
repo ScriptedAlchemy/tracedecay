@@ -582,6 +582,7 @@ pub fn runtime_failure_class(error: &TraceDecayError) -> AgentTaskFailureClass {
         | TraceDecayError::ProfileResetRequired { .. }
         | TraceDecayError::ResetRequired { .. }
         | TraceDecayError::ToolRefused(_)
+        | TraceDecayError::ServiceUnitNotOwned { .. }
         | TraceDecayError::Sqlite(_)
         | TraceDecayError::Json(_)
         | TraceDecayError::Automation(_) => AgentTaskFailureClass::Permanent,

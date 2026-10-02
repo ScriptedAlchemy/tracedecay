@@ -149,8 +149,8 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     if findings.daemon_transport_failures > 0 {
         dc.info(&format!(
             "    {} failure(s) reached the managed daemon but its socket reset or broke; \
-             run `tracedecay daemon status` and \
-             `journalctl --user -u tracedecay.service` to check for saturation, restart, \
+             run `tracedecay daemon status` and the `logs:` command it prints \
+             to check for saturation, restart, \
              or OOM evidence before reloading Cursor",
             findings.daemon_transport_failures
         ));
