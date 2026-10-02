@@ -283,18 +283,17 @@ impl TraceDecayOpenOptions {
     }
 
     fn resolved_profile_root(&self) -> Result<PathBuf> {
-        if let Some(profile_root) = &self.profile_root {
-            return Ok(profile_root.clone());
-        }
-        if let Some(parent) = self
-            .global_db_path
+        let profile_root = self
+            .profile_root
             .as_deref()
-            .and_then(std::path::Path::parent)
-        {
-            return Ok(parent.to_path_buf());
-        }
-        Err(TraceDecayError::Config {
-            message: "project open requires an explicit profile root".to_owned(),
-        })
+            .or_else(|| {
+                self.global_db_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent)
+            })
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project open requires an explicit profile root".to_owned(),
+            })?;
+        tracedecay_daemon_identity::canonical_identity_path(profile_root)
     }
 }
