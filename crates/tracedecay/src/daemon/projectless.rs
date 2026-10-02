@@ -14,7 +14,7 @@ use tracedecay_mcp::tools::catalog_discovery::{
 };
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
-    explore_call_budget, project_catalog_discovery_scope, tool_error_response,
+    explore_call_budget, project_catalog_discovery_scope,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -353,7 +353,7 @@ async fn projectless_tools_call_response_with_connection(
     if let Err(error) = boxed_projectless_phase(store_administration.ensure_account_active()).await
     {
         if error.is_store_reset_required() {
-            return tool_error_response(id, tool_name, &error);
+            return crate::mcp::tools::tool_refusal_response(id, tool_name, &error);
         }
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
@@ -418,7 +418,7 @@ async fn dispatch_admitted_projectless_call(
 }
 
 fn requires_project_error(id: serde_json::Value, tool_name: &str) -> JsonRpcResponse {
-    tool_error_response(
+    crate::mcp::tools::tool_refusal_response(
         id,
         tool_name,
         &TraceDecayError::project_route(
@@ -466,7 +466,7 @@ async fn projectless_profile_owner_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => crate::mcp::tools::tool_refusal_response(id, tool_name, &error),
     }
 }
 
@@ -487,7 +487,7 @@ async fn projectless_profile_configuration_response(
     let normalized = match adapt_application_tool_request(tool_name, arguments) {
         Ok(normalized) => normalized,
         Err(error) => {
-            return tool_error_response(
+            return crate::mcp::tools::tool_refusal_response(
                 id,
                 tool_name,
                 &TraceDecayError::Config {
@@ -512,7 +512,7 @@ async fn projectless_profile_configuration_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => crate::mcp::tools::tool_refusal_response(id, tool_name, &error),
     }
 }
 
@@ -544,7 +544,7 @@ async fn projectless_profile_retained_response(
                 "projectless retained dispatch requires an explicit user scope".to_string(),
             );
         }
-        Err(error) => return tool_error_response(id, tool_name, &error),
+        Err(error) => return crate::mcp::tools::tool_refusal_response(id, tool_name, &error),
     }
     let Some(application) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
         return requires_project_error(id, tool_name);
@@ -566,7 +566,7 @@ async fn projectless_profile_retained_response(
             tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => tool_error_response(id, tool_name, &error),
+        Err(error) => crate::mcp::tools::tool_refusal_response(id, tool_name, &error),
     }
 }
 

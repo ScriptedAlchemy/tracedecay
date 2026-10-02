@@ -1232,7 +1232,7 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(id, &tool_name, &error);
                 }
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1274,7 +1274,7 @@ impl McpServer {
                         connection_client_name,
                         connection_instance_id,
                     });
-                    tool_error_response(id, &tool_name, &error)
+                    crate::mcp::tools::tool_refusal_response(id, &tool_name, &error)
                 })
             }
         }
@@ -1347,7 +1347,7 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(error) => tool_error_response(id, tool_name, &error),
+            Err(error) => crate::mcp::tools::tool_refusal_response(id, tool_name, &error),
         }
     }
 
@@ -1464,7 +1464,9 @@ impl McpServer {
         .await
         {
             Some(Ok(routed)) => routed,
-            Some(Err(error)) => return tool_error_response(id, &tool_name, &error),
+            Some(Err(error)) => {
+                return crate::mcp::tools::tool_refusal_response(id, &tool_name, &error);
+            }
             // Cancel won before route selection installed dispatch authority.
             // That is transport abandonment, not an admitted tool cancel:
             // emit the same -32800 / request_cancelled terminal the RMCP and
@@ -1488,7 +1490,7 @@ impl McpServer {
                         true,
                         "MCP server was released before retained dispatch admission",
                     );
-                    return tool_error_response(id, &tool_name, &error);
+                    return crate::mcp::tools::tool_refusal_response(id, &tool_name, &error);
                 }
             },
         };
@@ -1516,7 +1518,7 @@ impl McpServer {
             caller_deadline,
         ) {
             Ok(prepared) => prepared,
-            Err(error) => return tool_error_response(id, &tool_name, &error),
+            Err(error) => return crate::mcp::tools::tool_refusal_response(id, &tool_name, &error),
         };
 
         // Acquire exactly one response lease from the execution server. The
@@ -1541,7 +1543,7 @@ impl McpServer {
                 label = "mcp.server.response_gate.wait"
             ) => guard,
             () = request_cancelled => {
-                return tool_error_response(
+                return crate::mcp::tools::tool_refusal_response(
                     id,
                     &tool_name,
                     &dispatch_cancelled_error(
@@ -1561,7 +1563,7 @@ impl McpServer {
                         true,
                         "the retained project server was retired before response admission",
                     );
-                    tool_error_response(id, &tool_name, &error)
+                    crate::mcp::tools::tool_refusal_response(id, &tool_name, &error)
                 });
         }
         connection.install_selected_response_lease(
@@ -1637,7 +1639,7 @@ impl McpServer {
             Ok(dispatch) => dispatch,
             Err(failure) => {
                 connection.clear_selected_response_lease();
-                return tool_error_response(id, &tool_name, failure.error());
+                return crate::mcp::tools::tool_refusal_response(id, &tool_name, failure.error());
             }
         };
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {

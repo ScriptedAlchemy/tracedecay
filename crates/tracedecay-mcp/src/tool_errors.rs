@@ -172,9 +172,12 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         | "project_required"
         | "project_not_enrolled"
         | "unknown_tool"
+        | "session_sync_wrong_scope"
         | CURSOR_PARAMETER_CHANGED_CODE
         | CURSOR_INVALID_CODE => Some("invalid_request"),
-        "application_surface_not_found_or_not_authorized" => Some("denied"),
+        "application_surface_not_found_or_not_authorized" | "project_route_not_found" => {
+            Some("denied")
+        }
         _ => None,
     }
 }
