@@ -39,6 +39,12 @@ type SiteV1<'a> = (&'a SymbolOccurrenceId, SourceSpan);
 /// Each edited file's child index, with the file its path held in the parent.
 pub(super) type EditedFilesV1 = Vec<(usize, Arc<FileGenerationArtifactsV1>)>;
 
+pub(super) struct GraphResolutionOutputsV1 {
+    pub(super) edges: Vec<CanonicalRelationEdgeV1>,
+    pub(super) abstentions: Vec<CodeIndexEdgeAbstentionV1>,
+    pub(super) unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+}
+
 /// The call sites an in-place edit can move, and the references that decide
 /// them.
 pub(super) struct ChangedSitesV1<'f> {
@@ -202,14 +208,7 @@ pub(super) fn edge_evidence_over_parent(
     files: &[Arc<FileGenerationArtifactsV1>],
     parent: &CodeIndexPublishedGenerationV1,
     shared: &BTreeSet<FileOccurrenceId>,
-) -> Result<
-    (
-        Vec<CanonicalRelationEdgeV1>,
-        Vec<CodeIndexEdgeAbstentionV1>,
-        Vec<CodeIndexUnresolvedReferenceV1>,
-    ),
-    CodeIndexProductionErrorV1,
-> {
+) -> Result<GraphResolutionOutputsV1, CodeIndexProductionErrorV1> {
     // Shared files are the same files on both sides, so equal file counts
     // and a parent file at every edited path mean the same set of paths.
     let edited = pair_edited_files(
@@ -225,7 +224,11 @@ pub(super) fn edge_evidence_over_parent(
         let (edges, abstentions) = collect_edge_evidence(files)?;
         let unresolved =
             super::resolution_outputs::unresolved_calls_for_edges(files, &edges, &|| Ok(()))?;
-        return Ok((edges, abstentions, unresolved));
+        return Ok(GraphResolutionOutputsV1 {
+            edges,
+            abstentions,
+            unresolved_calls: unresolved,
+        });
     };
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("code_index.build.references_resolved").inc(sites.resolved_references() as u64);
@@ -240,7 +243,11 @@ pub(super) fn edge_evidence_over_parent(
     let unresolved =
         sites.unresolved_calls(files, &cross_file, &parent.unresolved_calls, &|| Ok(()))?;
     let (edges, abstentions) = edge_evidence(files, cross_file);
-    Ok((edges, abstentions, unresolved))
+    Ok(GraphResolutionOutputsV1 {
+        edges,
+        abstentions,
+        unresolved_calls: unresolved,
+    })
 }
 
 fn site(reference: &CodeIndexUnresolvedReferenceV1) -> SiteV1<'_> {

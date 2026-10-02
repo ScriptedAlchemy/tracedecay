@@ -104,7 +104,7 @@ pub use graph_build_bound::CodeGraphBuildBoundV1;
 mod changed_resolution;
 mod graph_page_store;
 mod graph_pages;
-use changed_resolution::edge_evidence_over_parent;
+use changed_resolution::{GraphResolutionOutputsV1, edge_evidence_over_parent};
 pub(crate) use graph_page_store::{
     CodeGraphPageDescriptorV1, CodeGraphPageStoreV1, CodeGraphPageStoreWriterV1,
     FileCodeGraphPageStoreV1, SealedCodeGraphPageStoreV1,
@@ -2219,7 +2219,7 @@ where
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
             );
-            let (edges, edge_abstentions, unresolved_calls) = hotpath::measure_block!(
+            let graph_outputs = hotpath::measure_block!(
                 "code_index.build.assemble.graph_outputs",
                 match (active.as_deref(), staged.parent_shared_occurrences.as_ref()) {
                     (Some(parent), Some(shared)) => {
@@ -2232,10 +2232,19 @@ where
                             &edges,
                             &|| Ok(()),
                         )?;
-                        Ok((edges, abstentions, unresolved))
+                        Ok(GraphResolutionOutputsV1 {
+                            edges,
+                            abstentions,
+                            unresolved_calls: unresolved,
+                        })
                     }
                 }
             )?;
+            let GraphResolutionOutputsV1 {
+                edges,
+                abstentions: edge_abstentions,
+                unresolved_calls,
+            } = graph_outputs;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
                 staged.symbols.symbols.len(),
