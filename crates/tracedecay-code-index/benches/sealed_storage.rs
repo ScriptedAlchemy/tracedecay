@@ -543,6 +543,7 @@ fn request(
             content_identity: content_digest(&identity.finalize()),
             captured_at: UtcMicros(sealed_at - 1_000_000),
             files,
+            omitted_sources: Vec::new(),
         },
         captured_files,
         changed_files: changed,

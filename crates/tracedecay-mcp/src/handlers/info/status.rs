@@ -140,7 +140,7 @@ fn ready_serving_source(
     Some(ReadyServingSourceV1 {
         reference: freshness.source_reference.as_deref()?,
         revision: freshness.source_revision.as_deref(),
-        current_source_verified: freshness.coverage == CodeIndexFreshnessCoverageV1::Complete
+        current_source_verified: freshness.coverage.covers_indexable_sources()
             && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh),
     })
 }
@@ -659,7 +659,13 @@ fn code_index_freshness_projection(
         return (status, Some(warning));
     }
     if authoritative {
-        (FreshnessLabelV1::Current, None)
+        let warning = freshness.omitted_sources.as_ref().map(|omitted| {
+            format!(
+                "{} captured source file(s) are not indexed; code_index_freshness.worktree.omitted_sources names them and why",
+                omitted.count
+            )
+        });
+        (FreshnessLabelV1::Current, warning)
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         let warning = if freshness.restore_progress.is_some() {
             "the sealed lexical artifact is completing bounded authentication before serving"
@@ -980,6 +986,7 @@ mod tests {
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1,
+        CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
         CodeIndexStalenessStateV1,
     };
     use tracedecay_contracts::retrieval::{StatusCodeIndexFreshnessV1, StatusRetrievalServingV1};
@@ -1490,6 +1497,45 @@ mod tests {
                         .to_owned()
                 )
             )
+        );
+    }
+
+    /// Sources no generation can index leave the read current, but status
+    /// says how many captured sources the index does not hold.
+    #[test]
+    fn a_fresh_read_with_omitted_sources_is_current_and_names_their_count() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+            coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            omitted_sources: Some(CodeIndexOmittedSourcesV1 {
+                count: 2,
+                sources: vec![CodeIndexOmittedSourceV1 {
+                    git_path_bytes: b"src/odd\\name.rs".to_vec(),
+                    display_path: "src/odd\\name.rs".to_owned(),
+                    reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, FreshnessLabelV1::Current);
+        assert!(
+            warning
+                .expect("omitted sources are named")
+                .starts_with("2 captured source file(s) are not indexed")
+        );
+        let complete = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            omitted_sources: None,
+            ..freshness
+        };
+        assert_eq!(
+            code_index_freshness_projection(&complete),
+            (FreshnessLabelV1::Current, None)
         );
     }
 

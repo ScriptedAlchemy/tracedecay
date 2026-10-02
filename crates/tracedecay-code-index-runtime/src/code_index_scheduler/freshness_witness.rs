@@ -31,8 +31,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
-    ContentDigest, IndexPathPolicyV1, LanguageId, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, validate_code_logical_path,
+    CodeSourceOmissionReasonV1, ContentDigest, IndexPathPolicyV1, LanguageId,
+    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, validate_code_logical_path,
 };
 use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
@@ -68,7 +68,7 @@ pub fn worktree_stat_sweep(
 ) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?;
+    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
     // One sweep span plus an entries gauge: the stat walk is O(candidates) and
     // must never publish one profiler event per file.
     hotpath::gauge!("daemon.code_index.freshness.stat_signature.candidates")
@@ -97,12 +97,19 @@ pub fn worktree_stat_sweep(
     })
 }
 
-/// Every ordinary or explicitly admitted path with a registered language,
-/// present or not: the roster a stat sweep checks.
+struct SourceCandidatesV1 {
+    /// Every ordinary or explicitly admitted path with a registered language,
+    /// present or not: the roster a stat sweep checks.
+    candidates: Vec<StatCandidateV1>,
+    /// Every Git path no logical path can carry, whatever its extension,
+    /// present or not: capture records each present one as an omitted source.
+    unrepresentable: Vec<Vec<u8>>,
+}
+
 fn source_candidates(
     repository: &gix::Repository,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
-) -> Result<Vec<StatCandidateV1>, CodeIndexSchedulerErrorV1> {
+) -> Result<SourceCandidatesV1, CodeIndexSchedulerErrorV1> {
     let classification = classification::WorktreeChangeClassificationV1::classify(repository)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let registry = StaticLanguageRegistry::new();
@@ -112,7 +119,18 @@ fn source_candidates(
         .collect::<BTreeSet<_>>();
     let mut candidate_paths = classification.candidate_paths();
     candidate_paths.extend(admitted_paths.iter().map(|path| (*path).to_owned()));
-    Ok(candidate_paths
+    let mut unrepresentable = classification
+        .non_utf8_paths()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    unrepresentable.extend(
+        candidate_paths
+            .iter()
+            .filter(|path| validate_code_logical_path(path).is_err())
+            .map(|path| path.as_bytes().to_vec()),
+    );
+    let candidates = candidate_paths
         .into_iter()
         .filter_map(|logical_path| {
             let extension = Path::new(&logical_path).extension()?.to_str()?;
@@ -123,7 +141,11 @@ fn source_candidates(
                 logical_path,
             })
         })
-        .collect())
+        .collect();
+    Ok(SourceCandidatesV1 {
+        candidates,
+        unrepresentable,
+    })
 }
 
 /// The per-file content identities one sealed generation was reconciled
@@ -135,10 +157,26 @@ fn source_candidates(
 pub struct SourceContentManifestV1 {
     snapshot_content_identity: ContentDigest,
     files: Arc<BTreeMap<String, ContentDigest>>,
+    withheld: Arc<BTreeSet<String>>,
+    unrepresentable: Arc<BTreeSet<Vec<u8>>>,
 }
 
 impl SourceContentManifestV1 {
     pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
+        let mut withheld = BTreeSet::new();
+        let mut unrepresentable = BTreeSet::new();
+        for source in &snapshot.omitted_sources {
+            match &source.reason {
+                CodeSourceOmissionReasonV1::PrivacyWithheld { .. } => {
+                    if let Ok(path) = std::str::from_utf8(&source.git_path) {
+                        withheld.insert(path.to_owned());
+                    }
+                }
+                CodeSourceOmissionReasonV1::UnrepresentablePath => {
+                    unrepresentable.insert(source.git_path.clone());
+                }
+            }
+        }
         Self {
             snapshot_content_identity: snapshot.content_identity.clone(),
             files: Arc::new(
@@ -149,6 +187,8 @@ impl SourceContentManifestV1 {
                     .map(|file| (file.logical_path.clone(), file.content_digest.clone()))
                     .collect(),
             ),
+            withheld: Arc::new(withheld),
+            unrepresentable: Arc::new(unrepresentable),
         }
     }
 
@@ -207,13 +247,14 @@ impl CandidateContentV1 {
         }
     }
 
-    fn matches(&self, expected: Option<&ContentDigest>) -> bool {
-        match (self, expected) {
-            (Self::Digest(digest), Some(expected)) => digest == expected,
-            // A withheld file's absence from the manifest is the one
-            // consistent state.
-            (Self::Withheld, None) => true,
-            _ => false,
+    fn matches(&self, logical_path: &str, manifest: &SourceContentManifestV1) -> bool {
+        match self {
+            Self::Digest(digest) => manifest.files.get(logical_path) == Some(digest),
+            Self::Withheld => {
+                !manifest.files.contains_key(logical_path)
+                    && manifest.withheld.contains(logical_path)
+            }
+            Self::Unreadable => false,
         }
     }
 }
@@ -332,6 +373,7 @@ struct CachedCandidateRosterV1 {
     admitted_paths: Vec<String>,
     evidence: Vec<(PathBuf, Option<StatKeyV1>)>,
     candidates: Arc<Vec<StatCandidateV1>>,
+    unrepresentable: Arc<Vec<Vec<u8>>>,
 }
 
 impl CachedCandidateRosterV1 {
@@ -515,21 +557,26 @@ impl SourceSweepCacheV1 {
             .iter()
             .map(|admission| admission.logical_path.clone())
             .collect::<Vec<_>>();
-        let candidates = match self.roster.as_ref() {
-            Some(roster) if roster.holds(git_metadata_signature, &admitted_paths) => {
-                Arc::clone(&roster.candidates)
-            }
+        let (candidates, unrepresentable) = match self.roster.as_ref() {
+            Some(roster) if roster.holds(git_metadata_signature, &admitted_paths) => (
+                Arc::clone(&roster.candidates),
+                Arc::clone(&roster.unrepresentable),
+            ),
             _ => {
                 stats.walked = true;
                 let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
                     return (false, stats);
                 };
                 let evidence = roster_evidence(&repository, project_root, sampled_at);
-                let Ok(candidates) = source_candidates(&repository, ignored_source_admissions)
+                let Ok(SourceCandidatesV1 {
+                    candidates,
+                    unrepresentable,
+                }) = source_candidates(&repository, ignored_source_admissions)
                 else {
                     return (false, stats);
                 };
                 let candidates = Arc::new(candidates);
+                let unrepresentable = Arc::new(unrepresentable);
                 let live = candidates
                     .iter()
                     .map(|candidate| candidate.logical_path.as_str())
@@ -540,10 +587,28 @@ impl SourceSweepCacheV1 {
                     admitted_paths,
                     evidence,
                     candidates: Arc::clone(&candidates),
+                    unrepresentable: Arc::clone(&unrepresentable),
                 });
-                candidates
+                (candidates, unrepresentable)
             }
         };
+        let present_unrepresentable = stat_concurrently(&unrepresentable, |git_path| {
+            gix::path::try_from_byte_slice(git_path)
+                .is_ok_and(|relative| project_root.join(relative).is_file())
+        })
+        .into_iter()
+        .zip(unrepresentable.iter())
+        .filter_map(|(present, git_path)| present.then_some(git_path.as_slice()))
+        .collect::<BTreeSet<_>>();
+        if present_unrepresentable
+            != manifest
+                .unrepresentable
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<BTreeSet<_>>()
+        {
+            return (false, stats);
+        }
         let eligible = candidates
             .iter()
             .filter(|candidate| {
@@ -581,6 +646,7 @@ impl SourceSweepCacheV1 {
         if !manifest
             .files
             .keys()
+            .chain(manifest.withheld.iter())
             .all(|logical_path| present_paths.contains(logical_path.as_str()))
         {
             return (false, stats);
@@ -590,7 +656,7 @@ impl SourceSweepCacheV1 {
         for (candidate, key) in present {
             match self.contents.get(&candidate.logical_path) {
                 Some((cached, content)) if Some(*cached) == key => {
-                    if !content.matches(manifest.files.get(&candidate.logical_path)) {
+                    if !content.matches(&candidate.logical_path, manifest) {
                         disputed.push(candidate);
                     }
                 }
@@ -633,7 +699,7 @@ impl SourceSweepCacheV1 {
             return (false, stats);
         }
         for ((candidate, key), content) in unvouched.into_iter().zip(derived) {
-            if !content.matches(manifest.files.get(&candidate.logical_path)) {
+            if !content.matches(&candidate.logical_path, manifest) {
                 disputed.push(candidate);
             }
             // The key was sampled before the read, so a settled key vouches

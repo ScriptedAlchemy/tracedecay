@@ -4183,16 +4183,25 @@
     },
     "CodeIndexFreshnessCoverageV1": {
       "description": "Coverage of one freshness read. Distinct from [`CodeIndexStalenessStateV1`]:\na generation can be fresh and still omit hook-hint counts, or unverified\nwhile the ladder would otherwise say ready.\n\n`Unobserved` is only the constructed default. A projected read never emits\nit, so an absent observation cannot be mistaken for `complete`.",
-      "enum": [
-        "unobserved",
-        "complete",
-        "partial_refresh_in_progress",
-        "partial_artifact_restore",
-        "partial_source_verification",
-        "partial_unverified_restore",
-        "partial_hook_hint_overflow"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "unobserved",
+            "complete",
+            "partial_refresh_in_progress",
+            "partial_artifact_restore",
+            "partial_source_verification",
+            "partial_unverified_restore",
+            "partial_hook_hint_overflow"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "partial_omitted_sources",
+          "description": "The sealed generation is fresh for every source it can index, and\n[`CodeIndexWorktreeFreshnessV1::omitted_sources`] names the sources it\ncannot. Waiting cannot change it.",
+          "type": "string"
+        }
+      ]
     },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
@@ -4272,6 +4281,56 @@
       ],
       "type": "object"
     },
+    "CodeIndexOmittedSourceV1": {
+      "properties": {
+        "display_path": {
+          "description": "`git_path_bytes` decoded for display, invalid UTF-8 replaced.",
+          "type": "string"
+        },
+        "git_path_bytes": {
+          "description": "The exact Git path bytes, which need not be UTF-8.",
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "$ref": "#/$defs/CodeIndexSourceOmissionReasonV1"
+        }
+      },
+      "required": [
+        "git_path_bytes",
+        "display_path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CodeIndexOmittedSourcesV1": {
+      "description": "Sources a sealed snapshot captured but does not index.",
+      "properties": {
+        "count": {
+          "description": "Every omitted source in the snapshot.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sources": {
+          "description": "The first omitted sources in Git path order, at most\n[`CODE_INDEX_OMITTED_SOURCE_LIST_LIMIT`].",
+          "items": {
+            "$ref": "#/$defs/CodeIndexOmittedSourceV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "count",
+        "sources"
+      ],
+      "type": "object"
+    },
     "CodeIndexRestoreProgressV1": {
       "description": "Bounded authentication work required to restore one immutable lexical\nartifact as a serving reader.\n\nThe unit is a fixed restore check, not bytes or build work. Completed\nchecks are published only after they pass. `authenticated_remaining` is\nalways `authenticated_total - authenticated_completed`, so a caller can\ndistinguish bounded cold restore from an unbounded rebuild.",
       "properties": {
@@ -4310,6 +4369,40 @@
         "authenticated_remaining"
       ],
       "type": "object"
+    },
+    "CodeIndexSourceOmissionReasonV1": {
+      "oneOf": [
+        {
+          "description": "No logical path can carry the Git path: not UTF-8, a backslash, a\ncontrol character, or leading or trailing whitespace.",
+          "properties": {
+            "kind": {
+              "const": "unrepresentable_path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The privacy boundary withheld the file's bytes.",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "privacy_withheld",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "detail"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "CodeIndexStalenessStateV1": {
       "description": "Closed staleness ladder for one mounted worktree.\n\nThe scheduler publishes one of these tokens. MCP, the dashboard, and the\nCLI must match the variant, not a hand-copied string, so a new ladder\nstate cannot appear at one caller and be missed at the others.",
@@ -4503,6 +4596,17 @@
             "string",
             "null"
           ]
+        },
+        "omitted_sources": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexOmittedSourcesV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sources the serving snapshot captured but does not index, when any."
         },
         "parked": {
           "anyOf": [
