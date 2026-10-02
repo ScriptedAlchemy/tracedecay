@@ -308,6 +308,23 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                     .map_err(Into::into);
             }
         };
+        let owning_profile_root = prebuilt_evidence
+            .as_ref()
+            .map(|bundle| bundle.profile_root.clone())
+            .or_else(|| options.profile_root.clone());
+        if options.trigger == AutomationTrigger::Scheduler
+            && let Some(profile_root) = owning_profile_root.as_deref()
+            && let Some(reconciled) = reconcile_pending_skill_deployment(
+                &run,
+                &host_io,
+                host_home.as_deref(),
+                profile_root,
+                analytics_project_root,
+            )
+            .await?
+        {
+            return Ok(reconciled);
+        }
         let evidence_bundle = match prebuilt_evidence {
             Some(bundle) => bundle,
             None => match build_skill_writer_evidence(
@@ -556,6 +573,93 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             committed_receipt,
         })
     })
+}
+
+/// A failed terminal whose committed skill mutations never reached the hosts.
+fn skill_deployment_pending(record: &AutomationRunLedgerRecord) -> bool {
+    record.status == crate::automation::run_ledger::AutomationRunStatus::Failed
+        && record.error_retryable == Some(true)
+        && record
+            .applied_ops
+            .as_ref()
+            .and_then(|ops| ops.get("deployment"))
+            .and_then(|deployment| deployment.get("retry_required"))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+/// Redeploys the committed managed-skill store when the latest terminal left
+/// host deployment owed. The run settles that debt instead of asking the
+/// backend for new mutations, whose replay would collide with the skills the
+/// earlier run already committed.
+async fn reconcile_pending_skill_deployment(
+    run: &AgentTaskRunContext<'_>,
+    host_io: &HostIo,
+    host_home: Option<&std::path::Path>,
+    profile_root: &std::path::Path,
+    project_root: Option<&std::path::Path>,
+) -> AutomationRunResult<Option<SkillWriterAutomationRun>> {
+    let Some(pending) = run
+        .latest_effectful_record()
+        .filter(|record| skill_deployment_pending(record))
+    else {
+        return Ok(None);
+    };
+    let reconciled_run_id = pending.run_id.clone();
+    let deployment = crate::automation::skill_writer::deploy_managed_skills(
+        host_io,
+        host_home,
+        profile_root,
+        project_root,
+    );
+    let deployment_json = serde_json::to_value(&deployment).map_err(TraceDecayError::from)?;
+    let report = json!({
+        "status": if deployment.retry_required {
+            "deployment_retry_required"
+        } else {
+            "deployment_reconciled"
+        },
+        "dry_run": false,
+        "task": "skill_writer",
+        "reconciled_run_id": reconciled_run_id,
+        "deployment": deployment_json,
+    });
+    let applied_ops = json!({ "deployment": deployment_json });
+    let finalizer = run.finalizer(None)?;
+    if deployment.retry_required {
+        let error = TraceDecayError::Config {
+            message: "managed skill host deployment still requires retry".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Retryable,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                None,
+                Some(report),
+                0,
+                0,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    let ledger_record = finalizer
+        .append_reconciliation_record(applied_ops, report.clone())
+        .await?;
+    Ok(Some(SkillWriterAutomationRun {
+        run_id: run.run_id.clone(),
+        report,
+        ledger_record,
+        backend_response: None,
+        committed_receipt: None,
+    }))
 }
 
 /// Validates and automatically applies the `skills` half of a skill-writer (or

@@ -400,6 +400,14 @@ impl<'a> AgentTaskRunContext<'a> {
         Ok(gate)
     }
 
+    /// Latest succeeded or failed terminal from the summary loaded by
+    /// [`Self::gate`]; `None` before the gate runs or off the scheduler path.
+    pub(crate) fn latest_effectful_record(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.ledger_summary
+            .as_ref()
+            .and_then(AutomationRunLedgerTaskSummary::latest_effectful_any_trigger)
+    }
+
     pub(crate) async fn skipped_parts(
         &self,
         evidence_hash: Option<String>,
@@ -1018,6 +1026,30 @@ impl<'a> AgentRunFinalizer<'a> {
         record.rejected_ops = rejected_ops;
         record.validation_report = validation_report;
         apply_retry_report(&mut record, retry_report);
+        self.finish_record(&mut record)?;
+        self.publish_terminal_record(&record).await?;
+        Ok(record)
+    }
+
+    /// Records a successful terminal that settles effects owed by an earlier
+    /// run without consulting the backend.
+    pub(crate) async fn append_reconciliation_record(
+        &self,
+        applied_ops: Value,
+        validation_report: Value,
+    ) -> Result<AutomationRunLedgerRecord> {
+        let mut record = self.record(RunRecordOutcome {
+            model: None,
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: None,
+            proposed_ops: None,
+            accepted_count: 0,
+            rejected_count: 0,
+            error: None,
+            error_classification: None,
+        })?;
+        record.applied_ops = Some(applied_ops);
+        record.validation_report = Some(validation_report);
         self.finish_record(&mut record)?;
         self.publish_terminal_record(&record).await?;
         Ok(record)
