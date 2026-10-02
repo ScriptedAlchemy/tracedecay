@@ -282,4 +282,23 @@ fn typescript_calls_on_computed_receivers_make_callers_partial() {
         ["ts/src/box.ts::run"]
     );
     assert!(graph.callees_partial("ts/src/box.ts::run"));
+
+    let mut gaps = graph
+        .generation
+        .unresolved_import_calls()
+        .into_iter()
+        .map(|gap| {
+            let span = gap.evidence_span.start_byte as usize..gap.evidence_span.end_byte as usize;
+            (gap.reference_name, &COMPUTED_RECEIVERS_TS[span])
+        })
+        .collect::<Vec<_>>();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            ("<computed>.handle".to_owned(), "handle"),
+            ("<computed>.map".to_owned(), "map"),
+            ("<computed>.save".to_owned(), "save"),
+        ]
+    );
 }

@@ -2431,15 +2431,15 @@ fn cross_file_reference_candidate(
         && reference.reference_kind == EdgeKind::Calls
         && typescript_member_call_path(&reference.reference_name)
             .is_some_and(|(head, _)| imported_locals.contains(head));
-    let computed_member_call = (typescript && reference.reference_kind == EdgeKind::Calls)
-        .then(|| typescript_computed_member_call(&reference.reference_name))
+    let computed_member = (typescript && reference.reference_kind == EdgeKind::Calls)
+        .then(|| typescript_computed_member(&reference.reference_name))
         .flatten();
     // A call on a local, `this`, global, or computed receiver binds nothing
     // by name, so it stays as limitation evidence.
     let receiver_call = reference.reference_kind == EdgeKind::Calls
         && reference.reference_name.contains('.')
         && (rust
-            || computed_member_call.is_some()
+            || computed_member.is_some()
             || (typescript
                 && typescript_member_call_path(&reference.reference_name)
                     .is_some_and(|(head, _)| !imported_locals.contains(head))));
@@ -2468,9 +2468,19 @@ fn cross_file_reference_candidate(
     let from = (*by_node_id.get(reference.from_node_id.as_str())?)?;
     Some(CodeIndexUnresolvedReferenceV1 {
         from_occurrence: from.occurrence.clone(),
-        reference_name: computed_member_call.unwrap_or_else(|| reference.reference_name.clone()),
+        reference_name: computed_member.map_or_else(
+            || reference.reference_name.clone(),
+            |member| format!("{TYPESCRIPT_COMPUTED_RECEIVER}{member}"),
+        ),
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
+            .map(|span| match computed_member {
+                Some(member) => SourceSpan {
+                    start_byte: span.end_byte - member.len() as u64,
+                    ..span
+                },
+                None => span,
+            })
             .unwrap_or(from.span),
         unmodeled_import: reference.unmodeled_import,
         argument_count: reference.argument_count,
@@ -2488,15 +2498,16 @@ pub(crate) fn typescript_member_call_path(reference_name: &str) -> Option<(&str,
 
 const TYPESCRIPT_COMPUTED_RECEIVER: &str = "<computed>.";
 
-/// `<computed>.member` for a TypeScript call whose receiver is an expression
-/// rather than an identifier path (`[1, 2].map`, `make().run`, `rows[0].save`,
-/// `x?.y`), so the call stays a bounded gap record; `None` otherwise.
-fn typescript_computed_member_call(reference_name: &str) -> Option<String> {
+/// The member a TypeScript call invokes on an expression receiver rather
+/// than an identifier path (`[1, 2].map`, `make().run`, `rows[0].save`,
+/// `x?.y`). Its gap is retained as `<computed>.member` at the member token,
+/// because the receiver text is unbounded.
+fn typescript_computed_member(reference_name: &str) -> Option<&str> {
     if typescript_member_call_path(reference_name).is_some() {
         return None;
     }
     let (_, member) = reference_name.rsplit_once('.')?;
-    typescript_identifier(member).then(|| format!("{TYPESCRIPT_COMPUTED_RECEIVER}{member}"))
+    typescript_identifier(member).then_some(member)
 }
 
 fn typescript_identifier(segment: &str) -> bool {
