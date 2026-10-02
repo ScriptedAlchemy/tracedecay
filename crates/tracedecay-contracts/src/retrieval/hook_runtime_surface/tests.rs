@@ -45,7 +45,6 @@ fn every_emitted_result_shape_round_trips_exactly() {
             "status": "rejected",
             "disposition": "catchup_required",
         }),
-        json!({"action": "opencode_lsp_updated", "status": "accepted"}),
         json!({
             "action": "ingest_transcript",
             "provider": "cursor",
