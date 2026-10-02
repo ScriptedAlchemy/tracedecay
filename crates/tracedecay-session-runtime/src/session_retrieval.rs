@@ -20,8 +20,8 @@ use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionRetrievalService, SessionRetrievalUnavailableCause, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
 };
 use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
@@ -78,6 +78,25 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
         hydration_total_bytes: bytes.min(defaults.hydration_total_bytes),
         hydration_limit: defaults.hydration_limit.max(limit),
         ..defaults
+    }
+}
+
+pub(crate) const fn unavailable_reason(
+    cause: SessionRetrievalUnavailableCause,
+) -> SessionRetrievalUnavailableReason {
+    match cause {
+        SessionRetrievalUnavailableCause::AuthorityAbsent => {
+            SessionRetrievalUnavailableReason::TemporalStoreUnavailable
+        }
+        SessionRetrievalUnavailableCause::ReadFailed => {
+            SessionRetrievalUnavailableReason::TemporalStoreReadFailed
+        }
+        SessionRetrievalUnavailableCause::HydrationUnavailable => {
+            SessionRetrievalUnavailableReason::HydrationUnavailable
+        }
+        SessionRetrievalUnavailableCause::KernelRefused => {
+            SessionRetrievalUnavailableReason::TemporalKernelRefused
+        }
     }
 }
 
@@ -585,7 +604,9 @@ impl DaemonSessionRetrievalService {
             grant_id,
         };
         let Ok(execution) = self.registered_execution() else {
-            return SessionRetrievalOutcome::Unavailable;
+            return SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            );
         };
         SessionRetrievalService::new(
             authorizer,
@@ -645,11 +666,11 @@ impl DaemonSessionRetrievalService {
                     store_scope: self.root.store_scope,
                 }
             }
-            SessionRetrievalOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::without_worker(
-                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-                ),
-            ),
+            SessionRetrievalOutcome::Unavailable(cause) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(unavailable_reason(cause)),
+                )
+            }
             SessionRetrievalOutcome::CursorManifestLimitExceeded {
                 kind,
                 observed,
@@ -718,11 +739,17 @@ impl DaemonSessionRetrievalService {
                     freshness,
                 }
             }
-            SessionTemporalExecutionError::Unavailable
-            | SessionTemporalExecutionError::Kernel(_) => {
+            SessionTemporalExecutionError::Unavailable => {
                 SessionRetrievalServiceOutcome::Unavailable(
                     SessionRetrievalUnavailable::without_worker(
                         SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                    ),
+                )
+            }
+            SessionTemporalExecutionError::Kernel(_) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalKernelRefused,
                     ),
                 )
             }

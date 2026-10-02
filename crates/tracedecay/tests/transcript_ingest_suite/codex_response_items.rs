@@ -198,6 +198,21 @@ Budget:
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:08.500Z",
+            "type": "turn_context",
+            "payload": {"cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.600Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "developer-context",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX"}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:08.700Z",
             "type": "response_item",
             "payload": {
                 "type": "message",
@@ -221,7 +236,7 @@ Budget:
             "payload": {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "ordinary response item duplicate should stay skipped"}]
+                "content": [{"type": "output_text", "text": "Visible assistant reply"}]
             }
         }),
         serde_json::json!({
@@ -267,6 +282,41 @@ Budget:
     assert_eq!(metadata["source_role"], "user");
     assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
+
+    let developer_hits = db
+        .search_session_messages(
+            "codex",
+            Some(db.project_id().as_str()),
+            "SECRET_DEVELOPER_CONTEXT_SHOULD_NOT_INDEX",
+            10,
+        )
+        .await;
+    assert!(
+        developer_hits.is_empty(),
+        "developer context must not be searchable: {developer_hits:?}"
+    );
+
+    let assistant_hits = db
+        .search_session_messages(
+            "codex",
+            Some(db.project_id().as_str()),
+            "Visible assistant reply",
+            10,
+        )
+        .await
+        .into_iter()
+        .map(|hit| (hit.message.role, hit.message.kind, hit.message.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_hits,
+        vec![(
+            "assistant".to_owned(),
+            Some("message".to_owned()),
+            "Visible assistant reply".to_owned(),
+        )],
+        "the event message is searchable once; its response_item echo and empty protocol rows are not"
+    );
+
     assert_eq!(
         db.get_parse_offset(path.to_string_lossy().as_ref()).await,
         Some(legacy_cursor),
