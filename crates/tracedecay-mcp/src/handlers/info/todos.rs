@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::decode_primitive_request;
 use crate::handlers::graph::graph_tool_completion;
 use serde_json::Value;
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -94,45 +95,12 @@ pub async fn compute_todos(
     // The marker walk reads every candidate source file, so it belongs on a
     // blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let (mut markers, touched, by_kind) = hotpath::future!(
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut markers = Vec::<TodoMarkerV1>::new();
-            let mut touched: Vec<String> = Vec::new();
-            let mut by_kind = BTreeMap::<String, u64>::new();
-
-            'outer: for file in &files {
-                let project_path = ProjectPath::resolve(&project_root, Path::new(file))?;
-                let source =
-                    tracedecay_runtime_core::sync::read_source_file(&project_path.absolute_path())
-                        .map_err(|error| TraceDecayError::Config {
-                            message: format!("cannot read indexed source '{file}': {error}"),
-                        })?;
-
-                for (idx, line) in source.lines().enumerate() {
-                    let line_no = (idx as u32) + 1;
-                    for kind in &kinds {
-                        if contains_marker_word(line, kind).is_some() {
-                            *by_kind.entry(kind.clone()).or_insert(0) += 1;
-                            markers.push(TodoMarkerV1 {
-                                kind: kind.clone(),
-                                file: file.clone(),
-                                line: line_no,
-                                text: line.trim().to_owned(),
-                                enclosing: None,
-                            });
-                            if !touched.contains(file) {
-                                touched.push(file.clone());
-                            }
-                            if markers.len() >= limit {
-                                break 'outer;
-                            }
-                            break; // one marker per line is enough
-                        }
-                    }
-                }
-            }
-            Ok((markers, touched, by_kind))
-        }),
+    let MarkerScan {
+        mut markers,
+        touched,
+        by_kind,
+    } = hotpath::future!(
+        tokio::task::spawn_blocking(move || scan_markers(&project_root, &files, &kinds, limit)),
         label = "mcp.info.todos.scan"
     )
     .await
@@ -147,35 +115,7 @@ pub async fn compute_todos(
         "mcp.info.todos.symbols",
         symbols_in_files(graph, &file_counts)?
     );
-    let mut symbols_by_file = HashMap::<&str, Vec<(&str, u32, u32)>>::new();
-    for symbol in &symbols {
-        let metadata = required_metadata(symbol)?;
-        let start = metadata.start_line.saturating_add(1);
-        let end = end_line(metadata)?.saturating_add(1);
-        symbols_by_file
-            .entry(required_file_path(symbol)?)
-            .or_default()
-            .push((metadata.qualified_name.as_str(), start, end));
-    }
-    for marker in &mut markers {
-        let mut enclosing = None;
-        for (qualified_name, start, end) in symbols_by_file
-            .get(marker.file.as_str())
-            .into_iter()
-            .flatten()
-        {
-            if *start <= marker.line && marker.line <= *end {
-                let span = *end - *start;
-                if enclosing
-                    .as_ref()
-                    .is_none_or(|(_, shortest_span)| span < *shortest_span)
-                {
-                    enclosing = Some((*qualified_name, span));
-                }
-            }
-        }
-        marker.enclosing = enclosing.map(|(qualified_name, _)| qualified_name.to_owned());
-    }
+    name_enclosing_symbols(&mut markers, &symbols)?;
 
     let result = TodosResultV1 {
         match_count: markers.len(),
@@ -186,4 +126,91 @@ pub async fn compute_todos(
         GraphToolResultV1::Todos(result),
         touched,
     ))
+}
+
+struct MarkerScan {
+    markers: Vec<TodoMarkerV1>,
+    touched: Vec<String>,
+    by_kind: BTreeMap<String, u64>,
+}
+
+/// The first `limit` markers of `files`, at most one per line, the first
+/// requested kind winning.
+fn scan_markers(
+    project_root: &Path,
+    files: &[String],
+    kinds: &[String],
+    limit: usize,
+) -> Result<MarkerScan> {
+    let mut scan = MarkerScan {
+        markers: Vec::new(),
+        touched: Vec::new(),
+        by_kind: BTreeMap::new(),
+    };
+    for file in files {
+        let project_path = ProjectPath::resolve(project_root, Path::new(file))?;
+        let source = tracedecay_runtime_core::sync::read_source_file(&project_path.absolute_path())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("cannot read indexed source '{file}': {error}"),
+            })?;
+        for (idx, line) in source.lines().enumerate() {
+            let Some(kind) = kinds
+                .iter()
+                .find(|kind| contains_marker_word(line, kind).is_some())
+            else {
+                continue;
+            };
+            *scan.by_kind.entry(kind.clone()).or_insert(0) += 1;
+            scan.markers.push(TodoMarkerV1 {
+                kind: kind.clone(),
+                file: file.clone(),
+                line: (idx as u32) + 1,
+                text: line.trim().to_owned(),
+                enclosing: None,
+            });
+            if !scan.touched.contains(file) {
+                scan.touched.push(file.clone());
+            }
+            if scan.markers.len() >= limit {
+                return Ok(scan);
+            }
+        }
+    }
+    Ok(scan)
+}
+
+/// Names each marker's innermost enclosing symbol; the first of equally
+/// short spans in occurrence order wins.
+fn name_enclosing_symbols(
+    markers: &mut [TodoMarkerV1],
+    symbols: &[CodeGraphSymbolSummaryV1],
+) -> Result<()> {
+    let mut symbols_by_file = HashMap::<&str, Vec<(&str, u32, u32)>>::new();
+    for symbol in symbols {
+        let metadata = required_metadata(symbol)?;
+        let start = metadata.start_line.saturating_add(1);
+        let end = end_line(metadata)?.saturating_add(1);
+        symbols_by_file
+            .entry(required_file_path(symbol)?)
+            .or_default()
+            .push((metadata.qualified_name.as_str(), start, end));
+    }
+    for marker in markers {
+        let mut enclosing: Option<(&str, u32)> = None;
+        let spans = symbols_by_file
+            .get(marker.file.as_str())
+            .into_iter()
+            .flatten();
+        for (qualified_name, start, end) in spans {
+            let span = *end - *start;
+            if *start <= marker.line
+                && marker.line <= *end
+                && enclosing.is_none_or(|(_, shortest)| span < shortest)
+            {
+                enclosing = Some((*qualified_name, span));
+            }
+        }
+        marker.enclosing = enclosing.map(|(qualified_name, _)| qualified_name.to_owned());
+    }
+    Ok(())
 }

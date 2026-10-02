@@ -195,6 +195,7 @@ describe('AgentsPage read coverage', () => {
               adjacency_queries: 1,
               adjacency_rows: 107,
               bytes_hydrated: 40_960,
+              catalog_symbols: 9,
             },
           },
         ],
@@ -223,7 +224,7 @@ describe('AgentsPage read coverage', () => {
     expect(costs.length).toBe(1);
     expect(costs[0]?.textContent).toBe('23 reads · 107 rows · 12.3 ms');
     expect(costs[0]?.getAttribute('title')).toBe(
-      '21 sealed-store and 2 staging-store point reads, 1 adjacency queries returning 107 rows, 40960 bytes hydrated, 12345 µs wall',
+      '21 sealed-store and 2 staging-store point reads, 1 adjacency queries returning 107 rows, 40960 bytes hydrated, 9 catalog symbols, 12345 µs wall',
     );
 
     // Both graph-fed surfaces refuse rather than report a zero.
