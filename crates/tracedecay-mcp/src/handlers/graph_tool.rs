@@ -215,7 +215,25 @@ pub async fn compute_graph_tool(
                     message: format!("invalid source metadata operation: {error}"),
                 })?;
             let graph = open(operation).await?;
-            with_read_cost(&graph, compute_files(&graph, request, scope_prefix).await)
+            // The freshness read names the latest text generation, which can
+            // run ahead of the generation this verified graph serves. Attach
+            // the omission block only when it describes the same sealed
+            // generation the listing comes from.
+            let worktree_omitted_sources = ctx.freshness().await.and_then(|payload| {
+                payload
+                    .worktrees
+                    .into_iter()
+                    .next()
+                    .filter(|worktree| {
+                        worktree.latest_generation_id.as_deref()
+                            == Some(graph.generation().as_str())
+                    })
+                    .and_then(|worktree| worktree.omitted_sources)
+            });
+            with_read_cost(
+                &graph,
+                compute_files(&graph, request, scope_prefix, worktree_omitted_sources).await,
+            )
         }
         ApplicationSurfaceOperation::Config => compute_config(ctx.project_root(), args).await,
         ApplicationSurfaceOperation::Search => {

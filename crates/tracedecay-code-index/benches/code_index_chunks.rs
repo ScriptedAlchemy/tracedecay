@@ -933,6 +933,7 @@ fn receipt_bound_file(
             content_identity: content_digest(&source.bytes),
             captured_at: UtcMicros(1_000_000),
             files: vec![file.clone()],
+            omitted_sources: Vec::new(),
         })
         .map_err(|error| format!("admit {}: {error:?}", source.logical_path))?;
     intake
