@@ -59,6 +59,22 @@ describe('Code index freshness', () => {
     expect(screen.queryByText(/not attached/)).toBeNull();
   });
 
+  it('names a failed mount and its retry command instead of an empty mount list', async () => {
+    renderFreshness('error', {
+      worktrees: [],
+      note: 'the last code-index mount for this project failed',
+      mount_failure: {
+        message: 'the code-index scheduler could not mount for this project',
+        remediation: 'run `tracedecay sync` to retry the code-index mount',
+      },
+    });
+
+    expect(await screen.findByText('the code-index scheduler could not mount for this project')).toBeTruthy();
+    expect(screen.getByText('run `tracedecay sync` to retry the code-index mount')).toBeTruthy();
+    expect(document.querySelector('[data-index-freshness="error"]')).toBeTruthy();
+    expect(screen.queryByText('fresh')).toBeNull();
+  });
+
   it('shows a mount that is still indexing without inventing a generation', async () => {
     renderFreshness('loading', {
       worktrees: [
