@@ -1553,6 +1553,107 @@ async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
     }
 }
 
+/// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta
+/// setting `cwd`, then user messages that leave it alone.
+fn session_cwd_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
+    let record = |pad: &str| match index {
+        0 => json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION_ID, "cwd": cwd, "pad": pad}
+        }),
+        _ => json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+        }),
+    };
+    let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
+    let line = record(&"x".repeat(pad)).to_string() + "\n";
+    assert_eq!(line.len(), CATCH_UP_RECORD_BYTES);
+    line
+}
+
+/// Admit `path` for `project_root` window by window until it stops deferring.
+async fn catch_up_codex_project_rollout(
+    path: &Path,
+    project_root: &Path,
+    admission: &MemoryHostAdmission,
+    max_new_bytes: u64,
+) {
+    for _ in 0..4_096 {
+        let pass = try_admit_codex_jsonl_observations_for_project_with_admission(
+            path,
+            project_root,
+            ProjectId::new("project-a").unwrap(),
+            admission,
+            Some(max_new_bytes),
+        )
+        .await
+        .expect("catch-up window");
+        if !pass.source_deferred {
+            return;
+        }
+    }
+    panic!("catch-up never stopped deferring");
+}
+
+/// An in-place rewrite that moves the rollout to another project starts a new
+/// JSONL generation. A window resumed in that generation must not inherit the
+/// cwd the previous generation cached for an offset past the rewrite.
+#[tokio::test]
+async fn a_rewritten_rollout_does_not_resume_the_previous_generations_context() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let project_a = temp.path().join("project-a");
+    let project_b = temp.path().join("project-b");
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let records = 64;
+    let original = (0..records)
+        .map(|index| session_cwd_rollout_line(index, &project_a, "original"))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    catch_up_codex_project_rollout(&path, &project_a, &admission, 4 * 1024).await;
+    let admitted = admission.observations().len();
+    assert_eq!(
+        admitted, records,
+        "every original record belongs to project A"
+    );
+
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all(session_cwd_rollout_line(0, &project_b, "original").as_bytes())
+        .unwrap();
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0)).unwrap();
+    let appended = (records..2 * records)
+        .map(|index| session_cwd_rollout_line(index, &project_b, "appended"))
+        .collect::<String>();
+    file.write_all(appended.as_bytes()).unwrap();
+    drop(file);
+    spin_until_jsonl_change_settled(&path);
+
+    let first_window = u64::try_from(original.len() + 4 * CATCH_UP_RECORD_BYTES).unwrap();
+    catch_up_codex_project_rollout(&path, &project_a, &admission, first_window).await;
+    let leaked = admission
+        .observations()
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("appended-")
+        })
+        .count();
+    assert_eq!(
+        leaked, 0,
+        "records the rewritten session meta moved to project B were admitted to project A"
+    );
+}
+
 #[tokio::test]
 async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     // The shared metadata cache retains entries up to

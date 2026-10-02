@@ -664,7 +664,8 @@ async fn admit_codex_jsonl_page(
             // The prior context is rebuilt by reading the rollout before its
             // cursor; a scan with no new frame never consults it.
             let context = if scan.resumed && scan.frame_bytes().next().is_some() {
-                let (context, read) = CodexContextState::scan_prior(path, scan.start_offset, meta);
+                let (context, read) =
+                    CodexContextState::scan_prior(path, scan.generation, scan.start_offset, meta);
                 prior_context_bytes = read;
                 context
             } else {

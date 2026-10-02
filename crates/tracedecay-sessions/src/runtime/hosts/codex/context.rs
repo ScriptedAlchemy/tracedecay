@@ -31,18 +31,23 @@ impl CodexContextState {
     /// The cwd is set by the last context record before the cursor, normally
     /// the current turn's, so the walk runs backwards from the cursor and stops
     /// there instead of replaying the prefix. A cached context for an earlier
-    /// offset of the same file also stops it at that offset.
+    /// offset of the same JSONL `generation` also stops it at that offset:
+    /// one generation is one byte stream, so the bytes before that offset are
+    /// the ones the cached context was read from.
     #[hotpath::measure(label = "sessions.hosts.codex.scan_prior")]
-    pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> (Self, u64) {
+    pub(super) fn scan_prior(
+        path: &Path,
+        generation: u64,
+        before_offset: u64,
+        meta: &CodexMeta,
+    ) -> (Self, u64) {
         if before_offset == 0 {
             return (Self::from_meta(meta), 0);
         }
         let Ok(mut file) = File::open(path) else {
             return (Self::from_meta(meta), 0);
         };
-        let generation = prior_context_generation(&file);
-        let (floor, floor_state) = generation
-            .and_then(|generation| cached_prior_context(path, generation, before_offset))
+        let (floor, floor_state) = cached_prior_context(path, generation, before_offset)
             .map_or_else(
                 || (0, Self::from_meta(meta)),
                 |(state, offset)| (offset, state),
@@ -52,9 +57,7 @@ impl CodexContextState {
                 Ok((cwd, read)) => (cwd.map_or(floor_state, |cwd| Self { cwd }), read),
                 Err(read) => return (Self::from_meta(meta), read),
             };
-        if let Some(generation) = generation {
-            store_prior_context(path, generation, before_offset, state.clone());
-        }
+        store_prior_context(path, generation, before_offset, state.clone());
         crate::runtime::pipeline_metrics::add("sessions.hosts.codex.prior_context_bytes", read);
         (state, read)
     }
@@ -171,8 +174,8 @@ fn line_context_cwd(
 }
 
 /// Bounded cache of resumed prior-context state keyed by rollout path, so the
-/// next window of the same file walks back no further than its last resume
-/// offset.
+/// next window of the same JSONL generation walks back no further than its
+/// last resume offset.
 const PRIOR_CONTEXT_CACHE_CAPACITY: usize = 512;
 
 struct CachedPriorContext {
@@ -200,28 +203,6 @@ pub(crate) fn evict_prior_context_for_test(path: &Path) {
             .entries
             .remove(path);
     }
-}
-
-fn prior_context_generation(file: &File) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let meta = file.metadata().ok()?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.dev().hash(&mut hasher);
-        meta.ino().hash(&mut hasher);
-    }
-    #[cfg(not(unix))]
-    {
-        meta.created()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_nanos()
-            .hash(&mut hasher);
-    }
-    Some(hasher.finish())
 }
 
 fn cached_prior_context(
