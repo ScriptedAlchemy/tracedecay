@@ -394,8 +394,8 @@ const REGISTERED_STORE_AUTHORITIES: [&str; 7] = [
     "session temporal profile schema",
     "workflow",
     "authority schema",
-    "LCM profile schema",
-    "git correlation profile schema",
+    "LCM",
+    "git correlation",
 ];
 
 fn is_registered_store_authority(authority: &str) -> bool {
@@ -574,6 +574,39 @@ mod tests {
         assert!(
             wire["error"]["data"].get("cli_fallback").is_none(),
             "a refused shape is not a transport failure to retry from the shell"
+        );
+    }
+
+    #[test]
+    fn lcm_profile_schema_refusal_names_the_profile_wide_reset() {
+        let response = tool_error_response(
+            json!(4),
+            "tracedecay_message_search",
+            &TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version: Some(13),
+                required_version: 14,
+            },
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        let remedy = wire["error"]["data"]["remedy"]
+            .as_str()
+            .expect("the refusal names its reset command");
+        assert!(
+            remedy.contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
+            "{remedy}"
+        );
+        assert!(
+            !remedy.contains(tracedecay_domain::errors::STALE_STORE_RESET_COMMAND),
+            "{remedy}"
+        );
+        assert_eq!(
+            wire["error"]["message"]
+                .as_str()
+                .expect("human-readable refusal")
+                .contains(tracedecay_domain::errors::PROFILE_RESET_COMMAND),
+            true,
+            "the human-readable message must carry the profile-wide reset too: {wire}"
         );
     }
 

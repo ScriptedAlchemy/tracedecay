@@ -221,8 +221,8 @@ pub(crate) struct ParsedStructuredTextV1 {
     pub(crate) format: StructuredTextFormatV1,
     pub(crate) value: Value,
     /// Span-anchored fields for the line and segment formats. Tree formats
-    /// leave this empty; their spans are recovered by locating the parsed
-    /// scalar in the original text.
+    /// leave this empty; redaction takes JSON and TOML value spans from their
+    /// span-reporting parsers and locates YAML scalars in the original text.
     pub(crate) fields: Vec<StructuredTextFieldV1>,
 }
 

@@ -108,10 +108,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             request.session_id().clone(),
             frozen_at,
             watermarks,
-            SessionTemporalCapabilitiesV1::new([
-                SessionTemporalCapabilityV1::FrozenWatermarks,
-                SessionTemporalCapabilityV1::GenerationRebuild,
-            ]),
+            SessionTemporalCapabilitiesV1::new([SessionTemporalCapabilityV1::FrozenWatermarks]),
         ))
     }
 

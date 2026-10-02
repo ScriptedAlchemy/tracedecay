@@ -514,18 +514,36 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
     }
     let _pin = super::pin_shared_jsonl_paths(&paths);
     let observed_builds = super::SharedJsonlBuildObserver::for_paths(&paths);
+    let build_gate = std::sync::Arc::new(std::sync::Barrier::new(path_count));
+    {
+        let mut gates = super::SHARED_JSONL_BUILD_GATES
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap();
+        for path in &paths {
+            gates.insert(path.clone(), std::sync::Arc::clone(&build_gate));
+        }
+    }
 
     let _prefetches = super::start_shared_jsonl_page_prefetch(&paths);
-    for path in &paths {
-        super::shared_jsonl_page(
-            path,
-            StoredCursor::default(),
-            Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
-            None,
-            super::SharedJsonlFramePreparation::Lazy,
-        )
-        .await
-        .expect("prepared generation page");
+    let builds = paths
+        .into_iter()
+        .map(|path| {
+            tokio::spawn(async move {
+                super::shared_jsonl_page(
+                    &path,
+                    StoredCursor::default(),
+                    Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
+                    None,
+                    super::SharedJsonlFramePreparation::Lazy,
+                )
+                .await
+                .expect("prepared generation page");
+            })
+        })
+        .collect::<Vec<_>>();
+    for build in builds {
+        build.await.expect("prepared generation task");
     }
 
     assert_eq!(
@@ -533,10 +551,10 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
         0,
         "every completed page build must release exactly one active-build slot"
     );
-
-    if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 8) {
-        assert!(observed_builds.peak() > 8);
-    }
+    assert!(
+        observed_builds.peak() >= 2,
+        "the rendezvous gate requires every page build to overlap before proceeding"
+    );
     let retained = super::SHARED_JSONL_PAGE_CACHE
         .get()
         .expect("shared page cache")

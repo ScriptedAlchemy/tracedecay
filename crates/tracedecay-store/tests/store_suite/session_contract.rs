@@ -13,10 +13,6 @@ use tracedecay_domain::{
 use tracedecay_store::{
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,
-    SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
-    SessionGenerationActivationRequestV1, SessionGenerationRebuildBeginPermit,
-    SessionGenerationRebuildDispositionV1, SessionGenerationRebuildReceiptV1,
-    SessionGenerationRebuildRequestV1, SessionProjectionBatchPersistPermit,
     SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
     SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
@@ -30,8 +26,7 @@ use tracedecay_store::{
     SessionStoreResult, SessionSummaryPublicationRequestV1, SessionTemporalCapabilitiesV1,
     SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
     SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1,
-    SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchReceiptV1,
-    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
+    SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchV1,
     SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 

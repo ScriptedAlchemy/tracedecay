@@ -28,6 +28,8 @@ use tracedecay_domain::configuration::{
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tokio::sync::watch;
+use tracedecay_daemon_service::{ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
@@ -44,8 +46,8 @@ use tracedecay_dashboard_api::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardProfileCodeIndexWorkerSettingsPort,
     DashboardScopeSetReadFuture, DashboardSessionAuthoritiesV1, DashboardSessionMountV1,
-    DashboardSessionResolutionV1, DashboardSessionResolverV1, DashboardStateCompositionV1,
-    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
+    DashboardSessionResolutionV1, DashboardStateCompositionV1, bind_dashboard,
+    build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 
 #[derive(Clone)]
@@ -692,30 +694,63 @@ fn dashboard_session_authorities(
     })
 }
 
+/// The session authorities of a project whose open is still publishing.
+///
+/// One task waits on the project's publication and resolves the retained
+/// server once; the dashboard reads the result and never re-asks.
 fn opening_project_sessions(
     resolver: crate::mcp::server::RetainedProjectServerResolver,
+    project_runtimes: ProjectRuntimeRegistryV1,
     project_root: PathBuf,
-) -> DashboardSessionResolverV1 {
-    Arc::new(move || {
-        let resolver = Arc::clone(&resolver);
-        let project_root = project_root.clone();
-        Box::pin(async move {
-            let request =
-                tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
-                    project_root,
-                );
-            match resolver(request).await {
-                Ok(Some(server)) => match dashboard_session_authorities(
-                    server.project_session_db(),
-                    server.project_session_retrieval(),
-                ) {
-                    Some(authorities) => DashboardSessionResolutionV1::Ready(authorities),
-                    None => DashboardSessionResolutionV1::Opening,
-                },
-                Ok(None) | Err(_) => DashboardSessionResolutionV1::Unavailable,
+) -> watch::Receiver<DashboardSessionResolutionV1> {
+    let (publication, receiver) = watch::channel(DashboardSessionResolutionV1::Opening);
+    tokio::spawn(async move {
+        tokio::select! {
+            resolution = project_sessions_once_published(resolver, &project_runtimes, project_root) => {
+                publication.send_replace(resolution);
             }
-        })
-    })
+            () = publication.closed() => {}
+        }
+    });
+    receiver
+}
+
+async fn project_sessions_once_published(
+    resolver: crate::mcp::server::RetainedProjectServerResolver,
+    project_runtimes: &ProjectRuntimeRegistryV1,
+    project_root: PathBuf,
+) -> DashboardSessionResolutionV1 {
+    loop {
+        let (state, mut changed) = project_runtimes.publication_view(&project_root);
+        match state {
+            Some(ProjectRuntimePublicationStateV1::Warming) => {
+                if changed.changed().await.is_err() {
+                    return DashboardSessionResolutionV1::Unavailable;
+                }
+            }
+            Some(ProjectRuntimePublicationStateV1::Ready) => break,
+            Some(
+                ProjectRuntimePublicationStateV1::Failed
+                | ProjectRuntimePublicationStateV1::ResetRequired(_),
+            )
+            | None => return DashboardSessionResolutionV1::Unavailable,
+        }
+    }
+    let request =
+        tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
+            project_root,
+        );
+    match resolver(request).await {
+        Ok(Some(server)) => dashboard_session_authorities(
+            server.project_session_db(),
+            server.project_session_retrieval(),
+        )
+        .map_or(
+            DashboardSessionResolutionV1::Unavailable,
+            DashboardSessionResolutionV1::Ready,
+        ),
+        Ok(None) | Err(_) => DashboardSessionResolutionV1::Unavailable,
+    }
 }
 
 #[hotpath::measure(label = "mcp.dashboard.open.total")]
@@ -961,17 +996,24 @@ pub(super) async fn compute_dashboard(
                 })
                 .transpose()?;
             // A request answered by the core server of a project that is still
-            // opening carries no session store; the dashboard then re-asks
-            // the retained server until the full server publishes it.
-            let project_sessions = match dashboard_session_authorities(
-                registered_project_session_db,
-                session_retrieval.zip(session_identity),
+            // opening carries no session store; the full server's publication
+            // then mounts it.
+            let project_sessions = match (
+                dashboard_session_authorities(
+                    registered_project_session_db,
+                    session_retrieval.zip(session_identity),
+                ),
+                daemon_invocation_service.as_ref(),
             ) {
-                Some(authorities) => DashboardSessionMountV1::Ready(authorities),
-                None => DashboardSessionMountV1::Opening(opening_project_sessions(
-                    Arc::clone(retained_server_resolver),
-                    requested_root.clone(),
-                )),
+                (Some(authorities), _) => DashboardSessionMountV1::Ready(authorities),
+                (None, Some(service)) => {
+                    DashboardSessionMountV1::Opening(opening_project_sessions(
+                        Arc::clone(retained_server_resolver),
+                        service.project_runtimes.clone(),
+                        requested_root.clone(),
+                    ))
+                }
+                (None, None) => DashboardSessionMountV1::Unavailable,
             };
             let code_read_authority = retained_server
                 .admitted_project_scope()
