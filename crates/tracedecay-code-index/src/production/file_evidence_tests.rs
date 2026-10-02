@@ -1,8 +1,9 @@
 //! Sealed cross-file evidence restores what its build derived, and an edit
 //! over a sealed parent reads and writes only what it changes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::EdgeAuthorityV1;
@@ -17,6 +18,7 @@ use crate::lineage::LineageKindV1;
 struct CountingStoreV1 {
     inner: WorkerPublicationStore,
     reads: Arc<AtomicUsize>,
+    read_digests: Arc<Mutex<Vec<ManifestDigest>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
@@ -29,12 +31,20 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         };
         let read = self.inner.segment_reader();
         let reads = Arc::clone(&self.reads);
+        let read_digests = Arc::clone(&self.read_digests);
         Ok(Some(CodeIndexSealedGenerationV1::new(
             Arc::from(active.manifest_bytes()),
-            Arc::new(move |request, buffer: &mut Vec<u8>| {
-                reads.fetch_add(1, Ordering::Relaxed);
-                read(request, buffer)
-            }),
+            Arc::new(
+                move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    let digest = match &request {
+                        SealedGenerationSegmentReadV1::Whole { digest, .. }
+                        | SealedGenerationSegmentReadV1::Range { digest, .. } => (*digest).clone(),
+                    };
+                    read_digests.lock().expect("read log").push(digest);
+                    read(request, buffer)
+                },
+            ),
         )))
     }
 
@@ -254,5 +264,106 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
             .filter(|edge| edge.authority == EdgeAuthorityV1::NameResolved)
             .count(),
         LEAVES
+    );
+}
+
+/// A crate of `leaves` files that each call `crate::other::shared`, beside a
+/// hub that defines a `shared` of its own and that only the first leaf calls.
+fn shared_name_tree(leaves: usize, hub_body: &str) -> Vec<(String, String)> {
+    let mut lib = String::from("pub mod hub;\npub mod other;\n");
+    let mut tree = vec![(
+        "Cargo.toml".to_owned(),
+        "[package]\nname = \"sharedcrate\"\nversion = \"0.1.0\"\n".to_owned(),
+    )];
+    for leaf in 0..leaves {
+        lib.push_str(&format!("pub mod leaf_{leaf:03};\n"));
+        let callee = if leaf == 0 { "hub" } else { "other" };
+        tree.push((
+            format!("src/leaf_{leaf:03}.rs"),
+            format!("pub fn leaf_{leaf:03}() -> u32 {{\n    crate::{callee}::shared() + 1\n}}\n"),
+        ));
+    }
+    tree.push((
+        "src/hub.rs".to_owned(),
+        format!("pub fn shared() -> u32 {{\n    {hub_body}\n}}\n"),
+    ));
+    tree.push((
+        "src/other.rs".to_owned(),
+        "pub fn shared() -> u32 {\n    2\n}\n".to_owned(),
+    ));
+    tree.push(("src/lib.rs".to_owned(), lib));
+    tree.sort();
+    tree
+}
+
+/// A body edit keeps every name resolution reads, so the files that merely
+/// reference the edited file's names bind as before: the successor decodes
+/// the edited file and the one leaf whose edge lands in it, not the leaves
+/// that share the name, and still seals what a cold build of the tree seals.
+#[test]
+fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
+    const LEAVES: usize = 300;
+    let store = CountingStoreV1::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("production owner");
+    let base_tree = shared_name_tree(LEAVES, "7");
+    let hub = base_tree
+        .iter()
+        .position(|(path, _)| path == "src/hub.rs")
+        .expect("the edited hub");
+    let base = publish(&mut owner, &base_tree, None, false, 2_000_000);
+    let parent = super::partitioned_codec::parse_partitioned_manifest(base.manifest_bytes())
+        .expect("sealed manifest");
+    let file_segments = parent
+        .file_segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.segment_digest.clone(),
+                parent.snapshot.files[segment.file_key as usize]
+                    .logical_path
+                    .clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    store.read_digests.lock().expect("read log").clear();
+    let edited_tree = shared_name_tree(LEAVES, "8");
+    let edited = publish(&mut owner, &edited_tree, Some(hub), true, 2_100_000);
+    assert_eq!(
+        edited.cold_reason(),
+        None,
+        "the body edit seals over its parent"
+    );
+    let decoded_files = store
+        .read_digests
+        .lock()
+        .expect("read log")
+        .iter()
+        .filter_map(|digest| file_segments.get(digest).cloned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        decoded_files,
+        BTreeSet::from([
+            "Cargo.toml".to_owned(),
+            "src/hub.rs".to_owned(),
+            "src/leaf_000.rs".to_owned()
+        ]),
+        "a body edit to a name {LEAVES} files reference decodes the edited file, its one caller, \
+         and the crate manifest crate-rooted paths resolve through"
+    );
+
+    let mut cold = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .expect("cold owner");
+    let rebuilt = publish(&mut cold, &edited_tree, Some(hub), false, 2_100_000);
+    assert_eq!(
+        edited.lane_digest(),
+        rebuilt.lane_digest(),
+        "the re-pointed successor seals the cold build's segments and graph pages"
     );
 }

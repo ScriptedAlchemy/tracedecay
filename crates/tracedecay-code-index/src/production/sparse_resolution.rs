@@ -26,6 +26,7 @@ use tracedecay_domain::{
 
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::graph_projection::unresolved_call_limitations;
+use crate::lineage::LineageSymbolRecordV1;
 
 use super::helpers::{
     edge_order, resolve_selected_cross_file_references, selected_references,
@@ -34,7 +35,7 @@ use super::helpers::{
 use super::resolution_index::{ResolutionIndexReaderV1, name_segments};
 use super::resolution_view::{NamedSymbolV1, ResolutionFileV1, SymbolsByNameV1};
 use super::sealed_parent::{DecodeFailureV1, SealedParentGenerationV1, SparseFileV1};
-use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
+use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1, collect_bounded_ordered};
 
 type SiteV1<'a> = (&'a SymbolOccurrenceId, SourceSpan);
 
@@ -133,6 +134,31 @@ fn package_declarations(file: &FileGenerationArtifactsV1) -> BTreeMap<&str, &str
         .collect()
 }
 
+/// What resolution reads of a symbol it finds by name. Its occurrence is
+/// not among them: candidates are chosen as a set, so a symbol whose file
+/// only changed occurrence binds the same references.
+type ResolutionKeyV1<'s> = (
+    &'s SymbolIdentityDigest,
+    &'s str,
+    &'s str,
+    &'s str,
+    &'s Option<String>,
+    bool,
+    &'s [String],
+);
+
+fn resolution_key(symbol: &LineageSymbolRecordV1) -> ResolutionKeyV1<'_> {
+    (
+        &symbol.identity,
+        &symbol.qualified_name,
+        &symbol.kind,
+        &symbol.visibility,
+        &symbol.signature,
+        symbol.is_async,
+        &symbol.derives,
+    )
+}
+
 /// The names under which a lookup can land on a changed file's symbol.
 ///
 /// A module's name moves a reference only as its last segment, the module
@@ -143,13 +169,17 @@ fn package_declarations(file: &FileGenerationArtifactsV1) -> BTreeMap<&str, &str
 struct ChangedNamesV1 {
     anywhere: HashSet<String>,
     last: HashSet<String>,
+    /// Names whose symbols resolution reads identically on both sides of the
+    /// edit. A reference to one binds as before; only an edge into an edited
+    /// file is re-pointed at that file's new occurrence.
+    carried: HashSet<String>,
 }
 
 impl ChangedNamesV1 {
-    /// The edited files' symbols' names before and after the edit, and the
-    /// local name of each import alias that forwards such a name, under the
-    /// same placement. A lookup only ever follows an import from its local
-    /// name to the name it imports.
+    /// The names of the edited files' symbols that resolution reads
+    /// differently after the edit, and the local name of each import alias
+    /// that forwards such a name, under the same placement. A lookup only
+    /// ever follows an import from its local name to the name it imports.
     fn new(
         edited: &[(
             usize,
@@ -161,14 +191,29 @@ impl ChangedNamesV1 {
         let mut names = Self {
             anywhere: HashSet::new(),
             last: HashSet::new(),
+            carried: HashSet::new(),
         };
         for (_, before, after) in edited {
+            let mut sides = HashMap::<&str, [Vec<ResolutionKeyV1<'_>>; 2]>::new();
+            for (side, file) in [before, after].into_iter().enumerate() {
+                for symbol in &file.artifacts.symbols {
+                    sides.entry(&symbol.simple_name).or_default()[side]
+                        .push(resolution_key(symbol));
+                }
+            }
             for symbol in before
                 .artifacts
                 .symbols
                 .iter()
                 .chain(&after.artifacts.symbols)
             {
+                if sides[symbol.simple_name.as_str()][0] == sides[symbol.simple_name.as_str()][1] {
+                    names.carried.insert(symbol.simple_name.clone());
+                    names
+                        .carried
+                        .extend(name_segments(&symbol.simple_name).map(str::to_owned));
+                    continue;
+                }
                 let placed = if symbol.kind == NodeKind::Module.as_str() {
                     &mut names.last
                 } else {
@@ -179,7 +224,7 @@ impl ChangedNamesV1 {
             }
         }
         loop {
-            let before = names.anywhere.len() + names.last.len();
+            let before = names.anywhere.len() + names.last.len() + names.carried.len();
             for (local, imported) in aliases {
                 if names.anywhere.contains(imported) {
                     names.anywhere.insert(local.clone());
@@ -187,8 +232,11 @@ impl ChangedNamesV1 {
                 if names.last.contains(imported) {
                     names.last.insert(local.clone());
                 }
+                if names.carried.contains(imported) {
+                    names.carried.insert(local.clone());
+                }
             }
-            if names.anywhere.len() + names.last.len() == before {
+            if names.anywhere.len() + names.last.len() + names.carried.len() == before {
                 return names;
             }
         }
@@ -346,8 +394,13 @@ pub(super) fn resolve_edit(
         .map(|(index, _, _)| *index)
         .collect::<BTreeSet<_>>();
     let mut referencing = BTreeSet::new();
+    let mut reached = BTreeSet::new();
     let mut pages = BTreeMap::new();
-    for name in names.all() {
+    for (name, moves) in names
+        .all()
+        .map(|name| (name, true))
+        .chain(names.carried.iter().map(|name| (name, false)))
+    {
         let page = index.page_of(name);
         if let btree_map::Entry::Vacant(entry) = pages.entry(page) {
             entry.insert(index.reference_page(page)?);
@@ -356,19 +409,64 @@ pub(super) fn resolve_edit(
             let file_index = index_of_path.get(path.as_str()).ok_or_else(|| {
                 contract("sealed resolution index names a file outside its successor")
             })?;
-            if !edited_indices.contains(file_index) {
+            if edited_indices.contains(file_index) {
+                continue;
+            }
+            if moves {
                 referencing.insert(*file_index);
+            } else {
+                reached.insert(*file_index);
             }
         }
     }
     drop(pages);
-    let mut selection = Vec::new();
-    for file_index in edited_indices
+    // A file a carried name reaches keeps every decision; it re-seals only
+    // when one of its sealed edges lands in an edited file.
+    let edited_paths = edited_indices
+        .iter()
+        .map(|&file_index| files[file_index].logical_path())
+        .collect::<HashSet<_>>();
+    let dependents = collect_bounded_ordered(
+        &reached
+            .difference(&referencing)
+            .copied()
+            .collect::<Vec<_>>(),
+        |&file_index, _worker| {
+            let parent_key = parent_key_of_path
+                .get(files[file_index].logical_path())
+                .ok_or_else(|| contract("a carried file has no parent segment"))?;
+            Ok::<_, CodeIndexProductionErrorV1>(
+                parent
+                    .file_evidence(*parent_key)?
+                    .is_some_and(|evidence| evidence.targets_any(&edited_paths))
+                    .then_some(file_index),
+            )
+        },
+    )?
+    .into_iter()
+    .flatten()
+    .collect::<BTreeSet<_>>();
+    hotpath::gauge!("code_index.sparse.dependents_repointed").set(dependents.len() as u64);
+    let candidates = edited_indices
         .iter()
         .chain(&referencing)
         .copied()
-        .collect::<BTreeSet<_>>()
-    {
+        .collect::<BTreeSet<_>>();
+    // Each referencing file decodes independently, so they decode across the
+    // indexing pool before the selection reads them in order.
+    collect_bounded_ordered(
+        &candidates
+            .iter()
+            .chain(&dependents)
+            .copied()
+            .collect::<Vec<_>>(),
+        |&file_index, _worker| {
+            files[file_index].artifacts();
+            Ok::<_, CodeIndexProductionErrorV1>(())
+        },
+    )?;
+    let mut selection = Vec::new();
+    for file_index in candidates {
         let references = &files[file_index].as_ref().artifacts.unresolved_references;
         let picks = if edited_indices.contains(&file_index) {
             (0..references.len()).collect::<Vec<_>>()
@@ -442,7 +540,11 @@ pub(super) fn resolve_edit(
             .edges
             .push((edge, path, identity));
     }
-    for (file_index, _) in &selection {
+    for file_index in selection
+        .iter()
+        .map(|(file_index, _)| file_index)
+        .chain(&dependents)
+    {
         let entry = result.entry(*file_index).or_default();
         if edited_indices.contains(file_index) {
             continue;

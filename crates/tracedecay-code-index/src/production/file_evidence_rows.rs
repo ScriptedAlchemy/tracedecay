@@ -20,8 +20,8 @@
 //! file keeps its bytes across generations, and a file without cross-file
 //! evidence needs no segment.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -432,6 +432,13 @@ impl PersistedFileEvidenceV1 {
         self.explicit_lineage = false;
         self.lineage.clear();
         self
+    }
+
+    /// Whether a sealed cross-file edge lands in one of `paths`.
+    pub(super) fn targets_any(&self, paths: &HashSet<&str>) -> bool {
+        self.target_paths
+            .iter()
+            .any(|path| paths.contains(path.as_str()))
     }
 
     pub(super) fn cross_file_edge_count(&self) -> usize {

@@ -2541,13 +2541,15 @@ impl CodeIndexPublishedGenerationV1 {
         )?;
         drop(rosters);
         let mut code_graph_pages = Vec::with_capacity(self.snapshot.files.len());
-        self.for_each_sealed_code_graph_page(|page| {
-            code_graph_pages.push(publish_code_graph_page(
-                page,
-                &reusable_graph_page_digests,
-                &mut publish_segment,
-            )?);
-            Ok(())
+        hotpath::measure_block!("code_index.sealed_encode.graph_pages", {
+            self.for_each_sealed_code_graph_page(|page| {
+                code_graph_pages.push(publish_code_graph_page(
+                    page,
+                    &reusable_graph_page_digests,
+                    &mut publish_segment,
+                )?);
+                Ok(())
+            })
         })?;
         let resolution_index = seal_resolution_index(
             &self.files,
