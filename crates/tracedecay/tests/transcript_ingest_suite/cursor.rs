@@ -618,7 +618,7 @@ async fn cursor_transcript_ingest_reads_display_model_fields() {
 }
 
 #[tokio::test]
-async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
+async fn cursor_transcript_ingest_stores_block_text_and_tool_calls_in_raw_lcm() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
 
@@ -668,7 +668,7 @@ async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
         .lcm_load_raw_message("cursor", "cursor-structured")
         .await
         .expect("raw structured message should exist");
-    assert_eq!(raw.content, serde_json::to_string(&content).unwrap());
+    assert_eq!(raw.content, "Inspect this image payload.");
 
     let metadata: serde_json::Value =
         serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
@@ -744,7 +744,10 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
     assert_eq!(results.len(), 1);
     let assistant = &results[0];
     assert_eq!(assistant.message.tool_names.as_deref(), Some("Shell"));
-    assert!(assistant.message.text.contains("tool_use"));
+    assert_eq!(
+        assistant.message.text,
+        "Running a shell command to list files."
+    );
 
     let metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
