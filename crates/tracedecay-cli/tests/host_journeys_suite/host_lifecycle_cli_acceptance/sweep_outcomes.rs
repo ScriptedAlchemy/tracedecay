@@ -747,6 +747,30 @@ fn chatgpt_reports_pending_operator_action_and_uninstalls_its_staged_bundle() {
         "{doctor}"
     );
 
+    // A bundle left without its manifest is a broken stage, not an absent
+    // one: doctor fails it, and reinstalling converges the staged bytes the
+    // receipt refuses to remove as foreign.
+    fs::remove_file(staged.join("plugin.json")).unwrap();
+    let partial = stderr(&cli.run(&["doctor"]));
+    assert!(
+        partial.contains("✘")
+            && partial.contains("ChatGPT staged bundle")
+            && partial.contains("incomplete"),
+        "{partial}"
+    );
+
+    let reinstall = cli.run(&["install", "--agent", case.id]);
+    let reinstall_stderr = stderr(&reinstall);
+    assert_eq!(
+        reinstall.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "{reinstall_stderr}"
+    );
+    assert!(
+        staged.join("plugin.json").is_file(),
+        "reinstall did not restore the staged manifest"
+    );
+
     let uninstall = cli.run(&["uninstall", "--agent", case.id]);
     let uninstall_stderr = stderr(&uninstall);
     assert_eq!(uninstall.status.code(), Some(0), "{uninstall_stderr}");

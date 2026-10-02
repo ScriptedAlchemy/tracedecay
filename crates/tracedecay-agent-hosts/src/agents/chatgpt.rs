@@ -108,11 +108,13 @@ impl AgentIntegration for ChatGptIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path, _profile: &ProfileRoot) -> bool {
-        // The staged bundle's manifest is the only integration payload this
-        // host owns; its presence is all the readback can truthfully claim.
+        // Any residue under the staged root is evidence this integration ran;
+        // a manifest-less remnant is a broken stage doctor must see, not
+        // proof that nothing was deployed.
         chatgpt_staged_plugin_dir(home)
-            .join(CHATGPT_PLUGIN_MANIFEST_RELATIVE)
-            .is_file()
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
     }
 
     fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
@@ -236,10 +238,25 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let staged_dir = chatgpt_staged_plugin_dir(home);
     let manifest_path = staged_dir.join(CHATGPT_PLUGIN_MANIFEST_RELATIVE);
     if !manifest_path.is_file() {
-        dc.warn(&format!(
-            "no ChatGPT plugin bundle staged at {}, run `tracedecay install --agent chatgpt` if you use ChatGPT",
-            staged_dir.display()
-        ));
+        // A staged tree without its manifest is a partial stage, not an
+        // absent one: the lifecycle committed files it owns, so the check
+        // fails rather than warning as if nothing were staged.
+        let has_residue = staged_dir
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if has_residue {
+            dc.fail(&format!(
+                "ChatGPT staged bundle at {} is incomplete: {} missing, run `tracedecay reinstall --agent chatgpt`",
+                staged_dir.display(),
+                CHATGPT_PLUGIN_MANIFEST_RELATIVE
+            ));
+        } else {
+            dc.warn(&format!(
+                "no ChatGPT plugin bundle staged at {}, run `tracedecay install --agent chatgpt` if you use ChatGPT",
+                staged_dir.display()
+            ));
+        }
         return;
     }
     dc.pass(&format!(
