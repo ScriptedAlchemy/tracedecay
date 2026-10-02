@@ -3490,8 +3490,9 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
                 .await
                 .map(|seat| seat.generation().manifest().generation_id.clone());
             (reading.readiness(CodeIndexReadinessTargetV1::Ready) == CodeIndexReadinessV1::Reached
-                && seated_generation == reading.latest_generation_id)
-                .then_some(reading)
+                && seated_generation.as_ref().map(CodeGenerationId::as_str)
+                    == reading.latest_generation_id.as_deref())
+            .then_some(reading)
         },
     )
     .await;
@@ -7761,7 +7762,6 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler");
-    let scheduler_probe = Arc::clone(&scheduler);
     let poison = Arc::clone(&scheduler);
     assert!(
         std::thread::spawn(move || {
@@ -8469,6 +8469,7 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler");
+    let scheduler_probe = Arc::clone(&scheduler);
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {

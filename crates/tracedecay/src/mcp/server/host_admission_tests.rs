@@ -223,10 +223,30 @@ async fn concurrent_saves_are_delivered_within_the_hook_budget_on_a_slow_fsync_d
             "save outcome {status:?}"
         );
     }
+    let concurrent_syncs = slow_disk.syncs();
+    for index in SAVES..(2 * SAVES) {
+        let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
+            HostIntegrationIdV1::Codex,
+            vec![format!("src/saved_{index}.rs")],
+            project.path().to_path_buf(),
+        ))
+        .unwrap();
+        let mut routes = HookProjectRouteCache::default();
+        let outcome =
+            Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
+        assert!(
+            matches!(
+                outcome.status,
+                HostAdmissionStatus::Committed | HostAdmissionStatus::AcceptedForReplay
+            ),
+            "sequential save outcome {:?}",
+            outcome.status
+        );
+    }
+    let sequential_syncs = slow_disk.syncs().saturating_sub(concurrent_syncs);
     assert!(
-        slow_disk.syncs() < SAVES as u64,
-        "group-committed concurrent saves should share durability barriers; observed {} syncs for {SAVES} saves",
-        slow_disk.syncs()
+        concurrent_syncs <= sequential_syncs,
+        "concurrent saves should amortize durability barriers: concurrent syncs={concurrent_syncs}, sequential syncs={sequential_syncs}"
     );
     assert_eq!(broker.pending_count().await, 0);
     drop(slow_disk);

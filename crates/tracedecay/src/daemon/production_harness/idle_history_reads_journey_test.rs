@@ -269,18 +269,28 @@ async fn converged_messages(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     expected: u64,
+    minimum_epoch_exclusive: Option<u64>,
 ) -> Value {
     loop {
         let status = lcm_status(harness, project).await;
         match convergence_state(&status) {
             "converging" => tokio::time::sleep(STATUS_POLL_INTERVAL).await,
-            "converged" if status["lcm"]["store"]["messages"] == json!(expected) => {
-                return status;
-            }
             "converged" => {
+                let epoch = status["projection"]["convergence"]["epoch"]
+                    .as_u64()
+                    .unwrap_or_else(|| {
+                        panic!("lcm_status must report a convergence epoch: {status}")
+                    });
+                if minimum_epoch_exclusive.is_some_and(|minimum| epoch <= minimum) {
+                    tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+                    continue;
+                }
+                if status["lcm"]["store"]["messages"] == json!(expected) {
+                    return status;
+                }
                 panic!(
                     "history converged on the wrong message count (expected {expected}): {status}"
-                )
+                );
             }
             other => panic!("history settled as {other} before converging: {status}"),
         }
@@ -316,7 +326,7 @@ async fn streamed_codex_message_reads_only_its_rollout() {
     )
     .await
     .unwrap();
-    let converged = converged_messages(&harness, &project, u64::from(unchanged) + 1).await;
+    let converged = converged_messages(&harness, &project, u64::from(unchanged) + 1, None).await;
     assert_eq!(converged["projection"]["state"], json!("current"));
     // The profile scope catches up on the same rollouts independently of the
     // project's convergence, so the corpus is quiet only once a whole window
@@ -344,7 +354,8 @@ async fn streamed_codex_message_reads_only_its_rollout() {
     let mut streamed = codex_record(CODEX_MESSAGE, 3_000);
     streamed["payload"]["message"] = json!("streamed codex turn");
     append_jsonl(&live, &[streamed]);
-    converged_messages(&harness, &project, u64::from(unchanged) + 2).await;
+    let first_epoch = converged["projection"]["convergence"]["epoch"].as_u64();
+    converged_messages(&harness, &project, u64::from(unchanged) + 2, first_epoch).await;
     assert_eq!(
         reads.take(),
         BTreeSet::from([live.to_string_lossy().into_owned()])
@@ -412,7 +423,8 @@ async fn streamed_message_reads_no_peer_host_session() {
     let mut streamed = codex_record(CODEX_MESSAGE, 3_000);
     streamed["payload"]["message"] = json!("streamed codex turn");
     append_jsonl(&live, &[streamed]);
-    converged_messages(&harness, &project, messages + 1).await;
+    let first_epoch = converged["projection"]["convergence"]["epoch"].as_u64();
+    converged_messages(&harness, &project, messages + 1, first_epoch).await;
     let (_, after) = quiet_converged(&harness, &project, &reads).await;
     assert_eq!(after, BTreeSet::from([live.to_string_lossy().into_owned()]));
 
@@ -442,7 +454,7 @@ async fn vibe_session_converges_beside_a_peer_host_and_is_searchable() {
     )
     .await
     .unwrap();
-    converged_messages(&harness, &project, 2).await;
+    converged_messages(&harness, &project, 2, None).await;
 
     let search = |provider: &'static str| {
         let harness = &harness;
