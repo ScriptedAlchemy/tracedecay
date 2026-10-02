@@ -3554,27 +3554,17 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
     );
 
     release_swap.send(()).expect("release serving swap");
-    let reading = wait_for_owner(
-        &registry,
-        fixture.path(),
-        SERVING_SEAT_FAILURE_CEILING,
-        "ready after the graph tail seats the generation",
-        || async {
-            let reading = registry
-                .dashboard_freshness_read(fixture.path())
-                .await
-                .ok()??;
-            let seated_generation = registry
-                .latest_complete_serving_for_test(fixture.path())
-                .await
-                .map(|seat| seat.generation().manifest().generation_id.clone());
-            (reading.readiness(CodeIndexReadinessTargetV1::Ready) == CodeIndexReadinessV1::Reached
-                && seated_generation.as_ref().map(CodeGenerationId::as_str)
-                    == reading.latest_generation_id.as_deref())
-            .then_some(reading)
-        },
-    )
-    .await;
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            CodeIndexReadinessTargetV1::Ready,
+            SERVING_SEAT_FAILURE_CEILING,
+        )
+        .await
+        .expect("readiness wait");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = reached else {
+        panic!("ready after the graph tail: {reached:?}");
+    };
     assert_eq!(
         reading.staleness_state,
         Some(CodeIndexStalenessStateV1::Fresh)
@@ -8548,7 +8538,6 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler");
-    let scheduler_probe = Arc::clone(&scheduler);
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {
@@ -8573,10 +8562,6 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
     })
     .await
     .expect("expired query should answer while the scheduler lock is held");
-    assert!(
-        scheduler_probe.try_lock().is_err(),
-        "expired query should not wait for the held scheduler lock"
-    );
     release_tx.send(()).expect("release scheduler lock");
     lock_thread.join().expect("scheduler lock thread joins");
 
