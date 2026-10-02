@@ -1164,6 +1164,47 @@ fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_releas
 }
 
 #[test]
+fn allocator_trim_reclaimer_resamples_pressure_after_checkpoint_throttle() {
+    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
+    let measured = Arc::new(AtomicU64::new(0));
+    let sampled = Arc::clone(&measured);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
+    let above_high = pressure.high_watermark_bytes() + 1;
+    let below_low = pressure.low_watermark_bytes().saturating_sub(1);
+    measured.store(above_high, Ordering::Release);
+    let _trim = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("allocator trim registration");
+
+    assert!(pressure.sample_for_checkpoint().is_over_budget());
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::OverBudget { .. }
+    ));
+
+    measured.store(below_low, Ordering::Release);
+    pressure.publish_observed_resident_bytes(above_high);
+
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::Nominal {
+            observed_bytes,
+            ..
+        } if observed_bytes == below_low
+    ));
+}
+
+#[test]
 fn allocator_pressure_reclaimer_installation_preserves_registration_failure() {
     let pressure = Arc::new(ResidentMemoryPressureV1::new(bytes(
         PRESSURE_TEST_LIMIT_BYTES,
