@@ -813,7 +813,10 @@ fn checkpoint_body_version_one_is_rejected_and_rewritten() {
     assert!(report.checkpoint_rewritten);
     drop(spool);
     let rewritten = fs::read(checkpoint_path(&root.0)).unwrap();
-    assert_eq!(u16::from_le_bytes([rewritten[4], rewritten[5]]), 2);
+    assert_eq!(
+        u16::from_le_bytes([rewritten[4], rewritten[5]]),
+        CHECKPOINT_FORMAT_VERSION
+    );
 }
 
 #[test]
@@ -1627,7 +1630,15 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         })
         .collect::<Vec<_>>();
     writer.commit().unwrap();
-    let (mut drain, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    // The drain reacquires its lease while an admitted callback may hold it,
+    // and the dead-lease fixture's 100µs wait gives that reacquire a single
+    // try_lock attempt; the drain therefore uses the production lease wait.
+    let drain_config = HookSpoolConfigV1 {
+        writer_lease_micros: HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop)
+            .writer_lease_micros,
+        ..config()
+    };
+    let (mut drain, _) = HookSpoolV1::open(&root.0, drain_config, UtcMicros(10)).unwrap();
     let acknowledgements = records
         .iter()
         .map(|record| HookSpoolAckV1 {
@@ -1662,6 +1673,9 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         });
         let outcomes = drain.acknowledge_many(&acknowledgements, UtcMicros(11));
         settled.store(true, std::sync::atomic::Ordering::SeqCst);
+        // A callback that entered its lease wait just before settlement is
+        // admitted once the drain lets go, within the budget it already has.
+        drop(drain);
         assert_eq!(outcomes.unwrap(), vec![Ok(true); 3]);
         callbacks.join().unwrap()
     });
@@ -1678,7 +1692,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         0,
         "{admissions:?}"
     );
-    drop((drain, slow_disk));
+    drop(slow_disk);
     let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
     assert_eq!(report.pending_records, 0);
     assert!(spool.pending.is_empty());

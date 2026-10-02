@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
@@ -294,6 +295,15 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         .await
     }
 
+    /// The session scope LCM writes this store's session rows under.
+    pub fn lcm_session_scope(&self) -> Result<ObservationScopeV1, LcmError> {
+        self.registered_binding()
+            .shard_id
+            .scope
+            .session_scope()
+            .ok_or(LcmError::NotASessionStore)
+    }
+
     #[hotpath::skip]
     pub async fn lcm_session_boundary_guarded<F>(
         &self,
@@ -303,11 +313,12 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     where
         F: FnOnce() -> Result<(), LcmError>,
     {
+        let scope = self.lcm_session_scope()?;
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let response = compression::record_session_boundary(&transaction, request).await?;
+        let response = compression::record_session_boundary(&transaction, &scope, request).await?;
         before_commit()?;
         SessionWriteTxn::commit(transaction).await?;
         Ok(response)

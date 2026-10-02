@@ -9,8 +9,8 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::artifacts::{sha256_bytes, sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
-    BackendRetryPolicy, classify_agent_task_error_message, run_agent_task_with_retry_report,
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_error;
@@ -406,7 +406,6 @@ fn checked_job_schedule_decision(
             let disposition = super::backend::agent_task_failure_disposition(
                 record.error_classification,
                 record.error_retryable,
-                record.error.as_deref(),
             );
             if disposition.is_non_retryable() {
                 return Ok(Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure));
@@ -619,6 +618,7 @@ async fn run_user_job_with_backend_publication(
                     .append_failed(
                         None,
                         format!("job pre-run command failed: {err}"),
+                        err.failure_class(),
                         None,
                         None,
                     )
@@ -661,7 +661,13 @@ async fn run_user_job_with_backend_publication(
             Ok(response) => response,
             Err(err) => {
                 let record = ctx
-                    .append_failed(input_hash, err.to_string(), None, Some(&retry_report))
+                    .append_failed(
+                        input_hash,
+                        err.to_string(),
+                        err.failure_class(),
+                        None,
+                        Some(&retry_report),
+                    )
                     .await?;
                 return Ok(failed_run(record));
             }
@@ -779,11 +785,6 @@ impl JobRunContext<'_> {
         completed_at_micros: i64,
     ) -> AutomationRunLedgerRecord {
         let completed_at = (completed_at_micros / 1_000_000).to_string();
-        let error_classification = if status == AutomationRunStatus::Failed {
-            error.as_deref().map(classify_agent_task_error_message)
-        } else {
-            None
-        };
         AutomationRunLedgerRecord {
             schema_version: 2,
             run_id: self.run_id.to_string(),
@@ -818,9 +819,8 @@ impl JobRunContext<'_> {
             fallback_status: None,
             error,
             session_evidence_budget_stage: None,
-            error_classification,
-            error_retryable: error_classification
-                .map(super::backend::AgentTaskFailureClass::is_retryable),
+            error_classification: None,
+            error_retryable: None,
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             report_ref: Some(json!({
@@ -912,10 +912,13 @@ impl JobRunContext<'_> {
         &self,
         input_hash: Option<String>,
         error: String,
+        classification: AgentTaskFailureClass,
         model: Option<String>,
         retry_report: Option<&AgentTaskRetryReport>,
     ) -> Result<AutomationRunLedgerRecord> {
         let mut record = self.base_record(AutomationRunStatus::Failed, Some(error))?;
+        record.error_classification = Some(classification);
+        record.error_retryable = Some(classification.is_retryable());
         record.input_hash = input_hash;
         if let Some(retry_report) = retry_report {
             record.backend_attempt_count = retry_report.attempt_count();
@@ -1003,7 +1006,33 @@ fn build_job_prompt(
     prompt
 }
 
-async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Result<String> {
+#[derive(Debug, thiserror::Error)]
+enum PreRunCommandError {
+    #[error("command timed out after {JOB_COMMAND_TIMEOUT_SECS}s")]
+    TimedOut,
+    #[error("failed to spawn command: {0}")]
+    Spawn(std::io::Error),
+    #[error("command exited with {status}: {stderr}")]
+    Exited {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+}
+
+impl PreRunCommandError {
+    fn failure_class(&self) -> AgentTaskFailureClass {
+        match self {
+            Self::TimedOut => AgentTaskFailureClass::Timeout,
+            Self::Spawn(_) => AgentTaskFailureClass::Unavailable,
+            Self::Exited { .. } => AgentTaskFailureClass::Permanent,
+        }
+    }
+}
+
+async fn run_pre_run_command(
+    command: &str,
+    project_root: Option<&Path>,
+) -> std::result::Result<String, PreRunCommandError> {
     #[cfg(windows)]
     let mut process = {
         let mut process = tokio::process::Command::new("cmd");
@@ -1027,20 +1056,13 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
         process.output(),
     )
     .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!("command timed out after {JOB_COMMAND_TIMEOUT_SECS}s"),
-    })?
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("failed to spawn command: {e}"),
-    })?;
+    .map_err(|_| PreRunCommandError::TimedOut)?
+    .map_err(PreRunCommandError::Spawn)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "command exited with {}: {}",
-                output.status,
-                truncate_chars_for_prompt(stderr.trim(), 500),
-            ),
+        return Err(PreRunCommandError::Exited {
+            status: output.status,
+            stderr: truncate_chars_for_prompt(stderr.trim(), 500),
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);

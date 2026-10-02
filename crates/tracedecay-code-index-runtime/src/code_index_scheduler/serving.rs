@@ -43,7 +43,7 @@ use tracedecay_domain::{
     RetrieverBatch, RetrieverOutcome, ScoreDomainId, WorktreeId,
     canonical_text::encode_lowercase_hex, sha256_hex_suffix,
 };
-use tracedecay_private_fs::{open_private_file, validate_private_directory};
+use tracedecay_private_fs::{RewriteWitness, open_private_file, validate_private_directory};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryReservationV1, ResidentOwnersV1, log_resident_owner_release_v1,
@@ -1789,6 +1789,7 @@ impl LatestCodeTextGenerationV1 {
                     descriptor.artifact_size_bytes,
                     authority,
                     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                    RewriteWitness::NATIVE,
                     control,
                 )
                 .map(|(reader, witness)| {

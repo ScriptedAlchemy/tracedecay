@@ -71,33 +71,37 @@ pub struct RemoteWriterFenceInstallV1 {
     pub project_id: ProjectId,
     pub target_binding: crate::StoreRuntimeBindingV1,
     pub authority_key: ManifestDigest,
-    pub expected: RemoteWriterFenceV1,
+    /// The fence this install replaces. `None` seeds the first published
+    /// writer of a lineage and succeeds only while the sink holds no fence
+    /// for it, or already holds exactly `replacement`.
+    pub expected: Option<RemoteWriterFenceV1>,
     pub replacement: RemoteWriterFenceV1,
     pub installed_at: UtcMicros,
 }
 
 impl RemoteWriterFenceInstallV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        let same_lineage = self.expected.brain_id == self.replacement.brain_id
-            && self.expected.shard_id == self.replacement.shard_id
-            && self.expected.generation_id == self.replacement.generation_id;
-        let next_epoch = self
-            .expected
-            .authority_epoch
-            .0
-            .checked_add(1)
-            .is_some_and(|epoch| epoch == self.replacement.authority_epoch.0);
-        let next_placement = self
-            .expected
-            .placement_revision
-            .get()
-            .checked_add(1)
-            .is_some_and(|revision| revision == self.replacement.placement_revision.get());
+        let successor = self.expected.as_ref().is_none_or(|expected| {
+            let same_lineage = expected.brain_id == self.replacement.brain_id
+                && expected.shard_id == self.replacement.shard_id
+                && expected.generation_id == self.replacement.generation_id;
+            let next_epoch = expected
+                .authority_epoch
+                .0
+                .checked_add(1)
+                .is_some_and(|epoch| epoch == self.replacement.authority_epoch.0);
+            let next_placement = expected
+                .placement_revision
+                .get()
+                .checked_add(1)
+                .is_some_and(|revision| revision == self.replacement.placement_revision.get());
+            expected.validate().is_ok() && same_lineage && next_epoch && next_placement
+        });
         let expected_authority_key = tracedecay_domain::canonical_sha256(&(
             "tracedecay.remote-recovery-authority.v1",
-            &self.expected.brain_id,
-            &self.expected.shard_id,
-            &self.expected.generation_id,
+            &self.replacement.brain_id,
+            &self.replacement.shard_id,
+            &self.replacement.generation_id,
         ));
         let target_matches_project = matches!(
             &self.target_binding.shard_id.scope,
@@ -108,11 +112,8 @@ impl RemoteWriterFenceInstallV1 {
             || self.project_id.validate().is_err()
             || !target_matches_project
             || !expected_authority_key.is_ok_and(|key| key == self.authority_key)
-            || self.expected.validate().is_err()
             || self.replacement.validate().is_err()
-            || !same_lineage
-            || !next_epoch
-            || !next_placement
+            || !successor
         {
             return Err(StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                 payload: "install remote writer fence",

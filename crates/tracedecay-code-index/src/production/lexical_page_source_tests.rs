@@ -435,6 +435,66 @@ fn draining_a_many_file_generation_amortizes_install_calls_by_the_multiplier() {
     );
 }
 
+/// A builder that accepts only a prefix of each staged batch makes the source
+/// restage the refused suffix. Those files were already read and admitted, so
+/// draining the generation must still read each sealed segment exactly once
+/// and mint the same pages a one-page drain does.
+#[test]
+fn prefix_accepted_batches_read_each_sealed_segment_once() {
+    let file_count = 40usize;
+    let fixture = fixture_for_source_files(
+        BATCH_FIXTURE_SOURCE,
+        "src/prefix_fixture.rs",
+        "rust",
+        file_count,
+    );
+    let _width = ForcedWorkerWidth::install(4);
+    let expected = one_page_expectations(&fixture);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read_count = Arc::clone(&reads);
+    let segments = Arc::clone(&fixture.segments);
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &fixture.manifest,
+        fixture.state_digest.clone(),
+        move |digest, _, buffer, _control| {
+            read_count.fetch_add(1, Ordering::SeqCst);
+            buffer.clear();
+            buffer.extend_from_slice(segments.get(digest).expect("sealed segment exists"));
+            Ok(())
+        },
+        1,
+        1024 * 1024,
+    )
+    .expect("partitioned source opens");
+    let batch_pages = 8;
+    let mut drained = Vec::new();
+    loop {
+        let first = drained.len().min(expected.len() - 1);
+        let read = source
+            .next_page_batch_if(
+                &ActiveControl,
+                bounds_for(&expected[first..(first + batch_pages).min(expected.len())]),
+                |_| Ok::<_, std::convert::Infallible>(NonZeroUsize::MIN),
+            )
+            .expect("source stages the batch")
+            .expect("the prefix is accepted");
+        match read {
+            VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => {
+                assert_eq!(pages.len(), 1, "only the accepted prefix is returned");
+                drained.push(expectation(&pages[0]));
+            }
+            VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
+                receipt
+                    .verify_completion(Some(source.cursor()))
+                    .expect("prefix drain completes");
+                break;
+            }
+        }
+    }
+    assert_eq!(drained, expected);
+    assert_eq!(reads.load(Ordering::SeqCst), file_count);
+}
+
 #[test]
 fn accepted_import_cursor_resumes_a_fresh_source_after_cancellation() {
     let imports = (0..128)

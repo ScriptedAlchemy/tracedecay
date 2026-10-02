@@ -28,10 +28,6 @@ impl SkillInstallTarget {
         matches!(self, Self::Cursor | Self::Codex | Self::Hermes)
     }
 
-    pub fn writes_prompt_index(self) -> bool {
-        !self.is_native_overlay()
-    }
-
     pub fn prompt_label(self) -> &'static str {
         match self {
             Self::Cursor => "Cursor",

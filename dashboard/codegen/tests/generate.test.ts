@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { z, type ZodTypeAny } from "zod";
 import ts from "typescript";
 import { generateContracts, type JsonSchema, OUTPUT_FILES } from "../src/generate.ts";
@@ -207,7 +208,7 @@ describe("contracts generator", () => {
     expect(generated).toContain('WIRE_SCHEMA_REVISION = "test.1"');
   });
 
-  it("typechecks consumer code and accepts only decoder-valid fixtures", async () => {
+  it("typechecks consumer code and accepts only decoder-valid fixtures", () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
       $defs: {
@@ -327,11 +328,13 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
       expect(diagnosticText(ts.getPreEmitDiagnostics(program))).toEqual([]);
 
       const javascript = ts.transpileModule(files[OUTPUT_FILES.DECODERS_FILE]!, {
-        compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
       }).outputText;
-      const runtimePath = join(directory, "runtime.js");
+      const runtimePath = join(directory, "runtime.cjs");
       writeFileSync(runtimePath, javascript);
-      const runtime = await import(pathToFileURL(runtimePath).href) as Record<string, ZodTypeAny>;
+      // Node's own loader: a vitest `import()` waits on the shared transform
+      // server, which a full parallel run keeps busy for seconds.
+      const runtime = createRequire(import.meta.url)(runtimePath) as Record<string, ZodTypeAny>;
       const node = {
         id: "root",
         label: null,

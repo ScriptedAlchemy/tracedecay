@@ -837,34 +837,18 @@ impl McpServer {
         })
     }
 
-    /// Applies the pre-dispatch freshness policy and records the call in the
-    /// server counters and the activity lane.
+    /// Applies the pre-edit freshness policy and records the call in the
+    /// server counters and the activity lane. Graph reads probe freshness in
+    /// the graph-tool owner, which every MCP and CLI read reaches.
     #[hotpath::measure(label = "mcp.server.tools_call.begin_dispatch", future = true)]
     async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
         cg: &Arc<TraceDecay>,
-        live_branch: &tracedecay_runtime_core::branch::BranchMemo,
         publish_activity: bool,
     ) {
-        // Notification-free freshness is useful before tools that edit source
-        // files in the index. Read-only graph queries should not block behind
-        // a full project walk; on very large indexes (especially when
-        // node_modules was intentionally included) that turns diagnostics and
-        // search into sync operations.
-        let skip_graph_freshness =
-            tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name)
-                == tracedecay_mcp::tools::binding::BranchSensitivity::Independent;
-        if !skip_graph_freshness && needs_lazy_sync_before_dispatch(tool_name) {
+        if needs_lazy_sync_before_dispatch(tool_name) {
             self.maybe_sync_if_stale().await;
-        } else if !skip_graph_freshness {
-            // D4: sync-on-read (never blocking). Read tools serve the current
-            // answer IMMEDIATELY and, when the read-refresh cooldown has
-            // elapsed, kick a single-flighted background refresh so the *next*
-            // read sees fresh data. This heals read-only sessions that never
-            // touch an edit tool without ever making a query wait behind a
-            // project walk.
-            self.maybe_spawn_read_refresh(cg, live_branch);
         }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
@@ -2009,7 +1993,7 @@ mod activity_dispatch_tests {
         let server = McpServer::new_with_registered_test_context(context, Vec::new())
             .await
             .expect("registered test server");
-        let (graph, live_branch) = server.reopen_if_branch_drifted_memoized().await;
+        let (graph, _) = server.reopen_if_branch_drifted_memoized().await;
         let activity_db = server
             .project_session_db
             .as_deref()
@@ -2034,7 +2018,7 @@ mod activity_dispatch_tests {
 
         tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            server.begin_tool_dispatch("tracedecay_status", &graph, &live_branch, true),
+            server.begin_tool_dispatch("tracedecay_status", &graph, true),
         )
         .await
         .expect("foreground dispatch must not wait for optional activity persistence");

@@ -354,7 +354,7 @@ mod goal_event_tests {
         assert!(matches!(
             &facts[0],
             CanonicalObservationFactV1::ToolInvocation { name, arguments, .. }
-                if name == "update_plan" && arguments.is_null()
+                if name == "update_plan" && arguments["plan"][1]["step"] == "ship"
         ));
         match &facts[1] {
             CanonicalObservationFactV1::WorkflowLifecycle {
@@ -1233,6 +1233,7 @@ mod recent_first_discovery_tests {
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
         persist_codex_history_frontier, persist_host_provider_coverage,
@@ -1249,6 +1250,8 @@ mod recent_first_discovery_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, "{}\n").unwrap();
+        // Discovery proves a file unchanged only by a settled identity.
+        spin_until_jsonl_change_settled(&path);
         path
     }
 
@@ -1427,6 +1430,58 @@ mod recent_first_discovery_tests {
                 resource: "exact-session request lookup capacity",
             }
         ));
+    }
+
+    /// A consumer told to wait for a scan in progress is released when a scan
+    /// finishes; a scan nobody waited on releases nothing, so a refused pass
+    /// subscribed before its own scan is not woken by that scan.
+    #[tokio::test]
+    async fn a_finished_scan_releases_only_consumers_that_waited_on_it() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        write_dated_rollout(home, ("2026", "08", "23"), "release");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let frontier = CodexDiscoveryFrontier::initial();
+        let released = hub.subscribe_scan_release();
+
+        let CodexDiscoveryDelivery::Ready(first) = hub
+            .discover("profile", &source, bounds, frontier)
+            .await
+            .unwrap()
+        else {
+            panic!("the first scan delivers");
+        };
+        assert!(!released.has_changed().unwrap());
+        hub.acknowledge("profile");
+
+        // A consumer joining now replays the source's index, which another
+        // consumer is scanning.
+        hub.register("project", Some(home));
+        let set_index_scanning = |scanning: bool| {
+            hub.inner
+                .lock()
+                .unwrap()
+                .replay_indexes
+                .entry(source.discovery_key())
+                .or_default()
+                .scanning = scanning;
+        };
+        set_index_scanning(true);
+        assert!(matches!(
+            hub.discover("project", &source, bounds, frontier)
+                .await
+                .unwrap(),
+            CodexDiscoveryDelivery::Waiting
+        ));
+        set_index_scanning(false);
+        hub.discover("profile", &source, bounds, first.next_frontier)
+            .await
+            .unwrap();
+        assert!(released.has_changed().unwrap());
     }
 
     #[tokio::test]
@@ -1806,16 +1861,20 @@ mod recent_first_discovery_tests {
         let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "0198-session-beyond-default-budget";
+        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
+        // Write the target mid-corpus: tmpfs lists newest entries first and
+        // btrfs oldest first, so either end would land in the first slice.
         for index in 0..4_100 {
+            if index == 2_050 {
+                std::fs::write(&expected, b"{}\n").unwrap();
+            }
             std::fs::write(
                 directory.join(format!("rollout-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();
         }
-        let session_id = "0198-session-beyond-default-budget";
-        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
-        std::fs::write(&expected, b"{}\n").unwrap();
 
         let source = CodexSource::with_home(home);
         let mut calls = 0_u64;
@@ -2085,6 +2144,40 @@ mod recent_first_discovery_tests {
 
         assert_ne!(replaced.next_frontier.epoch, completed.epoch);
         assert_eq!(replaced.report.paths, vec![path]);
+    }
+
+    /// An in-place rewrite keeps the inode and its generation; inside the
+    /// change-time quantum of the identity discovery recorded it keeps every
+    /// stat field too, so that identity must not prove the file unchanged.
+    #[test]
+    #[cfg(unix)]
+    fn codex_same_size_in_place_rewrite_is_redelivered() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let path = write_dated_rollout(home, ("2026", "08", "17"), "rewritten");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let mut frontier = CodexDiscoveryFrontier::initial();
+
+        for round in 0..32_u8 {
+            let completed = source
+                .discover_transcript_paths_with_frontier(bounds, frontier)
+                .unwrap()
+                .next_frontier;
+            let original = std::fs::metadata(&path).unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.write_all(if round % 2 == 0 { b"[]\n" } else { b"{}\n" })
+                .unwrap();
+            file.set_modified(original.modified().unwrap()).unwrap();
+            drop(file);
+
+            let rewritten = source
+                .discover_transcript_paths_with_frontier(bounds, completed)
+                .unwrap();
+            assert_ne!(rewritten.next_frontier.epoch, completed.epoch);
+            assert_eq!(rewritten.report.paths, vec![path.clone()]);
+            frontier = rewritten.next_frontier;
+        }
     }
 
     /// Coverage: retained traversal across passes must visit every historical

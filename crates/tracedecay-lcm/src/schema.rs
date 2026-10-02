@@ -19,12 +19,15 @@ use super::util;
 /// `lcm_raw_messages` also holds the session message projection, so each
 /// message body is stored once beside the session-only columns (`kind`,
 /// `model`, `tool_names`, `source_path`, `source_offset`), and one FTS index
-/// serves both LCM grep and session message search. There are no LCM summary
+/// serves both LCM grep and session message search. An observation projects at
+/// most one message row, the one occurrence its retrieval anchor resolves to,
+/// so a host record's parts share that row. There are no LCM summary
 /// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
-/// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
-/// reset.
-pub const LCM_SCHEMA_VERSION: i64 = 13;
+/// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
+/// scope as project fields (version 14); older stores hold rows with an
+/// invented project and require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 14;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's
@@ -782,6 +785,59 @@ mod tests {
             raw_fts_structure_is_current(&*conn).await,
             Some(false),
             "missing raw FTS table was accepted as current"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shipped_v13_profile_refuses_typed_without_upgrading() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 13, 123);",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let refusal = |error: LcmError| match error {
+            LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => Ok((found_version, required_version)),
+            other => Err(format!("expected a typed reset refusal, got {other}")),
+        };
+        assert_eq!(
+            refusal(
+                require_admissible_lcm_schema(&*conn)
+                    .await
+                    .expect_err("a shipped v13 store must refuse admission")
+            )?,
+            (Some(13), 14)
+        );
+        assert_eq!(
+            refusal(
+                ensure_lcm_schema(&conn)
+                    .await
+                    .expect_err("opening a shipped v13 store must refuse, not upgrade it")
+            )?,
+            (Some(13), 14)
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+                "migration marker version",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            13
         );
         Ok(())
     }

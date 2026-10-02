@@ -91,7 +91,8 @@ pub(crate) fn retire_superseded_versions_sql(table: &SharedGenerationTable) -> S
         "DELETE FROM {name}
          WHERE rowid IN (
              SELECT older.rowid
-             FROM {name} AS successor CROSS JOIN {name} AS older
+             FROM {name} AS successor INDEXED BY idx_{name}_introduced
+                  CROSS JOIN {name} AS older
              WHERE successor.session_id = ?1 AND successor.generation = ?2
                AND older.session_id = ?1 AND {matches} AND older.generation < ?2
          )",

@@ -967,6 +967,49 @@ describe("TraceDecayClient transport envelopes", () => {
     );
   });
 
+  it("surfaces the measured delay of a re-warming code graph", async () => {
+    const detail = { kind: "code_graph_rewarming", retry_after_millis: 7_940 };
+    const rewarming = problemEnvelope("unavailable", "application.code-graph.rewarming", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_delay",
+      retryable: true,
+      retryAfterMillis: 7_940,
+      legalActions: ["retry"],
+      detail,
+    });
+    const malformed = problemEnvelope("unavailable", "application.code-graph.rewarming", {
+      bindingId: "binding.http.workflow.list_definitions",
+      retry: "after_delay",
+      retryable: true,
+      retryAfterMillis: 7_940,
+      legalActions: ["retry"],
+      detail: { ...detail, retry_after_millis: "7940" },
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, rewarming),
+        (_request, response) => json(response, 503, malformed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        const refusal = await requestThroughTransport(client).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(TraceDecayUnavailableError);
+        const problem = (refusal as TraceDecayUnavailableError).problem;
+        expect(problem.detail).toEqual(detail);
+        expect(problem.retry_after_millis).toBe(7_940);
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
   it("surfaces the diagnostics detail an unsupported problem carries", async () => {
     const detail = {
       kind: "diagnostics_unsupported",

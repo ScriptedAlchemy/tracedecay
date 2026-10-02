@@ -77,7 +77,7 @@ export type AdmitWorkSynthesisCommand = {
 
 export type AgentInstanceId = string;
 
-export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable";
+export type AgentTaskFailureClass = "denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large";
 
 export type AgentTaskKind = "combined_review" | "memory_curator" | "session_reflector" | "skill_writer" | "user_job";
 
@@ -321,6 +321,10 @@ export type AnalyticsUsageSummaryV1 = {
 export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" | "permanent";
 
 export type ApplicationProblemDetailV1 = 
+  | {
+    kind: "code_graph_rewarming";
+    retry_after_millis: number;
+  }
   | {
     kind: "daemon_unreachable";
     named_by: string | null;
@@ -918,6 +922,7 @@ export type CodeIndexConvergenceParkedV1 = {
 export type CodeIndexFreshnessCoverageV1 = "complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources";
 
 export type CodeIndexFreshnessPayloadV1 = {
+  mount_failure?: CodeIndexMountFailureV1 | null | undefined;
   note: string;
   worktrees: Array<CodeIndexWorktreeFreshnessV1>;
 };
@@ -928,6 +933,11 @@ export type CodeIndexGenerationRecoveryV1 = {
   incompatibilities: Array<string>;
   incompatible_generation_id: string;
   serving: CodeIndexGenerationRecoveryServingV1;
+};
+
+export type CodeIndexMountFailureV1 = {
+  message: string;
+  remediation: string;
 };
 
 export type CodeIndexOmittedSourcesV1 = {

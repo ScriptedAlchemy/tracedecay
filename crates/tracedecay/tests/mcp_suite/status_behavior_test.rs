@@ -132,13 +132,22 @@ async fn converged_json_status(
     let started = Instant::now();
     loop {
         let status = sealed_json_status(harness, project_root).await;
-        if status["session_projection"]["convergence"]["state"] == "converged" {
+        let projection_converged =
+            status["session_projection"]["convergence"]["state"] == "converged";
+        let hook_replay = &status["hook_replay"]["status"];
+        assert_ne!(
+            hook_replay, "failed",
+            "hook replay drain failed: {}",
+            status["hook_replay"]
+        );
+        if projection_converged && hook_replay == "drained" {
             return status;
         }
         assert!(
             started.elapsed() < Duration::from_secs(20),
-            "session projection never converged: {}",
-            status["session_projection"]
+            "session projection or hook replay never settled: projection={}, hook_replay={}",
+            status["session_projection"],
+            status["hook_replay"]
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -229,6 +238,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         compact["session_git_evidence"],
         json!({ "status": "unrecorded", "backfill_watermark": null })
     );
+    assert_eq!(compact["hook_replay"], json!({ "status": "drained" }));
     assert_eq!(compact["server"]["errors"], 0);
     assert!(compact["server"].get("worktree_mismatch").is_none());
     assert_eq!(
@@ -385,6 +395,7 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **code_index_freshness.status:** current\n\
              **github_source:** {{2 field(s)}}\n\
              **graph_statistics:** {{6 field(s)}}\n\
+             **hook_replay.status:** drained\n\
              **memory.status:** nominal\n\
              {owner_bullets}\
              **project_root:** {root}\n\

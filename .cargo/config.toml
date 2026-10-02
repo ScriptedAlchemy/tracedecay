@@ -14,6 +14,15 @@ target-dir = "target"
 # setting; it has no effect on Rust code.
 CFLAGS = { value = "-DNDEBUG", force = false }
 CXXFLAGS = { value = "-DNDEBUG", force = false }
+# MSVC encodes narrow string literals in the host ANSI code page unless told
+# otherwise, so grammar symbol names spelled as universal character names
+# (Lean's `\u00b7`, Haskell's `\u2192`) become invalid or lossy UTF-8 and
+# tree-sitter's `node_kind_for_id` panics on them. cc-rs reads the
+# target-qualified variable instead of the plain one, so it repeats NDEBUG.
+CFLAGS_x86_64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CXXFLAGS_x86_64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CFLAGS_aarch64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
+CXXFLAGS_aarch64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
 # SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
 # effective auxiliary width. Keep the bundled build deterministic across
 # developer and CI hosts instead of accepting SQLite's default ceiling of 8.
@@ -134,9 +143,9 @@ directory = ".pnpm/crates/crates-io"
 [source.pnpm-git]
 directory = ".pnpm/crates/git"
 
-[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=9ac25815c2184854a295f3b1c1c3e2706f07b2aa"]
+[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=58037effacda10952f14c45e258d98caea63f862"]
 git = "https://github.com/ScriptedAlchemy/grafeo.git"
-rev = "9ac25815c2184854a295f3b1c1c3e2706f07b2aa"
+rev = "58037effacda10952f14c45e258d98caea63f862"
 replace-with = "pnpm-git"
 
 [source."git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9"]

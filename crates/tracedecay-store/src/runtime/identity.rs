@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_canonical_text};
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, LocatorDigest, ProjectId, RefId, RepositoryId,
@@ -170,6 +171,22 @@ impl StoreShardScopeV1 {
             Self::Project { project_id }
             | Self::ProjectSessions { project_id }
             | Self::Code { project_id, .. } => Some(project_id),
+        }
+    }
+
+    /// The observation scope whose sessions this shard stores; `None` for a
+    /// shard that holds no sessions.
+    pub fn session_scope(&self) -> Option<ObservationScopeV1> {
+        match self {
+            Self::ProfileSessions => Some(ObservationScopeV1::Profile),
+            Self::ProjectSessions { project_id } => Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            }),
+            Self::Profile
+            | Self::ProfileMemory
+            | Self::RemoteNode { .. }
+            | Self::Project { .. }
+            | Self::Code { .. } => None,
         }
     }
 
@@ -581,6 +598,44 @@ mod tests {
             serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
             shard
         );
+    }
+
+    #[test]
+    fn only_session_shards_name_a_session_scope() {
+        let project_id = id::<ProjectId>("project.identity");
+        assert_eq!(
+            StoreShardScopeV1::ProfileSessions.session_scope(),
+            Some(ObservationScopeV1::Profile)
+        );
+        assert_eq!(
+            StoreShardScopeV1::ProjectSessions {
+                project_id: project_id.clone(),
+            }
+            .session_scope(),
+            Some(ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            })
+        );
+
+        for scope in [
+            StoreShardScopeV1::Profile,
+            StoreShardScopeV1::ProfileMemory,
+            StoreShardScopeV1::RemoteNode {
+                node_id: id::<BrainNodeId>("node.identity"),
+            },
+            StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            StoreShardScopeV1::Code {
+                project_id: project_id.clone(),
+                repository_id: id::<RepositoryId>("repository.identity"),
+                scope: CodeShardScopeV1::Worktree {
+                    worktree_id: id::<WorktreeId>("worktree.identity"),
+                },
+            },
+        ] {
+            assert_eq!(scope.session_scope(), None, "{scope:?} holds no sessions");
+        }
     }
 
     #[test]

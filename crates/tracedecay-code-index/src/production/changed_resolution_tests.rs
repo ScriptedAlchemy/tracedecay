@@ -3,20 +3,20 @@ use std::path::Path;
 use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
 use super::changed_resolution::{ChangedSitesV1, pair_edited_files};
-use super::graph_inputs::resolve_files;
+use super::resolution_outputs::resolve_files;
 use super::worker_tests::{
     WorkerProjectionSink, WorkerPublicationStore, partitioned_restore, partitioned_seal,
     worker_config, worker_id, worker_request_with_source,
 };
 use super::*;
 
-const FIXTURE_ROOT: &str = concat!(
+pub(super) const FIXTURE_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tracedecay-code-extraction/fixtures/cross-file-calls"
 );
 
 /// Every file under `root`, path-sorted, as `(root-relative path, source)`.
-fn fixture_files(root: &Path) -> Vec<(String, String)> {
+pub(super) fn fixture_files(root: &Path) -> Vec<(String, String)> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         let mut entries = std::fs::read_dir(dir)
             .expect("fixture directory")
@@ -44,7 +44,7 @@ fn fixture_files(root: &Path) -> Vec<(String, String)> {
     files
 }
 
-fn language_for(path: &str) -> &'static str {
+pub(super) fn language_for(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("py") => "python",
         Some("go" | "mod") => "go",
@@ -63,7 +63,7 @@ fn language_for(path: &str) -> &'static str {
 /// that the `fresh` file gets its own occurrence as an edit does. Over the
 /// owner's active generation only the fresh file's bytes are captured, as a
 /// watched refresh captures only changed files.
-fn publish(
+pub(super) fn publish(
     owner: &mut CodeIndexProductionOwnerV1<WorkerPublicationStore, WorkerProjectionSink>,
     files: &[(String, String)],
     fresh: Option<usize>,
@@ -82,7 +82,7 @@ fn publish(
             String::new()
         };
         let file_occurrence_id =
-            worker_id::<FileOccurrenceId>(&format!("file.changed.{ordinal:02}{edit}"));
+            worker_id::<FileOccurrenceId>(&format!("file.changed.{ordinal:03}{edit}"));
         let bytes = source.as_bytes();
         request.snapshot.files.push(SanitizedCodeFileV1 {
             file_occurrence_id: file_occurrence_id.clone(),
@@ -95,7 +95,7 @@ fn publish(
             .snapshot
             .sanitization_receipts
             .push(worker_id::<SanitizationReceiptId>(&format!(
-                "receipt.changed.{ordinal:02}"
+                "receipt.changed.{ordinal:03}"
             )));
         if !over_parent || fresh == Some(ordinal) {
             request.captured_files.push(CodeIndexCapturedFileV1 {

@@ -103,8 +103,16 @@ impl PartitionedSealV1 {
         let manifest = generation
             .encode_partitioned_sealed(|publication| {
                 match publication {
-                    SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    SealedGenerationSegmentPublicationV1::File { digest, bytes }
+                    | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
                         segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                    }
+                    SealedGenerationSegmentPublicationV1::CodeGraphPage {
+                        page_digest,
+                        bytes,
+                        ..
+                    } => {
+                        segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
                     }
                     SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
                         bytes, ..
@@ -190,6 +198,7 @@ impl PartitionedSealV1 {
             &mut |request, buffer| self.read_segment(request, buffer),
             revision,
             spill,
+            &mut |_| Ok(()),
             check,
         )?;
         Ok(spilled.materialize(&|| Ok(()))?)

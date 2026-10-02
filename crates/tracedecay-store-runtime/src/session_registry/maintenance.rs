@@ -555,6 +555,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .as_ref()
             .ok()
             .and_then(RegisteredGlobalDbOwnerV1::reset_required);
+        if let (Ok(_), None, StoreShardScopeV1::ProjectSessions { project_id }) =
+            (&attached, &refused_authority, &shard_id.scope)
+        {
+            self.stamp_project_sessions_admission(project_id.as_str());
+        }
         self.record_registered_admission(
             shard_id,
             attached.as_ref().err().or(refused_authority.as_ref()),
@@ -562,7 +567,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         attached
     }
 
-    fn record_registered_admission(
+    pub(super) fn record_registered_admission(
         &self,
         shard_id: StoreShardIdV1,
         refusal: Option<&TraceDecayError>,
@@ -612,7 +617,8 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Stores in this profile currently held in their typed reset-required
     /// state, each with the exact command that resets it: registered stores
-    /// refused at attach, then Hook V2 admission state refused at open.
+    /// refused at attach, then Hook V2 admission state on disk in a shape this
+    /// binary refuses, in the profile or any of its project shards.
     #[must_use]
     pub fn reset_required_stores(&self) -> Vec<StoreResetRequiredV1> {
         let mut stores: Vec<_> = self
@@ -623,14 +629,21 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
             .collect();
         let profile_root = self.identity.profile_root();
-        let hook_admissions: BTreeMap<_, _> =
-            tracedecay_hooks::hook_admission_reset_required_roots(profile_root)
-                .iter()
-                .map(|root| {
-                    let state = hook_admission_reset_required(profile_root, root);
-                    (state.store.clone(), state)
-                })
-                .collect();
+        let project_shards = std::fs::read_dir(
+            tracedecay_runtime_core::storage::profile_shards_root(profile_root),
+        )
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path());
+        let hook_admissions: BTreeMap<_, _> = std::iter::once(profile_root.to_path_buf())
+            .chain(project_shards)
+            .flat_map(|root| tracedecay_hooks::hook_admission_reset_required_roots(&root))
+            .map(|root| {
+                let state = hook_admission_reset_required(profile_root, &root);
+                (state.store.clone(), state)
+            })
+            .collect();
         stores.extend(hook_admissions.into_values());
         stores
     }

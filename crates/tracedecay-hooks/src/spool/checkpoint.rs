@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt};
 #[cfg(windows)]
@@ -32,6 +33,9 @@ pub(super) const CHECKPOINT_ENTRY_BYTES: usize = 100;
 pub(super) const CHECKPOINT_REWRITE_FRAME_THRESHOLD: u32 = 64;
 pub(super) const CHECKPOINT_REWRITE_BYTE_THRESHOLD: u64 = 256 * 1024;
 
+/// Names the records file, not its bytes. Open re-derives the covered prefix
+/// digest and every append re-checks it, so an equal revision never stands in
+/// for reading the records and needs no change-time settledness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RecordsFileRevisionV1 {
@@ -139,6 +143,11 @@ struct HookSpoolCheckpointHeaderV1 {
     version: u16,
     host: NativeHostIdentityV1,
     records_revision: Option<RecordsFileRevisionV1>,
+    /// SHA-256 of the records bytes `[0, records_revision.length)` the entries
+    /// index. The revision alone cannot see a same-length in-place write that
+    /// lands within one filesystem timestamp tick.
+    #[serde(with = "revision_identity")]
+    covered_checksum: [u8; 32],
     record_count: u32,
 }
 
@@ -147,7 +156,103 @@ pub(super) struct ValidatedCheckpointV1 {
     pub(super) records_revision: Option<RecordsFileRevisionV1>,
     pub(super) records: Vec<PendingRecordV1>,
     pub(super) checksum: [u8; 32],
+    pub(super) covered_checksum: [u8; 32],
     pub(super) bytes: u64,
+}
+
+impl ValidatedCheckpointV1 {
+    /// The records file length the checkpoint entries cover.
+    pub(super) fn covered_end(&self) -> u64 {
+        self.records_revision
+            .as_ref()
+            .map_or(0, |revision| revision.length)
+    }
+}
+
+/// A running SHA-256 over the records file prefix `[0, len)` a handle has
+/// read or written itself.
+///
+/// Appending extends it with the frame's bytes, so the next verification
+/// hashes the file once and compares, with no second pass over the prefix.
+#[derive(Clone)]
+pub(super) struct RecordsPrefixDigestV1 {
+    hasher: Sha256,
+    len: u64,
+}
+
+const PREFIX_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+impl RecordsPrefixDigestV1 {
+    pub(super) fn empty() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            len: 0,
+        }
+    }
+
+    pub(super) fn of(bytes: &[u8]) -> Self {
+        let mut digest = Self::empty();
+        digest.extend(bytes);
+        digest
+    }
+
+    pub(super) fn checksum(&self) -> [u8; 32] {
+        self.hasher.clone().finalize().into()
+    }
+
+    pub(super) fn extend(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+        self.len = self.len.saturating_add(bytes.len() as u64);
+    }
+
+    /// Hashes the records file bytes `[len, end)` into the digest. `false`
+    /// means the file ended first, and the digest no longer describes any
+    /// prefix the caller can trust.
+    pub(super) fn read_through(&mut self, root: &Path, end: u64) -> Result<bool, HookSpoolError> {
+        if end <= self.len {
+            return Ok(end == self.len);
+        }
+        let path = records_path(root);
+        if !validate_regular_or_missing(&path)? {
+            return Ok(false);
+        }
+        let mut file = File::open(&path).map_err(|_| HookSpoolError::Io)?;
+        file.seek(SeekFrom::Start(self.len))
+            .map_err(|_| HookSpoolError::Io)?;
+        let mut chunk = vec![0u8; PREFIX_READ_CHUNK_BYTES];
+        while self.len < end {
+            let wanted = usize::try_from(end - self.len)
+                .map_or(PREFIX_READ_CHUNK_BYTES, |remaining| {
+                    remaining.min(PREFIX_READ_CHUNK_BYTES)
+                });
+            let read = file
+                .read(&mut chunk[..wanted])
+                .map_err(|_| HookSpoolError::Io)?;
+            if read == 0 {
+                return Ok(false);
+            }
+            self.extend(&chunk[..read]);
+        }
+        Ok(true)
+    }
+
+    /// Whether the records file's current `[0, len)` still hashes to this
+    /// digest.
+    #[hotpath::measure(label = "hooks.spool.verify_records_prefix")]
+    pub(super) fn matches_file(&self, root: &Path) -> Result<bool, HookSpoolError> {
+        let mut current = Self::empty();
+        Ok(current.read_through(root, self.len)? && current.checksum() == self.checksum())
+    }
+}
+
+impl std::fmt::Debug for RecordsPrefixDigestV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RecordsPrefixDigestV1")
+            .field("len", &self.len)
+            .field("checksum", &self.checksum())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,17 +374,26 @@ pub(super) fn read_checkpoint(
         records_revision: header.records_revision,
         records,
         checksum,
+        covered_checksum: header.covered_checksum,
         bytes: u64::try_from(bytes.len()).map_err(|_| HookSpoolError::MetadataCorrupted)?,
     }))
 }
 
+/// `covered` must be the caller's digest of the records bytes the entries
+/// index; the revision's length must equal the entries' total framed length.
 pub(super) fn write_checkpoint(
     root: &Path,
     config: HookSpoolConfigV1,
     records: &[PendingRecordV1],
+    covered: &RecordsPrefixDigestV1,
 ) -> Result<CheckpointAnchorV1, HookSpoolError> {
     let records_revision = records_file_revision(root)?;
-    if !valid_cached_records(records, records_revision.as_ref(), config) {
+    if !valid_cached_records(records, records_revision.as_ref(), config)
+        || records_revision
+            .as_ref()
+            .map_or(0, |revision| revision.length)
+            != covered.len
+    {
         return Err(HookSpoolError::MetadataCorrupted);
     }
     let record_count =
@@ -288,6 +402,7 @@ pub(super) fn write_checkpoint(
         version: CHECKPOINT_FORMAT_VERSION,
         host: config.host,
         records_revision: records_revision.clone(),
+        covered_checksum: covered.checksum(),
         record_count,
     };
     let header_bytes =

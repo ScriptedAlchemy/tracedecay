@@ -22,7 +22,7 @@ pub use admission_ledger::{
     HookAdmissionCommitV1, HookAdmissionDecisionV1, HookAdmissionLedgerError,
     HookAdmissionLedgerLimitsV1, HookAdmissionLedgerReceiptV1, HookAdmissionLedgerV1,
     HookAdmissionStagedV1, PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR,
-    PROJECT_HOOK_ADMISSIONS_DIR, hook_admission_reset_required_roots, record_hook_admission_reset,
+    PROJECT_HOOK_ADMISSIONS_DIR, hook_admission_reset_required_roots,
 };
 pub use capture::{
     NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, capture_native_event_for_replay,

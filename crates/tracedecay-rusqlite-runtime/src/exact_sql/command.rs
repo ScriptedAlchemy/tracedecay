@@ -191,6 +191,31 @@ impl TransactionLeaseState {
     }
 }
 
+/// A writer command's final answer, held until the worker has recorded the
+/// command's telemetry. A caller that sees its commit then also sees that
+/// commit's `SQLite` work in the writer telemetry snapshot, instead of racing
+/// the worker and reading it into a later window.
+#[must_use = "the caller is waiting for this reply"]
+pub(crate) struct DeferredReply(Option<Box<dyn FnOnce()>>);
+
+impl DeferredReply {
+    fn none() -> Self {
+        Self(None)
+    }
+
+    fn new<T: 'static>(reply: async_channel::Sender<T>, value: T) -> Self {
+        Self(Some(Box::new(move || {
+            let _ = reply.try_send(value);
+        })))
+    }
+
+    pub(crate) fn send(self) {
+        if let Some(send) = self.0 {
+            send();
+        }
+    }
+}
+
 pub(crate) enum TransactionCommand {
     Attach {
         attachment: ExactSqlAttachment,
@@ -214,7 +239,7 @@ pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
     shutdown_requested: &Arc<AtomicBool>,
-) {
+) -> DeferredReply {
     match command {
         WriterCommand::Dispatch {
             request,
@@ -223,8 +248,7 @@ pub(crate) fn run_writer_command(
             authority,
         } => {
             if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
-                let _ = reply.try_send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
             // One-shot execution only. The sibling spans
             // `rusqlite.exact_sql.transaction` and `rusqlite.exact_sql.vacuum`
@@ -247,7 +271,7 @@ pub(crate) fn run_writer_command(
                 connection.last_insert_rowid(),
                 &last_insert_rowid,
             );
-            let _ = reply.try_send(result);
+            DeferredReply::new(reply, result)
         }
         WriterCommand::BeginTransaction {
             behavior,
@@ -259,17 +283,20 @@ pub(crate) fn run_writer_command(
             authority,
         } => {
             if policy == TransactionPolicy::AuthorizedLongLease && authority.is_none() {
-                let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
-                    "long-lease transaction requires attached write authority".to_owned(),
-                )));
-                return;
+                return DeferredReply::new(
+                    reply,
+                    Err(ExactSqlError::AuthorityDenied(
+                        "long-lease transaction requires attached write authority".to_owned(),
+                    )),
+                );
             }
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::BeginTransaction)
             {
-                let _ = reply.try_send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
+            // The begin is answered at once: the caller drives the transaction
+            // that follows. Only its terminal answer waits for the telemetry.
             let completion = {
                 let before = connection.total_changes();
                 match begin_transaction_with_busy_retry(
@@ -308,37 +335,37 @@ pub(crate) fn run_writer_command(
                         crate::hotpath_observe::record_exact_sql_transaction_outcome(
                             crate::hotpath_observe::ExactSqlTransactionOutcome::BeginFailed,
                         );
-                        let _ =
-                            reply.try_send(Err(sqlite_error("begin exact SQL transaction", error)));
-                        None
+                        return DeferredReply::new(
+                            reply,
+                            Err(sqlite_error("begin exact SQL transaction", error)),
+                        );
                     }
                 }
             };
-            if let Some(completion) = completion {
-                crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                    completion.outcome(lease.is_expired()),
-                );
-                if completion.finish(connection).is_err() {
-                    shutdown_requested.store(true, Ordering::Release);
-                }
+            let Some(completion) = completion else {
+                return DeferredReply::none();
+            };
+            crate::hotpath_observe::record_exact_sql_transaction_outcome(
+                completion.outcome(lease.is_expired()),
+            );
+            let (cleanup, terminal) = completion.finish(connection);
+            if cleanup.is_err() {
+                shutdown_requested.store(true, Ordering::Release);
             }
+            terminal
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Query)
             {
-                let _ = reply.try_send(Err(error));
-                return;
+                return DeferredReply::new(reply, Err(error));
             }
             let statement = match ExactSqlStatement::new(
                 "PRAGMA wal_checkpoint(TRUNCATE)".to_owned(),
                 Vec::new(),
             ) {
                 Ok(statement) => statement,
-                Err(error) => {
-                    let _ = reply.try_send(Err(error));
-                    return;
-                }
+                Err(error) => return DeferredReply::new(reply, Err(error)),
             };
             let result = hotpath::measure_block!("rusqlite.wal_checkpoint", {
                 with_exact_sql_guard(
@@ -356,7 +383,7 @@ pub(crate) fn run_writer_command(
                     || execute_query_unchecked(connection, statement),
                 )
             });
-            let _ = reply.try_send(result);
+            DeferredReply::new(reply, result)
         }
     }
 }
@@ -793,7 +820,9 @@ impl TransactionCompletion {
         }
     }
 
-    fn finish(self, connection: &Connection) -> Result<(), ExactSqlError> {
+    /// Detaches what the transaction attached and returns the cleanup outcome
+    /// with the caller's terminal answer, still unsent.
+    fn finish(self, connection: &Connection) -> (Result<(), ExactSqlError>, DeferredReply) {
         let mut cleanup_error = None;
         for attachment in self.attachments.into_iter().rev() {
             if let Err(error) = detach_database(connection, attachment.database_name(), None)
@@ -808,24 +837,24 @@ impl TransactionCompletion {
         {
             cleanup_error = Some(sqlite_error("restore exact SQL attachment limit", error));
         }
-        match self.terminal {
+        let terminal = match self.terminal {
             Some(TransactionTerminal::Commit { reply, result }) => {
                 let response = match (result, cleanup_error.as_ref()) {
                     (Ok(_), Some(error)) => Err(error.clone()),
                     (result, _) => result,
                 };
-                let _ = reply.try_send(response);
+                DeferredReply::new(reply, response)
             }
             Some(TransactionTerminal::Rollback { reply, result }) => {
                 let response = match (result, cleanup_error.as_ref()) {
                     (Ok(_), Some(error)) => Err(error.clone()),
                     (result, _) => result,
                 };
-                let _ = reply.try_send(response);
+                DeferredReply::new(reply, response)
             }
-            None => {}
-        }
-        cleanup_error.map_or(Ok(()), Err)
+            None => DeferredReply::none(),
+        };
+        (cleanup_error.map_or(Ok(()), Err), terminal)
     }
 }
 

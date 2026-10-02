@@ -1140,9 +1140,11 @@ reset prints one `tracedecay init <path>` command per project store whose root
 still exists; each project's store records its own root and identity, so
 `init` registers it again and keeps serving its existing code generation. A
 git checkout also registers itself again the first time a command runs in it.
-A session store written by the same release can carry the same refused table;
-the daemon names it when `init` first opens that project, and the same command
-resets it. While the profile authority is reset-required, project commands
+At startup the daemon inspects every project sessions store whose project
+root still exists, without opening the project, so a profile written by an
+earlier release lists each refused store at once and one `wipe --stale --yes`
+resets them all. A store this release's schema already admitted records that
+in its `store_manifest.json` and is not opened again until the schema changes. While the profile authority is reset-required, project commands
 refuse with this reset instead of serving: project routing resolves
 enrollment, linked worktrees, and remote-deletion records through the
 registry.

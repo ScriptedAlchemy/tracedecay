@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::{
@@ -1132,14 +1133,20 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
             .expect("warm catalog")
             .symbols,
     );
-    let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(6_187));
+    let held = store
+        .interactive_catalog_bytes()
+        .expect("a warmed catalog reports the bytes it holds");
+    // Table sizing follows the target's hash group width, so the exact figure
+    // is per-architecture; the catalog still holds every id it serves.
+    let served_id_bytes = before.iter().map(|id| id.len() as u64).sum::<u64>();
+    assert!(
+        held >= served_id_bytes,
+        "the catalog holds {held} bytes, less than the {served_id_bytes} bytes of ids it serves"
+    );
 
     assert_eq!(
         store.release_interactive_catalog(),
-        CodeGraphCatalogReleaseV1::Released {
-            bytes: held.expect("ready catalog")
-        }
+        CodeGraphCatalogReleaseV1::Released { bytes: held }
     );
     assert_eq!(store.interactive_catalog_bytes(), None);
     assert_eq!(
@@ -1183,7 +1190,7 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(store.interactive_catalog_scan_builds(), 2);
-    assert_eq!(store.interactive_catalog_bytes(), held);
+    assert_eq!(store.interactive_catalog_bytes(), Some(held));
     let after = occurrences(
         &reader
             .symbols_page(None, 10, request())
@@ -1191,4 +1198,116 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
             .symbols,
     );
     assert_eq!(after, before);
+}
+
+/// Holds the catalog build gate for `hold`, the way a corpus-sized scan
+/// keeps a warm running, while `during` runs on another thread.
+fn with_catalog_warm_held<T: Send + 'static>(
+    store: &CodeGraphProjectionStore,
+    hold: Duration,
+    during: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let gate = store
+        .interactive_catalog
+        .build
+        .lock()
+        .expect("hold the catalog build gate");
+    let running = std::thread::spawn(during);
+    std::thread::sleep(hold);
+    drop(gate);
+    running.join().expect("the held thread finishes")
+}
+
+/// A read admitted while a released catalog re-warms waits for it within
+/// its budget instead of refusing: a 1 s re-warm under a 5 s budget serves.
+///
+/// Fails if the read answers the re-warming state at once (it answered
+/// "code graph interactive catalog was released and is re-warming in the
+/// background" before reads waited), or waits past the re-warm.
+#[test]
+fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
+    let store = store_for(production_manifest());
+    let reader = reader(&store);
+    let before = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("warm catalog")
+            .symbols,
+    );
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+
+    let waiting = store.clone();
+    let (outcome, waited) = with_catalog_warm_held(&store, Duration::from_secs(1), move || {
+        let started = Instant::now();
+        (
+            waiting.await_rewarm(Duration::from_secs(5)),
+            started.elapsed(),
+        )
+    });
+
+    assert_eq!(outcome, Ok(()));
+    assert!(
+        waited >= Duration::from_secs(1) && waited < Duration::from_secs(5),
+        "the read waited {waited:?} for a 1 s re-warm"
+    );
+    assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
+    let after = occurrences(
+        &reader
+            .symbols_page(None, 10, request())
+            .expect("the re-warmed catalog serves the read")
+            .symbols,
+    );
+    assert_eq!(after, before);
+}
+
+/// A read whose budget ends before the re-warm does answers the typed
+/// pending state with the measured warm-up still needed: the catalog's
+/// last warm took 10 s, so a read that waited 2 s of a 10 s re-warm is told
+/// to retry after the ~8 s left, not after a fixed default.
+///
+/// Fails if the read refuses before its budget, waits past it, or reports
+/// a delay shorter than the warm-up still running.
+#[test]
+fn a_read_past_its_budget_answers_the_measured_remaining_rewarm() {
+    let hold = Duration::from_secs(10);
+    let store = store_for(production_manifest());
+    let warming = store.clone();
+    with_catalog_warm_held(&store, hold, move || {
+        warming
+            .warm_interactive_catalog_with_cancellation(request())
+            .expect("the first warm builds the catalog");
+    });
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+
+    let gate = store
+        .interactive_catalog
+        .build
+        .lock()
+        .expect("hold the re-warm's build gate");
+    let started = Instant::now();
+    let pending = store
+        .await_rewarm(Duration::from_secs(2))
+        .expect_err("a 2 s budget ends inside a 10 s re-warm");
+    let waited = started.elapsed();
+    let remaining = hold.saturating_sub(waited);
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(3),
+        "the read waited {waited:?} of its 2 s budget"
+    );
+    assert!(
+        pending.retry_after >= remaining && pending.retry_after < Duration::from_secs(9),
+        "retry after {:?} with {remaining:?} of the re-warm left",
+        pending.retry_after
+    );
+
+    std::thread::sleep(hold.saturating_sub(started.elapsed()));
+    drop(gate);
+    assert_eq!(store.await_rewarm(Duration::from_secs(5)), Ok(()));
+    assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
 }

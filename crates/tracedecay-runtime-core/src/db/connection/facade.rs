@@ -460,7 +460,8 @@ impl DatabaseWriteTransaction<'_> {
         let tracks_graph_generation = {
             let mut rows = transaction
                 .query(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata'",
+                    "SELECT 1 FROM pragma_table_list('metadata')
+                     WHERE schema = 'main' AND type = 'table'",
                     (),
                 )
                 .await

@@ -1,9 +1,9 @@
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    ManagedSupportFileExt, SkillInstallTarget, create_managed_skill, list_managed_skills,
-    load_managed_skill, managed_skill_dir,
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillReadError, ManagedSkillSource,
+    ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, create_managed_skill,
+    list_managed_skills, load_managed_skill, managed_skill_dir,
 };
 
 fn routing_draft() -> ManagedSkillDraft {
@@ -52,9 +52,12 @@ async fn released_summary_only_record_is_refused_and_the_store_scan_resets_only_
     let bytes = serde_json::to_vec_pretty(&value).unwrap();
     std::fs::write(&record, &bytes).unwrap();
 
-    let refusal = load_managed_skill(profile.path(), "routing")
+    let ManagedSkillReadError::Failed(refusal) = load_managed_skill(profile.path(), "routing")
         .await
-        .unwrap_err();
+        .unwrap_err()
+    else {
+        panic!("a summary-only record is a store refusal, not a missing skill");
+    };
     let expected_reason = format!(
         "managed skill record '{}' is the released summary-only shape",
         record.display()
@@ -78,13 +81,14 @@ async fn released_summary_only_record_is_refused_and_the_store_scan_resets_only_
         ["keeper"]
     );
     assert!(!dir.exists(), "the refused skill directory is reset");
-    assert_eq!(
-        load_managed_skill(profile.path(), "routing")
-            .await
-            .unwrap_err()
-            .to_string(),
-        "config error: managed skill 'routing' not found"
+    let missing = load_managed_skill(profile.path(), "routing")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&missing, ManagedSkillReadError::NotFound { id } if id == "routing"),
+        "{missing:?}"
     );
+    assert_eq!(missing.to_string(), "managed skill 'routing' not found");
 }
 
 #[tokio::test]
@@ -127,9 +131,11 @@ async fn invalid_routing_is_rejected_without_rewriting_records() {
         let markdown = std::fs::read(dir.join("SKILL.md")).unwrap();
 
         for error in [
-            load_managed_skill(profile.path(), &skill.metadata.id)
-                .await
-                .unwrap_err(),
+            TraceDecayError::from(
+                load_managed_skill(profile.path(), &skill.metadata.id)
+                    .await
+                    .unwrap_err(),
+            ),
             list_managed_skills(profile.path()).await.unwrap_err(),
         ] {
             assert!(

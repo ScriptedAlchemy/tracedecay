@@ -312,7 +312,10 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
             .await
             .expect("an earlier authority holding no rows is replaced, not refused"),
     );
-    assert_eq!(temporal_schema_version(&db_path).await, 7);
+    assert_eq!(
+        temporal_schema_version(&db_path).await,
+        tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION
+    );
     assert_eq!(
         temporal_schema_object_catalog(&db_path).await,
         final_catalog

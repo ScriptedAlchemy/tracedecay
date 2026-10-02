@@ -1,6 +1,8 @@
 //! Codex thread-goal and workflow-lifecycle ingestion: goal rows with dedupe,
 //! latest-status surfacing, observation projection, and secret sanitization.
 
+use std::collections::BTreeSet;
+
 use tempfile::TempDir;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
@@ -328,16 +330,40 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
             .await;
 
     let blobs = codex_observation_json_blobs(&runtime).await;
-    let goal_observations = blobs
+    let expected_goal_message_ids = blobs
         .iter()
         .filter(|blob| {
             blob.contains("\"kind\":\"workflow_lifecycle\"")
                 && blob.contains("\"semantic_kind\":\"goal\"")
         })
-        .count();
+        .map(|blob| {
+            let observation: serde_json::Value = serde_json::from_str(blob).unwrap();
+            observation["payload"]["stable_record_id"]
+                .as_str()
+                .expect("goal observation stable record id")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        goal_observations, 4,
-        "all goal updates, including the token/time tick, must persist raw"
+        expected_goal_message_ids.len(),
+        4,
+        "all four goal updates, including the token/time tick, must persist raw"
+    );
+    let actual_goal_message_ids = runtime
+        .search_session_messages(
+            "codex",
+            Some(runtime.project_id().as_str()),
+            "phlogiston",
+            10,
+        )
+        .await
+        .into_iter()
+        .filter(|hit| hit.message.kind.as_deref() == Some("goal"))
+        .map(|hit| hit.message.message_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_goal_message_ids, expected_goal_message_ids,
+        "sessions search must return one goal row for every goal observation"
     );
 
     let goal_rows: Vec<_> = codex_workflow_fact_rows(&runtime)
@@ -346,26 +372,28 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         .filter(|(kind, _, _)| kind == "goal")
         .collect();
     assert_eq!(
-        goal_rows.len(),
-        3,
-        "projected goal state must keep transitions only; got {goal_rows:?}"
+        goal_rows
+            .iter()
+            .map(|(_, status, _)| status.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("active"), Some("active"), Some("paused")],
+        "projected goal state must keep transitions only"
     );
-    assert_eq!(goal_rows[0].1.as_deref(), Some("active"));
-    assert_eq!(goal_rows[1].1.as_deref(), Some("active"));
-    assert_eq!(goal_rows[2].1.as_deref(), Some("paused"));
 
     let goals = runtime
         .runtime()
         .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
         .await
         .unwrap();
-    assert_eq!(goals.len(), 1);
+    let [latest_goal] = goals.as_slice() else {
+        panic!("latest goals must contain exactly the session's latest goal: {goals:?}");
+    };
     assert_eq!(
-        goals[0].message.text,
+        latest_goal.message.text,
         "phlogiston pipeline rollout and verification"
     );
     let meta: serde_json::Value =
-        serde_json::from_str(goals[0].message.metadata_json.as_deref().unwrap()).unwrap();
+        serde_json::from_str(latest_goal.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(meta["status"], "paused");
 
     let observations = runtime
@@ -393,10 +421,13 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         .into_iter()
         .filter(|(kind, _, _)| kind == "goal")
         .collect();
-    assert_eq!(goal_rows_rebuilt.len(), 3);
-    assert_eq!(goal_rows_rebuilt[0].1.as_deref(), Some("active"));
-    assert_eq!(goal_rows_rebuilt[1].1.as_deref(), Some("active"));
-    assert_eq!(goal_rows_rebuilt[2].1.as_deref(), Some("paused"));
+    assert_eq!(
+        goal_rows_rebuilt
+            .iter()
+            .map(|(_, status, _)| status.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("active"), Some("active"), Some("paused")]
+    );
 
     // Restart reopen: latest goal remains paused with objective text.
     drop(runtime);
@@ -406,13 +437,15 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
         .await
         .unwrap();
-    assert_eq!(goals_again.len(), 1);
+    let [latest_goal_again] = goals_again.as_slice() else {
+        panic!("reopened latest goals must preserve one session goal: {goals_again:?}");
+    };
     assert_eq!(
-        goals_again[0].message.text,
+        latest_goal_again.message.text,
         "phlogiston pipeline rollout and verification"
     );
     let meta_again: serde_json::Value =
-        serde_json::from_str(goals_again[0].message.metadata_json.as_deref().unwrap()).unwrap();
+        serde_json::from_str(latest_goal_again.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(meta_again["status"], "paused");
 }
 

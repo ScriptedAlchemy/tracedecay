@@ -57,6 +57,9 @@ fn generation_bits(generation: libc::c_long) -> u64 {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStrExt;
+
+    #[cfg(target_os = "linux")]
     use super::inode_generation;
 
     #[cfg(target_os = "linux")]
@@ -65,14 +68,31 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("rollout.jsonl");
         std::fs::write(&path, b"{}\n").unwrap();
-        let first = inode_generation(&std::fs::File::open(&path).unwrap())
-            .unwrap()
-            .expect("ext4 reports an inode generation");
+        let Some(first) = inode_generation(&std::fs::File::open(&path).unwrap()).unwrap() else {
+            // tmpfs (a container's /tmp) and ZFS do not implement
+            // FS_IOC_GETVERSION; only ext4 is required to report one here.
+            assert!(!is_ext4(temp.path()), "ext4 reports an inode generation");
+            eprintln!(
+                "skipping: the filesystem under {} reports no inode generation",
+                temp.path().display()
+            );
+            return;
+        };
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"{}\n").unwrap();
         let second = inode_generation(&std::fs::File::open(&path).unwrap())
             .unwrap()
             .expect("ext4 reports an inode generation");
         assert_ne!(first, second);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_ext4(path: &std::path::Path) -> bool {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `statfs` is a plain C struct, valid when zeroed.
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is NUL-terminated and `stat` is a writable `statfs`.
+        assert_eq!(unsafe { libc::statfs(path.as_ptr(), &mut stat) }, 0);
+        stat.f_type == libc::EXT4_SUPER_MAGIC
     }
 }
