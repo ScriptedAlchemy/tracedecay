@@ -755,6 +755,81 @@ fn apply_pragmas(
     Ok(())
 }
 
+/// Levels a point lookup reads in one store B-tree. The narrowest interior
+/// fanout these schemas produce is about 45 cells per 4 KiB page (64-hex
+/// digest keys), and four levels of it address 45³ ≈ 91k leaf pages, about
+/// 370 MB in a single tree.
+const BTREE_LEVEL_BOUND: i64 = 4;
+
+/// The writer connection's page cache: one root-to-leaf path for every B-tree
+/// the store's admitted schema holds, so the interior pages an ingest looks up
+/// on every message stay resident between messages. SQLite's fixed default
+/// is smaller than that working set once a session store grows.
+pub(crate) struct WriterPageCache {
+    floor_pages: i64,
+    fitted_schema_version: Option<i64>,
+}
+
+impl WriterPageCache {
+    /// Captures SQLite's default cache as the floor, then fits the cache to
+    /// the schema the store holds at open.
+    pub(crate) fn new(connection: &Connection) -> Result<Self, ConnectionPolicyError> {
+        let configured: i64 = connection
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .map_err(|source| policy("page cache default", source))?;
+        let page_size: i64 = connection
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .map_err(|source| policy("page size", source))?;
+        // A negative cache_size is a budget in KiB, a positive one in pages.
+        let floor_pages = if configured < 0 {
+            configured.saturating_neg().saturating_mul(1024) / page_size.max(1)
+        } else {
+            configured
+        };
+        let mut cache = Self {
+            floor_pages,
+            fitted_schema_version: None,
+        };
+        cache.fit(connection)?;
+        Ok(cache)
+    }
+
+    /// Re-derives the cache when the committed schema differs from the one it
+    /// was last sized for: the schema install that follows a fresh open, and
+    /// any later admitted table or index.
+    pub(crate) fn fit(&mut self, connection: &Connection) -> Result<(), ConnectionPolicyError> {
+        let schema_version: i64 = connection
+            .prepare_cached("PRAGMA schema_version")
+            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+            .map_err(|source| policy("schema version", source))?;
+        if self.fitted_schema_version == Some(schema_version) {
+            return Ok(());
+        }
+        let btrees: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE rootpage > 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| policy("admitted B-trees", source))?;
+        let pages = btrees
+            .saturating_mul(BTREE_LEVEL_BOUND)
+            .max(self.floor_pages);
+        // Writer SQL may never resize the cache; only this policy may.
+        connection
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .map_err(|source| policy("page cache authorizer", source))?;
+        let resized = connection.pragma_update(None, "cache_size", pages);
+        connection
+            .authorizer(Some(authorize_writer))
+            .map_err(|source| policy("restore writer authorizer", source))?;
+        resized.map_err(|source| policy("page cache size", source))?;
+        hotpath::gauge!("rusqlite.writer.page_cache_pages").set(pages);
+        self.fitted_schema_version = Some(schema_version);
+        Ok(())
+    }
+}
+
 fn verify_pragma_i64(
     connection: &Connection,
     name: &'static str,

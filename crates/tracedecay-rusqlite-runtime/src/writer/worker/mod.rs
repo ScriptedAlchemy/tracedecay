@@ -409,6 +409,13 @@ impl Worker {
             }
             None => None,
         };
+        let page_cache = match connection::WriterPageCache::new(&connection) {
+            Ok(page_cache) => page_cache,
+            Err(error) => {
+                return self
+                    .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
+            }
+        };
         let mut checkpoint = match WriterCheckpointController::new(
             RusqliteCheckpointDriver::new(connection),
             checkpoint_config(&self.config),
@@ -440,8 +447,9 @@ impl Worker {
         }
         let state = Arc::clone(&self.state);
         let telemetry = self.telemetry.clone();
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.run_loop(checkpoint, runtime)))
-        {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+            self.run_loop(checkpoint, page_cache, runtime)
+        })) {
             // The fault is otherwise invisible: every later request only sees
             // "writer unavailable". Name the panic so a faulted writer can be
             // traced from the process log.
@@ -464,7 +472,12 @@ impl Worker {
         let _ = self.started.send(Err(error));
     }
 
-    fn run_loop(mut self, mut checkpoint: WriterCheckpointController, runtime: Runtime) {
+    fn run_loop(
+        mut self,
+        mut checkpoint: WriterCheckpointController,
+        mut page_cache: connection::WriterPageCache,
+        runtime: Runtime,
+    ) {
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
@@ -639,6 +652,7 @@ impl Worker {
                             // Answer only once the work is in the telemetry, so
                             // a caller's snapshot after its reply includes it.
                             reply.send();
+                            self.fit_page_cache(&mut page_cache, &mut checkpoint);
                             self.run_scheduled_checkpoint(&mut checkpoint);
                             hard_checkpoint_retry_due = checkpoint
                                 .hard_drain_required()
@@ -776,6 +790,7 @@ impl Worker {
                     &self.state,
                     &self.watermark_publisher,
                 );
+                self.fit_page_cache(&mut page_cache, &mut checkpoint);
                 self.run_scheduled_checkpoint(&mut checkpoint);
                 if checkpoint.hard_drain_required() {
                     for pending in batches {
@@ -818,6 +833,17 @@ impl Worker {
             Err(_) => self
                 .state
                 .store(WriterState::Faulted as u8, Ordering::Release),
+        }
+    }
+
+    fn fit_page_cache(
+        &self,
+        page_cache: &mut connection::WriterPageCache,
+        checkpoint: &mut WriterCheckpointController,
+    ) {
+        if page_cache.fit(checkpoint.connection_mut()).is_err() {
+            self.state
+                .store(WriterState::Faulted as u8, Ordering::Release);
         }
     }
 
