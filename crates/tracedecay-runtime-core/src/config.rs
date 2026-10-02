@@ -158,6 +158,14 @@ impl ProfileRoot {
         &self.data_dir
     }
 
+    /// Whether the data directory is the home's own `.tracedecay`, the
+    /// profile [`ProfileRoot::under_home`] names.
+    pub fn is_home_default(&self) -> bool {
+        self.home
+            .as_ref()
+            .is_some_and(|home| canonicalize_data_dir(home.join(TRACEDECAY_DIR)) == self.data_dir)
+    }
+
     /// The user home agent hosts keep their state under, when known.
     pub fn home(&self) -> Option<&Path> {
         self.home.as_deref()

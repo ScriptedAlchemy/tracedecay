@@ -673,6 +673,116 @@ async fn user_job_pre_run_command_runs_from_project_root() {
     assert_eq!(run.report["status"], json!("delivered"));
 }
 
+async fn run_scheduled_pre_run_failure(
+    job_id: &str,
+    command: &str,
+    project_root: std::path::PathBuf,
+) -> (AutomationJob, AutomationRunLedgerRecord) {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(&profile_root).unwrap();
+
+    let mut job = sample_job(job_id);
+    job.pre_run_command = Some(command.to_string());
+    let config = AutomationConfig {
+        allow_job_commands: true,
+        ..enabled_job_config()
+    };
+    let backend = ContentBackend::new("unused");
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &config,
+        &backend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some(format!("{job_id}-run")),
+            profile_root: Some(profile_root),
+            project_root: Some(project_root),
+            occurrence_anchor_run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.report["status"], json!("failed"));
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Failed);
+    assert_eq!(run.ledger_record.trigger, AutomationTrigger::Scheduler);
+    (job, run.ledger_record)
+}
+
+fn after_failure_cooldown(record: &AutomationRunLedgerRecord) -> i64 {
+    record.completed_at.parse::<i64>().unwrap() + 301
+}
+
+#[tokio::test]
+async fn scheduled_pre_run_spawn_failure_is_retried_after_cooldown() {
+    let temp = tempdir().unwrap();
+    let missing_root = temp.path().join("missing-project");
+
+    let (job, record) =
+        run_scheduled_pre_run_failure("cmd-spawn", "echo unreachable", missing_root).await;
+
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Unavailable)
+    );
+    assert_eq!(record.error_retryable, Some(true));
+    assert!(
+        record
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("job pre-run command failed: failed to spawn command:"),
+        "{:?}",
+        record.error
+    );
+    assert_eq!(
+        job_schedule_decision(
+            &job,
+            std::slice::from_ref(&record),
+            after_failure_cooldown(&record)
+        ),
+        None
+    );
+}
+
+#[cfg(windows)]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input 1>&2 & exit 3";
+#[cfg(not(windows))]
+const NONZERO_EXIT_PRE_RUN_COMMAND: &str = "echo bad-input >&2; exit 3";
+
+#[tokio::test]
+async fn scheduled_pre_run_nonzero_exit_is_not_retried() {
+    let temp = tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root).unwrap();
+
+    let (job, record) =
+        run_scheduled_pre_run_failure("cmd-exit", NONZERO_EXIT_PRE_RUN_COMMAND, project_root).await;
+
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Permanent)
+    );
+    assert_eq!(record.error_retryable, Some(false));
+    let error = record.error.as_deref().unwrap();
+    assert!(
+        error.starts_with("job pre-run command failed: command exited with"),
+        "{error}"
+    );
+    assert!(error.ends_with(": bad-input"), "{error}");
+    assert_eq!(
+        job_schedule_decision(
+            &job,
+            std::slice::from_ref(&record),
+            after_failure_cooldown(&record)
+        ),
+        Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
+    );
+}
+
 #[tokio::test]
 async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     let temp = tempdir().unwrap();

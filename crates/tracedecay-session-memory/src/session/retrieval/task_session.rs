@@ -62,7 +62,9 @@ impl SessionExecutionAdmissionFailure {
         match self {
             Self::WrongScope => SessionRetrievalOutcome::WrongScope,
             Self::Denied => SessionRetrievalOutcome::Denied,
-            Self::Unavailable => SessionRetrievalOutcome::Unavailable,
+            Self::Unavailable => SessionRetrievalOutcome::Unavailable(
+                SessionRetrievalUnavailableCause::AuthorityAbsent,
+            ),
             Self::BudgetExhausted { stage } => super::budget_exhausted(stage, None),
             Self::TimedOut => SessionRetrievalOutcome::TimedOut,
             Self::Cancelled => SessionRetrievalOutcome::Cancelled,
@@ -345,7 +347,7 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::CursorRefused(mismatch) => {
             TaskSessionRetrievalOutcomeV1::CursorRefused(mismatch)
         }
-        SessionRetrievalOutcome::Unavailable
+        SessionRetrievalOutcome::Unavailable(_)
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }
         | SessionRetrievalOutcome::CompleteZero { .. }

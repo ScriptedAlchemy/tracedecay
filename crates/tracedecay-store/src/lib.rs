@@ -153,8 +153,8 @@ pub use projection::{
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageProjection, WorkflowFactProjection,
-    WorkflowFactRecord, message_output_digest,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V6,
+    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord, message_output_digest,
 };
 pub use provider_descriptor::{
     TOOL_CALL_ID_COVERAGE_KEY, TOOL_CALL_IDS_HOST_UNRECORDED, ToolMetadataNormalizer,

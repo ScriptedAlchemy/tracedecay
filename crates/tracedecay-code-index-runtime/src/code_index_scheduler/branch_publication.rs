@@ -526,10 +526,10 @@ impl BranchPublicationContextV1 {
                 && freshness.as_ref().is_some_and(|freshness| {
                     freshness.latest_generation_id.as_deref()
                         == Some(generation.manifest().generation_id.as_str())
-                        && matches!(
-                            freshness.code_graph_serving.as_ref(),
-                            Some(CodeGraphServingReadinessV1::Ready)
-                        )
+                        && freshness
+                            .code_graph_serving
+                            .as_ref()
+                            .is_some_and(CodeGraphServingReadinessV1::is_activated)
                 })
                 && let ServingGenerationInstallationOutcomeV1::Installed(installation) = schedulers
                     .install_exact_serving_generation(canonical_worktree_root, generation)

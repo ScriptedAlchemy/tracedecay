@@ -22,9 +22,9 @@ use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
-    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphSymbolSummaryV1,
-    build_code_graph_manifest_inputs_checked, code_graph_projection_identity,
-    current_generation_entity, has_label,
+    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphServingWarmthV1,
+    CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
+    code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 mod imports;
@@ -1122,7 +1122,7 @@ fn census_and_search_refuse_zero_sizes_and_cancellation() {
 }
 
 #[test]
-fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
+fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
     let store = store_for(production_manifest());
     assert_eq!(store.interactive_catalog_bytes(), None, "nothing built yet");
     let reader = reader(&store);
@@ -1133,7 +1133,7 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
             .symbols,
     );
     let held = store.interactive_catalog_bytes();
-    assert_eq!(held, Some(6_187));
+    assert_eq!(held, Some(6_203));
 
     assert_eq!(
         store.release_interactive_catalog(),
@@ -1146,14 +1146,49 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_on_the_next_read() {
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::NotReady
     );
+    assert_eq!(
+        store.serving_warmth(),
+        Ok(CodeGraphServingWarmthV1::Warming(
+            "code graph interactive catalog was released for memory; the next graph read \
+             re-warms it"
+                .to_owned()
+        ))
+    );
 
+    // A read whose budget ends after its first look cannot rebuild the
+    // catalog itself; it answers warming and the rebuild runs on its own.
+    assert_eq!(
+        reader
+            .symbols_page(
+                None,
+                10,
+                Arc::new(CancelAfter {
+                    observations: AtomicU64::new(0),
+                    allowed: 2,
+                }),
+            )
+            .expect_err("a released catalog is not rebuilt on the request"),
+        CodeGraphProjectionError::Unavailable(
+            "code graph interactive catalog was released and is re-warming in the background"
+                .to_owned()
+        )
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while store.serving_warmth() != Ok(CodeGraphServingWarmthV1::Warm) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background rebuild finished: {:?}",
+            store.serving_warmth()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(store.interactive_catalog_scan_builds(), 2);
+    assert_eq!(store.interactive_catalog_bytes(), held);
     let after = occurrences(
         &reader
             .symbols_page(None, 10, request())
-            .expect("the next read rebuilds the catalog")
+            .expect("the rebuilt catalog serves")
             .symbols,
     );
     assert_eq!(after, before);
-    assert_eq!(store.interactive_catalog_scan_builds(), 2);
-    assert_eq!(store.interactive_catalog_bytes(), held);
 }

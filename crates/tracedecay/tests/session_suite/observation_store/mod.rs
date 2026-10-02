@@ -19,7 +19,7 @@ use tracedecay_domain::{
     RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
     RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark,
-    WorktreeId,
+    WorktreeId, is_canonical_payload_revision_replay,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -497,6 +497,74 @@ fn canonical_revision_observation(
         ObservationSourceGenerationV1::new(generation).unwrap(),
         range,
         ObservationOrderingDomainV1::SqliteRowId,
+        stable_record_id,
+    )
+    .unwrap();
+
+    DurableObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+/// Snapshot-provider analogue of [`canonical_revision_observation`]: a
+/// message-only canonical envelope ordered by snapshot position, like records
+/// admitted before location facts were projected.
+fn snapshot_revision_observation(
+    provider: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    content: &str,
+) -> DurableObservationV1 {
+    let session_id = format!("session.{provider}.location-revision");
+    let stable_record_id = ObservationId::new("record.snapshot.stable").unwrap();
+    let relations =
+        CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
+            .with_message_id(stable_record_id.clone());
+    let message = CanonicalObservationFactV1::Message {
+        role: CanonicalMessageRoleV1::Assistant,
+        content: json!(content),
+        model: None,
+        timestamp: None,
+    };
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
+    let payload = serde_json::to_value(
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new(provider).unwrap(),
+            "message",
+            stable_record_id.clone(),
+            relations,
+            vec![message],
+            evidence,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(receipt_id).unwrap(),
+            ComponentVersion::new("privacy.observation-record.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(payload_reference),
+    )
+    .unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        provider_source(provider, &session_id),
+        scope(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
         stable_record_id,
     )
     .unwrap();
@@ -1416,6 +1484,152 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
                 "{provider} {difference} left the wrong durable cursor"
             );
         }
+    }
+}
+
+/// Codex capture used to drop every `response_item` tool-call `arguments` to
+/// null, so a rewritten rollout now carries the real arguments for the same
+/// observation id. The revision normalizer adopts them only when the retained
+/// payload has none; a retained non-null value or any other authored change
+/// stays an identity collision.
+#[test]
+fn canonical_payload_revision_adopts_only_dropped_codex_tool_arguments() {
+    let base = canonical_revision_observation(
+        "codex",
+        1,
+        41,
+        42,
+        "receipt.codex.tool-args.base",
+        false,
+        "stable authored content",
+    );
+    let with_tool_invocation = |receipt_id: &str, name: &str, arguments: serde_json::Value| {
+        mutate_observation_payload(&base, receipt_id, |payload| {
+            payload["facts"].as_array_mut().unwrap().push(json!({
+                "kind": "tool_invocation",
+                "invocation_id": "call-merge",
+                "name": name,
+                "arguments": arguments,
+            }));
+        })
+    };
+
+    let stored_dropped = with_tool_invocation(
+        "receipt.codex.tool-args.dropped",
+        "exec_command",
+        serde_json::Value::Null,
+    );
+    let current_captured = with_tool_invocation(
+        "receipt.codex.tool-args.captured",
+        "exec_command",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_captured
+    ));
+
+    let stored_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-a",
+        "exec_command",
+        json!({"cmd": "a"}),
+    );
+    let current_authored = with_tool_invocation(
+        "receipt.codex.tool-args.authored-b",
+        "exec_command",
+        json!({"cmd": "b"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_authored,
+        &current_authored
+    ));
+
+    let current_renamed = with_tool_invocation(
+        "receipt.codex.tool-args.renamed",
+        "apply_patch",
+        json!({"cmd": "gh pr merge 366 --squash"}),
+    );
+    assert!(!is_canonical_payload_revision_replay(
+        &stored_dropped,
+        &current_renamed
+    ));
+}
+
+/// Snapshot hosts and Vibe now lead every canonical payload with a
+/// location-only `Session` fact. The revision normalizer adopts that fact for
+/// records admitted before the change, and for retained location-only sessions
+/// adopts a moved path/provenance, but any other authored difference stays an
+/// identity collision.
+#[test]
+fn canonical_payload_revision_adopts_snapshot_location_session() {
+    for provider in ["cline", "kiro"] {
+        let stored = snapshot_revision_observation(
+            provider,
+            1,
+            41,
+            42,
+            &format!("receipt.{provider}.location.stored"),
+            "stable authored content",
+        );
+        let location_session = |payload: &mut serde_json::Value| {
+            let session = serde_json::to_value(CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: Some("/workspace/task".to_string()),
+                transcript_path: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: None,
+                native_source: None,
+                profile: None,
+                location_provenance: Some("task_metadata".to_string()),
+            })
+            .unwrap();
+            payload["facts"].as_array_mut().unwrap().insert(0, session);
+        };
+        let current = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.current"),
+            location_session,
+        );
+        assert!(
+            is_canonical_payload_revision_replay(&stored, &current),
+            "{provider}: a leading location session must adopt on replay"
+        );
+
+        let moved = mutate_observation_payload(&current, "receipt.location.moved", |payload| {
+            payload["facts"][0]["location_path"] = json!("/workspace/moved");
+        });
+        assert!(
+            is_canonical_payload_revision_replay(&current, &moved),
+            "{provider}: a moved location path must adopt on replay"
+        );
+
+        let changed_content = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.changed"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][1]["content"] = json!("changed authored content");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &changed_content),
+            "{provider}: location adoption must not launder authored changes"
+        );
+
+        let bloated_session = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.bloated"),
+            |payload| {
+                location_session(payload);
+                payload["facts"][0]["project_path"] = json!("/workspace/task");
+            },
+        );
+        assert!(
+            !is_canonical_payload_revision_replay(&stored, &bloated_session),
+            "{provider}: a session with authored fields is not location-only"
+        );
     }
 }
 

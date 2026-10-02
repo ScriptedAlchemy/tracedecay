@@ -18,7 +18,7 @@
 use std::cmp::{Ordering as CmpOrdering, Reverse};
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,15 +34,17 @@ use tracedecay_store::runtime::{
 };
 
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
-use crate::row_index::{ROW_INDEX_FILE, RowIndexBuilder};
+use crate::row_index::{
+    ENTITY_ROW_OFFSETS_FILE, EntityRowOffsetsWriter, ROW_INDEX_FILE, RowIndexBuilder,
+};
 use crate::{GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey};
 
 use super::{
     CheckedDigestWriter, CheckedVecWriter, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationRelation, GraphGenerationReplaySource,
     GraphProjectionIdentity, GraphRowDigestSum, SealedCodeGenerationReplay,
-    checked_canonical_bytes, relational_dependency_generations, validate_sealed_replay,
-    write_generation_identity_frames, write_row_frame,
+    checked_canonical_bytes, relational_dependency_generations, row_frame_lanes,
+    validate_sealed_replay, write_generation_identity_frames, write_row_frame,
 };
 
 /// Canonical bytes a spill buffers before it sorts and writes one run.
@@ -52,7 +54,7 @@ use super::{
 pub const GRAPH_ROW_SPILL_RUN_BYTES: usize = 32 * 1024 * 1024;
 /// Read and write buffer per open run or merged file.
 const SPILL_IO_BUFFER_BYTES: usize = 256 * 1024;
-const ENTITIES_FILE: &str = "entities.rows";
+pub(crate) const ENTITIES_FILE: &str = "entities.rows";
 const RELATIONS_FILE: &str = "relations.rows";
 /// A producer-owned file that travels with the sealed generation, see
 /// [`GraphGenerationRowSpill::attachment_path`].
@@ -106,6 +108,19 @@ impl SpillRow {
             + self.endpoints[0].len()
             + self.endpoints[1].len()
             + self.canonical.len()
+    }
+
+    fn encoded_len(&self) -> u64 {
+        [
+            self.identity.len(),
+            self.endpoints[0].len(),
+            self.endpoints[1].len(),
+            self.canonical.len(),
+        ]
+        .into_iter()
+        .fold(0_u64, |total, length| {
+            total.saturating_add(4).saturating_add(length as u64)
+        })
     }
 
     fn write(&self, writer: &mut impl Write) -> Result<(), GraphDbError> {
@@ -441,6 +456,16 @@ impl GraphGenerationRowSpill {
             .join(ATTACHMENT_FILE)
             .is_file()
             .then(RowIndexBuilder::new);
+        let mut entity_offsets = row_index
+            .is_some()
+            .then(|| {
+                EntityRowOffsetsWriter::create(
+                    &directory.join(ENTITY_ROW_OFFSETS_FILE),
+                    entity_identities.len(),
+                )
+            })
+            .transpose()?;
+        let mut entity_row_offset = 0_u64;
         let entity_count = merge_runs(
             &self.entities.runs,
             &directory.join(ENTITIES_FILE),
@@ -449,6 +474,13 @@ impl GraphGenerationRowSpill {
                 let lanes = write_row_frame(&mut writer, "entity", &row.canonical)?;
                 if let Some(index) = row_index.as_mut() {
                     index.entity(&row.identity, lanes)?;
+                }
+                if let Some(offsets) = entity_offsets.as_mut() {
+                    let length = row.encoded_len();
+                    offsets.push(entity_row_offset, length)?;
+                    entity_row_offset = entity_row_offset.checked_add(length).ok_or_else(|| {
+                        GraphDbError::unavailable("graph entity row offsets exceed u64")
+                    })?;
                 }
                 Ok(())
             },
@@ -489,6 +521,9 @@ impl GraphGenerationRowSpill {
         }
         let row_sum = writer.row_sum();
         writer.finish()?;
+        if let Some(offsets) = entity_offsets {
+            offsets.finish()?;
+        }
         if let Some(index) = row_index {
             index.write(&directory.join(ROW_INDEX_FILE))?;
         }
@@ -667,6 +702,14 @@ impl SpilledGraphGeneration {
         path.is_file().then_some(path)
     }
 
+    /// Canonical entity rows and their identity-order offsets, retained only
+    /// for a generation carrying a producer attachment.
+    pub(crate) fn entity_rows(&self) -> Option<(PathBuf, PathBuf)> {
+        let rows = self.directory.path().join(ENTITIES_FILE);
+        let offsets = self.directory.path().join(ENTITY_ROW_OFFSETS_FILE);
+        (rows.is_file() && offsets.is_file()).then_some((rows, offsets))
+    }
+
     pub(crate) fn directory(&self) -> &Path {
         self.directory.path()
     }
@@ -722,6 +765,68 @@ impl SpilledGraphGeneration {
             check,
         )
     }
+}
+
+pub(crate) fn read_spilled_entity(
+    rows: &Path,
+    offset: u64,
+    length: u64,
+    expected_identity: &GraphEntityId,
+    expected_lanes: super::RowLanes,
+) -> Result<GraphEntity, GraphDbError> {
+    let mut file = File::open(rows).map_err(|error| spill_io("entity rows open", error))?;
+    let rows_bytes = file
+        .metadata()
+        .map_err(|error| spill_io("entity rows metadata", error))?
+        .len();
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > rows_bytes)
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "graph entity row offset exceeds its row file".to_owned(),
+        });
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| GraphDbError::unavailable("graph entity row length exceeds address space"))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| spill_io("entity rows seek", error))?;
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(length).map_err(|error| {
+        GraphDbError::unavailable(format!("graph entity row cannot be allocated: {error}"))
+    })?;
+    encoded.resize(length, 0);
+    file.read_exact(&mut encoded)
+        .map_err(|error| spill_io("entity rows read", error))?;
+    let mut cursor = encoded.as_slice();
+    let row = SpillRow::read(&mut cursor)?.ok_or_else(|| GraphDbError::Corrupt {
+        message: "graph entity row offset points at end of file".to_owned(),
+    })?;
+    if !cursor.is_empty() || !row.endpoints.iter().all(String::is_empty) {
+        return Err(GraphDbError::Corrupt {
+            message: "graph entity row offset does not cover one entity row".to_owned(),
+        });
+    }
+    if row.identity != expected_identity.as_str()
+        || row_frame_lanes("entity", &row.canonical)? != expected_lanes
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "graph entity row does not match its row index".to_owned(),
+        });
+    }
+    let entity: GraphEntity =
+        serde_json::from_slice(&row.canonical).map_err(|error| GraphDbError::Corrupt {
+            message: format!("graph entity row is not canonical entity JSON: {error}"),
+        })?;
+    entity.validate()?;
+    if entity.identity != *expected_identity
+        || canonical_row(&entity, "recovered generation entity", &|| Ok(()))? != row.canonical
+    {
+        return Err(GraphDbError::Corrupt {
+            message: "graph entity row canonical payload does not match its identity".to_owned(),
+        });
+    }
+    Ok(entity)
 }
 
 /// Decoded rows of one merged spill file, in canonical order, each with the

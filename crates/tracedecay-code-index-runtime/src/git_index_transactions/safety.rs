@@ -256,7 +256,7 @@ impl FixedGitIndexRunner {
             "config",
             "--null",
             "--get-regexp",
-            r"^(core\.sparseCheckout|core\.sparseCheckoutCone|index\.sparse)$",
+            r"^(core\.sparsecheckout|core\.sparsecheckoutcone|index\.sparse)$",
         ])?;
         let config = if config.status.success() {
             config.stdout
@@ -269,7 +269,7 @@ impl FixedGitIndexRunner {
             });
         };
         let sparse_entries = self
-            .run_git("ls-files", &["ls-files", "--sparse", "-t", "-z"])?
+            .run_git("ls-files", &["ls-files", "-t", "-z"])?
             .stdout
             .split(|byte| *byte == 0)
             .filter(|entry| entry.starts_with(b"S "))

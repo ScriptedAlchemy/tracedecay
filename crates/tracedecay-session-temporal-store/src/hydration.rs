@@ -553,7 +553,8 @@ fn canonical_projected_message(
     let output_ordinal = u32::try_from(output_ordinal).ok()?;
     let projection = derive_canonical_projection(observation).ok()?;
     projection
-        .messages()
+        .message()
+        .into_iter()
         .find(|output| {
             output.output_ordinal() == output_ordinal
                 && output.message().provider == observation.source().provider().as_str()

@@ -4,14 +4,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::automation::artifacts::sha256_json;
-use crate::automation::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskResponse};
+use crate::automation::backend::{
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskResponse,
+    runtime_failure_class,
+};
 use crate::automation::config::AutomationConfig;
 use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
-use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
+use crate::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationTrigger,
+};
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -305,6 +310,22 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                     .map_err(Into::into);
             }
         };
+        let owning_profile_root = prebuilt_evidence
+            .as_ref()
+            .map(|bundle| bundle.profile_root.clone())
+            .or_else(|| options.profile_root.clone());
+        if let Some(profile_root) = owning_profile_root.as_deref()
+            && let Some(reconciled) = reconcile_pending_skill_deployment(
+                &run,
+                &host_io,
+                host_home.as_deref(),
+                profile_root,
+                analytics_project_root,
+            )
+            .await?
+        {
+            return Ok(reconciled);
+        }
         let evidence_bundle = match prebuilt_evidence {
             Some(bundle) => bundle,
             None => match build_skill_writer_evidence(
@@ -417,6 +438,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                         evidence_hash,
                         Some(proposed_ops),
                         error.to_string(),
+                        AgentTaskFailureClass::Permanent,
                         &retry_report,
                     )
                     .await?;
@@ -459,11 +481,12 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                             evidence_hash,
                             Some(proposed_ops),
                             error.to_string(),
+                            error.failure_class(),
                             &retry_report,
                         )
                         .await?;
                     return Err(AutomationRunError::RecordedFailure {
-                        error,
+                        error: error.into(),
                         ledger_record: Box::new(ledger_record),
                     });
                 }
@@ -518,6 +541,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                         evidence_hash,
                         Some(proposed_ops),
                         err.to_string(),
+                        runtime_failure_class(&err),
                         &retry_report,
                     )
                     .await?;
@@ -550,6 +574,123 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             committed_receipt,
         })
     })
+}
+
+/// The latest skill-writer terminal when it committed skill mutations that
+/// never reached the hosts. Every skill-writer run settles this before it asks
+/// the backend for new work, so no later terminal can hide it.
+pub(super) fn pending_skill_deployment(
+    summary: &AutomationRunLedgerTaskSummary,
+) -> Option<&AutomationRunLedgerRecord> {
+    summary.latest_effectful_any_trigger().filter(|record| {
+        record.status == crate::automation::run_ledger::AutomationRunStatus::Failed
+            && record.error_retryable == Some(true)
+            && record
+                .applied_ops
+                .as_ref()
+                .and_then(|ops| ops.get("deployment"))
+                .and_then(|deployment| deployment.get("retry_required"))
+                .and_then(Value::as_bool)
+                == Some(true)
+    })
+}
+
+/// Redeploys the committed managed-skill store when the latest terminal left
+/// host deployment owed. The run settles that debt instead of asking the
+/// backend for new mutations, whose replay would collide with the skills the
+/// earlier run already committed.
+async fn reconcile_pending_skill_deployment(
+    run: &AgentTaskRunContext<'_>,
+    host_io: &HostIo,
+    host_home: Option<&std::path::Path>,
+    profile_root: &std::path::Path,
+    project_root: Option<&std::path::Path>,
+) -> AutomationRunResult<Option<SkillWriterAutomationRun>> {
+    let summary = run.ledger_summary().await?;
+    let Some(pending) = pending_skill_deployment(&summary) else {
+        return Ok(None);
+    };
+    let reconciled_run_id = pending.run_id.clone();
+    let rejected_ops = pending.rejected_ops.clone();
+    let rejected_count = pending.rejected_count;
+    let deployment = crate::automation::skill_writer::deploy_managed_skills(
+        host_io,
+        host_home,
+        profile_root,
+        project_root,
+    );
+    let deployment_json = serde_json::to_value(&deployment).map_err(TraceDecayError::from)?;
+    let report = json!({
+        "status": if deployment.retry_required {
+            "deployment_retry_required"
+        } else {
+            "deployment_reconciled"
+        },
+        "dry_run": false,
+        "task": "skill_writer",
+        "reconciled_run_id": reconciled_run_id,
+        "deployment": deployment_json,
+    });
+    let applied_ops = json!({ "deployment": deployment_json });
+    let finalizer = run.finalizer(None)?;
+    if deployment.retry_required {
+        let error = TraceDecayError::Config {
+            message: "managed skill host deployment still requires retry".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Retryable,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                None,
+                Some(report),
+                0,
+                0,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    if rejected_count > 0 {
+        let error = TraceDecayError::Config {
+            message: "skill curation could not apply every validated proposal".to_string(),
+        };
+        let ledger_record = finalizer
+            .append_failed_record_with_effects(
+                None,
+                None,
+                None,
+                error.to_string(),
+                AgentTaskFailureClass::Permanent,
+                &AgentTaskRetryReport::default(),
+                Some(applied_ops),
+                rejected_ops,
+                Some(report),
+                0,
+                rejected_count,
+            )
+            .await?;
+        return Err(AutomationRunError::RecordedFailure {
+            error,
+            ledger_record: Box::new(ledger_record),
+        });
+    }
+    let ledger_record = finalizer
+        .append_reconciliation_record(applied_ops, report.clone())
+        .await?;
+    Ok(Some(SkillWriterAutomationRun {
+        run_id: run.run_id.clone(),
+        report,
+        ledger_record,
+        backend_response: None,
+        committed_receipt: None,
+    }))
 }
 
 /// Validates and automatically applies the `skills` half of a skill-writer (or
@@ -723,9 +864,13 @@ pub(super) async fn finalize_skill_writer_success(
         );
         record.status = crate::automation::run_ledger::AutomationRunStatus::Failed;
         record.error = Some(error.to_string());
-        record.error_classification =
-            Some(crate::automation::backend::AgentTaskFailureClass::Permanent);
-        record.error_retryable = Some(false);
+        let error_classification = if deployment_failed {
+            AgentTaskFailureClass::Retryable
+        } else {
+            AgentTaskFailureClass::Permanent
+        };
+        record.error_classification = Some(error_classification);
+        record.error_retryable = Some(error_classification.is_retryable());
         record.applied_ops = Some(json!({
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),

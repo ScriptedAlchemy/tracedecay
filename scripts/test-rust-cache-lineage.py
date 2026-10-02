@@ -174,5 +174,35 @@ class HostedWorkflowLineageTests(unittest.TestCase):
             "hotpath-coverage.yml must set CARGO_INCREMENTAL=0",
         )
 
+    def test_rejects_rooting_rust_cache_at_the_vendored_checkout(self) -> None:
+        self._assert_rejected_after(
+            "hotpath-profile.yml",
+            "crates -> ../target\n",
+            ". -> target\n",
+            "hotpath-profile.yml rust-cache step must list workspace root 'crates -> ../target'",
+        )
+
+    def test_rejects_dropping_the_lockfile_key_root(self) -> None:
+        self._assert_rejected_after(
+            "hotpath-coverage.yml",
+            "            . -> target/rust-cache-lockfile-key\n",
+            "",
+            "hotpath-coverage.yml rust-cache step must list workspace root "
+            "'. -> target/rust-cache-lockfile-key'",
+        )
+
+    def test_step_split_ignores_sibling_steps(self) -> None:
+        text = (
+            "steps:\n"
+            "      - uses: Swatinem/rust-cache@v2\n"
+            "        with:\n"
+            "          shared-key: a\n"
+            "\n"
+            "      - run: echo 'crates -> ../target'\n"
+        )
+        (step,) = self.checker.rust_cache_steps(text)
+        self.assertIn("shared-key: a", step)
+        self.assertNotIn("crates -> ../target", step)
+
 if __name__ == "__main__":
     unittest.main()

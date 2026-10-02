@@ -145,31 +145,42 @@ fn hook_v2_work_completion(
 
 /// Provider envelopes whose producer work is still owed, for redrive. Work
 /// past the ledger's age bound is dropped there rather than redriven forever.
+/// A ledger that cannot be read is a typed failure: an empty list is only
+/// "nothing is owed", never "the ledger was unavailable".
 #[hotpath::measure(label = "mcp.hook_runtime.pending_work")]
 pub fn hook_v2_pending_work_envelopes(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
-) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
+) -> std::result::Result<Vec<tracedecay_hooks::HookEventEnvelopeV2>, HookV2AdmissionLedgerUnavailable>
+{
     let ledger_root = hook_v2_admission_ledger_root(data_root, host);
-    if !ledger_root.is_dir() && !pre_ledger_hook_v2_pending_work_root(data_root, host).is_dir() {
-        return Vec::new();
+    let absent = |root: &Path| match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(tracedecay_hooks::HookAdmissionLedgerError::Io),
+    };
+    if absent(&ledger_root)? && absent(&pre_ledger_hook_v2_pending_work_root(data_root, host))? {
+        return Ok(Vec::new());
     }
-    match with_hook_v2_admission_ledger(Some(data_root), ledger_root, host, now, |ledger| {
-        ledger.pending_work_envelopes(now)
-    }) {
-        Some(Ok(pending)) => pending,
-        Some(Err(error)) => {
-            tracing::warn!(
-                event = "hook_v2_pending_work_unavailable",
-                host = host.hook_key(),
-                error = %error,
-                "hook V2 pending producer work could not be read"
-            );
-            Vec::new()
-        }
-        None => Vec::new(),
-    }
+    Ok(with_hook_v2_admission_ledger(
+        Some(data_root),
+        ledger_root,
+        host,
+        now,
+        |ledger| ledger.pending_work_envelopes(now),
+    )??)
+}
+
+/// Why the daemon could not use a Hook V2 admission ledger.
+#[derive(Debug, thiserror::Error)]
+pub enum HookV2AdmissionLedgerUnavailable {
+    #[error("the admission ledger owner is poisoned")]
+    Poisoned,
+    #[error("the daemon already holds its bound of open admission ledgers")]
+    AtCapacity,
+    #[error(transparent)]
+    Ledger(#[from] tracedecay_hooks::HookAdmissionLedgerError),
 }
 
 /// Stage one admission identity, with the producer work it owes. `None`
@@ -189,22 +200,25 @@ fn stage_hook_v2_admission(
         now,
         |ledger| ledger.stage_admission(envelope, work, now).ok(),
     )
+    .ok()
     .flatten()
 }
 
 /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
 /// first use and again after a failed write. A project ledger (`data_root`)
-/// whose pre-ledger pending work remains is refused for reset. `None` means
-/// the ledger is unavailable (open failure, reset refusal, poisoned owner, or
-/// the open-ledger bound).
+/// whose pre-ledger pending work remains is refused for reset. An open
+/// failure, reset refusal, poisoned owner, or the open-ledger bound is a
+/// typed error; callers must not treat it as an empty ledger.
 fn with_hook_v2_admission_ledger<T>(
     data_root: Option<&Path>,
     ledger_root: std::path::PathBuf,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
     operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
-) -> Option<T> {
-    let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
+) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
+    let mut ledgers = hook_v2_admission_ledgers()
+        .lock()
+        .map_err(|_| HookV2AdmissionLedgerUnavailable::Poisoned)?;
     if ledgers
         .get(&ledger_root)
         .is_some_and(tracedecay_hooks::HookAdmissionLedgerV1::needs_reopen)
@@ -216,7 +230,7 @@ fn with_hook_v2_admission_ledger<T>(
         Entry::Occupied(retained) => retained.into_mut(),
         Entry::Vacant(unopened) => {
             if open_ledgers >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
-                return None;
+                return Err(HookV2AdmissionLedgerUnavailable::AtCapacity);
             }
             let opened = match data_root {
                 Some(data_root) => refuse_pre_ledger_pending_work(data_root, host),
@@ -239,12 +253,12 @@ fn with_hook_v2_admission_ledger<T>(
                         error = %error,
                         "hook V2 admission ledger could not be opened"
                     );
-                    return None;
+                    return Err(error.into());
                 }
             }
         }
     };
-    Some(operation(ledger))
+    Ok(operation(ledger))
 }
 
 /// Refuses `host`'s project ledger for reset while the pre-ledger
@@ -257,7 +271,6 @@ fn refuse_pre_ledger_pending_work(
     let present = root
         .try_exists()
         .map_err(|_| tracedecay_hooks::HookAdmissionLedgerError::Io)?;
-    tracedecay_hooks::record_hook_admission_reset(&root, present);
     if present {
         return Err(tracedecay_hooks::HookAdmissionLedgerError::ResetRequired);
     }
@@ -853,22 +866,22 @@ pub(super) fn hook_v2_profile_admit(
     })
     .map(|staged| staged.and_then(|staged| staged.commit.wait().map(|()| staged.receipt.decision)));
     Ok(match outcome {
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => {
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)) => {
             HookV2ProfileAdmissionResultV1::Accepted {
                 disposition: HookRuntimeDispositionV1::Accepted,
             }
         }
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => {
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)) => {
             HookV2ProfileAdmissionResultV1::ExactDuplicate {
                 disposition: HookRuntimeDispositionV1::Accepted,
             }
         }
-        Some(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
+        Ok(Ok(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)) => {
             HookV2ProfileAdmissionResultV1::Rejected {
                 disposition: HookRuntimeDispositionV1::CatchupRequired,
             }
         }
-        None | Some(Err(_)) => HookV2ProfileAdmissionResultV1::Unavailable {},
+        Err(_) | Ok(Err(_)) => HookV2ProfileAdmissionResultV1::Unavailable {},
     })
 }
 

@@ -67,7 +67,12 @@ pub fn enrolled_project_roots(
 }
 
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
-    profile_root.join("projects").join(project_id)
+    profile_shards_root(profile_root).join(project_id)
+}
+
+/// The directory holding every project shard of `profile_root`.
+pub fn profile_shards_root(profile_root: &Path) -> PathBuf {
+    profile_root.join("projects")
 }
 
 /// The profile that owns `data_root` as its shard for `project_id`: the

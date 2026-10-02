@@ -132,6 +132,7 @@ pub fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionEr
         | TraceDecayError::Search { .. }
         | TraceDecayError::File { .. }
         | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::ServiceUnitNotOwned { .. }
         | TraceDecayError::ProjectOpen { .. }
         | TraceDecayError::ToolRefused { .. }
         | TraceDecayError::Io(_)

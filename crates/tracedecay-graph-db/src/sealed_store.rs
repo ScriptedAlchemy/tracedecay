@@ -1792,7 +1792,15 @@ fn stage_sealed_artifact(
     let (row_sum, base_files, layered) = match rows {
         SealedRowSource::Spilled(spilled) => (
             Some(spilled.row_sum()),
-            spilled.attachment().zip(spilled.row_index()),
+            spilled
+                .attachment()
+                .zip(spilled.row_index())
+                .zip(spilled.entity_rows())
+                .map(
+                    |((attachment, row_index), (entity_rows, entity_row_offsets))| {
+                        (attachment, row_index, entity_rows, entity_row_offsets)
+                    },
+                ),
             None,
         ),
         SealedRowSource::Layered(layered) => (Some(layered.row_sum()), None, Some(layered)),
@@ -1809,10 +1817,15 @@ fn stage_sealed_artifact(
         layered.install_base_files(staging)?;
         (entities, relations) = layered.row_counts();
     }
-    if let Some((attachment, row_index)) = &base_files {
+    if let Some((attachment, row_index, entity_rows, entity_row_offsets)) = &base_files {
         for (source, name) in [
             (attachment, crate::sealed_layer::GENERATION_ATTACHMENT_FILE),
             (row_index, crate::row_index::ROW_INDEX_FILE),
+            (entity_rows, crate::generation::ENTITIES_FILE),
+            (
+                entity_row_offsets,
+                crate::row_index::ENTITY_ROW_OFFSETS_FILE,
+            ),
         ] {
             std::fs::hard_link(source, staging.join(name))
                 .map_err(|error| sealed_store_io_failure("base file link failed", error))?;
