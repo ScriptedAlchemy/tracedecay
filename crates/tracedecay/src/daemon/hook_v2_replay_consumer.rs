@@ -242,7 +242,7 @@ async fn drain_all_hosts(
             match HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)) {
                 Ok(more) => sweep.more_pending |= more,
                 Err(error) => {
-                    sweep.fail(*host, StatusHookReplaySpoolV1::Records, error.to_string())
+                    sweep.fail(*host, StatusHookReplaySpoolV1::Records, error.to_string());
                 }
             }
         }
