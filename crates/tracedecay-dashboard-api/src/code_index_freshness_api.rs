@@ -13,7 +13,7 @@
 use axum::Json;
 use axum::extract::State;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
+    CodeIndexFreshnessPayloadV1, CodeIndexStalenessStateV1,
 };
 
 use super::DashboardState;
@@ -65,11 +65,7 @@ async fn project_code_index_freshness(
         (false, _) => CodeIndexFreshnessPayloadV1::from_unattached_registry(),
     };
     match live {
-        Some(worktree)
-            if worktree.latest_generation_id.is_some()
-                && worktree.coverage == CodeIndexFreshnessCoverageV1::Complete
-                && worktree.staleness_state == Some(CodeIndexStalenessStateV1::Fresh) =>
-        {
+        Some(worktree) if worktree.is_authoritative() => {
             DashboardEnvelopeV1::ready(
                 scope_from_state(state),
                 DashboardCoverageV1::complete(1, "mounted_worktree"),
@@ -159,7 +155,8 @@ mod tests {
     use super::*;
     use crate::read_model::DashboardDomainStateV1;
     use tracedecay_contracts::code_index_freshness::{
-        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexStalenessStateV1,
+        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexOmittedSourceV1,
+        CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
         CodeIndexWorktreeFreshnessV1,
     };
 
@@ -288,5 +285,40 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+
+    /// Sources no generation can index do not keep the dashboard waiting:
+    /// the fresh generation is ready and the payload still names them.
+    #[tokio::test]
+    async fn fresh_generation_with_omitted_sources_is_ready_and_names_them() {
+        let omitted = CodeIndexOmittedSourcesV1 {
+            count: 1,
+            sources: vec![CodeIndexOmittedSourceV1 {
+                git_path_bytes: b"src/odd\\name.rs".to_vec(),
+                display_path: "src/odd\\name.rs".to_owned(),
+                reason: CodeIndexSourceOmissionReasonV1::UnrepresentablePath,
+            }],
+        };
+        let served = omitted.clone();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(move |root| {
+            let omitted = served.clone();
+            Box::pin(async move {
+                Ok(Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    latest_generation_id: Some("generation.fixture".to_owned()),
+                    staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+                    coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+                    omitted_sources: Some(omitted),
+                    hook_hint_count: Some(0),
+                    ..Default::default()
+                }))
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
+        assert_eq!(envelope.payload.worktrees[0].omitted_sources, Some(omitted));
     }
 }
