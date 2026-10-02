@@ -8,8 +8,11 @@
 /// shares projection rows across generations: a refresh adds rows under its
 /// own generation instead of copying the session, occurrences carry the
 /// relation facts they derive from, and derived evidence is keyed by its
-/// first member so a live run extends in place.
-pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 7;
+/// first member so a live run extends in place. Version 8 resets a session
+/// whose materialized occurrences lost their canonical observation:
+/// `session_temporal_resets` carries the request and the generation a
+/// rebuilt session starts from.
+pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 8;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
@@ -204,6 +207,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "output_count",
             "recorded_at",
         ],
+    ),
+    (
+        "session_temporal_resets",
+        &["session_id", "requested_at", "reset_generation"],
     ),
     (
         "session_turns",

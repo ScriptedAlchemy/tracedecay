@@ -33,6 +33,25 @@ never replaced wholesale.
   guards drift. That is an intentional offline-packaging exception, opposite
   the dashboard's gitignored `app-dist/` rebuilt by `build.rs`. See
   `plugin/cursor-native-extension/README.md`.
+- **ChatGPT (desktop/local plugin loading):** the receipt-backed Core
+  component renders the portable `plugin/plugin.json` + `plugin/mcp.json`
+  pair (with the resolved `tracedecay` binary path), the
+  `tracedecay-explorer` stdio server and app UI from
+  `chatgpt-extension/embedded/`, the icon, and `README-chatgpt.md` into the
+  staged plugin source under
+  `~/.tracedecay/host-bundle-stage/chatgpt/tracedecay`. ChatGPT registers
+  plugins only through its own interactive surfaces, so install and
+  `update-plugin` commit the staged bytes and report host registration as
+  unverifiable (informational, exit 0), with activation guidance in the README.
+  `uninstall` removes the receipt-owned staged tree. The explorer is a read-only
+  MCP App over the same daemon authority:
+  MCP-transport operations go through a spawned `tracedecay serve`, HTTP
+  operations use the profile's `daemon-authority.json` token server-side
+  only. The committed `embedded/` bundle follows the Cursor
+  offline-packaging exception and is guarded by `pnpm run check:embedded`.
+  ChatGPT cloud reachability (Secure MCP Tunnel or a hosted HTTPS
+  deployment) is a documented prerequisite, not a verified route; see
+  `plugin/chatgpt-extension/README.md`.
 - **Cursor cloud, Codex, Hermes, and Kiro:** only their evidenced hook, MCP,
   and CLI routes are declared. Missing LSP/native-diagnostics APIs stay typed
   unavailable.

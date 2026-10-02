@@ -1046,12 +1046,15 @@ async fn parent_resolver_rejects_ambiguous_session_message_ids() {
     resolver.register("message.shared", "occurrence.a");
     resolver.register("message.shared", "occurrence.b");
     let error = resolver
-        .reject_ambiguity("test parent ambiguity")
+        .reject_ambiguity()
         .expect_err("duplicate message ids must be rejected");
-    let detail = format!("{error:?}");
     assert!(
-        detail.contains("message.shared") || detail.contains("resolves to 2 occurrences"),
-        "{detail}"
+        matches!(
+            &error,
+            SessionStoreError::AmbiguousMessageOccurrence { message_id, occurrences: 2 }
+                if message_id == "message.shared"
+        ),
+        "{error:?}"
     );
 }
 
@@ -1073,7 +1076,20 @@ async fn parent_resolver_pages_live_sized_observation_history() {
                 output_count INTEGER NOT NULL
              );
              CREATE INDEX idx_session_temporal_observation_effects_session
-                ON session_temporal_observation_effects(session_id, observation_sequence);",
+                ON session_temporal_observation_effects(session_id, observation_sequence);
+             CREATE TABLE observation_projection_dispositions (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                PRIMARY KEY(projector_version, observation_id)
+             );
+             CREATE TABLE observation_projection_provenance (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                output_provider TEXT NOT NULL,
+                output_message_id TEXT NOT NULL,
+                message_created INTEGER NOT NULL
+             );",
         )
         .await
         .unwrap();
@@ -1149,7 +1165,20 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
                 output_count INTEGER NOT NULL
              );
              CREATE INDEX idx_session_temporal_observation_effects_session
-                ON session_temporal_observation_effects(session_id, observation_sequence);",
+                ON session_temporal_observation_effects(session_id, observation_sequence);
+             CREATE TABLE observation_projection_dispositions (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                PRIMARY KEY(projector_version, observation_id)
+             );
+             CREATE TABLE observation_projection_provenance (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                output_provider TEXT NOT NULL,
+                output_message_id TEXT NOT NULL,
+                message_created INTEGER NOT NULL
+             );",
         )
         .await
         .unwrap();

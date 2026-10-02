@@ -24,8 +24,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass,
-    SessionId,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::ParseOffset;
@@ -73,6 +73,17 @@ struct SeamSpyAdmission {
     /// Commit only the first batched frame, then report the window CAS lost.
     /// The durable cursor then covers a prefix, not the window's last frame.
     peer_covers_batch_prefix: AtomicBool,
+    rewrites: Mutex<Vec<RewriteCall>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RewriteCall {
+    Begin {
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    },
+    Complete(ObservationSourceGenerationV1),
 }
 
 #[tokio::test]
@@ -85,6 +96,7 @@ async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
         b"{\"type\":\"event_msg\"}\n{\"type\":\"turn_context\"}\n",
     )
     .expect("JSONL fixture");
+    spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let (first, _) =
@@ -119,6 +131,7 @@ async fn shared_jsonl_page_keys_symlinks_by_canonical_source() {
     let path = temp.path().join("source.jsonl");
     let alias = temp.path().join("alias.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    spin_until_jsonl_change_settled(&path);
     symlink(&path, &alias).expect("symlink fixture");
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
@@ -141,6 +154,7 @@ async fn shared_jsonl_page_waiters_share_one_async_in_flight_read() {
     let temp = tempfile::TempDir::new().expect("temp directory");
     let path = temp.path().join("concurrent.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
+    spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
     let first_path = path.clone();
@@ -398,6 +412,7 @@ async fn generation_pin_prevents_slow_consumer_page_eviction() {
     let temp = tempfile::TempDir::new().expect("temp directory");
     let pinned_path = temp.path().join("pinned.jsonl");
     std::fs::write(&pinned_path, b"{}\n").expect("pinned JSONL fixture");
+    spin_until_jsonl_change_settled(&pinned_path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
     let (pinned, initial_hit) = super::shared_jsonl_page(
         &pinned_path,
@@ -463,6 +478,7 @@ async fn exact_append_cursor_replaces_a_superseded_speculative_page() {
         .expect("append fixture");
     file.write_all(b"{\"type\":\"event_msg\"}\n")
         .expect("append JSONL frame");
+    spin_until_jsonl_change_settled(&path);
 
     let (exact, first_hit) = super::shared_jsonl_page_with_cancellation(
         &path,
@@ -810,6 +826,37 @@ impl HostAdmission for SeamSpyAdmission {
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Vec<ObservationSourceCursorV1>> {
         self.inner.committed_source_cursors(source, scope)
+    }
+
+    fn begin_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        previous: ObservationSourceGenerationV1,
+        generation: ObservationSourceGenerationV1,
+        retained_through: u64,
+    ) -> AdmissionFuture<'a, ()> {
+        self.rewrites.lock().unwrap().push(RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through,
+        });
+        self.inner
+            .begin_source_rewrite(source, scope, previous, generation, retained_through)
+    }
+
+    fn complete_source_rewrite<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+    ) -> AdmissionFuture<'a, u64> {
+        self.rewrites
+            .lock()
+            .unwrap()
+            .push(RewriteCall::Complete(generation));
+        self.inner
+            .complete_source_rewrite(source, scope, generation)
     }
 
     fn drain_projection_queue<'a>(
@@ -1568,6 +1615,83 @@ async fn catching_up_an_edited_rollout_rereads_no_prefix_per_window() {
     }
 }
 
+/// A rewrite retires what the new generation stopped offering only once that
+/// generation was read to the end of the file: a tail spanning several passes
+/// stays deferred and never completes the rewrite early.
+#[tokio::test]
+async fn a_rewrite_completes_only_when_its_generation_reaches_the_end() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let records = 512_usize;
+    let original = (0..records)
+        .map(|index| catch_up_rollout_line(index, &cwd, "original"))
+        .collect::<String>();
+    std::fs::write(&path, &original).unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let spy = SeamSpyAdmission::default();
+    let pass = |max_new_bytes| {
+        try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            max_new_bytes,
+        )
+    };
+    assert!(!pass(None).await.expect("cold pass").source_deferred);
+    let previous = stored_cursor(&spy).await.expect("cold cursor").generation();
+    // Every pass that reaches the end settles its generation; with no rewrite
+    // pending that retires nothing.
+    assert_eq!(
+        std::mem::take(&mut *spy.rewrites.lock().unwrap()),
+        vec![RewriteCall::Complete(previous)]
+    );
+
+    let edited_index = records / 4;
+    let edit_offset = u64::try_from(edited_index * CATCH_UP_RECORD_BYTES).unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(edit_offset)).unwrap();
+    file.write_all(catch_up_rollout_line(edited_index, &cwd, "edited").as_bytes())
+        .unwrap();
+    drop(file);
+    spin_until_jsonl_change_settled(&path);
+
+    let first = pass(Some(CATCH_UP_WINDOW_BYTES))
+        .await
+        .expect("first tail pass");
+    assert!(first.source_deferred, "the tail spans several passes");
+    let generation = stored_cursor(&spy).await.expect("tail cursor").generation();
+    assert_ne!(generation, previous);
+    assert_eq!(
+        *spy.rewrites.lock().unwrap(),
+        vec![RewriteCall::Begin {
+            previous,
+            generation,
+            retained_through: edit_offset,
+        }]
+    );
+    for _ in 0..records {
+        let tail = pass(Some(CATCH_UP_WINDOW_BYTES)).await.expect("tail pass");
+        if !tail.source_deferred {
+            assert_eq!(
+                *spy.rewrites.lock().unwrap().last().unwrap(),
+                RewriteCall::Complete(generation)
+            );
+            assert_eq!(spy.rewrites.lock().unwrap().len(), 2);
+            return;
+        }
+        assert_eq!(
+            spy.rewrites.lock().unwrap().len(),
+            1,
+            "a deferred pass must not complete the rewrite"
+        );
+    }
+    panic!("the tail never stopped deferring");
+}
+
 /// One rollout line of exactly [`CATCH_UP_RECORD_BYTES`]: the session meta
 /// setting `cwd`, then user messages that leave it alone.
 fn session_cwd_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
@@ -1677,6 +1801,7 @@ async fn codex_session_meta_prefix_is_decoded_once_across_consumers() {
     // capacity is the degraded fallback of one entry.
     super::install_test_shared_jsonl_preparation_authority();
     let (_temp, path, _) = rollout_fixture();
+    spin_until_jsonl_change_settled(&path);
     let first = SeamSpyAdmission::default();
     let second = SeamSpyAdmission::default();
     let before = crate::runtime::hosts::codex::session_meta_read_count_for_test(&path);
@@ -1842,6 +1967,7 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     std::fs::create_dir_all(&cwd).unwrap();
     let path = temp.path().join("rollout.jsonl");
     let len = write_undecodable_tail_rollout(&path, &cwd);
+    spin_until_jsonl_change_settled(&path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
     let spy = SeamSpyAdmission::default();
 

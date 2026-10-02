@@ -74,6 +74,11 @@ pub fn require_component_capabilities(
         // `~/.factory/hooks.json` (SessionStart / Stop calling
         // `hook-droid-event`), backed by the checked-in captured fixture.
         (HostKindV1::FactoryDroid, Core) => &[Hooks, Cli],
+        // ChatGPT's Core component is the staged portable bundle whose
+        // `mcp.json` registers both MCP servers; it declares no hooks, so
+        // requiring `Hooks` would refuse the component against the same
+        // capability matrix every other host is judged by.
+        (HostKindV1::ChatGpt, Core) => &[Mcp],
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

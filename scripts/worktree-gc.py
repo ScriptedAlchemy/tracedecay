@@ -49,6 +49,7 @@ BUILD_OUTPUTS = (
     ("dashboard/node_modules", "pnpm-lock.yaml"),
     ("sdks/typescript/node_modules", "pnpm-lock.yaml"),
     ("plugin/cursor-native-extension/node_modules", "pnpm-lock.yaml"),
+    ("plugin/chatgpt-extension/node_modules", "pnpm-lock.yaml"),
     (".pnpm", "pnpm-lock.yaml"),
     ("sdks/codegen/.pnpm", "pnpm-lock.yaml"),
 )

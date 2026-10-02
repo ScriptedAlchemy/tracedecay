@@ -1,0 +1,34 @@
+{
+  "name": "@tracedecay/chatgpt-extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ChatGPT extension (MCP server + MCP App) that bridges to the local TraceDecay daemon for code exploration and provenance-rich context.",
+  "license": "MIT",
+  "bin": {
+    "tracedecay-chatgpt-extension": "./embedded/server.mjs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check:embedded": "node scripts/build.mjs --check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@openai/mcp-extensions": "^0.1.0",
+    "@tracedecay/sdk": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@rsbuild/core": "^1.7.6",
+    "@rslib/core": "^0.23.2",
+    "@types/node": "^22.20.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

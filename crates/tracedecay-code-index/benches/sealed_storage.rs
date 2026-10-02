@@ -27,7 +27,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant,
 };
 
@@ -38,10 +38,10 @@ use tracedecay_code_index::{
     languages::{LanguageRegistry, StaticLanguageRegistry},
     lineage::LineageKindV1,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-        CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        CodeIndexSealedPublicationV1, MemorySealedPublicationStoreV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
         SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
@@ -52,12 +52,11 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros,
-    WorktreeId,
+    ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros, WorktreeId,
 };
 
 const REPO_ENV: &str = "SEALED_STORAGE_REPO";
@@ -74,47 +73,6 @@ struct SourceFile {
     logical_path: String,
     language: LanguageId,
     bytes: Arc<[u8]>,
-}
-
-#[derive(Default, Clone)]
-struct MemoryPublication {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
-}
-
-impl CodeIndexAtomicPublicationPort for MemoryPublication {
-    fn load_active(
-        &self,
-        scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
-            .get(scope)
-            .cloned())
-    }
-
-    fn publish_atomically(
-        &mut self,
-        scope: &CodeIndexGenerationScopeV1,
-        expected_active_generation: Option<&CodeGenerationId>,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| CodeIndexPublicationStoreErrorV1::CompareAndSwap)?;
-        if active
-            .get(scope)
-            .map(|current| current.manifest().generation_id.clone())
-            .as_ref()
-            != expected_active_generation
-        {
-            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
-        }
-        active.insert(scope.clone(), generation);
-        Ok(())
-    }
 }
 
 struct ApplyingProjection;
@@ -237,11 +195,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sources = git_sources(&repository, &revision)?;
     let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
 
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config()?,
-        MemoryPublication::default(),
-        ApplyingProjection,
-    )?;
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config()?, store.clone(), ApplyingProjection)?;
     let all_paths = sources
         .iter()
         .map(|source| source.logical_path.clone())
@@ -259,7 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The same tree sealed again as a linked worktree of the project.
     let linked = CodeIndexProductionOwnerV1::new(
         config()?,
-        MemoryPublication::default(),
+        MemorySealedPublicationStoreV1::default(),
         ApplyingProjection,
     )?
     .build_and_publish(
@@ -286,12 +241,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     let started = Instant::now();
-    let clean_sealed = seal(&clean, None)?;
+    let clean_sealed = seal(clean.publication(), None)?;
     let clean_seal_ms = started.elapsed().as_millis();
     let started = Instant::now();
-    let successor_sealed = seal(&successor, Some(&clean_sealed.manifest))?;
+    let successor_sealed = seal(successor.publication(), Some(&clean_sealed.manifest))?;
     let successor_seal_ms = started.elapsed().as_millis();
-    let linked_sealed = seal(&linked, None)?;
+    let linked_sealed = seal(linked.publication(), None)?;
     let file_segment_bytes =
         |segments: &BTreeMap<String, Vec<u8>>| segments.values().map(Vec::len).sum::<usize>();
     let scope_bytes = |sealed: &Sealed| sealed.manifest.len() + sealed.evidence.1.len();
@@ -348,9 +303,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus_files: sources.len(),
         corpus_bytes,
         edited_files,
-        clean: generation_report(&clean, &clean_sealed, clean_seal_ms, clean_restore_ms),
+        clean: generation_report(
+            &store.decode(clean.manifest_bytes())?,
+            &clean_sealed,
+            clean_seal_ms,
+            clean_restore_ms,
+        ),
         successor: generation_report(
-            &successor,
+            &store.decode(successor.manifest_bytes())?,
             &successor_sealed,
             successor_seal_ms,
             successor_restore_ms,
@@ -576,16 +536,17 @@ fn config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
 }
 
 fn seal(
-    generation: &CodeIndexPublishedGenerationV1,
+    publication: &CodeIndexSealedPublicationV1,
     parent: Option<&[u8]>,
 ) -> Result<Sealed, CodeIndexProductionErrorV1> {
     let mut file_segments = BTreeMap::new();
     let mut pack = Vec::new();
     let mut evidence = None;
-    let manifest = generation.encode_partitioned_sealed_with_parent(parent, |publication| {
+    let manifest = publication.encode(parent, |publication| {
         match publication {
             SealedGenerationSegmentPublicationV1::File { digest, bytes }
-            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
                 file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {

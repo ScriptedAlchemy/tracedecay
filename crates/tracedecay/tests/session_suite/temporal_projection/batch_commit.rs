@@ -368,7 +368,11 @@ async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically()
 
     let error = complete_candidate(&store, &candidate).await.unwrap_err();
     assert!(
-        format!("{error:?}").contains("resolves to 2 occurrences"),
+        matches!(
+            &error,
+            SessionStoreError::AmbiguousMessageOccurrence { message_id, occurrences: 2 }
+                if message_id == duplicate
+        ),
         "unexpected ambiguity error: {error:?}"
     );
 }
@@ -435,5 +439,12 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
     .unwrap();
 
     let error = complete_candidate(&store, &candidate).await.unwrap_err();
-    assert!(format!("{error:?}").contains("resolves to 2 occurrences"));
+    assert!(
+        matches!(
+            &error,
+            SessionStoreError::AmbiguousMessageOccurrence { message_id, occurrences: 2 }
+                if message_id == duplicate
+        ),
+        "unexpected ambiguity error: {error:?}"
+    );
 }

@@ -21,6 +21,7 @@ use super::{
     mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
     wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
+    with_untouched_fillers,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -338,10 +339,10 @@ async fn generation_swaps_keep_retained_bytes_flat() {
 /// holding and its idle window gives them back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_increment_reports_its_retained_parses_and_the_idle_window_releases_them() {
-    let fixture = GitFixture::new(&[
+    let fixture = GitFixture::new(&with_untouched_fillers(&[
         ("src/main.rs", "fn main() { first(); }\nfn first() {}\n"),
         ("src/lib.rs", "pub fn untouched() {}\n"),
-    ]);
+    ]));
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
     let (registry, _) = mounted_core_query_worktree_in(

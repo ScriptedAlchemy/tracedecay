@@ -1186,7 +1186,7 @@ async fn cursor_blank_unsupported_and_oversized_frames_are_covered() {
 }
 
 #[tokio::test]
-async fn cursor_truncation_replacement_preserves_distinct_generations() {
+async fn cursor_truncation_replacement_retires_the_prior_generation() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let transcript_path = tmp.path().join("cursor-replaced.jsonl");
@@ -1224,12 +1224,12 @@ async fn cursor_truncation_replacement_preserves_distinct_generations() {
     let replaced =
         ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project)).await;
     assert_eq!(replaced.messages_upserted, 2);
-    assert_eq!(db.session_message_count().await.unwrap(), 3);
-    assert_eq!(
+    assert_eq!(db.session_message_count().await.unwrap(), 2);
+    assert!(
         db.search_session_messages("cursor", None, "orig-cursor-repl-9f3a", 10)
             .await
-            .len(),
-        1
+            .is_empty(),
+        "the replacement no longer offers the first generation"
     );
     assert_eq!(
         db.search_session_messages("cursor", None, "repl-cursor-gen-9f3a", 10)
@@ -1500,7 +1500,7 @@ async fn cline_projection_failure_retries_changed_snapshot_without_duplicate() {
 }
 
 #[tokio::test]
-async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_frames() {
+async fn claude_and_codex_jsonl_truncation_replacement_retires_prior_frames() {
     for provider in ["claude", "codex"] {
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
@@ -1516,7 +1516,6 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
             first.messages_upserted >= 2,
             "{provider}: initial ingest must commit provider frames"
         );
-        let first_count = db.session_message_count().await.unwrap();
         assert_eq!(
             db.search_session_messages(provider, None, "Investigate", 10)
                 .await
@@ -1607,15 +1606,14 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
         assert_eq!(stats.messages_upserted, 2, "{provider}");
         assert_eq!(
             replaced.session_message_count().await.unwrap(),
-            first_count + 2,
-            "{provider}: prior generation rows must remain searchable"
+            2,
+            "{provider}: the replacement retires every frame it no longer offers"
         );
-        assert_eq!(
+        assert!(
             replaced
                 .search_session_messages(provider, None, "Investigate", 10)
                 .await
-                .len(),
-            1,
+                .is_empty(),
             "{provider}"
         );
         assert_eq!(
@@ -1704,12 +1702,12 @@ async fn cursor_jsonl_rotation_rename_rescans_replacement_without_gap() {
     let rotated =
         ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project)).await;
     assert_eq!(rotated.messages_upserted, 2);
-    assert_eq!(db.session_message_count().await.unwrap(), 3);
-    assert_eq!(
+    assert_eq!(db.session_message_count().await.unwrap(), 2);
+    assert!(
         db.search_session_messages("cursor", None, "orig-cursor-rot-9f3a", 10)
             .await
-            .len(),
-        1
+            .is_empty(),
+        "the transcript path, not the archived file, is the source of truth"
     );
     assert_eq!(
         db.search_session_messages("cursor", None, "rot-cursor-gen-9f3a", 10)

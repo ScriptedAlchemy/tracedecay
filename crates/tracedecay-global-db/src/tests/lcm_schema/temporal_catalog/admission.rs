@@ -42,7 +42,7 @@ async fn assert_session_temporal_version_refused(db_path: &Path, found_version: 
             refusal.map(|error| error.to_string()),
             Some(format!(
                 "session temporal profile schema {found_version} is incompatible with required \
-                 schema 7; reset the profile"
+                 schema 8; reset the profile"
             ))
         );
     }
@@ -312,7 +312,10 @@ async fn temporal_schema_replaces_an_empty_earlier_authority_with_the_final_cont
             .await
             .expect("an earlier authority holding no rows is replaced, not refused"),
     );
-    assert_eq!(temporal_schema_version(&db_path).await, 7);
+    assert_eq!(
+        temporal_schema_version(&db_path).await,
+        tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION
+    );
     assert_eq!(
         temporal_schema_object_catalog(&db_path).await,
         final_catalog
