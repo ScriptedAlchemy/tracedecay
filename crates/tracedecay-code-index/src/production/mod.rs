@@ -318,7 +318,8 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     Unavailable(String),
     /// Another owner holds the code-generation store lock this operation
     /// needs, exclusive or shared. The holder releases it on its own and emits
-    /// no wake, so the refused pass is retried rather than parked.
+    /// no wake. The refused pass waits for that release instead of retrying
+    /// while the lock is still held.
     #[error("the code-generation store lock is held by another owner")]
     StoreLockContended,
     /// Materializing the whole generation does not fit the process

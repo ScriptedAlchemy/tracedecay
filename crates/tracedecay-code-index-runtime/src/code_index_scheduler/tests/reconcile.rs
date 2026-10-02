@@ -1690,18 +1690,14 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     );
 }
 
-#[test]
-fn occurrence_graph_store_is_available_before_catalog_warm() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store_root = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(
-        &fixture,
-        store_root.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    published(scheduler.reconcile_now().expect("seed generation"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    let generation_id = latest.generation().manifest().generation_id.clone();
+/// Builds a generation's graph store the way publication does: from its
+/// sealed segments on disk, one window of files at a time, without decoding
+/// the generation.
+fn sealed_segment_graph_store(
+    binding: &super::super::CodeGraphReplayBindingV1,
+    generation_id: &tracedecay_domain::CodeGenerationId,
+    scratch: &Path,
+) -> Arc<crate::code_index::graph_projection::CodeGraphProjectionStore> {
     let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
         crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
     )
@@ -1710,11 +1706,6 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
     )
     .expect("projection identity");
-    // Build the graph the way publication does: from the sealed segments on
-    // disk, one window of files at a time.
-    let binding = scheduler
-        .code_graph_replay_binding(&generation_id)
-        .expect("sealed replay binding");
     let digest = tracedecay_domain::sha256_hex_suffix(binding.sealed_state_digest.as_str())
         .expect("sha256 sealed digest");
     let sealed_manifest = std::fs::read(
@@ -1730,7 +1721,6 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
     let source =
         crate::code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
             .expect("sealed manifest opens");
-    let scratch = TempDir::new().expect("graph row scratch");
     let manifest = crate::code_index::graph_projection::build_sealed_code_graph_rows(
         projection.clone(),
         &source,
@@ -1749,11 +1739,8 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
             Ok(())
         },
         &projector_revision,
-        tracedecay_graph_db::GraphGenerationRowSpill::create(
-            scratch.path().join("rows"),
-            projection,
-        )
-        .expect("row spill"),
+        tracedecay_graph_db::GraphGenerationRowSpill::create(scratch.join("rows"), projection)
+            .expect("row spill"),
         &mut |_| Ok(()),
         &|| Ok(()),
     )
@@ -1765,13 +1752,32 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
         Arc::new(tracedecay_graph_db::NeverCancelled),
     )
     .expect("verified graph snapshot");
-    let graph_store = Arc::new(
+    Arc::new(
         crate::code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
         )
         .expect("graph projection store"),
+    )
+}
+
+#[test]
+fn occurrence_graph_store_is_available_before_catalog_warm() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store_root = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store_root.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    published(scheduler.reconcile_now().expect("seed generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let binding = scheduler
+        .code_graph_replay_binding(&generation_id)
+        .expect("sealed replay binding");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
     let reader = graph_store
         .evidence_reader_with_cancellation(
             &generation_id,
@@ -3332,6 +3338,79 @@ async fn publication_decode_refused_by_a_store_lock_holder_seats_after_release()
     registry.shutdown().await;
 }
 
+/// A persistent publication seats its graph head on the text owner before the
+/// serving decode, and the holder that decode usually meets is the pass's own
+/// text projection, gone before the follow-up pass. The predecessor's decoded
+/// seat must not outlive that refusal, or the follow-up pass reads the
+/// occupied slot as nothing owed and the generation never seats.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_decode_of_a_graph_serving_publication_seats_on_the_follow_up_pass() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let held = hold_second_publication_at_decode(&registry, &fixture, &store).await;
+    let text = registry
+        .latest_text_serving_for_root(fixture.path())
+        .await
+        .expect("the publication's text owner serves");
+    let generation_id = text.metadata().manifest().generation_id.clone();
+    let binding = registry
+        .code_graph_replay_binding(fixture.path(), &generation_id)
+        .await
+        .expect("mounted worktree")
+        .expect("sealed replay binding");
+    let scratch = TempDir::new().expect("graph row scratch");
+    let graph_store = sealed_segment_graph_store(&binding, &generation_id, scratch.path());
+    let reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation_id,
+            Some(text.metadata().snapshot().repository.clone()),
+            text.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph evidence reader");
+    text.install_graph_serving(
+        reader,
+        Some(graph_store),
+        super::super::CodeGraphServingAuthorityV1::Memory,
+    )
+    .expect("the publication's graph head serves from its text owner");
+
+    let holder = acquire_code_generation_store_lock(&held.scoped_store)
+        .expect("hold the code-generation store lock");
+    let (second, release_after_decode) = held.decode().await;
+    drop(holder);
+    release_after_decode
+        .send(())
+        .expect("release graph prepare");
+
+    let ready = wait_for_ready_generation(&registry, fixture.path())
+        .await
+        .unwrap_or_else(|stalled| panic!("the new generation never seated: {stalled:?}"));
+    assert_eq!(ready, second);
+    assert_eq!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .map(|seat| seat
+                .generation()
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned()),
+        Some(second.clone()),
+        "the refused decode's follow-up pass seats the new generation"
+    );
+    assert_eq!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .map(|id| id.as_str().to_owned()),
+        Some(second)
+    );
+    registry.shutdown().await;
+}
+
 /// A serving decode that fails for a reason no holder will release parks
 /// typed, so status names the failure instead of an eternal `indexing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3434,7 +3513,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
-    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")
         .expect("serving swap gate stays armed");
@@ -3480,7 +3559,7 @@ async fn ready_wait_ends_only_after_the_graph_tail_seats_the_generation() {
         .wait_for_readiness(
             fixture.path(),
             CodeIndexReadinessTargetV1::Ready,
-            Duration::from_secs(10),
+            SERVING_SEAT_FAILURE_CEILING,
         )
         .await
         .expect("readiness wait");
@@ -5849,19 +5928,19 @@ async fn restart_over_same_length_preserved_mtime_rewrite_rebuilds_the_retained_
         )
         .await
         .expect("remount worktree over the retained store");
-    let mut signals = OwnerSignals::subscribe(&restarted, fixture.path()).await;
-    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(latest) = restarted.latest_complete_fresh(fixture.path()).await
-                && latest.generation().manifest().generation_id != sealed_id
-            {
-                break latest;
-            }
-            signals.changed().await;
-        }
-    })
-    .await
-    .expect("a restart over changed bytes with equal stat metadata must rebuild");
+    let rebuilt = wait_for_owner(
+        &restarted,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "a restart over changed bytes with equal stat metadata must rebuild",
+        || async {
+            restarted
+                .latest_complete_fresh(fixture.path())
+                .await
+                .filter(|latest| latest.generation().manifest().generation_id != sealed_id)
+        },
+    )
+    .await;
     let served = rebuilt
         .lexical()
         .iter()
@@ -8471,25 +8550,23 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
-    let outcome = registry
-        .exact_occurrence(
-            RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request,
-        )
-        .await;
-    let elapsed = started.elapsed();
+    let outcome = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        registry
+            .exact_occurrence(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request,
+            )
+            .await
+    })
+    .await
+    .expect("expired query should answer while the scheduler lock is held");
     release_tx.send(()).expect("release scheduler lock");
     lock_thread.join().expect("scheduler lock thread joins");
 
     assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "expired query waited {elapsed:?} for scheduler work"
-    );
     registry.shutdown().await;
 }
 

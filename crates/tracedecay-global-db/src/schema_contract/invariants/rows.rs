@@ -5,8 +5,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
-use crate::{global_db_operation_error, global_db_operation_message};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use crate::global_db_operation_error;
+use tracedecay_domain::errors::ProjectOpenFailureKind;
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor, params};
 use tracedecay_session_temporal_store::operations::{
     FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
     receipt_id as summary_receipt_id,
@@ -80,20 +81,33 @@ pub(super) async fn query_has_rows(
     // query to a single row keeps the cost O(1) in violations and makes the
     // answer independent of how large the offending set is.
     let bounded = format!("SELECT 1 FROM ({query}) LIMIT 1");
-    let mut rows = conn
-        .query(&bounded, ())
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut rows = conn.query(&bounded, ()).await.map_err(audit_read_error)?;
     rows.next()
         .await
         .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(audit_read_error)
 }
 
 pub(super) fn authority_violation(
     message: impl Into<String>,
 ) -> tracedecay_domain::errors::TraceDecayError {
-    global_db_operation_message(OPERATION, message)
+    tracedecay_domain::errors::TraceDecayError::project_open(
+        ProjectOpenFailureKind::AuthorityVerdict {
+            migration_pending: false,
+        },
+        message,
+    )
+}
+
+/// A row read the audit could not finish. A database that could not be read
+/// right now stays a retryable database error; any other failure (a row that
+/// does not decode, a refused statement) is a verdict about the stored data.
+pub(super) fn audit_read_error(error: EngineError) -> tracedecay_domain::errors::TraceDecayError {
+    if error.is_transient_read_failure() {
+        global_db_operation_error(OPERATION, error)
+    } else {
+        authority_violation(error.to_string())
+    }
 }
 
 pub(super) fn decode_authority_json<T: DeserializeOwned>(
@@ -143,29 +157,15 @@ pub(super) async fn validate_receipt_authority_page(
             params![high_water, AUDIT_PAGE_ROWS],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut page_rows = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
         page_rows += 1;
-        high_water = row
-            .get::<i64>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let receipt_id = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let sanitizer_version = row
-            .get::<String>(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let payload_digest = row
-            .get::<String>(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let receipt_json = row
-            .get::<String>(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        high_water = row.get::<i64>(0).map_err(audit_read_error)?;
+        let receipt_id = row.get::<String>(1).map_err(audit_read_error)?;
+        let sanitizer_version = row.get::<String>(2).map_err(audit_read_error)?;
+        let payload_digest = row.get::<String>(3).map_err(audit_read_error)?;
+        let receipt_json = row.get::<String>(4).map_err(audit_read_error)?;
         if sanitizer_version == SUMMARY_PUBLICATION_SANITIZER_VERSION {
             let receipt: FrozenPublicationReceipt =
                 decode_authority_json(&receipt_json, "summary publication receipt authority JSON")?;
@@ -248,36 +248,18 @@ pub(super) async fn validate_observation_authority_page(
             params![high_water, OBSERVATION_AUDIT_PAGE_ROWS],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut page_rows = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
         page_rows += 1;
-        let sequence = row
-            .get::<i64>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sequence = row.get::<i64>(0).map_err(audit_read_error)?;
         high_water = sequence;
-        let observation_id = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let payload_digest = row
-            .get::<String>(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let receipt_id = row
-            .get::<String>(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let observation_json = row
-            .get::<String>(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let cursor_json = row
-            .get::<String>(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let Some(joined_receipt_id) = row
-            .get::<Option<String>>(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        let observation_id = row.get::<String>(1).map_err(audit_read_error)?;
+        let payload_digest = row.get::<String>(2).map_err(audit_read_error)?;
+        let receipt_id = row.get::<String>(3).map_err(audit_read_error)?;
+        let observation_json = row.get::<String>(4).map_err(audit_read_error)?;
+        let cursor_json = row.get::<String>(5).map_err(audit_read_error)?;
+        let Some(joined_receipt_id) = row.get::<Option<String>>(6).map_err(audit_read_error)?
         else {
             return Err(authority_violation(
                 "committed observation references a missing receipt",
@@ -341,26 +323,14 @@ pub(super) async fn validate_source_cursor_authority_chunk(
             params![cursor_rowid, AUDIT_PAGE_ROWS],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut page_rows = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
         page_rows += 1;
-        cursor_rowid = row
-            .get::<i64>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let source_json = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let scope_json = row
-            .get::<String>(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let cursor_json = row
-            .get::<String>(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        cursor_rowid = row.get::<i64>(0).map_err(audit_read_error)?;
+        let source_json = row.get::<String>(1).map_err(audit_read_error)?;
+        let scope_json = row.get::<String>(2).map_err(audit_read_error)?;
+        let cursor_json = row.get::<String>(3).map_err(audit_read_error)?;
         let source: ObservationSourceIdentityV1 =
             decode_authority_json(&source_json, "source cursor identity JSON")?;
         let scope: ObservationScopeV1 =
@@ -395,35 +365,17 @@ pub(super) async fn validate_source_cursor_authority_chunk(
             params![advance_rowid, AUDIT_PAGE_ROWS],
         )
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        .map_err(audit_read_error)?;
     let mut page_rows = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
         page_rows += 1;
-        advance_rowid = row
-            .get::<i64>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let source_json = row
-            .get::<String>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let scope_json = row
-            .get::<String>(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let coverage_json = row
-            .get::<String>(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let reason = row
-            .get::<String>(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let receipt_id = row
-            .get::<Option<String>>(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let receipt_json = row
-            .get::<Option<String>>(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        advance_rowid = row.get::<i64>(0).map_err(audit_read_error)?;
+        let source_json = row.get::<String>(1).map_err(audit_read_error)?;
+        let scope_json = row.get::<String>(2).map_err(audit_read_error)?;
+        let coverage_json = row.get::<String>(3).map_err(audit_read_error)?;
+        let reason = row.get::<String>(4).map_err(audit_read_error)?;
+        let receipt_id = row.get::<Option<String>>(5).map_err(audit_read_error)?;
+        let receipt_json = row.get::<Option<String>>(6).map_err(audit_read_error)?;
         let source: ObservationSourceIdentityV1 =
             decode_authority_json(&source_json, "source cursor advance identity JSON")?;
         let scope: ObservationScopeV1 =
@@ -472,7 +424,7 @@ pub(super) async fn validate_mutable_invariant_rows(
         if let Some(query) = invariant.audit_query
             && query_has_rows(conn, query).await?
         {
-            return Err(global_db_operation_message(OPERATION, invariant.violation));
+            return Err(invariant.violated());
         }
     }
     Ok(())

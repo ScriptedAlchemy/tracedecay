@@ -1,4 +1,24 @@
+use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
+
 use super::*;
+
+/// A rotation chain the audit rejects is a verdict about the stored rows, so
+/// reopening repeats it rather than retrying it as a database fault.
+fn assert_cursor_rotation_verdict(error: TraceDecayError, context: &str) {
+    match error {
+        TraceDecayError::ProjectOpen {
+            kind:
+                ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                },
+            detail,
+        } => assert_eq!(
+            detail, "session cursor key rotation state is invalid",
+            "{context}"
+        ),
+        other => panic!("{context}: expected an authority verdict, got {other:?}"),
+    }
+}
 
 #[tokio::test]
 async fn temporal_schema_persists_cursor_keys_without_read_creation() {
@@ -263,14 +283,12 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
 
     let restart_path = tmp.path().join(".tracedecay").join("cursor-audit.db");
     copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    assert_eq!(
+    assert_cursor_rotation_verdict(
         open_global_db(&restart_path)
             .await
             .err()
-            .expect("restart audit refuses the database")
-            .to_string(),
-        "database error: session cursor key rotation state is invalid (operation: ensure global database authority invariants)",
-        "restart audit must reject an active key that is not the monotonic maximum"
+            .expect("restart audit refuses the database"),
+        "restart audit must reject an active key that is not the monotonic maximum",
     );
 }
 
@@ -320,14 +338,14 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
             .join(".tracedecay")
             .join("restart.db");
         copy_database_for_temporal_restart(&db_path, &restart_path).await;
-        assert_eq!(
+        assert_cursor_rotation_verdict(
             open_global_db(&restart_path)
                 .await
                 .err()
-                .expect("restart audit refuses the database")
-                .to_string(),
-            "database error: session cursor key rotation state is invalid (operation: ensure global database authority invariants)",
-            "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
+                .expect("restart audit refuses the database"),
+            &format!(
+                "{fixture}: a later key must not satisfy a skipped immediate-successor retirement"
+            ),
         );
     }
 }

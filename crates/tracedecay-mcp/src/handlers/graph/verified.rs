@@ -62,9 +62,9 @@ pub fn nodes_addressed_by_selector(
         return Ok(graph.symbol_summary(&occurrence)?.into_iter().collect());
     }
     let Some(qualified_name) = selector.qualified_name.as_deref() else {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: qualified_name or node_id".to_owned(),
-        });
+        return Err(TraceDecayError::missing_required_parameter(
+            "missing required parameter: qualified_name or node_id",
+        ));
     };
     graph.resolve_qualified_name(qualified_name, None, 1_000)
 }

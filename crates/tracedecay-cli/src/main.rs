@@ -1413,10 +1413,23 @@ async fn dispatch_runtime_command(
         Commands::Work { invocation } => work_command::run(profile, invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(profile, invocation).await?,
         Commands::Remote { action } => {
-            hotpath::measure_block!(
-                "cli.remote.run",
-                crate::remote_command::run(profile, action.into())
-            )?;
+            let profile = profile.clone();
+            let command = action.into();
+            hotpath::future!(
+                async {
+                    tokio::task::spawn_blocking(move || {
+                        crate::remote_command::run(&profile, command)
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracedecay_domain::errors::TraceDecayError::Config {
+                            message: format!("remote command task failed to join: {error}"),
+                        }
+                    })?
+                },
+                label = "cli.remote.run"
+            )
+            .await?;
         }
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(profile, action).await?;

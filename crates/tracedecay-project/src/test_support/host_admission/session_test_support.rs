@@ -2,27 +2,9 @@
 
 use std::path::Path;
 
-use tracedecay_session_temporal_store::SessionTemporalAccess;
-
 use super::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
 impl HostAdmissionTestRuntimeV1 {
-    #[doc(hidden)]
-    pub async fn ensure_session_cursor_key_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> tracedecay_domain::errors::Result<tracedecay_domain::SignedCursorKeyRefV1> {
-        SessionTemporalAccess::new(self.session_database_for_test(scope)?)
-            .ensure_active_session_cursor_key_result()
-            .await
-            .map_err(
-                |error| tracedecay_domain::errors::TraceDecayError::Database {
-                    operation: "provision test session cursor authentication key".to_owned(),
-                    message: error.to_string(),
-                },
-            )
-    }
-
     #[doc(hidden)]
     pub async fn session_activity_for_test(
         &self,

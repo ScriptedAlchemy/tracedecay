@@ -176,6 +176,24 @@ impl Error {
             _ => matches!(self.sqlite_code(), Some(SQLITE_BUSY | SQLITE_LOCKED)),
         }
     }
+
+    /// True when this failure says the database could not be read right now
+    /// (held, interrupted, an I/O fault, or a file that would not open), so
+    /// the same read can succeed later without anything changing.
+    #[hotpath::skip]
+    pub const fn is_transient_read_failure(&self) -> bool {
+        match self {
+            Self::TransactionExpired => true,
+            Self::StatementBatch { source, .. } => source.is_transient_read_failure(),
+            _ => {
+                self.is_busy_or_locked()
+                    || matches!(
+                        self.sqlite_code(),
+                        Some(SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_CANTOPEN)
+                    )
+            }
+        }
+    }
 }
 
 /// `SQLITE_BUSY`: another connection holds a conflicting database lock.
@@ -184,3 +202,41 @@ const SQLITE_BUSY: i32 = 5;
 const SQLITE_LOCKED: i32 = 6;
 /// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
 const SQLITE_CONSTRAINT: i32 = 19;
+const SQLITE_INTERRUPT: i32 = 9;
+const SQLITE_IOERR: i32 = 10;
+const SQLITE_CANTOPEN: i32 = 14;
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    fn sqlite(extended_code: i32) -> Error {
+        Error::Sqlite {
+            operation: "step",
+            code: Some(extended_code & 0xff),
+            extended_code: Some(extended_code),
+            message: "fixture".to_owned(),
+        }
+    }
+
+    #[test]
+    fn transient_read_failures_are_named_by_engine_code() {
+        // SQLITE_BUSY_SNAPSHOT, SQLITE_LOCKED, SQLITE_IOERR_SHORT_READ.
+        for transient in [sqlite(517), sqlite(6), sqlite(522), Error::Busy] {
+            assert!(transient.is_transient_read_failure(), "{transient:?}");
+        }
+        // SQLITE_CONSTRAINT_TRIGGER, SQLITE_CORRUPT, a column that does not
+        // decode: each answers the same on every read.
+        for verdict in [
+            sqlite(1811),
+            sqlite(11),
+            Error::TypeMismatch {
+                column: 0,
+                expected: "text",
+                actual: "integer",
+            },
+        ] {
+            assert!(!verdict.is_transient_read_failure(), "{verdict:?}");
+        }
+    }
+}
