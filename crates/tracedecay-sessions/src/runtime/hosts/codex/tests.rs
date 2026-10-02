@@ -354,7 +354,7 @@ mod goal_event_tests {
         assert!(matches!(
             &facts[0],
             CanonicalObservationFactV1::ToolInvocation { name, arguments, .. }
-                if name == "update_plan" && arguments.is_null()
+                if name == "update_plan" && arguments["plan"][1]["step"] == "ship"
         ));
         match &facts[1] {
             CanonicalObservationFactV1::WorkflowLifecycle {

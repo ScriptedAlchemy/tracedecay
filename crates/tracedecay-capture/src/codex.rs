@@ -873,7 +873,7 @@ fn append_codex_response_item_facts(
             facts.push(CanonicalObservationFactV1::ToolInvocation {
                 invocation_id,
                 name: name.clone(),
-                arguments: Value::Null,
+                arguments: response_item_tool_arguments(payload, item_kind),
             });
             if item_kind == "function_call" && name == "update_plan" {
                 let _ = append_codex_update_plan_lifecycle_fact(payload, facts);
@@ -975,6 +975,20 @@ fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
         Some(Value::String(raw)) => serde_json::from_str(raw).ok(),
         Some(value @ Value::Object(_)) => Some(value.clone()),
         _ => None,
+    }
+}
+
+fn response_item_tool_arguments(payload: &Value, item_kind: &str) -> Value {
+    match item_kind {
+        "function_call" | "tool_search_call" => match payload.get("arguments") {
+            Some(Value::String(raw)) => parse_arguments(payload.get("arguments"))
+                .unwrap_or_else(|| Value::String(raw.clone())),
+            Some(value) if !value.is_null() => value.clone(),
+            _ => Value::Null,
+        },
+        "custom_tool_call" => payload.get("input").cloned().unwrap_or(Value::Null),
+        "web_search_call" => payload.get("action").cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
     }
 }
 
