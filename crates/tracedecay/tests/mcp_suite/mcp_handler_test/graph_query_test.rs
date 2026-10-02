@@ -5,6 +5,7 @@ mod relation_page_cost;
 mod restart_seat;
 mod typed_evidence_trailers;
 mod typescript_module_resolution;
+mod unknown_file;
 mod unsealed_graph;
 
 use crate::support::*;
