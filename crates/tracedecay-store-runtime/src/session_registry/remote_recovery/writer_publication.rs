@@ -15,7 +15,6 @@ use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
 use tracedecay_domain::{BrainNodeId, ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalEffectErrorV1, RemoteSqliteStorageV1, RemoteWriterPublicationErrorV1,
-    RemoteWriterPublicationStateV1,
 };
 use tracedecay_store::RemoteWriterFenceInstallV1;
 
@@ -78,11 +77,7 @@ fn publish_first_writer(
     policy: &RemoteReplayPolicyEvidenceV1,
     published_at: UtcMicros,
 ) -> Result<(), RemoteWriterPublicationErrorV1> {
-    if storage.writer_publication_state(writer, policy, published_at)?
-        == RemoteWriterPublicationStateV1::Published
-    {
-        return Ok(());
-    }
+    storage.writer_publication_state(writer, policy, published_at)?;
     seed_project_writer_fence(replay, writer, published_at)?;
     storage.publish_authority(writer, policy, published_at)
 }
