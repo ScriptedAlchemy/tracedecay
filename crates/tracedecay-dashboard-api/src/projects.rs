@@ -54,41 +54,45 @@ impl DashboardRuntime {
     }
 
     /// The active project's state. While its session authorities are still
-    /// opening, each call asks the daemon again and mounts them the first
-    /// time it answers ready.
-    pub async fn active_state(&self) -> DashboardState {
+    /// opening, this reads the resolution the daemon published, mounting the
+    /// authorities or recording them unavailable the first time it is
+    /// terminal. It never waits on or calls into the daemon.
+    pub fn active_state(&self) -> DashboardState {
         let current = self.active();
-        let Some(resolve) = current.session_resolver.clone() else {
+        let Some(publication) = current.session_mount.as_ref() else {
             return current;
         };
-        match resolve().await {
-            DashboardSessionResolutionV1::Opening => current,
-            DashboardSessionResolutionV1::Unavailable => DashboardState {
-                session_authority: DashboardSessionAuthorityStateV1::Unavailable,
-                ..current
-            },
-            DashboardSessionResolutionV1::Ready(authorities) => {
-                let (mounted, newly_mounted) = {
-                    let mut active = self
-                        .active
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let newly_mounted = active.session_resolver.is_some();
-                    if newly_mounted {
-                        active.mount_session_authorities(authorities);
-                    }
-                    (active.clone(), newly_mounted)
-                };
-                if newly_mounted {
-                    tracing::info!(
-                        event = "dashboard_session_authorities_mounted",
-                        project_root = %mounted.project_root.display(),
-                    );
-                    crate::token_count::spawn_warm(mounted.clone());
-                }
-                mounted
-            }
+        let resolution = publication.borrow().clone();
+        if matches!(resolution, DashboardSessionResolutionV1::Opening) {
+            return current;
         }
+        let (state, mounted) = {
+            let mut active = self
+                .active
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let terminal_first_seen = active.session_mount.take().is_some();
+            match resolution {
+                DashboardSessionResolutionV1::Ready(authorities) if terminal_first_seen => {
+                    active.mount_session_authorities(authorities);
+                }
+                DashboardSessionResolutionV1::Unavailable if terminal_first_seen => {
+                    active.session_authority = DashboardSessionAuthorityStateV1::Unavailable;
+                }
+                _ => {}
+            }
+            let mounted = terminal_first_seen
+                && active.session_authority == DashboardSessionAuthorityStateV1::Ready;
+            (active.clone(), mounted)
+        };
+        if mounted {
+            tracing::info!(
+                event = "dashboard_session_authorities_mounted",
+                project_root = %state.project_root.display(),
+            );
+            crate::token_count::spawn_warm(state.clone());
+        }
+        state
     }
 
     pub fn active_project_id(&self) -> Option<String> {
@@ -106,7 +110,7 @@ impl DashboardRuntime {
         let active = self.active();
         if active.project_id.as_deref() == Some(project_id) {
             return Ok(SelectedProjectState {
-                state: self.active_state().await,
+                state: self.active_state(),
             });
         }
 

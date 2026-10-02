@@ -114,6 +114,15 @@ pub(crate) fn retained_noop_requires_follow_up_wake(
     serving_empty && !activation_deferred && consumed_external_arrival && source_is_noop
 }
 
+/// The verified head belongs to a different generation than the retained
+/// manifest this pass tried to recover. Replaying that manifest publishes a
+/// second graph over the generation that owns the head.
+pub(crate) fn graph_head_belongs_to_another_generation(error: &CodeIndexSchedulerErrorV1) -> bool {
+    error.activation_conflict_context().is_some_and(|context| {
+        context.site == "code_graph.recover_verified_snapshot_from_head.generation"
+    })
+}
+
 /// Whether this activation failure repeats the previous attempt's conflict
 /// verdict for the same sealed generation. A first Conflict can be a race
 /// with a concurrent publisher and retries like any transient failure, but
@@ -189,6 +198,10 @@ enum PublishedTextProjectionOutcomeV1 {
     WaitingForMemory,
     /// Shutdown retired the text control mid-slice.
     Shutdown,
+    /// Another owner holds the code-generation store lock. Unfinished, but a
+    /// continuation would only repeat the refusal: the worker retries when
+    /// that owner releases the lock.
+    WaitingForStore,
 }
 
 impl GraphSeatGateV1 {
@@ -2697,6 +2710,12 @@ impl CodeIndexSchedulerRegistryV1 {
                             "published text projection waits for resident memory to be given back"
                         );
                         return PublishedTextProjectionOutcomeV1::WaitingForMemory;
+                    } else if error.is_generation_store_lock_contended() {
+                        tracing::info!(
+                            event = "code_index_text_projection_waiting_for_store",
+                            "published text projection waits for the code-generation store lock"
+                        );
+                        return PublishedTextProjectionOutcomeV1::WaitingForStore;
                     } else {
                         tracing::warn!(
                             event = "code_index_text_projection_failed",

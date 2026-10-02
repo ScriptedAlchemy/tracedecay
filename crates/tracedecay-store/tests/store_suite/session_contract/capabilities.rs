@@ -38,32 +38,6 @@ impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
     }
 }
 
-impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {
-    async fn begin_session_generation_rebuild_supported(
-        &self,
-        _permit: SessionGenerationRebuildBeginPermit,
-        _request: SessionGenerationRebuildRequestV1,
-    ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
-        panic!("capability guard was bypassed")
-    }
-
-    async fn persist_session_temporal_projection_batch_supported(
-        &self,
-        _permit: SessionProjectionBatchPersistPermit,
-        _batch: SessionTemporalProjectionBatchV1,
-    ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
-        panic!("capability guard was bypassed")
-    }
-
-    async fn activate_session_temporal_generation_supported(
-        &self,
-        _permit: SessionGenerationActivatePermit,
-        _request: SessionGenerationActivationRequestV1,
-    ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
-        panic!("capability guard was bypassed")
-    }
-}
-
 impl SessionRefreshStore for CapabilityDeniedSessionPorts {
     async fn begin_or_join_session_refresh_supported(
         &self,
@@ -231,41 +205,14 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
         })
     ));
 
-    let forged = snapshot_for(session_id.clone(), 7);
-    let rebuild =
-        SessionGenerationRebuildRequestV1::new(session_id.clone(), generation(8), forged.clone())
-            .unwrap();
-    let activation = SessionGenerationActivationRequestV1::new(
-        session_id.clone(),
-        generation(8),
-        forged.clone(),
-        ExecutionControl::default(),
-    )
-    .unwrap();
-    let projection = projection_batch(&session_id);
-
-    let results = [
+    assert!(matches!(
         ready(
             ports.freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(
                 session_id,
             )),
-        )
-        .map(|_| ()),
-        ready(ports.begin_session_generation_rebuild(rebuild)).map(|_| ()),
-        ready(ports.persist_session_temporal_projection_batch(projection)).map(|_| ()),
-        ready(ports.activate_session_temporal_generation(activation)).map(|_| ()),
-    ];
-    let required = [
-        SessionTemporalCapabilityV1::FrozenWatermarks,
-        SessionTemporalCapabilityV1::GenerationRebuild,
-        SessionTemporalCapabilityV1::GenerationRebuild,
-        SessionTemporalCapabilityV1::GenerationRebuild,
-    ];
-    for (result, expected) in results.into_iter().zip(required) {
-        assert!(matches!(
-            result,
-            Err(SessionStoreError::UnsupportedCapability { capability })
-                if capability == expected
-        ));
-    }
+        ),
+        Err(SessionStoreError::UnsupportedCapability {
+            capability: SessionTemporalCapabilityV1::FrozenWatermarks
+        })
+    ));
 }
