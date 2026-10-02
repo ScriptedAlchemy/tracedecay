@@ -718,8 +718,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let mut workflow_results = Vec::new();
-        let mut workflow_observations = BTreeMap::new();
+        let mut workflow_results: Vec<SessionMessageSearchResult> = Vec::new();
+        let mut workflow_observations: BTreeMap<String, usize> = BTreeMap::new();
         for (observation_id, fact) in
             search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?
         {
