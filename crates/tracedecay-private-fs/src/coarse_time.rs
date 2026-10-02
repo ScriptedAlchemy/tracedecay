@@ -47,6 +47,18 @@ impl RewriteWitness {
             Self::Absent => None,
         }
     }
+
+    /// Whether a later stat equal to `metadata` proves the file's bytes
+    /// unchanged since this one: the witness has a change time and that time
+    /// is already behind the clock that stamps the next write.
+    ///
+    /// Ask before reading the bytes the stat is to vouch for. A change time
+    /// that settles only afterwards can be shared with a write during the read.
+    #[must_use]
+    pub fn vouches_for_unchanged_bytes(self, metadata: &Metadata) -> bool {
+        self.change_time_nanos(metadata)
+            .is_some_and(change_time_settled)
+    }
 }
 
 #[cfg(unix)]
@@ -102,7 +114,7 @@ fn linux_coarse_now_nanos() -> Option<i128> {
 
 #[cfg(test)]
 mod tests {
-    use super::change_time_settled;
+    use super::{RewriteWitness, change_time_settled};
 
     #[test]
     fn epoch_change_time_is_settled() {
@@ -117,25 +129,33 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_fresh_write_shares_the_current_coarse_quantum() {
-        use std::os::unix::fs::MetadataExt;
-
+    fn a_fresh_write_cannot_vouch_for_its_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("fresh");
-        let mut saw_unsettled = false;
+        let mut saw_unvouched = false;
         for _ in 0..64 {
             std::fs::write(&path, b"x").unwrap();
             let metadata = std::fs::metadata(&path).unwrap();
-            let changed_at_nanos =
-                i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
-            if !change_time_settled(changed_at_nanos) {
-                saw_unsettled = true;
+            if !RewriteWitness::ChangeTime.vouches_for_unchanged_bytes(&metadata) {
+                saw_unvouched = true;
                 break;
             }
         }
         assert!(
-            saw_unsettled,
-            "a write inside the coarse quantum must not count as a settled change time"
+            saw_unvouched,
+            "a change time inside the coarse quantum must not vouch for unchanged bytes"
         );
+    }
+
+    #[test]
+    fn only_a_change_time_witness_vouches_for_a_settled_file() {
+        let settled = std::fs::metadata(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("stat the crate manifest");
+
+        assert_eq!(
+            RewriteWitness::ChangeTime.vouches_for_unchanged_bytes(&settled),
+            cfg!(unix)
+        );
+        assert!(!RewriteWitness::Absent.vouches_for_unchanged_bytes(&settled));
     }
 }
