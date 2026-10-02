@@ -299,8 +299,6 @@ struct PartitionedEvidenceSegmentIdentityV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
     #[serde(default)]
-    evidence_size_bytes: u64,
-    #[serde(default)]
     pages: Vec<PartitionedEvidencePageIdentityV1>,
 }
 
