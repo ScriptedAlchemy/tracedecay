@@ -49,6 +49,7 @@ export class DaemonBridge {
   #registry: ServeSession | null = null;
   readonly #projects = new Map<string, ProjectHandle>();
   readonly #pending = new Map<string, Promise<ProjectHandle>>();
+  #closing = false;
 
   constructor(options: BridgeOptions) {
     this.#options = options;
@@ -120,6 +121,7 @@ export class DaemonBridge {
   }
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
+    if (this.#closing) throw bridgeClosed();
     let pending = this.#pending.get(projectId);
     if (pending === undefined) {
       // One acquisition at a time per project: two concurrent callers must not
@@ -170,6 +172,12 @@ export class DaemonBridge {
       },
     });
     const handle: ProjectHandle = { project, session, client, process_run_id: record.process_run_id };
+    if (this.#closing) {
+      // Shutdown raced this acquisition: never cache the child or let it
+      // outlive close().
+      await session.close();
+      throw bridgeClosed();
+    }
     this.#projects.set(projectId, handle);
     return handle;
   }
@@ -241,6 +249,10 @@ export class DaemonBridge {
   }
 
   async close(): Promise<void> {
+    this.#closing = true;
+    // In-flight acquisitions close their own children once they see the flag;
+    // wait for them so a session created mid-race cannot escape shutdown.
+    await Promise.allSettled([...this.#pending.values()]);
     const sessions = [...this.#projects.values()].map((handle) => handle.session);
     if (this.#registry !== null) sessions.push(this.#registry);
     this.#projects.clear();
@@ -251,6 +263,14 @@ export class DaemonBridge {
 
 function optional(signal: AbortSignal | undefined): { signal?: AbortSignal } {
   return signal === undefined ? {} : { signal };
+}
+
+function bridgeClosed(): DaemonFailure {
+  return new DaemonFailure({
+    kind: "unavailable",
+    code: "bridge_closed",
+    message: "the extension bridge is shutting down",
+  });
 }
 
 // Shared work outlives any single request: a caller that cancels gets its own

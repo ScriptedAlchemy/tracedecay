@@ -369,9 +369,14 @@ export function taxTotal(invoices: Invoice[]): number {
       }
       const ping = await rawPost(url, new URL(url).host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), `Bearer ${token}`);
       expect(ping.status).toBe(200);
-    } finally {
       child.kill("SIGTERM");
       await once(child, "exit");
+      await expect(stat(tokenPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await once(child, "exit");
+      }
     }
   });
 
