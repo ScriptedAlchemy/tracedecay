@@ -606,3 +606,17 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         })
     );
 }
+
+#[test]
+fn verifying_seated_generation_reads_stale_like_status() {
+    use tracedecay_contracts::doctor::CodeIndexMountStateV1;
+
+    assert_eq!(
+        code_index_mount_state(Some(CodeIndexStalenessStateV1::Verifying)),
+        CodeIndexMountStateV1::Stale
+    );
+    assert_eq!(
+        code_index_mount_state(Some(CodeIndexStalenessStateV1::Indexing)),
+        CodeIndexMountStateV1::Indexing
+    );
+}

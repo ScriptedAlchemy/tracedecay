@@ -173,10 +173,11 @@ fn host_integration_read_from_report(
 /// so doctor and status give one verdict for the same worktree.
 ///
 /// An unmounted worktree reports `Unmounted`; a fresh one `Mounted`; a stale
-/// one `Stale`; a worktree whose background convergence is parked on a
-/// deterministic contract violation reports `Parked` with the exact reason;
-/// one still indexing, refreshing, restoring, or verifying reports
-/// `Indexing`. The read observes only: it neither renews a residency lease
+/// one, or one whose last complete index serves while the scheduler verifies
+/// source freshness, `Stale`, as status labels it; a worktree whose background
+/// convergence is parked on a deterministic contract violation reports
+/// `Parked` with the exact reason; one still indexing, refreshing, or
+/// restoring reports `Indexing`. The read observes only: it neither renews a residency lease
 /// nor wakes code-index work.
 #[hotpath::measure(label = "daemon.doctor.code_index", future = true)]
 pub async fn code_index_read_from_registry(
@@ -198,18 +199,23 @@ pub async fn code_index_read_from_registry(
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
     }
-    observed(match freshness.staleness_state {
+    observed(code_index_mount_state(freshness.staleness_state))
+}
+
+fn code_index_mount_state(staleness: Option<CodeIndexStalenessStateV1>) -> CodeIndexMountStateV1 {
+    match staleness {
         Some(CodeIndexStalenessStateV1::Fresh) => CodeIndexMountStateV1::Mounted,
-        Some(CodeIndexStalenessStateV1::Stale) => CodeIndexMountStateV1::Stale,
+        Some(CodeIndexStalenessStateV1::Stale | CodeIndexStalenessStateV1::Verifying) => {
+            CodeIndexMountStateV1::Stale
+        }
         Some(
             CodeIndexStalenessStateV1::Indexing
             | CodeIndexStalenessStateV1::Refreshing
             | CodeIndexStalenessStateV1::Restoring
-            | CodeIndexStalenessStateV1::Verifying
             | CodeIndexStalenessStateV1::Parked,
         )
         | None => CodeIndexMountStateV1::Indexing,
-    })
+    }
 }
 
 // === Pending schema migrations (Storage family) ==============================
