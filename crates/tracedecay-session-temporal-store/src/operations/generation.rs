@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
@@ -10,6 +10,9 @@ use crate::relations::{SessionRelationProjection, SummarySourceRef};
 
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
+
+/// The largest `summary_id IN (...)` batch one stale-marking upsert binds.
+const STALE_MARKING_BATCH: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RawSummaryInvalidation {
@@ -460,31 +463,47 @@ pub(super) async fn publish_candidate_generation(
         .await?;
     }
     if let Some(predecessor) = predecessor {
-        for affected in stale_closure(relation_projection, predecessor, summary_id)? {
-            let mut rows = conn
-                .query(
-                    "SELECT source_horizon_json
-                     FROM session_summary_nodes WHERE summary_id = ?1",
-                    params![affected.as_str()],
+        // One `summary_id IN (...)` INSERT..SELECT per chunk replaces the
+        // per-node horizon read plus upsert. A chunk writing fewer rows than
+        // it names means a node vanished, the same `SummaryNodeNotFound` the
+        // per-node `SELECT` raised.
+        for chunk in
+            stale_closure(relation_projection, predecessor, summary_id)?.chunks(STALE_MARKING_BATCH)
+        {
+            let placeholders = (4..=chunk.len() + 3)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut bindings: Vec<Value> = Vec::with_capacity(chunk.len() + 3);
+            bindings.extend([
+                Value::Text(session_id.to_owned()),
+                Value::Integer(candidate),
+                Value::Integer(now),
+            ]);
+            bindings.extend(chunk.iter().map(|id| Value::Text(id.clone())));
+            let changed = conn
+                .execute(
+                    &format!(
+                        "INSERT INTO session_summary_availability (
+                            session_id, generation, summary_id, availability,
+                            source_horizon_json, reason, checked_at
+                         )
+                         SELECT ?1, ?2, nodes.summary_id, 'stale',
+                                nodes.source_horizon_json, 'predecessor_superseded', ?3
+                         FROM session_summary_nodes AS nodes
+                         WHERE nodes.summary_id IN ({placeholders})
+                         ON CONFLICT(session_id, generation, summary_id) DO UPDATE SET
+                            availability = 'stale',
+                            source_horizon_json = excluded.source_horizon_json,
+                            reason = 'predecessor_superseded',
+                            checked_at = excluded.checked_at"
+                    ),
+                    bindings,
                 )
                 .await?;
-            let Some(row) = rows.next().await? else {
+            if changed != chunk.len() as u64 {
                 return Err(LcmError::SummaryNodeNotFound);
-            };
-            let horizon: String = row.get(0)?;
-            conn.execute(
-                "INSERT INTO session_summary_availability (
-                    session_id, generation, summary_id, availability,
-                    source_horizon_json, reason, checked_at
-                 ) VALUES (?1, ?2, ?3, 'stale', ?4, 'predecessor_superseded', ?5)
-                 ON CONFLICT(session_id, generation, summary_id) DO UPDATE SET
-                    availability = 'stale',
-                    source_horizon_json = excluded.source_horizon_json,
-                    reason = 'predecessor_superseded',
-                    checked_at = excluded.checked_at",
-                params![session_id, candidate, affected.as_str(), horizon, now],
-            )
-            .await?;
+            }
         }
     }
     conn.execute(
