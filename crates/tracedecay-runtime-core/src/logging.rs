@@ -390,11 +390,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn log_daemon_event_writes_the_logfmt_line_to_stderr_when_rust_log_is_unset() {
-        assert!(
-            std::env::var_os("RUST_LOG").is_none(),
-            "visibility is the unset-RUST_LOG path; the emitter is eprintln, not tracing"
-        );
+    fn log_daemon_event_writes_the_logfmt_line_to_stderr_whatever_rust_log_says() {
+        // The emitter writes fd 2 directly and never consults `RUST_LOG` or a
+        // tracing filter, so the ambient environment cannot change the line.
         let fields = [
             ("pass", "code_generations".to_string()),
             (
