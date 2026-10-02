@@ -2500,7 +2500,26 @@ impl CodeIndexPublishedGenerationV1 {
                 ))
             })
         })?;
-        evidence.finish()
+        evidence.finish()?;
+        for descriptor in &generation.code_graph_pages {
+            segment.clear();
+            read_segment(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &descriptor.page_digest,
+                    size_bytes: descriptor.size_bytes,
+                },
+                &mut segment,
+            )?;
+            verify_segment_identity(
+                &segment,
+                &descriptor.page_digest,
+                descriptor.size_bytes,
+                "sealed code graph page length exceeds u64",
+                "sealed code graph page byte size does not match its manifest",
+                "sealed code graph page digest does not match its manifest",
+            )?;
+        }
+        Ok(())
     }
 }
 

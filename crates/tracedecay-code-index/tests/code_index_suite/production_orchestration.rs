@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     io::Read,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -3109,6 +3109,17 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     );
     let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
         .expect("partitioned segment identities parse");
+    let graph_page_digests = envelope["generation"]["code_graph_pages"]
+        .as_array()
+        .expect("code graph page descriptors")
+        .iter()
+        .map(|page| {
+            page["page_digest"]
+                .as_str()
+                .expect("code graph page digest")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         identities
             .iter()
@@ -3173,7 +3184,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     // Buffer address -> its capacity after the last read it served.
     let mut file_buffers = BTreeMap::new();
     let evidence_buffer_address = Cell::new(None);
-    let segment_reads = Cell::new(0_usize);
+    let segment_reads = RefCell::new(BTreeSet::new());
     let largest_file_segment = Cell::new(0_usize);
     let largest_evidence_page = Cell::new(0_usize);
     let evidence_buffer_capacity = Cell::new(0_usize);
@@ -3215,12 +3226,27 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
                 evidence_buffer_capacity.set(buffer.capacity());
             }
-            segment_reads.set(segment_reads.get() + 1);
+            segment_reads
+                .borrow_mut()
+                .insert(digest.as_str().to_owned());
             Ok(())
         },
     )
     .expect("partitioned bytes decode");
-    assert_eq!(segment_reads.get(), PARTITIONED_FORMAT_SEGMENTS.len());
+    assert!(
+        segment_reads.borrow().is_disjoint(&graph_page_digests),
+        "text decode must leave independently served graph pages untouched"
+    );
+    let eagerly_decoded_digests = identities
+        .iter()
+        .map(|identity| identity.digest.as_str().to_owned())
+        .filter(|digest| !graph_page_digests.contains(digest))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        *segment_reads.borrow(),
+        eagerly_decoded_digests,
+        "decode must read every non-graph segment and defer only graph pages"
+    );
     let largest_file_segment = largest_file_segment.get();
     assert_eq!(
         file_buffers.len(),
@@ -3257,7 +3283,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
 
     // Segment authentication without decoding, which graph replay verifies a
     // retained generation through: intact segments verify, and one flipped
-    // byte in any of them is refused by the verifier and by the decoder.
+    // byte in any of them is refused. Text decode authenticates only the file
+    // and evidence segments it consumes; graph pages stay lazy and authenticate
+    // when the graph store reads them.
     let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
         let (digest, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
@@ -3299,15 +3327,16 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, flip).is_err(),
             "one flipped byte in segment {corrupted} must fail authentication"
         );
-        assert!(
-            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
-                &manifest,
-                &SharedDecodedContentPoolV1::default(),
-                flip
-            )
-            .is_err(),
-            "one flipped byte in segment {corrupted} must fail the decoder"
+        let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            &SharedDecodedContentPoolV1::default(),
+            flip,
         );
+        if graph_page_digests.contains(*corrupted) {
+            decoded.expect("text decode must not materialize a graph page");
+        } else {
+            decoded.expect_err("a consumed corrupt segment must fail text decode");
+        }
     }
 
     let mut reencoded_segments = BTreeMap::new();
