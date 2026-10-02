@@ -558,10 +558,12 @@ mod tests {
             Arc::new(|| Box::pin(async { Err("/private/operator/path".to_owned()) })),
             Arc::new(|_| Box::pin(async { CodeIndexDemandAdmissionV1::Queued })),
         ));
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
         let reader = super::super::project_dashboard_freshness_reader(
-            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+            registry.clone(),
             Arc::clone(&activation),
         );
+        let waiter = super::super::project_readiness_waiter(registry, Arc::clone(&activation));
 
         assert_eq!(
             activation
@@ -574,11 +576,24 @@ mod tests {
         }
 
         assert_eq!(
-            reader(root).await,
+            reader(root.clone()).await,
             Err(
                 tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed
             )
         );
+        let waited = waiter(
+            root,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("the readiness authority returns typed mount failure");
+        assert!(matches!(
+            waited,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                reason
+            } if reason == "code_index_mount_failed"
+        ));
     }
 
     /// A linked worktree under the default `sync.watch_linked_worktrees = false`

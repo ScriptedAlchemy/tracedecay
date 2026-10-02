@@ -857,6 +857,8 @@ const READ_FAILED_NOTE: &str = "code-index freshness read failed";
 const MOUNT_FAILED_NOTE: &str = "the last code-index mount for this project failed";
 const MOUNT_FAILED_MESSAGE: &str = "the code-index scheduler could not mount for this project";
 const MOUNT_FAILED_REMEDIATION: &str = "run `tracedecay sync` to retry the code-index mount";
+/// Stable reason code for a failed demand-driven code-index mount.
+pub const CODE_INDEX_MOUNT_FAILED: &str = "code_index_mount_failed";
 
 impl CodeIndexFreshnessPayloadV1 {
     /// Payload after the daemon scheduler registry answered for this project.
