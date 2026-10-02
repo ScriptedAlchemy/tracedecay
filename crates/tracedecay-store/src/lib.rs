@@ -33,7 +33,7 @@ pub mod transcript;
 
 pub use canonical_projection::{
     EDITED_FILES_KEY, SPAWNED_SESSIONS_KEY, TOOL_USE_ID_KEY, canonical_fact_text,
-    derive_canonical_projection, message_metadata_with_envelope,
+    derive_canonical_projection, message_metadata_with_envelope, session_project_fields,
     stored_message_is_shipped_release_rendering, workflow_semantic_kind,
 };
 pub use codex_goal_context::{

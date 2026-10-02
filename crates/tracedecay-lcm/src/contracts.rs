@@ -506,6 +506,8 @@ pub enum LcmError {
         actual_to: Option<i64>,
     },
     LifecycleStateNotFound,
+    /// An LCM write targeted a store that holds no sessions.
+    NotASessionStore,
     Cancelled,
     DeadlineExceeded,
     BudgetExhausted,
@@ -617,6 +619,9 @@ impl std::fmt::Display for LcmError {
             ),
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
+            }
+            Self::NotASessionStore => {
+                write!(f, "LCM writes require a profile or project session store")
             }
             Self::Cancelled => write!(f, "LCM payload verification was cancelled"),
             Self::DeadlineExceeded => {
