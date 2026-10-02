@@ -344,6 +344,11 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
                 .to_owned()
         })
         .collect::<BTreeSet<_>>();
+    assert_eq!(
+        expected_goal_message_ids.len(),
+        4,
+        "all four goal updates, including the token/time tick, must persist raw"
+    );
     let actual_goal_message_ids = runtime
         .search_session_messages(
             "codex",
