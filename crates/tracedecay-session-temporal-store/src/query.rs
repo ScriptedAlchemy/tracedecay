@@ -13,7 +13,7 @@ use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStor
 
 use crate::sql::{
     SHARED_GENERATION_TABLES, SharedGenerationTable, discard_candidate_rows_sql,
-    retire_superseded_versions_sql,
+    discard_session_rows_sql, retire_superseded_versions_sql,
 };
 
 pub(super) const PERSIST_OPERATION: &str = "persist session temporal projection batch";
@@ -166,6 +166,24 @@ pub(super) async fn discard_candidate_rows(
         operation,
         SHARED_GENERATION_TABLES.iter(),
         discard_candidate_rows_sql,
+    )
+    .await
+}
+
+/// Deletes every row the generations through `generation` introduced.
+pub(super) async fn discard_session_rows(
+    conn: &impl crate::handle::SessionTemporalExec,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    operation: &'static str,
+) -> SessionStoreResult<()> {
+    execute_per_shared_table(
+        conn,
+        session_id,
+        generation,
+        operation,
+        SHARED_GENERATION_TABLES.iter(),
+        discard_session_rows_sql,
     )
     .await
 }
