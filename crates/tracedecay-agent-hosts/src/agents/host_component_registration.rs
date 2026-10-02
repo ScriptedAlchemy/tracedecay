@@ -1004,6 +1004,158 @@ mod tests {
     use crate::agents::host_bundle::{HostBundleError, HostKindV1};
 
     #[test]
+    fn opencode_core_lifecycle_preserves_unparseable_operator_config() {
+        use crate::agents::host_bundle::{
+            HostBundleLifecycleOpV1 as Op, HostBundleWriterV1, HostComponentSetExecutionRequestV1,
+            HostComponentSetLifecycleRequestV1, HostComponentV1,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let config = home.path().join(".config/opencode/opencode.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, b"{not-json").unwrap();
+        let bundle = crate::agents::host_bundle_registry::verified_embedded_host_component_set(
+            HostKindV1::OpenCode,
+            &[HostComponentV1::Core],
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
+        let mut writer = HostBundleWriterV1::open(home.path()).unwrap();
+        for (index, operation) in [
+            Op::Install,
+            Op::Install,
+            Op::Update,
+            Op::Repair,
+            Op::Uninstall,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = HostComponentSetExecutionRequestV1 {
+                lifecycle: HostComponentSetLifecycleRequestV1 {
+                    operation,
+                    expected_host: HostKindV1::OpenCode,
+                    expected_components: vec![HostComponentV1::Core],
+                    explicit_confirmation: true,
+                    hermes_profile_bindings: 0,
+                    explicit_adoption: false,
+                },
+                operation_id: [index as u8 + 1; 16],
+            };
+            let mut authority = CatalogHostComponentRegistrationAuthority::new(
+                &profile,
+                "opencode",
+                home.path(),
+                operation,
+            )
+            .unwrap();
+            writer
+                .execute_component_set(&bundle.component_set, &request, &bundle, &mut authority)
+                .unwrap();
+            assert_eq!(fs::read(&config).unwrap(), b"{not-json");
+            assert_eq!(
+                home.path()
+                    .join(".config/opencode/plugins/tracedecay.ts")
+                    .exists(),
+                operation != Op::Uninstall
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_core_cleanup_is_reversible_and_revision_checked() {
+        use crate::agents::host_bundle::{
+            HostBundleLifecycleOpV1 as Op, HostBundleWriterV1, HostComponentSetExecutionRequestV1,
+            HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostComponentV1,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let bundle = crate::agents::host_bundle_registry::verified_embedded_host_component_set(
+            HostKindV1::OpenCode,
+            &[HostComponentV1::Core],
+            0,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .unwrap();
+        let mut request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation: Op::Install,
+                expected_host: HostKindV1::OpenCode,
+                expected_components: vec![HostComponentV1::Core],
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+                explicit_adoption: false,
+            },
+            operation_id: [1; 16],
+        };
+        let mut authority = CatalogHostComponentRegistrationAuthority::new(
+            &profile,
+            "opencode",
+            home.path(),
+            Op::Install,
+        )
+        .unwrap();
+        let mut writer = HostBundleWriterV1::open(home.path()).unwrap();
+        writer
+            .execute_component_set(&bundle.component_set, &request, &bundle, &mut authority)
+            .unwrap();
+        let config = home.path().join(".config/opencode/opencode.json");
+        let before = br#"{"lsp":{"tracedecay":{"command":["old","lsp"]},"rust":{"command":["rust-analyzer"]}},"mcp":{"servers":{"docs":{"type":"remote","url":"https://mcp.example.com"}}}}"#;
+        fs::write(&config, before).unwrap();
+        request.operation_id = [2; 16];
+        let mut authority = CatalogHostComponentRegistrationAuthority::new(
+            &profile,
+            "opencode",
+            home.path(),
+            Op::Install,
+        )
+        .unwrap();
+        let revision = authority
+            .current_revision(&bundle.component_set, &request)
+            .unwrap();
+        authority
+            .preflight(&bundle.component_set, &request)
+            .unwrap();
+        authority.stage(&bundle.component_set, &request).unwrap();
+        authority.apply(&bundle.component_set, &request).unwrap();
+        authority.verify(&bundle.component_set, &request).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&config).unwrap()).unwrap(),
+            serde_json::json!({
+                "lsp": {"rust": {"command": ["rust-analyzer"]}},
+                "mcp": {"servers": {"docs": {"type": "remote", "url": "https://mcp.example.com"}}}
+            })
+        );
+        assert_ne!(
+            authority
+                .current_revision(&bundle.component_set, &request)
+                .unwrap(),
+            revision
+        );
+        authority.rollback(&bundle.component_set, &request).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), before);
+        assert_eq!(
+            authority
+                .current_revision(&bundle.component_set, &request)
+                .unwrap(),
+            revision
+        );
+
+        writer
+            .execute_component_set(&bundle.component_set, &request, &bundle, &mut authority)
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&config).unwrap())
+                .unwrap()
+                .pointer("/lsp/tracedecay")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn typed_host_cli_absence_stays_distinct_from_config_failure() {
         let unavailable = CatalogHostComponentRegistrationAuthority::registration_error(
             HostKindV1::FactoryDroid,

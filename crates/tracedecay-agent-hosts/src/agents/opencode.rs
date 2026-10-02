@@ -144,15 +144,26 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
         let config_path = opencode_config_path(&ctx.home, &ctx.profile);
-        let config = match std::fs::read(&config_path) {
-            Ok(config_bytes) => {
-                let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
-                    return State::Corrupt;
-                };
-                Some(config)
+        let config = if matches!(
+            component,
+            HostComponentV1::Core | HostComponentV1::ContextMcp
+        ) {
+            match std::fs::read(&config_path) {
+                Ok(config_bytes) => {
+                    match serde_json::from_slice::<serde_json::Value>(&config_bytes) {
+                        Ok(config) => Some(config),
+                        Err(error) if component == HostComponentV1::Core => {
+                            tracing::warn!(path = %config_path.display(), %error, "Cannot inspect retired OpenCode LSP registration; Core artifacts remain independent of MCP config");
+                            None
+                        }
+                        Err(_) => return State::Corrupt,
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return State::Corrupt,
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return State::Corrupt,
+        } else {
+            None
         };
         let mcp_current = config
             .as_ref()
@@ -188,9 +199,12 @@ impl AgentIntegration for OpenCodeIntegration {
             .is_ok_and(|contents| contents.contains(OPENCODE_PLUGIN_MARKER));
         let prompt_current = std::fs::read_to_string(opencode_prompt_path(&ctx.home, &ctx.profile))
             .is_ok_and(|contents| contents.contains(PROMPT_RULE_MARKER));
-        if plugin_current && prompt_current {
+        let legacy_lsp = config
+            .as_ref()
+            .is_some_and(|config| config.pointer("/lsp/tracedecay").is_some());
+        if plugin_current && prompt_current && !legacy_lsp {
             State::Current
-        } else if !plugin_path.exists() && !prompt_current {
+        } else if !plugin_path.exists() && !prompt_current && !legacy_lsp {
             State::Missing
         } else {
             State::Repairable
@@ -229,7 +243,9 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle::HostComponentV1;
 
         let mut paths = Vec::new();
-        if components.contains(&HostComponentV1::ContextMcp) {
+        if components.contains(&HostComponentV1::ContextMcp)
+            || components.contains(&HostComponentV1::Core)
+        {
             paths.push(opencode_config_path(home, profile));
         }
         if components.contains(&HostComponentV1::Core) {
@@ -772,15 +788,19 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
 
 /// Remove only the retired custom-LSP entry during an explicit Core lifecycle.
 ///
-/// Core no longer owns `opencode.json`, but prior releases wrote this exact
-/// key for Core. The one-time cleanup must not add or remove the disjoint MCP
-/// component.
+/// Core stages `opencode.json` only to remove the key prior releases wrote.
+/// Unparseable operator config is left untouched; MCP lifecycle edits remain strict.
 fn remove_legacy_lsp_registration(config_path: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
     update_text_file_transactionally(config_path, |existing: &str| {
+        if let Err(error) = JsonConfigDialect::Json.parse_for_edit(config_path, existing) {
+            tracing::warn!(path = %config_path.display(), %error, "Skipped retired OpenCode LSP cleanup; operator config is unparseable");
+            return Ok(((), TextFileMutation::Unchanged));
+        }
         strip_registration_entries(config_path, existing, false, true)
+            .map(|(_, mutation)| ((), mutation))
     })?;
     Ok(())
 }
@@ -918,6 +938,95 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_registration_ignores_corrupt_mcp_config() {
+        use crate::agents::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
+
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let config = opencode_config_path(home.path(), &profile);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{not-json").unwrap();
+        let ctx = HealthcheckContext {
+            home: home.path().to_path_buf(),
+            profile: profile.clone(),
+            project_path: home.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
+            State::Missing
+        );
+        assert_eq!(
+            OpenCodeIntegration.host_component_registration(HostComponentV1::ContextMcp, &ctx),
+            State::Corrupt
+        );
+        install_opencode_plugin(
+            &opencode_plugin_path(home.path(), &profile),
+            "/usr/bin/tracedecay",
+        )
+        .unwrap();
+        install_prompt_rules(&opencode_prompt_path(home.path(), &profile)).unwrap();
+        assert_eq!(
+            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
+            State::Current
+        );
+        let install = InstallContext {
+            home: ctx.home,
+            profile,
+            tracedecay_bin: "/usr/bin/tracedecay".to_string(),
+            project_root: None,
+            dashboard: false,
+        };
+        OpenCodeIntegration
+            .activate_deployed_host_component_registration(&[HostComponentV1::Core], &install)
+            .unwrap();
+        OpenCodeIntegration
+            .deactivate_deployed_host_component_registration(&[HostComponentV1::Core], &install)
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{not-json");
+    }
+
+    #[test]
+    fn existing_core_with_legacy_lsp_requires_activation() {
+        use crate::agents::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
+
+        let home = tempfile::tempdir().unwrap();
+        let profile = ProfileRoot::under_home(home.path());
+        let config = opencode_config_path(home.path(), &profile);
+        install_opencode_plugin(
+            &opencode_plugin_path(home.path(), &profile),
+            "/usr/bin/tracedecay",
+        )
+        .unwrap();
+        install_prompt_rules(&opencode_prompt_path(home.path(), &profile)).unwrap();
+        std::fs::write(&config, serde_json::to_vec(&json!({
+            "lsp": {"tracedecay": {"command": ["old-tracedecay", "lsp"]}, "operator": {"command": ["operator-lsp"]}},
+            "mcp": {"servers": {"docs": {"type": "remote", "url": "https://mcp.example.com"}}}
+        })).unwrap()).unwrap();
+        let ctx = HealthcheckContext {
+            home: home.path().to_path_buf(),
+            profile: profile.clone(),
+            project_path: home.path().to_path_buf(),
+        };
+        assert_eq!(
+            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
+            State::Repairable
+        );
+        remove_legacy_lsp_registration(&config).unwrap();
+        assert_eq!(
+            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
+            State::Current
+        );
+        let config = crate::agents::load_json_file_strict(&config).unwrap();
+        assert!(config["lsp"].get("tracedecay").is_none());
+        assert_eq!(
+            config["lsp"]["operator"]["command"],
+            json!(["operator-lsp"])
+        );
+        assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
+    }
 
     /// The profile's `$XDG_CONFIG_HOME` is honored only inside the home being
     /// resolved: otherwise a managed-skill export sweep handed a sandbox home

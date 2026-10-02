@@ -3,6 +3,7 @@ import type { Plugin } from "@opencode/plugin"
 const TRACEDECAY_BIN = "__TRACEDECAY_BIN__"
 const MAX_GUIDANCE_BYTES = 8 * 1024
 const MAX_PENDING_GUIDANCE_PER_SESSION = 16
+const MAX_PENDING_GUIDANCE_SESSIONS = 128
 
 // Durable session boundaries on OpenCode's public event stream. The
 // deprecated `session.idle` / `session.status` pair is not emitted for V2
@@ -69,18 +70,36 @@ export class SessionLocations {
 export class PendingGuidance {
   private readonly bySession = new Map<string, string[]>()
 
-  push(sessionID: string, guidance: string | undefined): void {
-    if (!guidance) return
-    const queue = this.bySession.get(sessionID) ?? []
-    if (queue.length >= MAX_PENDING_GUIDANCE_PER_SESSION) queue.shift()
-    queue.push(guidance)
+  deliveryFor(sessionID: string): (guidance: string | undefined) => void {
+    let queue = this.bySession.get(sessionID)
+    if (!queue) {
+      queue = []
+      this.bySession.set(sessionID, queue)
+    }
+    this.bySession.delete(sessionID)
     this.bySession.set(sessionID, queue)
+    if (this.bySession.size > MAX_PENDING_GUIDANCE_SESSIONS) {
+      const oldest = this.bySession.keys().next()
+      if (!oldest.done) this.bySession.delete(oldest.value)
+    }
+    const captured = queue
+    return (guidance) => {
+      if (!guidance || this.bySession.get(sessionID) !== captured) return
+      if (captured.length >= MAX_PENDING_GUIDANCE_PER_SESSION) captured.shift()
+      captured.push(guidance)
+    }
+  }
+
+  delete(sessionID: string): void {
+    this.bySession.delete(sessionID)
+  }
+
+  clear(): void {
+    this.bySession.clear()
   }
 
   drain(sessionID: string): string[] {
-    const queue = this.bySession.get(sessionID) ?? []
-    this.bySession.delete(sessionID)
-    return queue
+    return this.bySession.get(sessionID)?.splice(0) ?? []
   }
 }
 
@@ -172,7 +191,7 @@ export const TraceDecayPlugin: Plugin.Plugin = {
       dispatchAfterAck(
         "hook-opencode-tool-after",
         event,
-        (guidance) => pending.push(event.sessionID, guidance),
+        pending.deliveryFor(event.sessionID),
         TRACEDECAY_BIN,
         cwd,
       )
@@ -183,12 +202,14 @@ export const TraceDecayPlugin: Plugin.Plugin = {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           sessions.observe(event)
-          if (!sessions.isSessionBoundary(event)) continue
           const sessionID = sessionOf(event)
+          if (event.type === "session.deleted" && sessionID) pending.delete(sessionID)
+          if (!sessions.isSessionBoundary(event)) continue
+          if (!sessionID) continue
           dispatchAfterAck(
             "hook-opencode-event",
             event,
-            (guidance) => sessionID && pending.push(sessionID, guidance),
+            pending.deliveryFor(sessionID),
             TRACEDECAY_BIN,
             cwd,
           )
@@ -199,7 +220,10 @@ export const TraceDecayPlugin: Plugin.Plugin = {
       }
     })()
 
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      pending.clear()
+    }
   },
 }
 
