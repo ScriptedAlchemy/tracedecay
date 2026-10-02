@@ -88,15 +88,15 @@ async fn import_and_converge(home: &Path, db: &ProjectSessionTestRuntime, projec
         .unwrap();
 }
 
-async fn worktree_sessions(
+async fn sessions_for(
     db: &ProjectSessionTestRuntime,
-    project: &Path,
+    git_ref: GitRefFilter,
 ) -> Vec<(String, String)> {
     let hits = db
         .runtime()
         .git_sessions_for_for_test(
             &SessionsForQuery {
-                git_ref: GitRefFilter::Worktree(normalize_worktree(&project.to_string_lossy())),
+                git_ref,
                 since: None,
                 until: None,
                 limit: 50,
@@ -121,11 +121,12 @@ async fn sessions_imported_after_the_catch_up_frontier_are_listed_for_their_work
     let project = tmp.path().join("project");
     init_repo(&project);
     let db = open_project_session_db(&project).await.unwrap();
+    let worktree = || GitRefFilter::Worktree(normalize_worktree(&project.to_string_lossy()));
 
     write_codex_rollout(&home, &project, "codex-recent", "06-01");
     import_and_converge(&home, &db, &project).await;
     assert_eq!(
-        worktree_sessions(&db, &project).await,
+        sessions_for(&db, worktree()).await,
         [("codex".to_owned(), "codex-recent".to_owned())]
     );
 
@@ -133,12 +134,14 @@ async fn sessions_imported_after_the_catch_up_frontier_are_listed_for_their_work
     write_claude_session(&home, &project, "claude-late", "01-01");
     import_and_converge(&home, &db, &project).await;
 
+    let expected = [
+        ("claude".to_owned(), "claude-late".to_owned()),
+        ("codex".to_owned(), "codex-late".to_owned()),
+        ("codex".to_owned(), "codex-recent".to_owned()),
+    ];
+    assert_eq!(sessions_for(&db, worktree()).await, expected);
     assert_eq!(
-        worktree_sessions(&db, &project).await,
-        [
-            ("claude".to_owned(), "claude-late".to_owned()),
-            ("codex".to_owned(), "codex-late".to_owned()),
-            ("codex".to_owned(), "codex-recent".to_owned()),
-        ]
+        sessions_for(&db, GitRefFilter::Branch("main".to_owned())).await,
+        expected
     );
 }
