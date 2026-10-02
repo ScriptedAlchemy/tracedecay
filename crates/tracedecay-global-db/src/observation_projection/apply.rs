@@ -440,16 +440,6 @@ async fn collapse_consecutive_goal_ticks(
         retained.push(fact_projection);
     }
 
-    let message = if message.as_ref().is_some_and(|projection| {
-        projection.message().kind.as_deref() == Some("goal")
-            && !retained
-                .iter()
-                .any(|fact| fact.fact().semantic_kind == CanonicalWorkflowSemanticKindV1::Goal)
-    }) {
-        None
-    } else {
-        message
-    };
     if retained.is_empty() {
         return match message {
             Some(message) => Ok(ObservationProjection::Message(message)),
