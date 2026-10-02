@@ -12,13 +12,6 @@ use crate::test_support::hold_after_project_sessions_for_test;
 /// `cancellation` from inside; the token is checked between them so a
 /// draining daemon waits for at most the unit in flight, not the whole open.
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
-#[cfg_attr(
-    not(feature = "hotpath"),
-    expect(
-        clippy::too_many_lines,
-        reason = "Handshake open is one identity-bind and route-publish sequence."
-    )
-)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
