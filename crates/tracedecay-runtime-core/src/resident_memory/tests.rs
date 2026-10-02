@@ -1490,55 +1490,6 @@ fn checkpoints_read_the_process_once_per_interval_and_then_see_growth() {
     );
     assert_eq!(reads.load(Ordering::Acquire), reads_taken + 1);
 }
-#[test]
-fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
-    let limit = bytes(1024 * 1024 * 1024 * 1024);
-    let sample = Arc::new(Mutex::new(ProcessResidentSampleV1 {
-        resident_bytes: 1,
-        unreclaimable_bytes: 1,
-        swapped_bytes: 0,
-        cgroup_committed_bytes: Some(limit.get()),
-    }));
-    let sampled = Arc::clone(&sample);
-    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
-        limit,
-        Arc::new(move || Some(*sampled.lock().expect("sample"))),
-    ));
-    let _reclaimer = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
-        .expect("register allocator reclaimer");
-    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
-        Arc::clone(&pressure),
-    ));
-
-    assert_eq!(pressure.measure_admission_bytes(), limit.get());
-    assert!(matches!(
-        pressure.state(),
-        ResidentMemoryPressureStateV1::OverBudget { .. }
-    ));
-    assert!(matches!(
-        authority.reserve(
-            key("project", "worktree", "generation", "graph"),
-            growth_request()
-        ),
-        Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
-    ));
-
-    sample.lock().expect("sample").cgroup_committed_bytes = Some(1);
-    assert_eq!(pressure.measure_admission_bytes(), 1);
-    assert!(matches!(
-        pressure.state(),
-        ResidentMemoryPressureStateV1::Nominal { .. }
-    ));
-    assert!(
-        authority
-            .reserve(
-                key("project", "worktree", "generation", "graph"),
-                growth_request()
-            )
-            .is_ok()
-    );
-}
 
 /// Every admission sizes from one view: the ceiling less the larger of the
 /// ledger and the measured process, and nothing while the pressure latch
@@ -1605,4 +1556,54 @@ fn headroom_is_the_ceiling_less_the_larger_of_ledger_and_measurement() {
         "the latch holds until the low watermark"
     );
     drop((charged, in_flight));
+}
+
+#[test]
+fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
+    let limit = bytes(1024 * 1024 * 1024 * 1024);
+    let sample = Arc::new(Mutex::new(ProcessResidentSampleV1 {
+        resident_bytes: 1,
+        unreclaimable_bytes: 1,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: Some(limit.get()),
+    }));
+    let sampled = Arc::clone(&sample);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || Some(*sampled.lock().expect("sample"))),
+    ));
+    let _reclaimer = super::register_process_allocator_pressure_reclaimer_v1(&pressure)
+        .expect("register allocator reclaimer");
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(pressure.measure_admission_bytes(), limit.get());
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::OverBudget { .. }
+    ));
+    assert!(matches!(
+        authority.reserve(
+            key("project", "worktree", "generation", "graph"),
+            growth_request()
+        ),
+        Err(ResidentMemoryAdmissionFailureV1::ObservedOverBudget { .. })
+    ));
+
+    sample.lock().expect("sample").cgroup_committed_bytes = Some(1);
+    assert_eq!(pressure.measure_admission_bytes(), 1);
+    assert!(matches!(
+        pressure.state(),
+        ResidentMemoryPressureStateV1::Nominal { .. }
+    ));
+    assert!(
+        authority
+            .reserve(
+                key("project", "worktree", "generation", "graph"),
+                growth_request()
+            )
+            .is_ok()
+    );
 }

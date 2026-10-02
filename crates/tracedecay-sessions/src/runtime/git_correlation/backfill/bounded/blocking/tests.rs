@@ -138,19 +138,43 @@ async fn detached_task_holds_capacity_until_its_closure_finishes() {
 async fn deadline_detaches_without_leaking_the_permit() {
     let permits = Arc::new(Semaphore::new(1));
     let (started_tx, started_rx) = oneshot::channel();
+    let (closure_running_tx, closure_running_rx) = oneshot::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let deadline_control = control(
-        ObservationCancellation::default(),
-        Duration::from_millis(25),
-    );
     let run_permits = Arc::clone(&permits);
     let run = tokio::spawn(async move {
-        run_with_semaphore(run_permits, &deadline_control, move || {
+        let permit = run_permits
+            .acquire_owned()
+            .await
+            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        let join = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             started_tx.send(()).unwrap();
+            closure_running_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             Ok::<_, BoundedBackfillInterruption>(())
-        })
-        .await
+        });
+        tokio::pin!(join);
+        closure_running_rx.await.unwrap();
+        let deadline_control = control(
+            ObservationCancellation::default(),
+            Duration::from_millis(25),
+        );
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut join => {
+                    return result
+                        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+                        .and_then(|value| {
+                            deadline_control.check()?;
+                            Ok(value)
+                        });
+                }
+                () = tokio::time::sleep(Duration::from_millis(10)) => {
+                    deadline_control.check()?;
+                }
+            }
+        }
     });
     started_rx.await.unwrap();
     assert_eq!(
