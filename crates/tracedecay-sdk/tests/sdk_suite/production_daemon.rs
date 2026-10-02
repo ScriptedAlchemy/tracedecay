@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -239,7 +240,6 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
     fs::write(&first_private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
     fs::write(&second_certificate, REMOTE_TLS_ALTERNATE_CERTIFICATE).unwrap();
     fs::write(&second_private_key, REMOTE_TLS_ALTERNATE_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&first_private_key, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&second_private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -411,7 +411,6 @@ fn enrolled_remote_failover_without_a_published_writer_is_a_typed_refusal() {
     let private_key = scratch.path().join("localhost.key.pem");
     fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
     fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
     let binary = production_binary();
@@ -567,7 +566,6 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
     let private_key = scratch.path().join("localhost.key.pem");
     fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
     fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
     let binary = production_binary();
