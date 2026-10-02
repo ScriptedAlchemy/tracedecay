@@ -17,7 +17,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageRecord,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
@@ -880,6 +880,80 @@ async fn search_returns_one_row_per_observation_before_applying_limit() {
     let metadata: Value =
         serde_json::from_str(workflow_only.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["provider_reference"], "task.native.beta");
+}
+
+#[tokio::test]
+async fn workflow_only_v5_profile_rebuilds_before_current_search() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        FIXTURE_SESSION,
+        "record.workflow-only-v5",
+        1,
+        vec![lifecycle(WorkflowLifecycleFixture {
+            semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+            reference: "task.native.v5",
+            item_id: None,
+            list_reference: None,
+            status: Some("pending"),
+            item_order: Some(1),
+            event_sequence: None,
+            text: "workflow-only predecessor canary",
+        })],
+    );
+    persist_and_project(&store, candidate, None).await;
+
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    conn.execute(
+        "UPDATE observation_workflow_facts
+         SET projector_version = ?1
+         WHERE projector_version = ?2",
+        rusqlite::params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE observation_projection_checkpoints
+         SET projector_version = ?1
+         WHERE projector_version = ?2",
+        rusqlite::params![
+            SESSION_MESSAGE_PROJECTOR_VERSION_V5,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let convergence = store.converge_projection_predecessor().await.unwrap();
+    let rebuild = convergence
+        .rebuild()
+        .expect("v5 workflow facts must trigger predecessor convergence");
+    assert!(rebuild.is_complete());
+
+    let hits = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+        .search_session_messages(
+            FIXTURE_PROVIDER,
+            Some("user"),
+            "workflow-only predecessor",
+            2,
+        )
+        .await
+        .expect("search rebuilt workflow-only observation");
+    let [hit] = hits.as_slice() else {
+        panic!("the rebuilt workflow observation must produce one search row");
+    };
+    assert_eq!(hit.message.text, "workflow-only predecessor canary");
 }
 
 #[tokio::test]
