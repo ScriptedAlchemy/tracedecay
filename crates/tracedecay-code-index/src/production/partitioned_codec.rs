@@ -2540,8 +2540,16 @@ mod tests {
                 "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
                 "snapshot": {
                     "files": [
-                        { "file_occurrence_id": FIXTURE_FILE, "disposition": "present" },
-                        { "file_occurrence_id": "file.partitioned.missing", "disposition": "present" }
+                        {
+                            "file_occurrence_id": FIXTURE_FILE,
+                            "logical_path": "src/lib.rs",
+                            "disposition": "present"
+                        },
+                        {
+                            "file_occurrence_id": "file.partitioned.missing",
+                            "logical_path": "src/missing.rs",
+                            "disposition": "present"
+                        }
                     ]
                 },
                 "file_segments": [{
