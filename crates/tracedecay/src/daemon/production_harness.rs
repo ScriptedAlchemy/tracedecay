@@ -1130,17 +1130,6 @@ async fn wait_for_production_composition_code_index(
         }
     })
     .await;
-    {
-        let snapshot = production_composition_admission_gate().snapshot();
-        eprintln!(
-            "DFLDBG publication_wait_ms={} ok={} admitted={} waiting={} capacity={}",
-            wait_started.elapsed().as_millis(),
-            publication.is_ok(),
-            snapshot.admitted,
-            snapshot.waiting,
-            snapshot.capacity
-        );
-    }
     match publication {
         Ok(()) => Ok(()),
         Err(_) => {
