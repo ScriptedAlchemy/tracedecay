@@ -14,10 +14,10 @@ use tracedecay_contracts::retrieval::{
     ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
     ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
-    StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1, StatusResultV1,
-    StatusRetrievalServingV1, StatusSchemaConvergenceStateV1, StatusSchemaConvergenceV1,
-    StatusServingConditionV1, StatusServingFreshnessV1, StatusSessionGitEvidenceUnavailableV1,
-    StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
+    StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1,
+    StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
+    StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::ProjectId;
@@ -403,19 +403,25 @@ fn git_staleness(
 
 /// Computes `tracedecay_status`. `server_stats` is the serving MCP server's
 /// request counters; `session_projection` is the project refresh worker's
-/// serving status; `wait` is the readiness wait the owner held the read
-/// for, when the request asked for one, and `reached_freshness` the reading
-/// that satisfied it, which the payload reports instead of a later reading.
+/// serving status; `hook_replay` is the daemon replay consumer's last sweep;
+/// `waited` is the readiness wait the owner held the read for, when the
+/// request asked for one, with the reading that satisfied it, which the
+/// payload reports instead of a later reading.
 #[hotpath::measure(label = "mcp.info.status.total")]
 pub async fn compute_status(
     ctx: &McpToolContext<'_>,
     request: &StatusSurfaceRequestV1,
     server_stats: Option<Value>,
     session_projection: SessionProjectionServingStatus,
+    hook_replay: StatusHookReplayV1,
     scope_prefix: Option<&str>,
-    wait: Option<CodeIndexReadinessWaitOutcomeV1>,
-    reached_freshness: Option<CodeIndexWorktreeFreshnessV1>,
+    waited: Option<(
+        CodeIndexReadinessWaitOutcomeV1,
+        Option<CodeIndexWorktreeFreshnessV1>,
+    )>,
 ) -> Result<StatusResultV1> {
+    let (wait, reached_freshness) =
+        waited.map_or((None, None), |(wait, reached)| (Some(wait), reached));
     if request.admission_only {
         return Ok(StatusResultV1::Admission(StatusAdmissionV1 {
             project_admitted: true,
@@ -503,6 +509,7 @@ pub async fn compute_status(
             label = "mcp.info.status.session_git_evidence"
         )
         .await,
+        hook_replay,
         git_staleness: request
             .include_staleness
             .then(|| git_staleness(freshness_payload.as_ref(), ctx.project_root())),
@@ -881,6 +888,18 @@ pub(crate) fn render_status_md(value: &Value) -> String {
                     {
                         for finding in findings {
                             md.bullet(&finding.to_string());
+                        }
+                    }
+                    if k == "hook_replay"
+                        && let Some(failures) = o.get("failures").and_then(Value::as_array)
+                    {
+                        for failure in failures {
+                            md.bullet(&format!(
+                                "{} {} drain failed: {}",
+                                failure["host"].as_str().unwrap_or_default(),
+                                failure["spool"].as_str().unwrap_or_default(),
+                                failure["cause"].as_str().unwrap_or_default(),
+                            ));
                         }
                     }
                 }
