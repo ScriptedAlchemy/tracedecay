@@ -387,10 +387,8 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         latest_goal.message.text,
         "phlogiston pipeline rollout and verification"
     );
-    let meta: serde_json::Value = serde_json::from_str(
-        latest_goal.message.metadata_json.as_deref().unwrap(),
-    )
-    .unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(latest_goal.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(meta["status"], "paused");
 
     let observations = runtime
@@ -441,10 +439,8 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
         latest_goal_again.message.text,
         "phlogiston pipeline rollout and verification"
     );
-    let meta_again: serde_json::Value = serde_json::from_str(
-        latest_goal_again.message.metadata_json.as_deref().unwrap(),
-    )
-    .unwrap();
+    let meta_again: serde_json::Value =
+        serde_json::from_str(latest_goal_again.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(meta_again["status"], "paused");
 }
 

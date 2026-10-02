@@ -305,13 +305,7 @@ Budget:
         )
         .await
         .into_iter()
-        .map(|hit| {
-            (
-                hit.message.role,
-                hit.message.kind,
-                hit.message.text,
-            )
-        })
+        .map(|hit| (hit.message.role, hit.message.kind, hit.message.text))
         .collect::<Vec<_>>();
     assert_eq!(
         assistant_hits,
