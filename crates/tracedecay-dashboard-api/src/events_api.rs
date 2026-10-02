@@ -527,43 +527,56 @@ struct SourcePollSnapshot {
 
 /// One shared poller per `DashboardState`: the first `/api/events` stream
 /// starts it, and every stream reads its latest snapshot instead of running
-/// the same registry and store-size queries per client.
+/// the same registry and store-size queries per client. The poller task exits
+/// when its last stream drops so a replaced dashboard state does not keep its
+/// store handles alive; a later stream re-arms it.
 #[derive(Clone, Default)]
 pub struct SharedSourcePoll {
-    sender: Arc<std::sync::OnceLock<tokio::sync::watch::Sender<SourcePollSnapshot>>>,
+    sender: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<SourcePollSnapshot>>>>,
 }
 
 impl SharedSourcePoll {
-    /// Start the shared poller on first call and return a reader of its latest
-    /// snapshot. The task skips source queries while no stream is subscribed.
+    /// Subscribe to the shared snapshot, starting the poller when it is not
+    /// running (first stream, or a restart after the last stream dropped).
     fn subscribe(
         &self,
         state: &DashboardState,
     ) -> tokio::sync::watch::Receiver<SourcePollSnapshot> {
-        self.sender
-            .get_or_init(|| {
-                let (sender, _initial) = tokio::sync::watch::channel(SourcePollSnapshot::default());
-                let poller_state = state.clone();
-                let poller_sender = sender.clone();
-                tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(POLL_INTERVAL);
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    loop {
-                        interval.tick().await;
-                        if poller_sender.receiver_count() == 0 {
-                            continue;
-                        }
-                        let registry = registry_snapshot(&poller_state).await;
-                        let total_store_bytes = summed_store_bytes(&poller_state).await;
-                        let _ = poller_sender.send(SourcePollSnapshot {
-                            registry,
-                            total_store_bytes,
-                        });
+        let mut slot = self.sender.lock().unwrap();
+        if let Some(sender) = slot.as_ref() {
+            return sender.subscribe();
+        }
+        let (sender, _initial) = tokio::sync::watch::channel(SourcePollSnapshot::default());
+        let poller_state = state.clone();
+        let poller_sender = sender.clone();
+        let poller_slot = Arc::clone(&self.sender);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if poller_sender.receiver_count() == 0 {
+                    // The exit re-check runs under the same lock `subscribe`
+                    // holds while attaching a receiver: a stream that lands in
+                    // between either bumps the count (keep polling) or sees
+                    // the cleared slot and arms a fresh poller.
+                    let mut slot = poller_slot.lock().unwrap();
+                    if poller_sender.receiver_count() == 0 {
+                        *slot = None;
+                        return;
                     }
+                }
+                let registry = registry_snapshot(&poller_state).await;
+                let total_store_bytes = summed_store_bytes(&poller_state).await;
+                let _ = poller_sender.send(SourcePollSnapshot {
+                    registry,
+                    total_store_bytes,
                 });
-                sender
-            })
-            .subscribe()
+            }
+        });
+        let receiver = sender.subscribe();
+        *slot = Some(sender);
+        receiver
     }
 }
 
