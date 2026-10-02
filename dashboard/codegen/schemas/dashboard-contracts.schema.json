@@ -1577,6 +1577,26 @@
         },
         {
           "additionalProperties": false,
+          "description": "The code graph's engine or catalog was released for memory and was\nstill warming again when the read's budget ran out;\n`retry_after_millis` is the measured warm-up it still needs.",
+          "properties": {
+            "kind": {
+              "const": "code_graph_rewarming",
+              "type": "string"
+            },
+            "retry_after_millis": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "retry_after_millis"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "No TraceDecay daemon accepts connections on `socket`. `named_by` is\nthe environment variable that chose the socket, when one did;\n`service_unit` is what this client observed of the managed service.",
           "properties": {
             "kind": {

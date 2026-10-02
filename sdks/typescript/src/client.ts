@@ -266,6 +266,8 @@ function isProblemDetail(value: unknown): boolean {
         typeof value.producer === "string" &&
         (value.generation === null || typeof value.generation === "string")
       );
+    case "code_graph_rewarming":
+      return isSafeUnsignedInteger(value.retry_after_millis);
     case "reset_required":
       return (
         typeof value.authority === "string" &&

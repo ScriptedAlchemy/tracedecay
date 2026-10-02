@@ -33,6 +33,7 @@ use tracedecay_graph_db::{
     VerifiedGraphSnapshot,
 };
 
+use super::warm_clock::{WarmClock, WarmOwner};
 use super::{
     CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
     CodeGraphServingWarmthV1, CodeGraphSymbolBindingV1, RELATION_EDGE_KINDS, SymbolRecordV1,
@@ -99,6 +100,18 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    clock: Arc<WarmClock>,
+}
+
+/// What a catalog read would wait on, as [`InteractiveCatalogCache::residency`]
+/// reports it.
+pub(super) enum CatalogResidency {
+    Resident,
+    Released,
+    /// Warming again after a completed warm.
+    Rewarming,
+    /// Cold, failed, or on its first warm: the reader answers that state.
+    Unreleased,
 }
 
 /// Outcome of asking a store to give back its interactive catalog.
@@ -118,12 +131,31 @@ pub enum CodeGraphCatalogReleaseV1 {
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
 impl InteractiveCatalogCache {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(clock: Arc<WarmClock>) -> Self {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            clock,
+        }
+    }
+
+    pub(super) fn residency(&self) -> CatalogResidency {
+        let Ok(state) = self.state.read() else {
+            return CatalogResidency::Unreleased;
+        };
+        match &*state {
+            InteractiveCatalogState::Ready(_) => CatalogResidency::Resident,
+            InteractiveCatalogState::Released => CatalogResidency::Released,
+            InteractiveCatalogState::Warming { .. }
+                if self.clock.has_warmed(WarmOwner::Catalog) =>
+            {
+                CatalogResidency::Rewarming
+            }
+            InteractiveCatalogState::Cold
+            | InteractiveCatalogState::Warming { .. }
+            | InteractiveCatalogState::Failed(_) => CatalogResidency::Unreleased,
         }
     }
 
@@ -1515,6 +1547,7 @@ impl CodeGraphInteractiveReader {
             }
             *state = InteractiveCatalogState::Warming { owner: None };
         }
+        self.catalog.clock.begin(WarmOwner::Catalog);
         let background = Self {
             cancellation: Arc::new(NeverCancelled),
             ..self.clone()
@@ -1532,6 +1565,7 @@ impl CodeGraphInteractiveReader {
                 if let Ok(mut state) = self.catalog.state.write() {
                     *state = InteractiveCatalogState::Released;
                 }
+                self.catalog.clock.settle(WarmOwner::Catalog, false);
                 CodeGraphProjectionError::Unavailable(format!(
                     "code graph interactive catalog re-warm could not start: {error}"
                 ))
@@ -1539,6 +1573,8 @@ impl CodeGraphInteractiveReader {
         }
     }
 
+    /// The warm's wall time, from entry through any wait for the build gate,
+    /// is the catalog's measured warm-up when this call builds it.
     fn warm_catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -1546,11 +1582,23 @@ impl CodeGraphInteractiveReader {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let _build = self
-            .catalog
-            .build
-            .lock()
-            .map_err(|_| catalog_lock_poisoned())?;
+        self.catalog.clock.begin(WarmOwner::Catalog);
+        let built = match self.catalog.build.lock() {
+            Ok(_build) => self.build_catalog_under_gate(cancellation),
+            Err(_) => Err(catalog_lock_poisoned()),
+        };
+        self.catalog
+            .clock
+            .settle(WarmOwner::Catalog, matches!(built, Ok(true)));
+        built.map(|_| ())
+    }
+
+    /// Builds and publishes the catalog unless one is ready; `Ok(true)` when
+    /// this call published it. The caller holds the build gate.
+    fn build_catalog_under_gate(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
@@ -1566,7 +1614,7 @@ impl CodeGraphInteractiveReader {
                     if cancellation.is_cancelled() {
                         return Err(CodeGraphProjectionError::Cancelled);
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
                 InteractiveCatalogState::Cold => TakenOverCatalog::Cold,
@@ -1628,7 +1676,7 @@ impl CodeGraphInteractiveReader {
                     std::sync::atomic::Ordering::Release,
                 );
                 *state = InteractiveCatalogState::Ready(catalog);
-                Ok(())
+                Ok(true)
             }
             Err(CodeGraphProjectionError::Cancelled) => {
                 // A background-marked build remains background-owned after

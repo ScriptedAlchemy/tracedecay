@@ -3,7 +3,9 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, UtcMicros};
+use tracedecay_domain::{
+    ApplicationProblemDetailV1, CursorBindingMismatchV1, EphemeralSanitizedQueryViewV1, UtcMicros,
+};
 
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
@@ -142,6 +144,9 @@ pub struct PrimitiveFailure {
     pub kind: PrimitiveFailureKind,
     pub code: String,
     pub message: String,
+    /// Structured facts that decide the problem in place of `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Box<ApplicationProblemDetailV1>>,
 }
 
 impl PrimitiveFailure {
@@ -158,6 +163,7 @@ impl PrimitiveFailure {
             kind,
             code,
             message,
+            detail: None,
         })
     }
 
@@ -166,11 +172,15 @@ impl PrimitiveFailure {
             kind: PrimitiveFailureKind::CursorRefused,
             code: mismatch.code().to_owned(),
             message: mismatch.message(),
+            detail: None,
         }
     }
 
     /// The application problem a caller receives for this failure.
     pub fn into_problem(self) -> ApplicationProblem {
+        if let Some(detail) = self.detail {
+            return ApplicationProblem::from_detail(*detail);
+        }
         let diagnostic = SafeDiagnostic {
             code: self.code,
             message: self.message,
