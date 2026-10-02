@@ -67,6 +67,11 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|(occurrence, (_, file))| (occurrence, *file))
             .collect::<BTreeMap<_, _>>();
+        let artifacts_by_occurrence = self
+            .files
+            .iter()
+            .map(|file| (&file.extraction.file_occurrence_id, file))
+            .collect::<BTreeMap<_, _>>();
 
         let check = || Ok::<(), GraphDbError>(());
         let mut owners = BTreeMap::<SymbolOccurrenceId, FileOccurrenceId>::new();
@@ -161,10 +166,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .filter(|edge| !owners.contains_key(&edge.to_occurrence))
                 .map(|edge| edge.to_occurrence.clone())
                 .collect();
-            let artifacts = self
-                .files
-                .iter()
-                .find(|file| file.extraction.file_occurrence_id == *occurrence);
+            let artifacts = artifacts_by_occurrence.get(occurrence).copied();
             let bindings = artifacts
                 .map(|file| {
                     code_graph_symbol_bindings(

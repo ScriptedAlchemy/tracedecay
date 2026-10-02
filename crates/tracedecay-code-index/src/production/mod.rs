@@ -2219,18 +2219,22 @@ where
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
             );
-            let (edges, edge_abstentions) = hotpath::measure_block!(
-                "code_index.build.assemble.edge_evidence",
+            let (edges, edge_abstentions, unresolved_calls) = hotpath::measure_block!(
+                "code_index.build.assemble.graph_outputs",
                 match (active.as_deref(), staged.parent_shared_occurrences.as_ref()) {
                     (Some(parent), Some(shared)) => {
                         edge_evidence_over_parent(&staged.files, parent, shared)
                     }
-                    _ => collect_edge_evidence(&staged.files),
+                    _ => {
+                        let (edges, abstentions) = collect_edge_evidence(&staged.files)?;
+                        let unresolved = resolution_outputs::unresolved_calls_for_edges(
+                            &staged.files,
+                            &edges,
+                            &|| Ok(()),
+                        )?;
+                        Ok((edges, abstentions, unresolved))
+                    }
                 }
-            )?;
-            let unresolved_calls = hotpath::measure_block!(
-                "code_index.build.assemble.unresolved_calls",
-                resolution_outputs::unresolved_calls_for_edges(&staged.files, &edges, &|| Ok(()))
             )?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,

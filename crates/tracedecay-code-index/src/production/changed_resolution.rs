@@ -18,16 +18,13 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, EdgeAuthorityV1, FileOccurrenceId, NodeKind, SourceSpan,
     SymbolOccurrenceId,
 };
-#[cfg(test)]
 use tracedecay_graph_db::GraphDbError;
 
 use crate::chunks::{
     CodeIndexEdgeAbstentionV1, CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1,
 };
-#[cfg(test)]
-use crate::graph_projection::{SealedCodeGraphRowsError, unresolved_call_limitations};
+use crate::graph_projection::unresolved_call_limitations;
 
-#[cfg(test)]
 use super::helpers::unresolved_import_calls;
 use super::helpers::{
     collect_edge_evidence, edge_evidence, edge_order, resolve_selected_cross_file_references,
@@ -137,14 +134,13 @@ impl<'f> ChangedSitesV1<'f> {
     /// still hold, re-derived at the moved sites against `cross_file_edges`.
     /// A site's limitations depend only on its own references and the edges
     /// bound at it, and the selection carries every reference of each site.
-    #[cfg(test)]
     pub(super) fn unresolved_calls(
         &self,
         files: &[Arc<FileGenerationArtifactsV1>],
         cross_file_edges: &[CanonicalRelationEdgeV1],
         parent_unresolved: &[CodeIndexUnresolvedReferenceV1],
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, SealedCodeGraphRowsError> {
+    ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1> {
         let references = selected_references(files, Some(&self.selection))
             .map(|(index, reference)| (files[index].authority.logical_path.as_str(), reference))
             .collect::<Vec<_>>();
@@ -165,7 +161,8 @@ impl<'f> ChangedSitesV1<'f> {
             file_edges.chain(cross_file_edges.iter().filter(at_sites)),
             unresolved_import_calls(files, Some(&self.selection)),
             check,
-        )?;
+        )
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         let mut unresolved = parent_unresolved
             .iter()
             .filter(|reference| !self.moved.contains(&site(reference)))
@@ -206,7 +203,11 @@ pub(super) fn edge_evidence_over_parent(
     parent: &CodeIndexPublishedGenerationV1,
     shared: &BTreeSet<FileOccurrenceId>,
 ) -> Result<
-    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
+    (
+        Vec<CanonicalRelationEdgeV1>,
+        Vec<CodeIndexEdgeAbstentionV1>,
+        Vec<CodeIndexUnresolvedReferenceV1>,
+    ),
     CodeIndexProductionErrorV1,
 > {
     // Shared files are the same files on both sides, so equal file counts
@@ -221,7 +222,10 @@ pub(super) fn edge_evidence_over_parent(
         .as_ref()
         .and_then(|(edited, _)| ChangedSitesV1::new(files, edited))
     else {
-        return collect_edge_evidence(files);
+        let (edges, abstentions) = collect_edge_evidence(files)?;
+        let unresolved =
+            super::resolution_outputs::unresolved_calls_for_edges(files, &edges, &|| Ok(()))?;
+        return Ok((edges, abstentions, unresolved));
     };
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("code_index.build.references_resolved").inc(sites.resolved_references() as u64);
@@ -233,7 +237,10 @@ pub(super) fn edge_evidence_over_parent(
             .iter()
             .filter(|edge| edge.authority == EdgeAuthorityV1::NameResolved),
     )?;
-    Ok(edge_evidence(files, cross_file))
+    let unresolved =
+        sites.unresolved_calls(files, &cross_file, &parent.unresolved_calls, &|| Ok(()))?;
+    let (edges, abstentions) = edge_evidence(files, cross_file);
+    Ok((edges, abstentions, unresolved))
 }
 
 fn site(reference: &CodeIndexUnresolvedReferenceV1) -> SiteV1<'_> {
