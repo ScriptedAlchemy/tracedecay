@@ -21,7 +21,7 @@ use tracedecay_domain::{
 use crate::production_orchestration::{
     ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
 };
-use crate::support::{PartitionedSealV1, id, reseal_manifest};
+use crate::support::{PartitionedSealV1, cold_generation, id, reseal_manifest};
 
 fn add_present_typescript_file(
     request: &mut CodeIndexBuildRequestV1,
@@ -93,11 +93,11 @@ fn sealed_multi_file_generation() -> PartitionedSealV1 {
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    PartitionedSealV1::of(
+    PartitionedSealV1::of(&cold_generation(
         &owner
             .build_and_publish(request, &ActiveControl)
             .expect("multi-file generation publishes"),
-    )
+    ))
 }
 
 /// Clears the forced width even when the guarded decode panics, so a failing

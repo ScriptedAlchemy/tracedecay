@@ -18,7 +18,7 @@ use crate::{
     production_orchestration::{
         ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
     },
-    support::{PartitionedSealV1, id, reseal_manifest},
+    support::{PartitionedSealV1, cold_generation, id, reseal_manifest},
 };
 
 const PRIMARY_IGNORED_PATH: &str = "node_modules/alpha/index.ts";
@@ -103,9 +103,11 @@ fn publish(request: CodeIndexBuildRequestV1) -> Arc<CodeIndexPublishedGeneration
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    owner
-        .build_and_publish(request, &ActiveControl)
-        .expect("ignored-source generation publishes")
+    cold_generation(
+        &owner
+            .build_and_publish(request, &ActiveControl)
+            .expect("ignored-source generation publishes"),
+    )
 }
 
 fn assert_rejected_before_publication(request: CodeIndexBuildRequestV1) {

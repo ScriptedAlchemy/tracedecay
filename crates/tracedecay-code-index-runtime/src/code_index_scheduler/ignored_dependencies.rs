@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
@@ -16,7 +15,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
-use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
+use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1};
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 use super::git_tree_capture::CapturedFileOutcomeV1;
@@ -203,9 +202,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let active = self
             .publication
-            .load_active_shared()
+            .load_active_manifest()
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         Ok(active.is_some_and(|active| {
+            let active = &active.metadata;
             active.manifest() == candidate.generation().manifest()
                 && active.snapshot() == candidate.generation().snapshot()
                 && active.ignored_source_admissions()
@@ -323,8 +323,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         drop((retained_bytes, retained_reservations));
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled(SourceContentManifestV1::for_snapshot(generation.snapshot()));
-        let latest = self.bind_latest_complete(Arc::clone(&generation), None);
-        let publication = publication_evidence(reextracted_files, &generation)?;
+        let latest = self.bind_latest_complete(
+            self.decoded_publication(&generation)
+                .map_err(CodeIndexProductionErrorV1::Publication)?,
+            None,
+        );
+        let publication = self.publish_evidence(&generation, reextracted_files, false);
         Ok(CodeIndexIgnoredDependencyBuildV1 {
             outcome: CodeIndexIgnoredDependencyIndexOutcomeV1 {
                 generation_id,
@@ -337,14 +341,13 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn adopt_ignored_source_roster(
         &mut self,
-        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        admissions: &[tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1],
     ) {
         // A path whose admission proof was already refused must not come back
         // through the sealed roster: re-adopting it rebuilds the identical
         // refused generation, so the refusal reproduces on every pass and the
         // serving slot never fills.
-        self.ignored_source_admissions = generation
-            .ignored_source_admissions()
+        self.ignored_source_admissions = admissions
             .iter()
             .filter(|admission| {
                 !self
@@ -897,43 +900,4 @@ fn map_reconcile_interruption_result<T>(
     result: Result<T, CodeIndexSchedulerErrorV1>,
 ) -> Result<T, CodeIndexSchedulerErrorV1> {
     result.map_err(map_reconcile_interruption)
-}
-
-fn publication_evidence(
-    reextracted_files: usize,
-    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-) -> Result<CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1> {
-    let changes = &generation.projection().request().changes;
-    let lane_digest = canonical_sha256(&(
-        generation.snapshot().content_identity.clone(),
-        generation
-            .chunks()
-            .chunks()
-            .iter()
-            .map(|chunk| (&chunk.id, &chunk.content_digest))
-            .collect::<Vec<_>>(),
-        generation.edges(),
-    ))
-    .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-    let (clone_payloads_reused, clone_stale_invalidations, clone_body_changes_observed) =
-        generation.clone_update_statistics();
-    Ok(CodeIndexPublishEvidenceV1 {
-        generation_id: generation.manifest().generation_id.clone(),
-        repository_id: generation.snapshot().repository.clone(),
-        snapshot_content_identity: generation.snapshot().content_identity.clone(),
-        lane_digest,
-        file_occurrence_ids: generation
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| file.file_occurrence_id.clone())
-            .collect(),
-        reextracted_files,
-        changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-        reused_chunks: changes.reused_count,
-        clone_payloads_reused: Some(clone_payloads_reused),
-        clone_stale_invalidations: Some(clone_stale_invalidations),
-        clone_body_changes_observed: Some(clone_body_changes_observed),
-        overflow_reconciled: false,
-    })
 }
