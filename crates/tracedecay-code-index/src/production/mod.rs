@@ -808,7 +808,9 @@ pub struct CodeIndexPublishedGenerationV1 {
     lineage: Vec<SymbolLineageCandidateV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
-    /// Canonical unresolved-call limitations derived while sealing.
+    /// Canonical unresolved-reference limitations derived while sealing:
+    /// `Calls` rows are call sites without an edge, `Implements` rows are Go
+    /// interfaces whose implementors the seal could not decide.
     unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     statistics: CodeIndexGenerationStatisticsV1,
