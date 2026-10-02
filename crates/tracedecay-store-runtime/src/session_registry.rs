@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 use tracedecay_domain::BrainNodeId;
-use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
