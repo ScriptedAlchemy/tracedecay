@@ -3420,8 +3420,9 @@ mod tests {
         };
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         serde_json::to_writer(&mut writer, &evidence).expect("large paged evidence encode");
+        let evidence_size_bytes = writer.position();
         let descriptor = writer
-            .finish(u64::try_from(published_bytes).expect("evidence length"))
+            .finish(evidence_size_bytes)
             .expect("large paged evidence finish");
         let peak_page_capacity = writer.peak_page_capacity;
         let peak_retained_owned_bytes = writer.peak_retained_owned_bytes;
