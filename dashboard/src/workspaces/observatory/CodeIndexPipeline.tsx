@@ -21,7 +21,8 @@ export function CodeIndexPipeline({
   scopeKey: string;
 }) {
   const progress = useLatestCodeIndexProgress(result, scopeKey);
-  const worktrees = result?.outcome === 'envelope' ? result.envelope.payload.worktrees : [];
+  const payload = result?.outcome === 'envelope' ? result.envelope.payload : undefined;
+  const worktrees = payload?.worktrees ?? [];
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -42,7 +43,10 @@ export function CodeIndexPipeline({
       aria-label="Code-index pipeline"
     >
       <h2 className="td-legend">Code-index pipeline</h2>
-      <CodeIndexReadinessList worktrees={worktrees} />
+      <CodeIndexReadinessList
+        mountFailure={payload?.mount_failure}
+        worktrees={worktrees}
+      />
       {worktrees.some((worktree) => worktree.restore_progress != null) ? (
         <div className="mt-2 flex flex-col gap-2">
           {worktrees.flatMap((worktree) =>
@@ -82,10 +86,20 @@ export function CodeIndexPipeline({
 }
 
 function CodeIndexReadinessList({
+  mountFailure,
   worktrees,
 }: {
+  mountFailure: CodeIndexFreshnessPayloadV1['mount_failure'];
   worktrees: CodeIndexWorktreeFreshnessV1[];
 }) {
+  if (mountFailure) {
+    return (
+      <div className="mt-2 text-body text-state-warning">
+        <p>{mountFailure.message}</p>
+        <p>{mountFailure.remediation}</p>
+      </div>
+    );
+  }
   if (worktrees.length === 0) {
     return <p className="mt-2 text-body text-text-muted">no mounted code-index worktree</p>;
   }

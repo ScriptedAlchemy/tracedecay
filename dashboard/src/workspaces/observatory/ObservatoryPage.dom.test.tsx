@@ -171,6 +171,29 @@ describe('ObservatoryPage store telemetry', () => {
     expect(document.querySelectorAll('[data-code-index-generation]').length).toBe(1);
   });
 
+  it('shows a failed pipeline mount and its retry action', async () => {
+    const failedMount = {
+      ...readyCodeIndexFreshnessEnvelope(),
+      domain_state: 'error',
+      payload: {
+        worktrees: [],
+        note: 'the last code-index mount for this project failed',
+        mount_failure: {
+          message: 'the code-index scheduler could not mount for this project',
+          remediation: 'run `tracedecay sync` to retry the code-index mount',
+        },
+      },
+    };
+    stubTelemetry(telemetryPayload(), emptyStorageFindingsPayload(), failedMount);
+    renderObservatory('pipeline');
+
+    expect(
+      await screen.findByText('the code-index scheduler could not mount for this project'),
+    ).toBeTruthy();
+    expect(screen.getByText('run `tracedecay sync` to retry the code-index mount')).toBeTruthy();
+    expect(screen.queryByText('no mounted code-index worktree')).toBeNull();
+  });
+
   it('renders table-growth unavailable states distinctly without zero measurements', async () => {
     stubTelemetry(telemetryPayload());
     renderObservatory('telemetry');

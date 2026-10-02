@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::watch;
 use tracedecay_contracts::ResolvedScope;
 
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
@@ -137,7 +138,7 @@ pub struct CodeIndexActivationV1 {
     state: Arc<AtomicU8>,
     pending_hooks: Arc<Mutex<PendingHookPathsV1>>,
     mount: CodeIndexActivationMountV1,
-    mount_failed: Arc<AtomicBool>,
+    mount_failed: watch::Sender<bool>,
     hint_sink: CodeIndexActivationHintSinkV1,
     retirement: Arc<CodeIndexActivationRetirementV1>,
     #[cfg(test)]
@@ -183,7 +184,7 @@ impl CodeIndexActivationV1 {
             state: Arc::new(AtomicU8::new(ACTIVATION_IDLE)),
             pending_hooks: Arc::new(Mutex::new(PendingHookPathsV1::default())),
             mount,
-            mount_failed: Arc::new(AtomicBool::new(false)),
+            mount_failed: watch::channel(false).0,
             hint_sink,
             retirement: Arc::new(CodeIndexActivationRetirementV1::new()),
             #[cfg(test)]
@@ -213,7 +214,12 @@ impl CodeIndexActivationV1 {
 
     /// Whether the last mount attempt failed and no later attempt mounted.
     pub fn mount_failed(&self) -> bool {
-        self.mount_failed.load(Ordering::Acquire)
+        *self.mount_failed.borrow()
+    }
+
+    /// Subscribe to failed-mount publication for a readiness wait.
+    pub fn subscribe_mount_failure(&self) -> watch::Receiver<bool> {
+        self.mount_failed.subscribe()
     }
 
     pub fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
@@ -300,7 +306,7 @@ impl CodeIndexActivationV1 {
         let state = Arc::clone(&self.state);
         let pending_hooks = Arc::clone(&self.pending_hooks);
         let mount = Arc::clone(&self.mount);
-        let mount_failed = Arc::clone(&self.mount_failed);
+        let mount_failed = self.mount_failed.clone();
         let hint_sink = Arc::clone(&self.hint_sink);
         runtime.spawn(hotpath::future!(
             async move {
@@ -314,7 +320,7 @@ impl CodeIndexActivationV1 {
                     return;
                 }
                 let mounted = mount().await;
-                mount_failed.store(mounted.is_err(), Ordering::Release);
+                mount_failed.send_replace(mounted.is_err());
                 if let Err(error) = mounted {
                     state.store(ACTIVATION_IDLE, Ordering::Release);
                     hotpath::gauge!("daemon.code_index.generation_state")

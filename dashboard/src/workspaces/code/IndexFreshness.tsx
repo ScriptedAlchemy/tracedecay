@@ -99,7 +99,7 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
     );
   }
   const { envelope } = result;
-  const { worktrees, note } = envelope.payload;
+  const { worktrees, note, mount_failure: mountFailure } = envelope.payload;
   // Authorization is an independent axis from the read's own state: a mount can
   // be `ready` and separately `redacted` for the identity asking. Folding them
   // together loses which one the reader is actually blocked by.
@@ -109,6 +109,12 @@ function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnes
       <StateChip kind={envelope.domain_state} />
       {authorization ? (
         <StateChip kind={authorization} detail="read authorization" />
+      ) : null}
+      {mountFailure ? (
+        <div className="text-3xs leading-snug text-state-warning">
+          <p>{mountFailure.message}</p>
+          <p>{mountFailure.remediation}</p>
+        </div>
       ) : null}
       {worktrees.map((worktree) => (
         <WorktreeReading
