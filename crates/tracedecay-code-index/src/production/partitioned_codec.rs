@@ -59,12 +59,15 @@ use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
     write_json_string,
 };
-use super::file_evidence_rows::{FileEvidenceV1, PersistedFileEvidenceV1, compact_file_evidence};
+use super::file_evidence_rows::{
+    FileEvidenceV1, PersistedFileEvidenceV1, compact_file_evidence, identity_lineage,
+};
 use super::lexical_page_source::{LEXICAL_FILE_PREFETCH_BYTES_V1, checkpoint};
 use super::projection_rows::{
-    PersistedBatchReceiptRefV1, PersistedBatchReceiptV1, PersistedProjectionRequestRefV1,
-    PersistedProjectionRequestV1, chunk_roster,
+    FileChunkRostersV1, PersistedBatchReceiptRefV1, PersistedBatchReceiptV1,
+    PersistedProjectionRequestRefV1, PersistedProjectionRequestV1,
 };
+use super::resolution_index::{PartitionedResolutionIndexDescriptorV1, seal_resolution_index};
 use super::sealed_codec::{
     DecodePeakProbeV1, FileScopeIdentityV1, PersistedFileGenerationArtifactsRefV2,
     PersistedFileGenerationArtifactsV1, PersistedFileGenerationArtifactsV2,
@@ -89,17 +92,17 @@ const GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedFileSegmentDescriptorV1 {
-    file_key: u32,
-    segment_digest: ManifestDigest,
-    segment_size_bytes: u64,
+pub(super) struct PartitionedFileSegmentDescriptorV1 {
+    pub(super) file_key: u32,
+    pub(super) segment_digest: ManifestDigest,
+    pub(super) segment_size_bytes: u64,
     /// Length of the canonical JSON the stored bytes inflate to. Restore
     /// windows budget on it, and inflation must end at exactly this length.
-    decoded_size_bytes: u64,
-    file_occurrence_id: FileOccurrenceId,
+    pub(super) decoded_size_bytes: u64,
+    pub(super) file_occurrence_id: FileOccurrenceId,
     /// Digest of the ordered symbol identities the segment carries, so a
     /// successor can decide reuse without reading the segment.
-    symbol_identities_digest: ManifestDigest,
+    pub(super) symbol_identities_digest: ManifestDigest,
 }
 
 fn symbol_identities_digest(
@@ -129,17 +132,21 @@ fn bind_symbol_occurrences(
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedFileEvidenceDescriptorV1 {
-    file_key: u32,
-    file_occurrence_id: FileOccurrenceId,
-    segment_digest: ManifestDigest,
-    segment_size_bytes: u64,
-    decoded_size_bytes: u64,
+pub(super) struct PartitionedFileEvidenceDescriptorV1 {
+    pub(super) file_key: u32,
+    pub(super) file_occurrence_id: FileOccurrenceId,
+    pub(super) segment_digest: ManifestDigest,
+    pub(super) segment_size_bytes: u64,
+    pub(super) decoded_size_bytes: u64,
+    /// Whether the segment carries the file's lineage rows, so a successor
+    /// that carries the file knows to reseal it with identity lineage.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) explicit_lineage: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedEvidencePageDescriptorV1 {
+pub(super) struct PartitionedEvidencePageDescriptorV1 {
     page_ordinal: u32,
     page_digest: ManifestDigest,
     page_size_bytes: u64,
@@ -147,7 +154,7 @@ struct PartitionedEvidencePageDescriptorV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedGenerationEvidenceDescriptorV1 {
+pub(super) struct PartitionedGenerationEvidenceDescriptorV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
     /// Prefix containing the typed generation evidence JSON.
@@ -183,6 +190,11 @@ pub enum SealedGenerationSegmentPublicationV1<'a> {
         digest: &'a ManifestDigest,
         bytes: &'a [u8],
     },
+    /// One page of the generation's resolution index.
+    ResolutionIndex {
+        digest: &'a ManifestDigest,
+        bytes: &'a [u8],
+    },
     CodeGraphPage {
         file_key: u32,
         page_digest: &'a ManifestDigest,
@@ -215,40 +227,46 @@ pub enum SealedGenerationSegmentReadV1<'a> {
 }
 
 #[derive(Serialize)]
-struct PartitionedPublishedGenerationRefV1<'a> {
-    format_revision: u32,
-    manifest: &'a CodeGenerationManifestV1,
-    snapshot: &'a SanitizedCodeSnapshotV1,
-    statistics: &'a CodeIndexGenerationStatisticsV1,
-    repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
-    ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
-    ignored_source_admissions_digest: &'a ManifestDigest,
-    file_segments: &'a [PartitionedFileSegmentDescriptorV1],
-    file_evidence: &'a [PartitionedFileEvidenceDescriptorV1],
-    coverage: CoverageSummaryV1,
-    capability: &'a CodeIndexCapabilityManifestV1,
-    generation_evidence: &'a PartitionedGenerationEvidenceDescriptorV1,
-    code_graph_pages: &'a [PartitionedCodeGraphPageDescriptorV1],
+pub(super) struct PartitionedPublishedGenerationRefV1<'a> {
+    pub(super) format_revision: u32,
+    pub(super) manifest: &'a CodeGenerationManifestV1,
+    pub(super) snapshot: &'a SanitizedCodeSnapshotV1,
+    pub(super) statistics: &'a CodeIndexGenerationStatisticsV1,
+    pub(super) chunk_count: u64,
+    pub(super) chunk_policy: &'a ChunkPolicyRevisionSummaryV1,
+    pub(super) repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
+    pub(super) ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
+    pub(super) ignored_source_admissions_digest: &'a ManifestDigest,
+    pub(super) file_segments: &'a [PartitionedFileSegmentDescriptorV1],
+    pub(super) file_evidence: &'a [PartitionedFileEvidenceDescriptorV1],
+    pub(super) coverage: CoverageSummaryV1,
+    pub(super) capability: &'a CodeIndexCapabilityManifestV1,
+    pub(super) generation_evidence: &'a PartitionedGenerationEvidenceDescriptorV1,
+    pub(super) code_graph_pages: &'a [PartitionedCodeGraphPageDescriptorV1],
+    pub(super) resolution_index: &'a PartitionedResolutionIndexDescriptorV1,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedPublishedGenerationV1 {
+pub(super) struct PartitionedPublishedGenerationV1 {
     /// Gated by the revision probe before this strict parse runs.
     #[serde(rename = "format_revision")]
     _format_revision: u32,
-    manifest: CodeGenerationManifestV1,
-    snapshot: SanitizedCodeSnapshotV1,
-    statistics: CodeIndexGenerationStatisticsV1,
-    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
-    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
-    ignored_source_admissions_digest: ManifestDigest,
-    file_segments: Vec<PartitionedFileSegmentDescriptorV1>,
-    file_evidence: Vec<PartitionedFileEvidenceDescriptorV1>,
-    coverage: CoverageSummaryV1,
-    capability: CodeIndexCapabilityManifestV1,
-    generation_evidence: PartitionedGenerationEvidenceDescriptorV1,
-    code_graph_pages: Vec<PartitionedCodeGraphPageDescriptorV1>,
+    pub(super) manifest: CodeGenerationManifestV1,
+    pub(super) snapshot: SanitizedCodeSnapshotV1,
+    pub(super) statistics: CodeIndexGenerationStatisticsV1,
+    pub(super) chunk_count: u64,
+    pub(super) chunk_policy: ChunkPolicyRevisionSummaryV1,
+    pub(super) repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    pub(super) ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    pub(super) ignored_source_admissions_digest: ManifestDigest,
+    pub(super) file_segments: Vec<PartitionedFileSegmentDescriptorV1>,
+    pub(super) file_evidence: Vec<PartitionedFileEvidenceDescriptorV1>,
+    pub(super) coverage: CoverageSummaryV1,
+    pub(super) capability: CodeIndexCapabilityManifestV1,
+    pub(super) generation_evidence: PartitionedGenerationEvidenceDescriptorV1,
+    pub(super) code_graph_pages: Vec<PartitionedCodeGraphPageDescriptorV1>,
+    pub(super) resolution_index: PartitionedResolutionIndexDescriptorV1,
 }
 
 #[derive(Serialize)]
@@ -293,6 +311,9 @@ struct PartitionedSegmentIdentityGenerationV1 {
     generation_evidence: PartitionedEvidenceSegmentIdentityV1,
     #[serde(default)]
     code_graph_pages: Vec<PartitionedCodeGraphPageIdentityV1>,
+    /// Absent from retired manifests, which abstain at the revision gate.
+    #[serde(default)]
+    resolution_index: Option<PartitionedResolutionIndexDescriptorV1>,
 }
 
 #[derive(Deserialize)]
@@ -369,13 +390,13 @@ struct PartitionedRawFileSegmentV1<'a> {
 /// the prior generation every file's implicit lineage rows continue from.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PartitionedGenerationEvidenceV1 {
+pub(super) struct PartitionedGenerationEvidenceV1 {
     #[serde(default)]
-    lineage_prior_generation: Option<CodeGenerationId>,
+    pub(super) lineage_prior_generation: Option<CodeGenerationId>,
     #[serde(deserialize_with = "deserialize_evidence_projection_request")]
-    projection_request: PersistedProjectionRequestV1,
+    pub(super) projection_request: PersistedProjectionRequestV1,
     #[serde(deserialize_with = "deserialize_evidence_projection_receipt")]
-    projection_receipt: PersistedBatchReceiptV1,
+    pub(super) projection_receipt: PersistedBatchReceiptV1,
 }
 
 /// The generation evidence stream decodes on one thread, so its request and
@@ -399,7 +420,7 @@ fn deserialize_evidence_projection_receipt<'de, D: serde::Deserializer<'de>>(
 }
 
 #[derive(Serialize)]
-struct PartitionedGenerationEvidenceRefV1<'a> {
+pub(super) struct PartitionedGenerationEvidenceRefV1<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     lineage_prior_generation: Option<&'a CodeGenerationId>,
     projection_request: PersistedProjectionRequestRefV1<'a>,
@@ -407,24 +428,17 @@ struct PartitionedGenerationEvidenceRefV1<'a> {
 }
 
 impl<'a> PartitionedGenerationEvidenceRefV1<'a> {
-    fn new(
-        generation: &'a CodeIndexPublishedGenerationV1,
+    /// `rosters` holds every file whose chunks `projection` adds or changes.
+    pub(super) fn new(
+        projection: &'a ProjectionPublicationHandoffV1,
+        rosters: &FileChunkRostersV1<'_>,
         lineage_prior_generation: Option<&'a CodeGenerationId>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let chunks = chunk_roster(
-            generation
-                .files
-                .iter()
-                .flat_map(|file| file.artifacts.chunks.chunks.iter()),
-        );
-        let request = generation.projection.request();
+        let request = projection.request();
         Ok(Self {
             lineage_prior_generation,
-            projection_request: PersistedProjectionRequestRefV1::new(request, &chunks)?,
-            projection_receipt: PersistedBatchReceiptRefV1::new(
-                request,
-                generation.projection.receipt(),
-            )?,
+            projection_request: PersistedProjectionRequestRefV1::new(request, rosters)?,
+            projection_receipt: PersistedBatchReceiptRefV1::new(request, projection.receipt())?,
         })
     }
 }
@@ -976,6 +990,19 @@ impl SealedEncodeBufferPoolV1 {
     }
 }
 
+/// Encode one file's segment for the generation `generation_id`, keyed at
+/// `file_key` in its snapshot.
+pub(super) fn encode_file_segment(
+    generation_id: &CodeGenerationId,
+    scope: &FileScopeIdentityV1,
+    file: &FileGenerationArtifactsV1,
+    file_key: u32,
+) -> Result<(PartitionedFileSegmentDescriptorV1, Vec<u8>), CodeIndexProductionErrorV1> {
+    let mut encoder = PartitionedSegmentEncoderV1::default();
+    let descriptor = encoder.encode_file_segment(generation_id, scope, file, file_key)?;
+    Ok((descriptor, encoder.segment))
+}
+
 impl PartitionedSegmentEncoderV1 {
     #[cfg(test)]
     fn segment_bytes(&self) -> &[u8] {
@@ -1121,68 +1148,57 @@ impl PartitionedSegmentEncoderV1 {
             symbol_identities_digest: symbol_identities_digest(&symbol_identities)?,
         })
     }
+}
 
-    #[hotpath::measure(label = "code_index.sealed_encode.evidence")]
-    fn encode_generation_evidence(
-        &mut self,
-        generation: &CodeIndexPublishedGenerationV1,
-        lineage_prior_generation: Option<&CodeGenerationId>,
-        reusable_graph_page_digests: &BTreeSet<ManifestDigest>,
-        mut publish: impl FnMut(
-            SealedGenerationSegmentPublicationV1<'_>,
-        ) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<
-        (
-            PartitionedGenerationEvidenceDescriptorV1,
-            Vec<PartitionedCodeGraphPageDescriptorV1>,
-        ),
-        CodeIndexProductionErrorV1,
-    > {
-        // File encoding needs two reusable buffers. Release their owned
-        // capacities before evidence starts so the evidence phase retains only
-        // one bounded page plus its compact content-address descriptors.
-        drop(std::mem::take(&mut self.payload));
-        drop(std::mem::take(&mut self.segment));
-        let evidence =
-            PartitionedGenerationEvidenceRefV1::new(generation, lineage_prior_generation)?;
-        let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
-        let encoded = serde_json::to_writer(&mut writer, &evidence);
-        if let Some(error) = writer.take_publish_error() {
-            return Err(error);
-        }
-        encoded.map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation evidence serialization failed: {error}"
-            ))
-        })?;
-        let evidence_size_bytes = writer.position();
-        let evidence_descriptor = writer.finish(evidence_size_bytes)?;
-        let mut graph_page_descriptors = Vec::new();
-        generation.for_each_sealed_code_graph_page(|page| {
-            let size_bytes = u64::try_from(page.encoded.len()).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed code graph page length exceeds u64".to_owned(),
-                )
-            })?;
-            if !reusable_graph_page_digests.contains(&page.page_digest) {
-                publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    file_key: page.file_key,
-                    page_digest: &page.page_digest,
-                    bytes: &page.encoded,
-                })?;
-            }
-            graph_page_descriptors.push(PartitionedCodeGraphPageDescriptorV1 {
-                file_key: page.file_key,
-                file_occurrence_id: page.file_occurrence_id,
-                logical_path: page.logical_path,
-                page_digest: page.page_digest,
-                size_bytes,
-                build_footprint: page.build_footprint,
-            });
-            Ok(())
-        })?;
-        Ok((evidence_descriptor, graph_page_descriptors))
+/// Write the generation evidence stream as bounded pages of one pack.
+#[hotpath::measure(label = "code_index.sealed_encode.evidence")]
+pub(super) fn write_generation_evidence(
+    evidence: &PartitionedGenerationEvidenceRefV1<'_>,
+    publish: &mut impl FnMut(
+        SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<PartitionedGenerationEvidenceDescriptorV1, CodeIndexProductionErrorV1> {
+    let mut writer = PartitionedEvidencePageWriterV1::new(publish);
+    let encoded = serde_json::to_writer(&mut writer, evidence);
+    if let Some(error) = writer.take_publish_error() {
+        return Err(error);
     }
+    encoded.map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation evidence serialization failed: {error}"
+        ))
+    })?;
+    let evidence_size_bytes = writer.position();
+    writer.finish(evidence_size_bytes)
+}
+
+/// Publish one sealed code graph page unless `reusable` already stores its
+/// bytes, and return its descriptor.
+pub(super) fn publish_code_graph_page(
+    page: super::graph_pages::SealedCodeGraphPageV1,
+    reusable: &BTreeSet<ManifestDigest>,
+    publish: &mut impl FnMut(
+        SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<PartitionedCodeGraphPageDescriptorV1, CodeIndexProductionErrorV1> {
+    let size_bytes = u64::try_from(page.encoded.len()).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract("sealed code graph page length exceeds u64".to_owned())
+    })?;
+    if !reusable.contains(&page.page_digest) {
+        publish(SealedGenerationSegmentPublicationV1::CodeGraphPage {
+            file_key: page.file_key,
+            page_digest: &page.page_digest,
+            bytes: &page.encoded,
+        })?;
+    }
+    Ok(PartitionedCodeGraphPageDescriptorV1 {
+        file_key: page.file_key,
+        file_occurrence_id: page.file_occurrence_id,
+        logical_path: page.logical_path,
+        page_digest: page.page_digest,
+        size_bytes,
+        build_footprint: page.build_footprint,
+    })
 }
 
 fn verify_segment_identity(
@@ -1210,7 +1226,7 @@ fn verify_segment_identity(
     Ok(())
 }
 
-fn decode_file_segment(
+pub(super) fn decode_file_segment(
     descriptor: &PartitionedFileSegmentDescriptorV1,
     generation_id: &CodeGenerationId,
     snapshot_digest: &ManifestDigest,
@@ -1276,8 +1292,32 @@ fn inflate_file_segment(
     Ok(())
 }
 
+pub(super) fn verify_index_segment(
+    bytes: &[u8],
+    digest: &ManifestDigest,
+    size_bytes: u64,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    verify_segment_identity(
+        bytes,
+        digest,
+        size_bytes,
+        "sealed resolution index length exceeds u64",
+        "sealed resolution index byte size does not match its manifest",
+        "sealed resolution index digest does not match its manifest",
+    )
+}
+
+pub(super) fn inflate_index_segment(
+    bytes: &[u8],
+    decoded_size_bytes: u64,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    let mut canonical = Vec::new();
+    inflate_file_segment(bytes, decoded_size_bytes, &mut canonical)?;
+    Ok(canonical)
+}
+
 /// One file's evidence segment: its stored bytes and their descriptor.
-fn encode_file_evidence_segment(
+pub(super) fn encode_file_evidence_segment(
     file_key: u32,
     file_occurrence_id: &FileOccurrenceId,
     evidence: &PersistedFileEvidenceV1,
@@ -1304,11 +1344,12 @@ fn encode_file_evidence_segment(
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
         segment_size_bytes: length(&bytes)?,
         decoded_size_bytes: length(&canonical)?,
+        explicit_lineage: evidence.has_explicit_lineage(),
     };
     Ok((descriptor, bytes))
 }
 
-fn decode_file_evidence_segment(
+pub(super) fn decode_file_evidence_segment(
     descriptor: &PartitionedFileEvidenceDescriptorV1,
     bytes: &[u8],
 ) -> Result<PersistedFileEvidenceV1, CodeIndexProductionErrorV1> {
@@ -1322,11 +1363,18 @@ fn decode_file_evidence_segment(
     )?;
     let mut canonical = Vec::new();
     inflate_file_segment(bytes, descriptor.decoded_size_bytes, &mut canonical)?;
-    serde_json::from_slice(&canonical).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed file evidence decoding failed: {error}"
-        ))
-    })
+    let evidence: PersistedFileEvidenceV1 =
+        serde_json::from_slice(&canonical).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file evidence decoding failed: {error}"
+            ))
+        })?;
+    if evidence.has_explicit_lineage() != descriptor.explicit_lineage || evidence.is_empty() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed file evidence does not match its descriptor".to_owned(),
+        ));
+    }
+    Ok(evidence)
 }
 
 /// Every file's sealed evidence, restored onto `files` (in segment order):
@@ -1355,10 +1403,31 @@ fn decode_file_evidence(
         .zip(files)
         .map(|(descriptor, file)| (descriptor.file_key, file))
         .collect::<HashMap<_, _>>();
+    let with_evidence = generation
+        .file_evidence
+        .iter()
+        .map(|descriptor| descriptor.file_key)
+        .collect::<BTreeSet<_>>();
+    let without_evidence = generation
+        .file_segments
+        .iter()
+        .zip(files)
+        .filter(|(descriptor, _)| !with_evidence.contains(&descriptor.file_key))
+        .map(|(_, file)| file)
+        .collect::<Vec<_>>();
     // One reused buffer per window slot, as file pages decode.
     let mut buffers =
         vec![Vec::new(); CodeIndexPublishedGenerationV1::partitioned_decode_window_files()];
     let mut restored = FileEvidenceV1::default();
+    for lineage in collect_bounded_ordered(&without_evidence, |file, _worker| {
+        identity_lineage(
+            file,
+            lineage_prior_generation,
+            &generation.manifest.generation_id,
+        )
+    })? {
+        restored.lineage.extend(lineage);
+    }
     for descriptors in generation.file_evidence.chunks(buffers.len()) {
         let mut owners = Vec::with_capacity(descriptors.len());
         for (descriptor, buffer) in descriptors.iter().zip(buffers.iter_mut()) {
@@ -1484,7 +1553,7 @@ fn decode_verified_file_segment(
     Ok(file)
 }
 
-fn decode_generation_evidence(
+pub(super) fn decode_generation_evidence(
     descriptor: &PartitionedGenerationEvidenceDescriptorV1,
     mut read_segment: impl FnMut(
         SealedGenerationSegmentReadV1<'_>,
@@ -1655,7 +1724,17 @@ where
     Ok(())
 }
 
-fn parse_partitioned_manifest(
+impl PartitionedPublishedGenerationV1 {
+    fn sources(&self) -> super::lexical_page_source::SealedGenerationSourcesV1 {
+        super::lexical_page_source::SealedGenerationSourcesV1 {
+            repository_parse_identity: self.repository_parse_identity.clone(),
+            ignored_source_admissions: self.ignored_source_admissions.clone(),
+            ignored_source_admissions_digest: self.ignored_source_admissions_digest.clone(),
+        }
+    }
+}
+
+pub(super) fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<PartitionedPublishedGenerationV1, CodeIndexProductionErrorV1> {
     let raw: PartitionedRawEnvelopeV1 = hotpath::measure_block!(
@@ -1756,10 +1835,11 @@ fn parse_partitioned_manifest(
             .enumerate()
             .map(|(key, file)| (key, &file.file_occurrence_id, file.logical_path.as_str())),
     )?;
+    generation.resolution_index.validate()?;
     Ok(generation)
 }
 
-fn snapshot_file_keys<'a>(
+pub(super) fn snapshot_file_keys<'a>(
     file_occurrences: impl Iterator<Item = &'a FileOccurrenceId>,
 ) -> Result<HashMap<&'a FileOccurrenceId, u32>, CodeIndexProductionErrorV1> {
     let mut keys = HashMap::new();
@@ -2157,6 +2237,43 @@ impl SealedGenerationFileWindowsV1 {
     }
 }
 
+/// Serialize one partitioned manifest inside its state-digest envelope.
+pub(super) fn seal_partitioned_manifest(
+    generation: &PartitionedPublishedGenerationRefV1<'_>,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    let generation_bytes = hotpath::measure_block!(
+        "code_index.sealed_encode.manifest_serialize",
+        serde_json::to_vec(generation).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest serialization failed: {error}"
+            ))
+        })
+    )?;
+    let state_digest = hotpath::measure_block!(
+        "code_index.sealed_encode.manifest_digest",
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    )?;
+    hotpath::measure_block!("code_index.sealed_encode.manifest_envelope", {
+        let generation =
+            RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation manifest is not UTF-8: {error}"
+                ))
+            })?)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        serde_json::to_vec(&PartitionedEnvelopeRefV1 {
+            state_digest: &state_digest,
+            generation: &generation,
+        })
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation manifest serialization failed: {error}"
+            ))
+        })
+    })
+}
+
 impl VerifiedSealedLexicalPageSourceV1 {
     pub fn open_partitioned_sealed(
         manifest_bytes: &[u8],
@@ -2173,6 +2290,8 @@ impl VerifiedSealedLexicalPageSourceV1 {
         maximum_page_bytes: usize,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let generation = parse_partitioned_manifest(manifest_bytes)?;
+        let chunk_policy = generation.chunk_policy.clone();
+        let sources = generation.sources();
         let source = PartitionedLexicalFileSourceV1 {
             generation_id: generation.manifest.generation_id.clone(),
             snapshot_digest: generation.manifest.snapshot_digest.clone(),
@@ -2184,6 +2303,8 @@ impl VerifiedSealedLexicalPageSourceV1 {
             generation.manifest,
             generation.snapshot,
             generation.statistics,
+            chunk_policy,
+            sources,
             source,
             source_state_digest,
             maximum_page_chunks,
@@ -2253,6 +2374,16 @@ impl CodeIndexPublishedGenerationV1 {
                     .code_graph_pages
                     .iter()
                     .map(|page| page.page_digest.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let reusable_index_digests = parent
+            .as_ref()
+            .map(|parent| {
+                parent
+                    .resolution_index
+                    .segments()
+                    .map(|page| page.segment_digest.clone())
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
@@ -2384,19 +2515,65 @@ impl CodeIndexPublishedGenerationV1 {
                 &mut publish_segment
             )
         )?;
-        let (generation_evidence, code_graph_pages) = PartitionedSegmentEncoderV1::default()
-            .encode_generation_evidence(
-                self,
+        let rosters = FileChunkRostersV1::new(
+            self.files
+                .iter()
+                .map(|file| {
+                    file_keys
+                        .get(&file.extraction.file_occurrence_id)
+                        .map(|key| (*key, file.artifacts.chunks.chunks.as_slice()))
+                        .ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed generation file is absent from its snapshot".to_owned(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter(),
+        );
+        let generation_evidence = write_generation_evidence(
+            &PartitionedGenerationEvidenceRefV1::new(
+                &self.projection,
+                &rosters,
                 lineage_prior_generation.as_ref(),
-                &reusable_graph_page_digests,
-                &mut publish_segment,
-            )?;
+            )?,
+            &mut publish_segment,
+        )?;
+        drop(rosters);
+        let mut code_graph_pages = Vec::with_capacity(self.snapshot.files.len());
+        hotpath::measure_block!("code_index.sealed_encode.graph_pages", {
+            self.for_each_sealed_code_graph_page(|page| {
+                code_graph_pages.push(publish_code_graph_page(
+                    page,
+                    &reusable_graph_page_digests,
+                    &mut publish_segment,
+                )?);
+                Ok(())
+            })
+        })?;
+        let resolution_index = seal_resolution_index(
+            &self.files,
+            &mut |publication: SealedGenerationSegmentPublicationV1<'_>| match publication {
+                SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, .. }
+                    if reusable_index_digests.contains(digest) =>
+                {
+                    Ok(())
+                }
+                publication => publish_segment(publication),
+            },
+        )?;
         let statistics = self.generation_statistics()?;
-        let generation = PartitionedPublishedGenerationRefV1 {
+        seal_partitioned_manifest(&PartitionedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
             snapshot: &self.snapshot,
             statistics: &statistics,
+            chunk_count: u64::try_from(self.chunks.chunks().len()).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation chunk count exceeds u64".to_owned(),
+                )
+            })?,
+            chunk_policy: self.chunk_policy_summary(),
             repository_parse_identity: &self.repository_parse_identity,
             ignored_source_admissions: self.ignored_source_roster.admissions(),
             ignored_source_admissions_digest: self.ignored_source_roster.digest(),
@@ -2406,37 +2583,7 @@ impl CodeIndexPublishedGenerationV1 {
             capability: &self.capability,
             generation_evidence: &generation_evidence,
             code_graph_pages: &code_graph_pages,
-        };
-        let generation_bytes = hotpath::measure_block!(
-            "code_index.sealed_encode.manifest_serialize",
-            serde_json::to_vec(&generation).map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest serialization failed: {error}"
-                ))
-            })
-        )?;
-        let state_digest = hotpath::measure_block!(
-            "code_index.sealed_encode.manifest_digest",
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(&generation_bytes))
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
-        )?;
-        hotpath::measure_block!("code_index.sealed_encode.manifest_envelope", {
-            let generation =
-                RawValue::from_string(String::from_utf8(generation_bytes).map_err(|error| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed generation manifest is not UTF-8: {error}"
-                    ))
-                })?)
-                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-            serde_json::to_vec(&PartitionedEnvelopeRefV1 {
-                state_digest: &state_digest,
-                generation: &generation,
-            })
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation manifest serialization failed: {error}"
-                ))
-            })
+            resolution_index: &resolution_index,
         })
     }
 
@@ -2564,12 +2711,13 @@ impl CodeIndexPublishedGenerationV1 {
         probe.sample();
         let (projection_request, projection_receipt) =
             hotpath::measure_block!("code_index.restore.evidence_expand", {
-                let chunks = chunk_roster(
-                    files
-                        .iter()
-                        .flat_map(|file| file.artifacts.chunks.chunks.iter()),
-                );
-                let request = evidence.projection_request.expand(&chunks)?;
+                let rosters =
+                    FileChunkRostersV1::new(generation.file_segments.iter().zip(files).map(
+                        |(descriptor, file)| {
+                            (descriptor.file_key, file.artifacts.chunks.chunks.as_slice())
+                        },
+                    ));
+                let request = evidence.projection_request.expand(&rosters)?;
                 let receipt = evidence.projection_receipt.expand(&request)?;
                 Ok::<_, CodeIndexProductionErrorV1>((request, receipt))
             })?;
@@ -2601,12 +2749,29 @@ impl CodeIndexPublishedGenerationV1 {
     pub fn partitioned_text_metadata(
         bytes: &[u8],
     ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
+        Self::partitioned_metadata_and_lane(bytes).map(|(metadata, _)| metadata)
+    }
+
+    /// [`Self::partitioned_text_metadata`] with the generation's lane digest.
+    pub(super) fn partitioned_metadata_and_lane(
+        bytes: &[u8],
+    ) -> Result<(VerifiedSealedTextGenerationMetadataV1, ManifestDigest), CodeIndexProductionErrorV1>
+    {
         let generation = parse_partitioned_manifest(bytes)?;
-        VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
+        let lane = super::sparse_increment::lane_digest(
+            &generation.snapshot,
+            &generation.file_segments,
+            &generation.code_graph_pages,
+        )?;
+        let sources = generation.sources();
+        let metadata = VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
             generation.statistics,
-        )
+            generation.chunk_policy,
+            sources,
+        )?;
+        Ok((metadata, lane))
     }
 
     pub fn partitioned_segment_identities(
@@ -2635,6 +2800,12 @@ impl CodeIndexPublishedGenerationV1 {
             SealedGenerationSegmentIdentityV1 {
                 digest: page.page_digest,
                 size_bytes: page.size_bytes,
+            }
+        }));
+        identities.extend(generation.resolution_index.segments().map(|segment| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: segment.segment_digest.clone(),
+                size_bytes: segment.segment_size_bytes,
             }
         }));
         Ok(identities)
@@ -2753,6 +2924,18 @@ impl CodeIndexPublishedGenerationV1 {
                 size_bytes: page.size_bytes,
             }
         }));
+        let resolution_index = generation.resolution_index.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation has no resolution index".to_owned(),
+            )
+        })?;
+        resolution_index.validate()?;
+        identities.extend(resolution_index.segments().map(|segment| {
+            SealedGenerationSegmentIdentityV1 {
+                digest: segment.segment_digest.clone(),
+                size_bytes: segment.segment_size_bytes,
+            }
+        }));
         Ok(Some(identities))
     }
 
@@ -2774,6 +2957,12 @@ impl CodeIndexPublishedGenerationV1 {
                     .file_evidence
                     .iter()
                     .map(|descriptor| (&descriptor.segment_digest, descriptor.segment_size_bytes)),
+            )
+            .chain(
+                generation
+                    .resolution_index
+                    .segments()
+                    .map(|segment| (&segment.segment_digest, segment.segment_size_bytes)),
             );
         for (digest, size_bytes) in per_file {
             segment.clear();
@@ -3514,6 +3703,7 @@ mod tests {
                 }
                 SealedGenerationSegmentPublicationV1::File { .. }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
                 | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
                     panic!("evidence writer cannot publish another segment kind")
                 }
@@ -3667,6 +3857,7 @@ mod tests {
                 }
                 SealedGenerationSegmentPublicationV1::File { .. }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
                 | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
                     panic!("evidence writer cannot publish another segment kind")
                 }
@@ -3726,6 +3917,7 @@ mod tests {
                 }
                 SealedGenerationSegmentPublicationV1::File { .. }
                 | SealedGenerationSegmentPublicationV1::FileEvidence { .. }
+                | SealedGenerationSegmentPublicationV1::ResolutionIndex { .. }
                 | SealedGenerationSegmentPublicationV1::CodeGraphPage { .. } => {
                     panic!("evidence writer cannot publish another segment kind")
                 }

@@ -106,11 +106,13 @@ fn at_width<R>(
 ) -> R {
     parallelism::force_indexing_workers_for_test(width);
     let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
     let generation = owner
         .build_and_publish(multi_file_request(file_count, 1_100_000), &ActiveControl)
         .expect("equivalence generation publishes");
+    let generation = store.generation(&generation);
     let read = read(&generation);
     parallelism::clear_forced_indexing_workers_for_test();
     read
