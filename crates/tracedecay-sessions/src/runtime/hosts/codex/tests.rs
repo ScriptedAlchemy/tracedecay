@@ -1806,16 +1806,20 @@ mod recent_first_discovery_tests {
         let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "0198-session-beyond-default-budget";
+        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
+        // Write the target mid-corpus: tmpfs lists newest entries first and
+        // btrfs oldest first, so either end would land in the first slice.
         for index in 0..4_100 {
+            if index == 2_050 {
+                std::fs::write(&expected, b"{}\n").unwrap();
+            }
             std::fs::write(
                 directory.join(format!("rollout-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();
         }
-        let session_id = "0198-session-beyond-default-budget";
-        let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
-        std::fs::write(&expected, b"{}\n").unwrap();
 
         let source = CodexSource::with_home(home);
         let mut calls = 0_u64;
