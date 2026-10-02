@@ -813,7 +813,10 @@ fn checkpoint_body_version_one_is_rejected_and_rewritten() {
     assert!(report.checkpoint_rewritten);
     drop(spool);
     let rewritten = fs::read(checkpoint_path(&root.0)).unwrap();
-    assert_eq!(u16::from_le_bytes([rewritten[4], rewritten[5]]), 2);
+    assert_eq!(
+        u16::from_le_bytes([rewritten[4], rewritten[5]]),
+        CHECKPOINT_FORMAT_VERSION
+    );
 }
 
 #[test]
@@ -1618,7 +1621,14 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
 #[test]
 fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() {
     let root = TestDir::new("lease-barrier-free");
-    let (mut writer, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    // The drain reacquires its lease against admitted callbacks with the
+    // production lease wait; the dead-lease fixture gives it one attempt.
+    let config = HookSpoolConfigV1 {
+        writer_lease_micros: HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop)
+            .writer_lease_micros,
+        ..config()
+    };
+    let (mut writer, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
     let records = (1..=3)
         .map(|event| {
             writer
@@ -1627,7 +1637,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         })
         .collect::<Vec<_>>();
     writer.commit().unwrap();
-    let (mut drain, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let (mut drain, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
     let acknowledgements = records
         .iter()
         .map(|record| HookSpoolAckV1 {
@@ -1650,7 +1660,7 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
                 admissions.push(
                     HookSpoolV1::open_within(
                         &root.0,
-                        config(),
+                        config,
                         UtcMicros(11),
                         crate::HOOK_SYNCHRONOUS_BUDGET,
                     )
@@ -1662,6 +1672,9 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         });
         let outcomes = drain.acknowledge_many(&acknowledgements, UtcMicros(11));
         settled.store(true, std::sync::atomic::Ordering::SeqCst);
+        // A callback that entered its lease wait just before settlement is
+        // admitted once the drain lets go, within the budget it already has.
+        drop(drain);
         assert_eq!(outcomes.unwrap(), vec![Ok(true); 3]);
         callbacks.join().unwrap()
     });
@@ -1678,8 +1691,8 @@ fn settling_and_reclaiming_hold_the_writer_lease_across_no_durability_barrier() 
         0,
         "{admissions:?}"
     );
-    drop((drain, slow_disk));
-    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+    drop(slow_disk);
+    let (spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
     assert_eq!(report.pending_records, 0);
     assert!(spool.pending.is_empty());
     assert_eq!(fs::metadata(records_path(&root.0)).unwrap().len(), 0);
