@@ -646,6 +646,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
                 {},
+                (SELECT p.observation_id
+                 FROM observation_projection_provenance p
+                 WHERE p.projector_version = ?2
+                   AND p.output_provider = m.provider
+                   AND p.output_message_id = m.message_id
+                 ORDER BY p.observation_sequence DESC
+                 LIMIT 1) AS observation_id,
                 bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
              FROM lcm_raw_messages_fts
              JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id
@@ -653,7 +660,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
              WHERE lcm_raw_messages_fts MATCH ?1",
             message_record_select_columns("m")
         );
-        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
+        let mut query_params = vec![
+            Value::Text(fts_query),
+            Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+            Value::Text(provider.to_owned()),
+        ];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
             push_project_identity_predicate(&mut sql, &mut query_params, project_key);
@@ -677,6 +688,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         );
 
         let mut transcript_results = Vec::new();
+        let mut matched_observations = BTreeSet::new();
         let mut rows = snapshot
             .query(&sql, query_params)
             .await
@@ -691,8 +703,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             let message = row_to_message(&row, 13)
                 .map_err(|message| session_db_operation_message(OPERATION, message))?;
             let score = -row
-                .get::<f64>(26)
+                .get::<f64>(27)
                 .map_err(|error| session_db_operation_error(OPERATION, error))?;
+            if let Some(observation_id) = row
+                .get::<Option<String>>(26)
+                .map_err(|error| session_db_operation_error(OPERATION, error))?
+            {
+                matched_observations.insert(observation_id);
+            }
             transcript_results.push(SessionMessageSearchResult {
                 session,
                 message,
@@ -700,8 +718,14 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let workflow_results =
+        let mut workflow_results =
             search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await?;
+        workflow_results
+            .retain(|(observation_id, _)| matched_observations.insert(observation_id.clone()));
+        let workflow_results = workflow_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect();
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
         results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
             provider: &result.session.provider,
@@ -863,7 +887,7 @@ async fn search_workflow_facts(
     project_key: Option<&str>,
     query: &str,
     limit: usize,
-) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
+) -> tracedecay_domain::errors::Result<Vec<(String, SessionMessageSearchResult)>> {
     const OPERATION: &str = "search registered workflow facts";
     let terms = query
         .split_whitespace()
@@ -931,13 +955,19 @@ async fn search_workflow_facts(
     {
         let session = row_to_session(&row)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
+        let observation_id = row
+            .get::<String>(14)
+            .map_err(|error| session_db_operation_error(OPERATION, error))?;
         let message = row_to_workflow_message(&row, 13)
             .map_err(|message| session_db_operation_message(OPERATION, message))?;
-        results.push(SessionMessageSearchResult {
-            session,
-            message,
-            score: 0.0,
-        });
+        results.push((
+            observation_id,
+            SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            },
+        ));
     }
     Ok(results)
 }
