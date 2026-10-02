@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test"
+import { afterAll, expect, test } from "bun:test"
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import mcpModule from "./tracedecay-mcp"
 import hookModule, {
   PendingGuidance,
   SessionLocations,
-  TraceDecayPlugin,
   dispatch,
   dispatchAfterAck,
 } from "./tracedecay"
@@ -20,12 +22,58 @@ function boundary(sessionID: string, type = "session.execution.succeeded") {
   return { type, data: { sessionID } }
 }
 
-test("OpenCode discovers one V2 definition per installed module", () => {
-  expect(hookModule).toBe(TraceDecayPlugin)
-  expect(hookModule.id).toBe("tracedecay-hooks")
-  expect(typeof hookModule.setup).toBe("function")
-  expect(mcpModule.id).toBe("tracedecay-mcp")
-  expect(typeof mcpModule.setup).toBe("function")
+const hookDirectories: string[] = []
+afterAll(() => {
+  for (const directory of hookDirectories) rmSync(directory, { recursive: true, force: true })
+})
+
+// A hook child that writes guidance, marks `<hook>.written`, then holds its
+// stdout open for `$1` seconds before exiting successfully.
+function partialGuidanceHook(): string {
+  const directory = mkdtempSync(join(tmpdir(), "opencode-hook-"))
+  hookDirectories.push(directory)
+  const hook = join(directory, "hook")
+  writeFileSync(
+    hook,
+    "#!/bin/sh\nprintf 'partial guidance'\n: > \"$0.written\"\nexec sleep \"$1\"\n",
+  )
+  chmodSync(hook, 0o755)
+  return hook
+}
+
+async function untilWritten(hook: string): Promise<void> {
+  while (!existsSync(`${hook}.written`)) await Bun.sleep(5)
+}
+
+test("each installed module's setup registers its OpenCode surface", async () => {
+  const servers: Record<string, unknown> = {}
+  await mcpModule.setup({
+    mcp: {
+      transform: async (edit: (editor: { set(name: string, server: unknown): void }) => void) =>
+        edit({ set: (name, server) => (servers[name] = server) }),
+    },
+  } as never)
+  expect(servers).toEqual({
+    tracedecay: { type: "local", command: ["__TRACEDECAY_BIN__", "serve"] },
+  })
+
+  const hooks: string[] = []
+  let subscription: AbortSignal | undefined
+  const dispose = (await hookModule.setup({
+    location: { directory: HERE },
+    session: { hook: async (name: string) => void hooks.push(`session.${name}`) },
+    tool: { hook: async (name: string) => void hooks.push(`tool.${name}`) },
+    event: {
+      subscribe: ({ signal }: { signal: AbortSignal }) => {
+        subscription = signal
+        return (async function* () {})()
+      },
+    },
+  } as never)) as () => void
+  expect(hooks).toEqual(["session.context", "tool.execute.after"])
+  expect(subscription?.aborted).toBe(false)
+  dispose()
+  expect(subscription?.aborted).toBe(true)
 })
 
 test("only the owning location dispatches an unlocated execution boundary", () => {
@@ -166,9 +214,11 @@ test("plugin disposal clears guidance and invalidates every in-flight delivery",
   pending.deliveryFor("ses_active")("queued")
   const deliver = pending.deliveryFor("ses_active")
   pending.clear()
+  const afterDisposal = pending.deliveryFor("ses_active")
   deliver("late")
+  afterDisposal("after disposal")
 
-  expect(pending.drain("ses_active")).toEqual([])
+  expect(pending.drain("ses_active")).toEqual(["after disposal"])
 })
 
 test("dispatch returns guidance only after the hook child exits successfully", async () => {
@@ -181,13 +231,16 @@ test("dispatch returns guidance only after the hook child exits successfully", a
 })
 
 test("stalled hook children are killed and their delivery settles", async () => {
+  const hook = partialGuidanceHook()
+  expect(await dispatch("0", {}, hook)).toBe("partial guidance")
+
   const pending = new PendingGuidance()
   const deliver = pending.deliveryFor("ses_stalled")
   const result = await new Promise<string | undefined>((resolve) => {
     dispatchAfterAck("60", {}, (guidance) => {
       deliver(guidance)
       resolve(guidance)
-    }, "/usr/bin/sleep")
+    }, hook)
   })
   expect(result).toBeUndefined()
   pending.deliveryFor("ses_stalled")("subsequent guidance")
@@ -195,8 +248,15 @@ test("stalled hook children are killed and their delivery settles", async () => 
 }, 15_000)
 
 test("plugin cancellation terminates an outstanding hook child", async () => {
+  const hook = partialGuidanceHook()
+  expect(await dispatch("0", {}, hook, undefined, new AbortController().signal)).toBe(
+    "partial guidance",
+  )
+
+  rmSync(`${hook}.written`)
   const controller = new AbortController()
-  const result = dispatch("60", {}, "/usr/bin/sleep", undefined, controller.signal)
+  const result = dispatch("60", {}, hook, undefined, controller.signal)
+  await untilWritten(hook)
   controller.abort()
   expect(await result).toBeUndefined()
 })

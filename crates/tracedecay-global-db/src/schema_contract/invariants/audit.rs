@@ -1263,9 +1263,11 @@ async fn count_suffix_rows(
     table: &str,
     after_rowid: i64,
 ) -> tracedecay_domain::errors::Result<(i64, i64)> {
+    // `+projector_version` keeps the planner on the rowid range: an index led
+    // by projector_version would scan every row of the version, the store.
     let query = format!(
         "SELECT COALESCE(MAX(rowid), ?1), COUNT(*) FROM {table}
-         WHERE rowid > ?1 AND projector_version = ?2"
+         WHERE rowid > ?1 AND +projector_version = ?2"
     );
     let mut rows = conn
         .query(
@@ -1300,7 +1302,7 @@ async fn collect_projection_suffix_ids(
          JOIN observations AS observation
            ON observation.observation_id = projection.observation_id
          WHERE projection.rowid > ?1
-           AND projection.projector_version = ?2
+           AND +projection.projector_version = ?2
            AND observation.sequence <= ?3
          ORDER BY projection.rowid LIMIT ?4"
     );
