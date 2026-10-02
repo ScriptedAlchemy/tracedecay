@@ -269,7 +269,16 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
-        HostKindV1::OpenCode => (Supported, Supported, Supported, Supported, Supported),
+        // OpenCode 2 exposes plugin hooks and local MCP registration, but it
+        // neither runs configured language servers nor exposes a native
+        // diagnostics API.
+        HostKindV1::OpenCode => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
+            Supported,
+        ),
         // Gemini CLI's extension lifecycle carries exactly one registration
         // route: the `mcpServers` entry inside `gemini-extension.json`, which
         // `gemini extensions install` adopts. It exposes no LSP registration
