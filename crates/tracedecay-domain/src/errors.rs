@@ -162,6 +162,8 @@ pub enum ProjectOpenFailureKind {
 pub enum InvalidRequestReason {
     MissingRequiredParameter,
     NotFound,
+    /// The string is not a handle a truncated response envelope emitted.
+    InvalidResponseHandle,
 }
 
 impl InvalidRequestReason {
@@ -170,6 +172,7 @@ impl InvalidRequestReason {
         match self {
             Self::MissingRequiredParameter => "missing_required_parameter",
             Self::NotFound => "not_found",
+            Self::InvalidResponseHandle => "invalid_handle",
         }
     }
 }

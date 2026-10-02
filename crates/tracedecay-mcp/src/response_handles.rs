@@ -18,7 +18,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 // MCP telemetry counters and re-exports the record types so MCP callers import
 // the authority and its telemetry-wrapped operations from one path.
 pub use tracedecay_session_memory::response_handles::{
-    RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, ResponseHandleRecord,
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleLookup, ResponseHandleRecord,
 };
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 
@@ -58,33 +58,13 @@ fn telemetry() -> &'static ResponseHandleTelemetry {
     TELEMETRY.get_or_init(ResponseHandleTelemetry::default)
 }
 
-fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static str) {
+fn public_inventory_problem(error: &ResponseHandleError) -> (&'static str, &'static str) {
     match error {
-        TraceDecayError::File { message, .. }
-            if message.starts_with("corrupt response-handle record:") =>
-        {
-            (
-                "corrupt_handle_record",
-                "The local response-handle inventory contains a corrupt record.",
-            )
-        }
-        TraceDecayError::File { .. }
-        | TraceDecayError::Database { .. }
-        | TraceDecayError::Search { .. }
-        | TraceDecayError::Config { .. }
-        | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::ProfileResetRequired { .. }
-        | TraceDecayError::ResetRequired { .. }
-        | TraceDecayError::ProjectRoute { .. }
-        | TraceDecayError::ProjectOpen { .. }
-        | TraceDecayError::InvalidRequest { .. }
-        | TraceDecayError::ToolRefused { .. }
-        | TraceDecayError::SyncLock { .. }
-        | TraceDecayError::LockDeadline { .. }
-        | TraceDecayError::Io(_)
-        | TraceDecayError::Sqlite(_)
-        | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => (
+        ResponseHandleError::CorruptRecord { .. } => (
+            "corrupt_handle_record",
+            "The local response-handle inventory contains a corrupt record.",
+        ),
+        ResponseHandleError::InvalidHandle | ResponseHandleError::Store(_) => (
             "handle_inventory_unavailable",
             "The local response-handle inventory is unavailable.",
         ),
@@ -100,37 +80,15 @@ pub const RETRIEVE_READ_FAILED_REASON: &str = "handle_read_failed";
 /// The caller-facing form of a handle-read failure. An invalid handle stays a
 /// request error; a store failure becomes a typed, retryable route problem
 /// that names no local path, so it keeps its reason across the owner boundary.
-pub fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
+pub fn public_retrieve_error(error: ResponseHandleError) -> TraceDecayError {
     match error {
-        TraceDecayError::Config { message } if message.starts_with("invalid response handle:") => {
-            TraceDecayError::Config { message }
-        }
-        TraceDecayError::File { message, .. }
-            if message.starts_with("corrupt response-handle record:") =>
-        {
-            TraceDecayError::project_route(
-                RETRIEVE_CORRUPT_RECORD_REASON,
-                true,
-                "corrupt response-handle record: cached payload failed integrity validation",
-            )
-        }
-        TraceDecayError::File { .. }
-        | TraceDecayError::Database { .. }
-        | TraceDecayError::Search { .. }
-        | TraceDecayError::Config { .. }
-        | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::ProfileResetRequired { .. }
-        | TraceDecayError::ResetRequired { .. }
-        | TraceDecayError::ProjectRoute { .. }
-        | TraceDecayError::ProjectOpen { .. }
-        | TraceDecayError::InvalidRequest { .. }
-        | TraceDecayError::ToolRefused { .. }
-        | TraceDecayError::SyncLock { .. }
-        | TraceDecayError::LockDeadline { .. }
-        | TraceDecayError::Io(_)
-        | TraceDecayError::Sqlite(_)
-        | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_) => TraceDecayError::project_route(
+        ResponseHandleError::InvalidHandle => error.into(),
+        ResponseHandleError::CorruptRecord { .. } => TraceDecayError::project_route(
+            RETRIEVE_CORRUPT_RECORD_REASON,
+            true,
+            "corrupt response-handle record: cached payload failed integrity validation",
+        ),
+        ResponseHandleError::Store(_) => TraceDecayError::project_route(
             RETRIEVE_READ_FAILED_REASON,
             true,
             "response-handle cache is unavailable",
@@ -225,7 +183,7 @@ pub fn store_response_handle(root: &Path, content: &str, now: i64) -> Result<Res
             );
         }
     }
-    result
+    result.map_err(TraceDecayError::from)
 }
 
 #[track_caller]
@@ -234,7 +192,7 @@ pub fn retrieve_response_handle(
     root: &Path,
     handle: &str,
     now: i64,
-) -> Result<ResponseHandleLookup> {
+) -> std::result::Result<ResponseHandleLookup, ResponseHandleError> {
     let started = Instant::now();
     let caller = std::panic::Location::caller();
     let telemetry = telemetry();
@@ -338,7 +296,9 @@ pub fn cleanup_expired_response_handles(root: &Path, now: i64) -> Result<usize> 
             );
         }
     }
-    result.map(|cleanup| cleanup.removed_expired)
+    result
+        .map(|cleanup| cleanup.removed_expired)
+        .map_err(TraceDecayError::from)
 }
 
 #[track_caller]
@@ -399,7 +359,12 @@ fn duration_micros_u64(duration: Duration) -> u64 {
     tracedecay_runtime_core::tracedecay::saturating_duration_micros(duration)
 }
 
-fn error_class(error: &TraceDecayError) -> &'static str {
+fn error_class(error: &ResponseHandleError) -> &'static str {
+    let error = match error {
+        ResponseHandleError::InvalidHandle => return "invalid_handle",
+        ResponseHandleError::CorruptRecord { .. } => return "corrupt_record",
+        ResponseHandleError::Store(error) => error,
+    };
     match error {
         TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::File { .. } => "file",
@@ -434,13 +399,15 @@ fn clipped_handle_for_log(handle: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_domain::errors::InvalidRequestReason;
+
     use super::*;
 
     #[test]
     fn public_inventory_problem_never_exposes_the_local_path() {
-        let error = TraceDecayError::File {
-            message: "corrupt response-handle record: invalid JSON".to_string(),
-            path: "/private/operator/cache/secret.json".to_string(),
+        let error = ResponseHandleError::CorruptRecord {
+            path: "/private/operator/cache/secret.json".into(),
+            reason: "invalid JSON".to_string(),
         };
 
         let (reason_code, detail) = public_inventory_problem(&error);
@@ -457,5 +424,37 @@ mod tests {
                 "corrupt response-handle record: cached payload failed integrity validation"
             ))
         );
+    }
+
+    /// A store failure whose text reads like a corrupt record or an invalid
+    /// handle is still the cache being unavailable.
+    #[test]
+    fn store_failures_are_classified_by_type_not_text() {
+        let lookalike = || {
+            ResponseHandleError::Store(TraceDecayError::File {
+                message: "corrupt response-handle record: invalid response handle:".to_string(),
+                path: "/cache/rh_000000000000000000000000.json".to_string(),
+            })
+        };
+
+        assert_eq!(
+            public_inventory_problem(&lookalike()).0,
+            "handle_inventory_unavailable"
+        );
+        assert_eq!(
+            public_retrieve_error(lookalike()).project_route_context(),
+            Some((
+                "handle_read_failed",
+                true,
+                "response-handle cache is unavailable"
+            ))
+        );
+        assert!(matches!(
+            public_retrieve_error(ResponseHandleError::InvalidHandle),
+            TraceDecayError::InvalidRequest {
+                reason: InvalidRequestReason::InvalidResponseHandle,
+                ..
+            }
+        ));
     }
 }
