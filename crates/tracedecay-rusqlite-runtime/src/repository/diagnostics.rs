@@ -1,4 +1,4 @@
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
+use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
     DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
@@ -19,6 +19,10 @@ use super::support::{conversion, invalid, u64_to_i64};
 // migration. These aliases keep the SQL below readable.
 const CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
 const CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
+
+/// The largest `diagnostic_anchor IN (...)` batch one cross-generation
+/// collision probe binds.
+const ANCHOR_COLLISION_BATCH: usize = 500;
 
 #[derive(Clone, Default)]
 pub struct DiagnosticExecutor;
@@ -63,12 +67,31 @@ impl DiagnosticExecutor {
             1
         };
 
-        for record in snapshot.records() {
+        // One batched `diagnostic_anchor IN (...)` probe per chunk replaces
+        // the per-record `SELECT 1 ... LIMIT 1` existence checks: any anchor
+        // already bound to another generation rejects the publication either
+        // way.
+        let anchors: Vec<&str> = snapshot
+            .records()
+            .iter()
+            .map(|record| record.diagnostic_anchor.as_str())
+            .collect();
+        for chunk in anchors.chunks(ANCHOR_COLLISION_BATCH) {
+            let placeholders = (2..=chunk.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut bindings: Vec<&str> = Vec::with_capacity(chunk.len() + 1);
+            bindings.push(generation.as_str());
+            bindings.extend(chunk.iter().copied());
             if savepoint
                 .query_row(
-                    "SELECT 1 FROM generation_diagnostics
-                     WHERE diagnostic_anchor = ?1 AND generation_id != ?2 LIMIT 1",
-                    params![record.diagnostic_anchor.as_str(), generation.as_str()],
+                    &format!(
+                        "SELECT 1 FROM generation_diagnostics
+                         WHERE generation_id != ?1
+                         AND diagnostic_anchor IN ({placeholders}) LIMIT 1"
+                    ),
+                    params_from_iter(bindings),
                     |_| Ok(()),
                 )
                 .optional()?
