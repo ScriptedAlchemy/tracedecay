@@ -1051,7 +1051,7 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_db_path: String::new(),
         lcm_scope: "unavailable".to_owned(),
         session_authority: crate::DashboardSessionAuthorityStateV1::Unavailable,
-        session_resolver: None,
+        session_mount: None,
         lcm_read_authority: None,
         git_correlation_read_authority: None,
         delivery_read_authority: None,

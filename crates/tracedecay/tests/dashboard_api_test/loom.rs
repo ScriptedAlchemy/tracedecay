@@ -12,22 +12,24 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 
 /// A dashboard started while its project is still opening reports the session
-/// authority as opening, then serves the seeded sessions once the project's
-/// session store is admitted, without being restarted.
+/// authority as opening on every read, then serves the seeded sessions once
+/// the project's publication delivers its session store, without a restart.
 #[test]
 fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let project_open = Arc::new(AtomicBool::new(false));
-        let fixture = start_dashboard_fixture_while_opening(Arc::clone(&project_open)).await;
+        let project_open = ProjectOpenPublication::default();
+        let fixture = start_dashboard_fixture_while_opening(project_open.clone()).await;
         let agent = http_agent();
         let capabilities_url = format!("{}/api/capabilities", fixture.base_url);
         let temporal_url = format!("{}/api/loom/temporal?limit=25", fixture.base_url);
 
-        let (status, capabilities) = get_json(&agent, &capabilities_url);
-        assert_eq!(status, 200, "{capabilities}");
-        assert_eq!(capabilities["session_authority"], "opening");
-        assert_eq!(capabilities["features"]["lcm"], false);
+        for _ in 0..5 {
+            let (status, capabilities) = get_json(&agent, &capabilities_url);
+            assert_eq!(status, 200, "{capabilities}");
+            assert_eq!(capabilities["session_authority"], "opening");
+            assert_eq!(capabilities["features"]["lcm"], false);
+        }
         let (event, frame) = first_event_frame(&agent, &format!("{}/api/events", fixture.base_url));
         assert_eq!(event, "heartbeat", "{frame}");
         assert_eq!(frame["kind"]["family"], "heartbeat");
@@ -38,7 +40,7 @@ fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
         assert_eq!(opening["payload"]["available"], false);
         assert_eq!(opening["payload"]["total"], 0);
 
-        project_open.store(true, Ordering::SeqCst);
+        project_open.publish_ready();
 
         let (status, capabilities) = get_json(&agent, &capabilities_url);
         assert_eq!(status, 200, "{capabilities}");
@@ -53,6 +55,31 @@ fn dashboard_started_during_project_open_serves_sessions_once_open_completes() {
             ready["payload"]["sessions"][0]["session_id"],
             "sess-dashboard-1"
         );
+    });
+}
+
+/// A project whose open finishes without a session store stops reporting
+/// `opening`: the dashboard records the terminal state it was published.
+#[test]
+fn dashboard_reports_unavailable_when_the_open_publishes_no_sessions() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let project_open = ProjectOpenPublication::default();
+        let fixture = start_dashboard_fixture_while_opening(project_open.clone()).await;
+        let agent = http_agent();
+        let capabilities_url = format!("{}/api/capabilities", fixture.base_url);
+
+        let (_, capabilities) = get_json(&agent, &capabilities_url);
+        assert_eq!(capabilities["session_authority"], "opening");
+
+        project_open.publish_unavailable();
+
+        for _ in 0..2 {
+            let (status, capabilities) = get_json(&agent, &capabilities_url);
+            assert_eq!(status, 200, "{capabilities}");
+            assert_eq!(capabilities["session_authority"], "unavailable");
+            assert_eq!(capabilities["features"]["lcm"], false);
+        }
     });
 }
 

@@ -315,21 +315,17 @@ async fn dispatch_opencode_event(
     telemetry: &analytics::HookTimingSpan,
     started: Instant,
 ) -> Option<String> {
-    let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        dispatch::dispatch_opencode_lsp_updated(runtime, event_json, project_root, Some(telemetry))
-            .await
-    } else {
-        dispatch::dispatch(
-            runtime,
-            NativeHostIdentityV1::OpenCode,
-            event_json,
-            project_root,
-            Some(telemetry),
-            started,
-        )
-        .await
-    };
-    dispatch.into_recorded_guidance(telemetry).flatten()
+    dispatch::dispatch(
+        runtime,
+        NativeHostIdentityV1::OpenCode,
+        event_json,
+        project_root,
+        Some(telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(telemetry)
+    .flatten()
 }
 
 #[hotpath::measure(
@@ -586,8 +582,8 @@ pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
     .await
 }
 
-/// OpenCode's direct tool callback payload (`{input, output}`) carries no
-/// event name; the plugin hook it answers is the name.
+/// OpenCode's direct tool callback payload carries no event name; the plugin
+/// hook it answers (`ctx.tool.hook("execute.after")`) is the name.
 pub const OPENCODE_TOOL_EXECUTE_AFTER_HOOK_NAME: &str = "tool.execute.after";
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]

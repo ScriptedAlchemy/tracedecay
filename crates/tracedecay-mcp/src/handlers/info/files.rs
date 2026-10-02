@@ -1,5 +1,8 @@
 //! `tracedecay_files`, indexed file listing with prefix and glob filters.
 
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
+};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     FilesLayoutV1, FilesResultV1, FilesSurfaceRequestV1, IndexedFileV1,
@@ -18,6 +21,7 @@ pub async fn compute_files(
     graph: &VerifiedGraphQuery,
     request: FilesSurfaceRequestV1,
     scope_prefix: Option<&str>,
+    worktree_omitted_sources: Option<CodeIndexOmittedSourcesV1>,
 ) -> Result<GraphToolCompletionV1> {
     let project_root = graph.project_root()?;
     let mut files = hotpath::future!(
@@ -51,6 +55,7 @@ pub async fn compute_files(
             count: files.len(),
             layout: request.layout.unwrap_or_default(),
             files,
+            worktree_omitted_sources,
         }),
         Vec::new(),
     ))
@@ -65,6 +70,26 @@ pub(crate) fn render_files_md(result: &FilesResultV1) -> String {
     md.heading(2, "Files");
     md.field("indexed files", &result.files.len().to_string());
     md.field("layout", layout);
+    if let Some(omitted) = result.worktree_omitted_sources.as_ref() {
+        md.field("worktree sources not indexed", &omitted.count.to_string());
+        let listing = omitted
+            .sources
+            .iter()
+            .map(|source| {
+                let reason = match &source.reason {
+                    CodeIndexSourceOmissionReasonV1::UnrepresentablePath => {
+                        "unrepresentable path".to_owned()
+                    }
+                    CodeIndexSourceOmissionReasonV1::PrivacyWithheld { detail } => {
+                        format!("privacy withheld: {detail}")
+                    }
+                };
+                format!("- {:?} ({reason})", source.display_path)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        md.blank().code("text", &listing);
+    }
 
     if result.files.is_empty() {
         md.blank().empty_note("No indexed files matched.");

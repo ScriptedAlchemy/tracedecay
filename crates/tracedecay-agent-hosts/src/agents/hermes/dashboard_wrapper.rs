@@ -127,8 +127,7 @@ pub(super) fn uninstall(plugin_dir: &Path) -> Result<()> {
     super::remove_generated_file(&dist_dir.join("index.js"))?;
     super::remove_empty_dir(&dist_dir)?;
     super::remove_generated_file(&dashboard_dir.join("manifest.json"))?;
-    super::remove_generated_file(&dashboard_dir.join("plugin_api.py"))?;
-    super::remove_generated_file(&dashboard_dir.join("embed_proxy.py"))?;
+    super::remove_generated_python_modules(&dashboard_dir, &["plugin_api", "embed_proxy"], false)?;
     if super::remove_empty_dir(&dashboard_dir)? {
         tracing::debug!(
             dashboard_dir = %dashboard_dir.display(),
@@ -344,9 +343,29 @@ mod tests {
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
         std::fs::write(plugin_dir.join("dashboard/notes.txt"), "user file").unwrap();
+        let cache_dir = plugin_dir.join("dashboard/__pycache__");
+        std::fs::create_dir(&cache_dir).unwrap();
+        for name in [
+            "plugin_api.cpython-311.pyc",
+            "embed_proxy.cpython-311.opt-1.pyc",
+            "plugin_api_extra.cpython-311.pyc",
+            "notes.cpython-311.pyc",
+            "plugin_api.pyc",
+        ] {
+            std::fs::write(cache_dir.join(name), name).unwrap();
+        }
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
+        assert_eq!(
+            file_contents(&cache_dir).into_keys().collect::<Vec<_>>(),
+            [
+                "notes.cpython-311.pyc",
+                "plugin_api.pyc",
+                "plugin_api_extra.cpython-311.pyc"
+            ]
+            .map(PathBuf::from)
+        );
         assert_eq!(text(&plugin_dir.join("dashboard/notes.txt")), "user file");
         assert!(!plugin_dir.join("dashboard/manifest.json").exists());
         assert!(!plugin_dir.join("dashboard/plugin_api.py").exists());

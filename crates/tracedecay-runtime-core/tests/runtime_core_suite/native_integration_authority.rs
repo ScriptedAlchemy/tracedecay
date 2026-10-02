@@ -237,7 +237,7 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
                 let mut paths = Vec::new();
                 candidate
                     .visit_blobs(|path, _bytes| {
-                        paths.push(path.to_owned());
+                        paths.push(String::from_utf8(path.to_vec()).expect("UTF-8 test path"));
                         Ok::<(), std::convert::Infallible>(())
                     })
                     .expect("visit candidate blobs");

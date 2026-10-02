@@ -1211,10 +1211,9 @@ pub(super) async fn insert_projection_receipt(
     batch_digest: &str,
     coverage: &ProjectionCoverage,
     committed_at: i64,
-    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<()> {
     let (committed_item_count, committed_copy_count) =
-        projection_progress_counts(conn, batch, baseline).await?;
+        projection_progress_counts(conn, batch).await?;
     conn.execute(
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest,
@@ -1274,19 +1273,14 @@ pub(super) async fn insert_projection_receipt(
 async fn projection_progress_counts(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
-    baseline: ProjectionProgressBaseline,
 ) -> SessionStoreResult<(usize, usize)> {
-    let seeded_from_active = batch.batch_ordinal() == 0
-        && matches!(baseline, ProjectionProgressBaseline::SeededFromActive);
-    let prior = if seeded_from_active {
+    let prior = if batch.batch_ordinal() == 0 {
         (batch.watermarks().active_generation(), None)
-    } else if batch.batch_ordinal() > 0 {
+    } else {
         (
             batch.generation(),
             Some(batch.batch_ordinal().saturating_sub(1)),
         )
-    } else {
-        return Ok((batch.item_count(), batch.copies().len()));
     };
     let (prior_items, prior_copies) = match prior {
         (generation, Some(ordinal)) => {
