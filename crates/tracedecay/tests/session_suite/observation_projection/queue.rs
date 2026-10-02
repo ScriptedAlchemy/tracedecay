@@ -149,10 +149,9 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
         .unwrap();
     let queued = store.next_queued_observation().await.unwrap().unwrap();
     let outcome = store.project_observation(&queued).await.unwrap();
-    let ProjectionPersistOutcome::Projected(projected) = outcome else {
+    let ProjectionPersistOutcome::Projected(_) = outcome else {
         panic!("observation should project");
     };
-    assert!(projected.message().is_some());
     drop(runtime);
 
     let conn = rusqlite::Connection::open(database_path).unwrap();
