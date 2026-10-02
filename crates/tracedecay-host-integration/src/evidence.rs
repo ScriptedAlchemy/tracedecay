@@ -10,7 +10,6 @@ use tracedecay_domain::{
 pub enum HostRegistrationRouteV1 {
     ClaudeConfiguredLanguageLsp,
     CursorNativeDiagnostics,
-    OpenCodeCustomLsp,
     Hook,
     Mcp,
     Cli,
@@ -19,12 +18,12 @@ pub enum HostRegistrationRouteV1 {
 impl HostRegistrationRouteV1 {
     /// The canonical capability this route proves. Host-specific routes are
     /// deliberately narrower than their capability (Claude registers the
-    /// analyzer through its configured-language LSP file, OpenCode through a
-    /// custom LSP entry, Cursor exposes diagnostics through its native
-    /// extension); this mapping is the only place that specialization lives.
+    /// analyzer through its configured-language LSP file, while Cursor exposes
+    /// diagnostics through its native extension); this mapping is the only
+    /// place that specialization lives.
     pub const fn capability(self) -> HostCapabilityV1 {
         match self {
-            Self::ClaudeConfiguredLanguageLsp | Self::OpenCodeCustomLsp => HostCapabilityV1::Lsp,
+            Self::ClaudeConfiguredLanguageLsp => HostCapabilityV1::Lsp,
             Self::CursorNativeDiagnostics => HostCapabilityV1::NativeDiagnostics,
             Self::Hook => HostCapabilityV1::Hooks,
             Self::Mcp => HostCapabilityV1::Mcp,
@@ -158,7 +157,6 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
     }
     OpenCode {
         Cli => "src/tool_command.rs",
-        OpenCodeCustomLsp => "src/agents/opencode.rs",
         Hook => "plugin/opencode/tracedecay.ts",
         Mcp => "src/agents/opencode.rs",
     }

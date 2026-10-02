@@ -57,19 +57,13 @@ test("guidance waits for its own session's next model request and is delivered o
   expect(pending.drain("ses_b")).toEqual(["other"])
 })
 
-test("dispatch lets the hook child finish instead of killing before durable spool", async () => {
-  const guided = await dispatch(
+test("dispatch returns guidance only after the hook child exits successfully", async () => {
+  const guidance = await dispatch(
     "TraceDecay guidance",
     { type: "session.execution.succeeded" },
     "/usr/bin/printf",
   )
-  expect(guided).toBe("TraceDecay guidance")
-
-  const startedAt = performance.now()
-  const guidance = await dispatch("0.05", { type: "session.execution.succeeded" }, "/bin/sleep")
-
-  expect(guidance).toBeUndefined()
-  expect(performance.now() - startedAt).toBeGreaterThanOrEqual(40)
+  expect(guidance).toBe("TraceDecay guidance")
 })
 
 test("dispatch runs the hook child in the plugin location so the daemon resolves the project", async () => {
@@ -78,20 +72,19 @@ test("dispatch runs the hook child in the plugin location so the daemon resolves
   expect(guidance).toBe("/tmp")
 })
 
-test("OpenCode acknowledges its callback while the durable child continues", async () => {
-  const startedAt = performance.now()
-  let delivered = false
-
-  dispatchAfterAck(
-    "0.05",
-    { type: "session.execution.succeeded" },
-    () => {
-      delivered = true
+test("OpenCode acknowledges its callback before child guidance is delivered", async () => {
+  let callbackReturned = false
+  const delivered = new Promise<{ guidance: string | undefined; callbackReturned: boolean }>(
+    (resolve) => {
+      dispatchAfterAck(
+        "TraceDecay guidance",
+        { type: "session.execution.succeeded" },
+        (guidance) => resolve({ guidance, callbackReturned }),
+        "/usr/bin/printf",
+      )
     },
-    "/bin/sleep",
   )
 
-  expect(performance.now() - startedAt).toBeLessThan(25)
-  await Bun.sleep(100)
-  expect(delivered).toBeTrue()
+  callbackReturned = true
+  expect(await delivered).toEqual({ guidance: "TraceDecay guidance", callbackReturned: true })
 })

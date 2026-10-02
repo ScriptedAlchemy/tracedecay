@@ -254,11 +254,14 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle::HostComponentV1;
 
         let core = components.contains(&HostComponentV1::Core);
-        if components.contains(&HostComponentV1::ContextMcp) {
+        let context_mcp = components.contains(&HostComponentV1::ContextMcp);
+        if context_mcp {
             install_mcp_server(
                 &opencode_config_path(&ctx.home, &ctx.profile),
                 &ctx.tracedecay_bin,
             )?;
+        } else if core {
+            remove_legacy_lsp_registration(&opencode_config_path(&ctx.home, &ctx.profile))?;
         }
         if core {
             let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
@@ -281,8 +284,11 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle::HostComponentV1;
 
         let core = components.contains(&HostComponentV1::Core);
-        if components.contains(&HostComponentV1::ContextMcp) {
+        let context_mcp = components.contains(&HostComponentV1::ContextMcp);
+        if context_mcp {
             uninstall_mcp_server(&opencode_config_path(&ctx.home, &ctx.profile))?;
+        } else if core {
+            remove_legacy_lsp_registration(&opencode_config_path(&ctx.home, &ctx.profile))?;
         }
         if core {
             let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
@@ -648,7 +654,8 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
 
 /// Merge TraceDecay's registration into the config parsed from the bytes
 /// observed under the write lock, returning the replacement value. A V1-era
-/// `mcp.tracedecay` entry is folded into the native `mcp.servers` map.
+/// `mcp.tracedecay` entry is folded into the native `mcp.servers` map, while
+/// the retired `lsp.tracedecay` registration is removed.
 fn merge_mcp_registration(
     config_path: &Path,
     mut config: serde_json::Value,
@@ -664,6 +671,12 @@ fn merge_mcp_registration(
         .ok_or_else(|| TraceDecayError::Config {
             message: format!("{} must contain a JSON object", config_path.display()),
         })?;
+    if let Some(lsp) = config_object
+        .get_mut("lsp")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        lsp.remove("tracedecay");
+    }
     let mcp = config_object
         .entry("mcp")
         .or_insert_with(|| json!({}))
@@ -725,13 +738,14 @@ enum OpenCodeRegistrationRemoval {
     Rewritten,
 }
 
-/// Remove TraceDecay's MCP server from `opencode.json`.
+/// Remove TraceDecay's MCP server and retired custom-LSP entry from
+/// `opencode.json`.
 fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
     let outcome = update_text_file_transactionally(config_path, |existing: &str| {
-        strip_mcp_registration(config_path, existing)
+        strip_registration_entries(config_path, existing, true, true)
     })?;
     match outcome {
         OpenCodeRegistrationRemoval::NoEntry => {
@@ -756,33 +770,53 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Strip TraceDecay's registration (native or V1-era key) from the config
+/// Remove only the retired custom-LSP entry during an explicit Core lifecycle.
+///
+/// Core no longer owns `opencode.json`, but prior releases wrote this exact
+/// key for Core. The one-time cleanup must not add or remove the disjoint MCP
+/// component.
+fn remove_legacy_lsp_registration(config_path: &Path) -> Result<()> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    update_text_file_transactionally(config_path, |existing: &str| {
+        strip_registration_entries(config_path, existing, false, true)
+    })?;
+    Ok(())
+}
+
+/// Strip TraceDecay's selected native or V1-era registrations from the config
 /// bytes observed under the write lock, deciding between a rewrite and
-/// removal of an emptied file. Containers the install created (`mcp`,
-/// `mcp.servers`) are pruned by the creation ledger when they empty.
-fn strip_mcp_registration(
+/// removal of an emptied file. Containers the install created are pruned by
+/// the creation ledger when they empty.
+fn strip_registration_entries(
     config_path: &Path,
     existing: &str,
+    remove_mcp: bool,
+    remove_lsp: bool,
 ) -> Result<(OpenCodeRegistrationRemoval, TextFileMutation)> {
     let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Uninstall drops only what TraceDecay wrote. A plugin registration the
     // host recorded through `opencode plugin add` is not ours to remove.
     let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
-    let Some(mcp) = config
-        .get_mut("mcp")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return Ok((
-            OpenCodeRegistrationRemoval::NoEntry,
-            TextFileMutation::Unchanged,
-        ));
-    };
-    let removed_legacy = mcp.remove(LEGACY_MCP_SERVER_KEY).is_some();
-    let removed_native = mcp
-        .get_mut("servers")
-        .and_then(|value| value.as_object_mut())
-        .is_some_and(|servers| servers.remove("tracedecay").is_some());
-    if !removed_legacy && !removed_native {
+    let removed_legacy_mcp = remove_mcp
+        && config
+            .get_mut("mcp")
+            .and_then(serde_json::Value::as_object_mut)
+            .is_some_and(|mcp| mcp.remove(LEGACY_MCP_SERVER_KEY).is_some());
+    let removed_native_mcp = remove_mcp
+        && config
+            .get_mut("mcp")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|mcp| mcp.get_mut("servers"))
+            .and_then(serde_json::Value::as_object_mut)
+            .is_some_and(|servers| servers.remove("tracedecay").is_some());
+    let removed_lsp = remove_lsp
+        && config
+            .get_mut("lsp")
+            .and_then(serde_json::Value::as_object_mut)
+            .is_some_and(|lsp| lsp.remove("tracedecay").is_some());
+    if !removed_legacy_mcp && !removed_native_mcp && !removed_lsp {
         return Ok((
             OpenCodeRegistrationRemoval::NoEntry,
             TextFileMutation::Unchanged,

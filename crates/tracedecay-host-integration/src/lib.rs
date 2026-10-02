@@ -225,10 +225,9 @@ mod tests {
 
     /// Every `HostKindV1` variant owns table rows: a CLI route first plus at
     /// least one daemon route, each route once, each with a non-empty evidence
-    /// reference. A host-specific route (Claude/OpenCode LSP, Cursor native
-    /// diagnostics) is only ever listed on a host whose canonical capability
-    /// is Supported: it is a narrower registration of that capability, not a
-    /// claim beyond it.
+    /// reference. A host-specific route (Claude LSP, Cursor native diagnostics)
+    /// is only ever listed on a host whose canonical capability is Supported:
+    /// it is a narrower registration of that capability, not a claim beyond it.
     #[test]
     fn registration_table_covers_every_stock_host() {
         for host in HostKindV1::ALL {
@@ -289,11 +288,18 @@ mod tests {
                 HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported
             )
         );
+        let registrations = stock_host_registration_evidence(HostKindV1::OpenCode);
         assert!(
-            stock_host_registration_evidence(HostKindV1::OpenCode)
+            registrations
                 .iter()
                 .all(|registration| registration.route.capability() != HostCapabilityV1::Lsp)
         );
+        for route in [HostRegistrationRouteV1::Hook, HostRegistrationRouteV1::Mcp] {
+            assert!(registrations.iter().any(|registration| {
+                registration.route == route
+                    && registration.state == HostCapabilityStateV1::Supported
+            }));
+        }
     }
 
     #[test]

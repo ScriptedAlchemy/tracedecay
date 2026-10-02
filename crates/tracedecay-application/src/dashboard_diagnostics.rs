@@ -22,7 +22,6 @@ use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::broker::{
     DiagnosticBroker, DiagnosticsSnapshot, EngineState, NodeSpan,
 };
-use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
@@ -118,7 +117,7 @@ pub fn diagnostic_broker(
 /// dashboard.
 #[hotpath::measure(label = "usecases.diagnostics.open_broker", future = true)]
 pub async fn open_diagnostic_broker(
-    profile: Option<&tracedecay_runtime_core::config::ProfileRoot>,
+    _profile: Option<&tracedecay_runtime_core::config::ProfileRoot>,
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
 ) -> Arc<Mutex<DiagnosticBroker>> {
@@ -127,7 +126,7 @@ pub async fn open_diagnostic_broker(
     // read or parsed. Falling back to the defaults there drops every
     // `custom_adapters` entry the user configured, and the broker has to say
     // so rather than report the fallback as the user's configuration.
-    let mut broker = match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await {
+    let broker = match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await {
         Ok(settings) => diagnostic_broker(project_root, settings),
         Err(error) => {
             tracing::warn!(
@@ -140,18 +139,6 @@ pub async fn open_diagnostic_broker(
             broker
         }
     };
-    // The OpenCode installer registers TraceDecay at the project level and at
-    // the home level. Construction reads the project file; the home-level
-    // declaration is adopted here so a host that was only registered in
-    // `~/.config/opencode/opencode.json` still keeps its retained analyzers.
-    // A server without an owning profile has no home level to adopt.
-    let home_ownership = profile.map_or_else(HostAnalyzerOwnership::default, |profile| {
-        HostAnalyzerOwnership::from_opencode_profile_home(profile)
-    });
-    if home_ownership.is_engaged() {
-        let merged = broker.host_analyzer_ownership().union(&home_ownership);
-        broker.adopt_host_analyzer_ownership(merged);
-    }
     Arc::new(Mutex::new(broker))
 }
 

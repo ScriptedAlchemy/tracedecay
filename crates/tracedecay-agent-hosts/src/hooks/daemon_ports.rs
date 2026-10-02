@@ -2,8 +2,8 @@
 //!
 //! These ports own the `daemon_hook_action` JSON. The native Hook dispatch core
 //! consumes typed ports ([`AsyncHookAdmissionPortV1`],
-//! [`AsyncHookFeedbackDeliveryPortV1`], and the `OpenCode` LSP submit port) and
-//! never issues those action strings itself.
+//! [`AsyncHookFeedbackDeliveryPortV1`]) and never issues those action strings
+//! itself.
 
 use std::path::Path;
 use std::sync::Mutex;
