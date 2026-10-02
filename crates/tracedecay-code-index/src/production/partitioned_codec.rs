@@ -3212,7 +3212,9 @@ mod tests {
         };
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         serde_json::to_writer(&mut writer, &evidence).expect("paged evidence encode");
-        let descriptor = writer.finish().expect("paged evidence finish");
+        let descriptor = writer
+            .finish(u64::try_from(expected.len()).expect("evidence length"))
+            .expect("paged evidence finish");
         drop(writer);
 
         assert_eq!(pack, expected, "page boundaries must not move a byte");
@@ -3418,7 +3420,9 @@ mod tests {
         };
         let mut writer = PartitionedEvidencePageWriterV1::new(&mut publish);
         serde_json::to_writer(&mut writer, &evidence).expect("large paged evidence encode");
-        let descriptor = writer.finish().expect("large paged evidence finish");
+        let descriptor = writer
+            .finish(u64::try_from(published_bytes).expect("evidence length"))
+            .expect("large paged evidence finish");
         let peak_page_capacity = writer.peak_page_capacity;
         let peak_retained_owned_bytes = writer.peak_retained_owned_bytes;
         drop(writer);

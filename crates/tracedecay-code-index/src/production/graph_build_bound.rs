@@ -1,34 +1,27 @@
 //! What building a generation's code graph from its sealed segments holds.
 //!
 //! [`CodeIndexPublishedGenerationV1::graph_build_bound`] sizes each state the
-//! streaming build keeps, from the generation it will project, so admission
-//! can charge the build before it runs. Structures are sized the way
-//! [`super::resident_bytes`] sizes a decode; graph rows are sized by emitting
-//! a sample of files through the real row emitter and scaling each row kind
-//! by its exact count.
+//! page-streaming build keeps, from the generation it will project, so
+//! admission can charge the build before it runs. Graph rows are sized by
+//! emitting a sample of files through the real row emitter and scaling each
+//! row kind by its exact count.
 
 use std::collections::{BTreeMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
 
-use tracedecay_domain::{
-    CodeSearchChunkV1, SanitizedCodeFileV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
-};
+use tracedecay_domain::{CodeSearchChunkV1, SanitizedCodeFileV1, SnapshotFileDispositionV1};
 use tracedecay_graph_db::{
     GRAPH_ROW_SPILL_RUN_BYTES, GraphEntityId, GraphSpillRowFootprint, graph_stable_identity,
 };
 
 use super::partitioned_codec::FILE_WINDOW_FILES_PER_WORKER_V1;
-use super::resident_bytes::{
-    ARC_HEADER_BYTES, btree_bytes, chunk_bytes, edge_heap_bytes, file_bytes, import_heap_bytes,
-    page_identity_bytes, symbol_bytes, unresolved_heap_bytes, vec_bytes,
-};
+use super::resident_bytes::{chunk_bytes, file_bytes, symbol_bytes};
 use super::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
 };
-use crate::chunks::CodeIndexUnresolvedReferenceV1;
 use crate::graph_projection::{
-    CodeGraphRowSampleV1, CodeGraphSampleFileV1, CodeGraphSymbolBindingV1, sample_code_graph_rows,
+    CodeGraphRowSampleV1, CodeGraphSampleFileV1, sample_code_graph_rows,
 };
 
 /// Files whose rows are emitted to size every row kind.
@@ -40,15 +33,15 @@ const GRAPH_ROW_SAMPLE_FILES_V1: usize = 256;
 pub struct CodeGraphBuildBoundV1 {
     /// The segment buffers and the largest window of decoded pages.
     pub decode_window_bytes: u64,
-    /// Every file reduced to what cross-file resolution reads.
+    /// Retired graph-time resolution state; always zero for page builds.
     pub resolution_file_bytes: u64,
-    /// Every file's chunk-derived symbol bindings.
+    /// Retired graph-time binding state; always zero for page builds.
     pub binding_bytes: u64,
-    /// The bound symbol set edges are retained from.
+    /// Retired graph-time bound set; always zero for page builds.
     pub bound_set_bytes: u64,
-    /// Cross-file edges and unresolved calls, listed and grouped by source.
+    /// Retired graph-time derived state; always zero for page builds.
     pub derived_bytes: u64,
-    /// At the emission peak: batches not yet emitted.
+    /// Page builds do not retain pending emission batches; always zero.
     pub emit_batch_bytes: u64,
     /// At the emission peak: rows buffered in the spill and the entity
     /// identities it keeps.
@@ -60,8 +53,8 @@ pub struct CodeGraphBuildBoundV1 {
 }
 
 impl CodeGraphBuildBoundV1 {
-    /// Resolution holds every reduced file with its bindings and bound set,
-    /// plus the decode window while windows are read, then the derived state.
+    /// Page acquisition holds one bounded decode window. The other terms are
+    /// retained for the public receipt shape and are zero for page builds.
     #[must_use]
     pub fn resolve_bytes(&self) -> u64 {
         self.resolution_file_bytes
@@ -70,8 +63,7 @@ impl CodeGraphBuildBoundV1 {
             .saturating_add(self.decode_window_bytes.max(self.derived_bytes))
     }
 
-    /// Emission holds the bound set and derived state beside the batches,
-    /// spill, and emitted rows at their joint peak.
+    /// Emission holds the spill and the page currently emitted as rows.
     #[must_use]
     pub fn emit_bytes(&self) -> u64 {
         self.bound_set_bytes
@@ -118,11 +110,7 @@ struct FileGraphCost<'a> {
     snapshot: &'a SanitizedCodeFileV1,
     /// The page as its window decodes it, with its chunks and symbols.
     decoded_page: usize,
-    reduced: usize,
-    bindings: usize,
-    batch: usize,
     bound_occurrences: usize,
-    bound_heap: usize,
     binding_count: usize,
 }
 
@@ -143,37 +131,7 @@ impl<'a> FileGraphCost<'a> {
                     .fold(0_usize, usize::saturating_add),
             )
             .saturating_add(symbol_records);
-        let edges = vec_bytes(&artifacts.edges, artifacts.edges.len(), edge_heap_bytes);
-        let imports = vec_bytes(
-            &artifacts.imports,
-            artifacts.imports.len(),
-            import_heap_bytes,
-        );
-        let handles = symbols.len().saturating_mul(size_of::<Arc<()>>());
-        let reduced = ARC_HEADER_BYTES
-            .saturating_add(size_of::<FileGenerationArtifactsV1>())
-            .saturating_add(page_identity_bytes(file))
-            .saturating_add(edges)
-            .saturating_add(imports)
-            .saturating_add(vec_bytes(
-                &artifacts.unresolved_references,
-                artifacts.unresolved_references.len(),
-                unresolved_heap_bytes,
-            ))
-            .saturating_add(handles)
-            .saturating_add(symbol_records);
-        let (binding_count, binding_heap) = binding_heap(chunks, snapshot);
-        let bindings = btree_bytes(
-            binding_count,
-            size_of::<(SymbolOccurrenceId, CodeGraphSymbolBindingV1)>(),
-        )
-        .saturating_add(binding_heap);
-        let batch = edges
-            .saturating_add(imports)
-            .saturating_add(handles)
-            .saturating_add(symbol_records)
-            .saturating_add(bindings)
-            .saturating_add(size_of::<&SanitizedCodeFileV1>());
+        let binding_count = binding_count(chunks);
         let bound = chunks
             .iter()
             .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
@@ -183,14 +141,7 @@ impl<'a> FileGraphCost<'a> {
             file,
             snapshot,
             decoded_page,
-            reduced,
-            bindings,
-            batch,
             bound_occurrences: bound.len(),
-            bound_heap: bound
-                .iter()
-                .map(|occurrence| occurrence.as_str().len())
-                .fold(0_usize, usize::saturating_add),
             binding_count,
         }
     }
@@ -246,27 +197,16 @@ fn sum(footprints: &[GraphSpillRowFootprint]) -> GraphSpillRowFootprint {
         })
 }
 
-/// Distinct symbols a file's chunks bind and the heap of those bindings.
-fn binding_heap(
-    chunks: &[Arc<CodeSearchChunkV1>],
-    snapshot: &SanitizedCodeFileV1,
-) -> (usize, usize) {
+/// Distinct symbols a file's chunks bind.
+fn binding_count(chunks: &[Arc<CodeSearchChunkV1>]) -> usize {
     let mut seen = HashSet::new();
-    let mut heap = 0_usize;
     for chunk in chunks {
         let Some(occurrence) = chunk.anchor.symbol_occurrence_id.as_ref() else {
             continue;
         };
-        if seen.insert(occurrence) {
-            heap = heap
-                .saturating_add(occurrence.as_str().len())
-                .saturating_add(snapshot.file_occurrence_id.as_str().len())
-                .saturating_add(snapshot.logical_path.len())
-                .saturating_add(chunk.id.as_str().len())
-                .saturating_add(chunk.language_descriptor_revision.as_str().len());
-        }
+        seen.insert(occurrence);
     }
-    (seen.len(), heap)
+    seen.len()
 }
 
 /// Two spill buffers, one per row kind, each written out as a run once its
@@ -367,45 +307,19 @@ impl CodeIndexPublishedGenerationV1 {
         let total = |value: fn(&FileGraphCost<'_>) -> usize| {
             costs.iter().map(value).fold(0_usize, usize::saturating_add)
         };
-        let resolution = total(|cost| cost.reduced);
-        let bindings = total(|cost| cost.bindings);
-        let bound_occurrences = total(|cost| cost.bound_occurrences);
-        let bound_set = hash_set_bytes(bound_occurrences, size_of::<SymbolOccurrenceId>())
-            .saturating_add(total(|cost| cost.bound_heap));
-
         let file_edges = total(|cost| cost.file.artifacts.edges.len());
         let cross_file_edges = self.edges.len().saturating_sub(file_edges);
-        let edge_bytes = if self.edges.is_empty() {
-            0
-        } else {
-            vec_bytes(&self.edges, self.edges.len(), edge_heap_bytes) / self.edges.len()
-        };
-        let unresolved = self
-            .files
-            .iter()
-            .flat_map(|file| file.artifacts.unresolved_references.iter())
-            .map(|reference| {
-                size_of::<CodeIndexUnresolvedReferenceV1>()
-                    .saturating_add(unresolved_heap_bytes(reference))
-            })
-            .fold(0_usize, usize::saturating_add);
-        let derived = cross_file_edges
-            .saturating_mul(edge_bytes)
-            .saturating_add(unresolved.saturating_mul(2));
 
         // The spill keeps every entity identity in a vector grown by pushes.
         let identity_bytes = size_of::<GraphEntityId>()
             .saturating_mul(2)
             .saturating_add(graph_stable_identity("symbol", "").len());
         let mut canonical_rows = 0_usize;
-        let mut remaining = total(|cost| cost.batch);
         let mut spill = SpillBuffers::default();
-        let mut emit = (0_usize, 0_usize, 0_usize);
-        let mut record = |batch: usize, spilled: usize, window: usize| {
-            if batch.saturating_add(spilled).saturating_add(window)
-                > emit.0.saturating_add(emit.1).saturating_add(emit.2)
-            {
-                emit = (batch, spilled, window);
+        let mut emit = (0_usize, 0_usize);
+        let mut record = |spilled: usize, window: usize| {
+            if spilled.saturating_add(window) > emit.0.saturating_add(emit.1) {
+                emit = (spilled, window);
             }
         };
         for window in costs.chunks(window_files) {
@@ -414,22 +328,19 @@ impl CodeIndexPublishedGenerationV1 {
                 GraphSpillRowFootprint::default(),
             );
             let mut entity_rows = 0_usize;
-            let mut batch = 0_usize;
             for cost in window {
                 let (entity, relation) = cost.rows(&sample);
                 entities = sum(&[entities, entity]);
                 relations = sum(&[relations, relation]);
                 entity_rows = entity_rows.saturating_add(cost.entity_count());
-                batch = batch.saturating_add(cost.batch);
             }
             canonical_rows = canonical_rows
                 .saturating_add(entities.buffered)
                 .saturating_add(relations.buffered);
             let rows = entities.resident.saturating_add(relations.resident);
-            record(remaining, spill.resident(identity_bytes), rows);
-            remaining = remaining.saturating_sub(batch);
+            record(spill.resident(identity_bytes), rows);
             let spilled = spill.push(entities, relations, entity_rows, identity_bytes);
-            record(remaining, spilled, rows);
+            record(spilled, rows);
         }
         let unsegmented = self
             .snapshot
@@ -444,7 +355,6 @@ impl CodeIndexPublishedGenerationV1 {
             .saturating_add(cross_relations.buffered);
         let spilled = spill.push(cross_entities, cross_relations, unsegmented, identity_bytes);
         record(
-            0,
             spilled,
             cross_entities
                 .resident
@@ -472,13 +382,13 @@ impl CodeIndexPublishedGenerationV1 {
 
         Ok(CodeGraphBuildBoundV1 {
             decode_window_bytes: bytes(decode_window),
-            resolution_file_bytes: bytes(resolution),
-            binding_bytes: bytes(bindings),
-            bound_set_bytes: bytes(bound_set),
-            derived_bytes: bytes(derived),
-            emit_batch_bytes: bytes(emit.0),
-            emit_spill_bytes: bytes(emit.1),
-            emit_window_bytes: bytes(emit.2),
+            resolution_file_bytes: 0,
+            binding_bytes: 0,
+            bound_set_bytes: 0,
+            derived_bytes: 0,
+            emit_batch_bytes: 0,
+            emit_spill_bytes: bytes(emit.0),
+            emit_window_bytes: bytes(emit.1),
             store_bytes: bytes(store),
         })
     }

@@ -104,23 +104,17 @@ impl CodeIndexPublishedGenerationV1 {
 
         let mut edges = BTreeMap::<FileOccurrenceId, Vec<&CanonicalRelationEdgeV1>>::new();
         for edge in &self.edges {
-            let owner = owners.get(&edge.from_occurrence).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed graph edge source has no owning file".to_owned(),
-                )
-            })?;
-            edges.entry(owner.clone()).or_default().push(edge);
+            if let Some(owner) = owners.get(&edge.from_occurrence) {
+                edges.entry(owner.clone()).or_default().push(edge);
+            }
         }
 
         let mut unresolved =
             BTreeMap::<FileOccurrenceId, Vec<&CodeIndexUnresolvedReferenceV1>>::new();
         for reference in &self.unresolved_calls {
-            let owner = owners.get(&reference.from_occurrence).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "unresolved call source has no owning file".to_owned(),
-                )
-            })?;
-            unresolved.entry(owner.clone()).or_default().push(reference);
+            if let Some(owner) = owners.get(&reference.from_occurrence) {
+                unresolved.entry(owner.clone()).or_default().push(reference);
+            }
         }
 
         let mut placeholder_owners = BTreeMap::<SymbolOccurrenceId, FileOccurrenceId>::new();
