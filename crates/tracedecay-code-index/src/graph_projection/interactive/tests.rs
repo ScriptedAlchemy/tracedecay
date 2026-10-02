@@ -1136,9 +1136,9 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
     // Three SwissTables each carry one trailing control group: 16 bytes on
     // x86 SSE2, 8 on aarch64 NEON.
     let expected = if cfg!(target_arch = "aarch64") {
-        6_163
+        6_179
     } else {
-        6_187
+        6_203
     };
     assert_eq!(held, Some(expected));
 

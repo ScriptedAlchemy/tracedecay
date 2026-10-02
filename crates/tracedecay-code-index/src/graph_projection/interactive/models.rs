@@ -301,6 +301,9 @@ pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) files: SortedMap<FileOccurrenceId, SanitizedCodeFileV1>,
     pub(super) imports: Vec<CodeIndexImportEvidenceV1>,
     pub(super) unresolved_call_sources: SortedMap<String, SymbolIds>,
+    /// Graph identity of each symbol that makes an unresolved call, so a
+    /// relation walk's keys find their gaps without reading an entity.
+    pub(super) unresolved_sources_by_entity: SortedMap<GraphEntityId, SymbolOccurrenceId>,
     pub(super) symbols_by_kind: SortedMap<String, u64>,
     pub(super) files_by_language: SortedMap<String, u64>,
     pub(super) largest_files: Vec<CodeGraphFileSymbolCountV1>,
@@ -324,6 +327,7 @@ pub(super) struct CatalogBuilder {
     pub(super) by_logical_path: BTreeMap<String, FileOccurrenceId>,
     pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
     unresolved_call_sources: BTreeMap<String, Vec<SymbolOccurrenceId>>,
+    pub(super) unresolved_sources_by_entity: BTreeMap<GraphEntityId, SymbolOccurrenceId>,
     symbols_by_kind: BTreeMap<String, u64>,
     symbols_by_logical_path: BTreeMap<String, u64>,
 }
@@ -338,6 +342,7 @@ impl CatalogBuilder {
             by_logical_path: BTreeMap::new(),
             files: BTreeMap::new(),
             unresolved_call_sources: BTreeMap::new(),
+            unresolved_sources_by_entity: BTreeMap::new(),
             symbols_by_kind: BTreeMap::new(),
             symbols_by_logical_path: BTreeMap::new(),
         }
@@ -382,6 +387,7 @@ impl CatalogBuilder {
             files: self.files.into(),
             imports,
             unresolved_call_sources: freeze_ids(self.unresolved_call_sources),
+            unresolved_sources_by_entity: self.unresolved_sources_by_entity.into(),
             symbols_by_kind: self.symbols_by_kind.into(),
             files_by_language: files_by_language.into(),
             largest_files,
@@ -483,6 +489,12 @@ impl InteractiveCatalog {
             .saturating_add(self.by_qualified_name.bytes(named_ids))
             .saturating_add(self.by_simple_name.bytes(named_ids))
             .saturating_add(self.unresolved_call_sources.bytes(named_ids))
+            .saturating_add(
+                self.unresolved_sources_by_entity
+                    .bytes(|entity, occurrence| {
+                        entity.as_str().len().saturating_add(id(occurrence))
+                    }),
+            )
             .saturating_add(
                 self.by_file
                     .bytes(|file, list| file.as_str().len().saturating_add(ids(list))),
