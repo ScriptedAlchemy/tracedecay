@@ -501,10 +501,6 @@ impl TraceDecayError {
         }
     }
 
-    pub fn is_database_error(&self) -> bool {
-        matches!(self, Self::Database { .. })
-    }
-
     /// A hook-runtime failure raised without an admission authority behind it
     /// (spool I/O, refresh ownership, test fixtures).
     ///

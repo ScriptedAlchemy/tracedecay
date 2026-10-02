@@ -2823,9 +2823,17 @@ mod tests {
                 .await
                 .expect_err("a planted disposition on a projected message must fail the audit");
         assert_eq!(
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                }
+            ),
+            "a planted row is a verdict about the stored data: {error:?}"
+        );
+        assert_eq!(
             error.to_string(),
-            "database error: projection authority must contain exactly one skip outcome \
-             without an alias (operation: ensure global database authority invariants)"
+            "projection authority must contain exactly one skip outcome without an alias"
         );
     }
 

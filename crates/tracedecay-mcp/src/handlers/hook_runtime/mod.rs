@@ -53,11 +53,9 @@ pub fn decode_hook_runtime_request(args: &Value) -> Result<HookRuntimeSurfaceReq
 }
 
 fn required_field<'a>(value: Option<&'a str>, key: &str) -> Result<&'a str> {
-    value.filter(|value| !value.is_empty()).ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::missing_required_parameter(format!(
-            "missing required parameter `{key}`"
-        ))
-    })
+    value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| config_error(format!("missing required parameter `{key}`")))
 }
 
 fn requires_projectless_routing(action: &str) -> tracedecay_domain::errors::TraceDecayError {

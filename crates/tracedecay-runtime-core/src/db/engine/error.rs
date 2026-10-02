@@ -156,29 +156,6 @@ impl Error {
     /// materialization ceiling refusing this exact statement. Neither is a
     /// transient engine condition, so a caller that retries one spins until
     /// something else changes the durable state.
-    /// True when this failure says the database could not be read right now
-    /// (busy, locked, interrupted, an I/O fault, or a file that would not
-    /// open), so the same read can succeed later without anything changing.
-    #[hotpath::skip]
-    pub const fn is_transient_read_failure(&self) -> bool {
-        match self {
-            Self::Busy | Self::TransactionExpired => true,
-            _ => matches!(
-                self.sqlite_code(),
-                Some(
-                    SQLITE_BUSY | SQLITE_LOCKED | SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_CANTOPEN
-                )
-            ),
-        }
-    }
-
-    /// True when the engine refused a write because the database file is
-    /// read-only to this process.
-    #[hotpath::skip]
-    pub const fn is_read_only_refusal(&self) -> bool {
-        matches!(self.sqlite_code(), Some(SQLITE_READONLY))
-    }
-
     #[hotpath::skip]
     pub const fn is_deterministic_refusal(&self) -> bool {
         match self {
@@ -199,6 +176,24 @@ impl Error {
             _ => matches!(self.sqlite_code(), Some(SQLITE_BUSY | SQLITE_LOCKED)),
         }
     }
+
+    /// True when this failure says the database could not be read right now
+    /// (held, interrupted, an I/O fault, or a file that would not open), so
+    /// the same read can succeed later without anything changing.
+    #[hotpath::skip]
+    pub const fn is_transient_read_failure(&self) -> bool {
+        match self {
+            Self::TransactionExpired => true,
+            Self::StatementBatch { source, .. } => source.is_transient_read_failure(),
+            _ => {
+                self.is_busy_or_locked()
+                    || matches!(
+                        self.sqlite_code(),
+                        Some(SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_CANTOPEN)
+                    )
+            }
+        }
+    }
 }
 
 /// `SQLITE_BUSY`: another connection holds a conflicting database lock.
@@ -207,9 +202,6 @@ const SQLITE_BUSY: i32 = 5;
 const SQLITE_LOCKED: i32 = 6;
 /// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
 const SQLITE_CONSTRAINT: i32 = 19;
-const SQLITE_BUSY: i32 = 5;
-const SQLITE_LOCKED: i32 = 6;
-const SQLITE_READONLY: i32 = 8;
 const SQLITE_INTERRUPT: i32 = 9;
 const SQLITE_IOERR: i32 = 10;
 const SQLITE_CANTOPEN: i32 = 14;
@@ -246,7 +238,5 @@ mod tests {
         ] {
             assert!(!verdict.is_transient_read_failure(), "{verdict:?}");
         }
-        assert!(sqlite(8).is_read_only_refusal());
-        assert!(!sqlite(5).is_read_only_refusal());
     }
 }

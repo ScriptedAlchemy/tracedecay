@@ -216,6 +216,41 @@ pub(super) enum ProjectOpenTypedFailure {
     },
 }
 
+impl ProjectOpenTypedFailure {
+    fn from_error(error: &TraceDecayError) -> Option<Self> {
+        Some(match error {
+            TraceDecayError::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            } => Self::ProfileResetRequired {
+                component,
+                found_version: *found_version,
+                required_version: *required_version,
+            },
+            TraceDecayError::ResetRequired { authority, reason } => Self::ResetRequired {
+                authority: authority.clone(),
+                reason: reason.clone(),
+            },
+            TraceDecayError::ProjectRoute {
+                reason_code,
+                retryable,
+                detail,
+                ..
+            } => Self::ProjectRoute {
+                reason_code: reason_code.clone(),
+                retryable: *retryable,
+                detail: detail.clone(),
+            },
+            TraceDecayError::ProjectOpen { kind, detail } => Self::ProjectOpen {
+                kind: *kind,
+                detail: detail.clone(),
+            },
+            _ => return None,
+        })
+    }
+}
+
 pub(super) enum ProjectOpenTaskClaim {
     InFlight(tokio::sync::watch::Receiver<ProjectOpenTaskState>),
     Failed(ProjectOpenFailure),
@@ -374,47 +409,11 @@ impl ProjectOpenFailure {
                 None => ProjectOpenStatusReasonV1::Unavailable,
             },
         };
-        let (message, typed) = match error {
-            TraceDecayError::ProfileResetRequired {
-                component,
-                found_version,
-                required_version,
-            } => (
-                error.to_string(),
-                Some(ProjectOpenTypedFailure::ProfileResetRequired {
-                    component,
-                    found_version: *found_version,
-                    required_version: *required_version,
-                }),
-            ),
-            TraceDecayError::ResetRequired { authority, reason } => (
-                error.to_string(),
-                Some(ProjectOpenTypedFailure::ResetRequired {
-                    authority: authority.clone(),
-                    reason: reason.clone(),
-                }),
-            ),
-            TraceDecayError::ProjectRoute {
-                reason_code,
-                retryable,
-                detail,
-                ..
-            } => (
-                detail.clone(),
-                Some(ProjectOpenTypedFailure::ProjectRoute {
-                    reason_code: reason_code.clone(),
-                    retryable: *retryable,
-                    detail: detail.clone(),
-                }),
-            ),
-            TraceDecayError::ProjectOpen { kind, detail } => (
-                detail.clone(),
-                Some(ProjectOpenTypedFailure::ProjectOpen {
-                    kind: *kind,
-                    detail: detail.clone(),
-                }),
-            ),
-            _ => (error.to_string(), None),
+        let typed = ProjectOpenTypedFailure::from_error(error);
+        let message = match error {
+            TraceDecayError::ProjectRoute { detail, .. }
+            | TraceDecayError::ProjectOpen { detail, .. } => detail.clone(),
+            _ => error.to_string(),
         };
         Self {
             message,
