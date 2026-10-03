@@ -492,12 +492,11 @@ impl LanguageRegistry {
 
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
-        let extractor = path.rsplit('.').next().and_then(|ext| {
+        path.rsplit('.').next().and_then(|ext| {
             self.by_extension
                 .get(ext)
                 .map(|&index| self.extractors[index].as_ref())
-        });
-        extractor
+        })
     }
 
     /// Whether `path` is a configuration document rather than code.
