@@ -13,9 +13,9 @@ use tracedecay_domain::{
 };
 
 use crate::chunks::{
-    CodeFileChunksV1, CodeIndexCallableArityV1, CodeIndexUnresolvedReferenceV1,
-    CodeSearchDocumentV1, CodeSearchEligibilityV1, code_chunk_id, code_file_identity,
-    published_symbol_spans,
+    CodeFileChunksV1, CodeIndexCallableArityV1, CodeIndexGoMethodSetRowV1,
+    CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, code_chunk_id,
+    code_file_identity, published_symbol_spans,
 };
 use crate::extract::ExtractionBatchV1;
 use crate::intake::content_digest;
@@ -23,6 +23,8 @@ use crate::lineage::LineageSymbolRecordV1;
 use crate::parallelism;
 
 use super::clone_rows::{PersistedCloneBodiesRefV1, PersistedCloneBodiesV1};
+use super::go_satisfaction::go_satisfaction;
+use super::module_resolution::ModuleImportIndexV1;
 use super::*;
 
 /// The partitioned generation manifest revision, which the daemon publishes.
@@ -178,6 +180,8 @@ struct PersistedFileIndexArtifactsRefV2<'a> {
     unresolved_references: &'a [CodeIndexUnresolvedReferenceV1],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     callable_arities: &'a [CodeIndexCallableArityV1],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    go_method_sets: &'a [CodeIndexGoMethodSetRowV1],
 }
 
 #[derive(Deserialize)]
@@ -193,6 +197,8 @@ struct PersistedFileIndexArtifactsV2 {
     unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
     #[serde(default)]
     callable_arities: Vec<CodeIndexCallableArityV1>,
+    #[serde(default)]
+    go_method_sets: Vec<CodeIndexGoMethodSetRowV1>,
 }
 
 #[derive(Serialize)]
@@ -805,6 +811,7 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                 schema_evidence: artifacts.schema_evidence.as_ref(),
                 unresolved_references: &artifacts.unresolved_references,
                 callable_arities: &artifacts.callable_arities,
+                go_method_sets: &artifacts.go_method_sets,
             },
         })
     }
@@ -1053,6 +1060,7 @@ impl PersistedFileGenerationArtifactsV2 {
                 schema_evidence: artifacts.schema_evidence,
                 unresolved_references: artifacts.unresolved_references,
                 callable_arities: artifacts.callable_arities,
+                go_method_sets: artifacts.go_method_sets,
             },
         })
     }
@@ -1154,9 +1162,17 @@ pub(super) fn assemble_published_generation(
         projection_request,
         projection_receipt,
         cross_file_edges,
-        unresolved_calls,
+        mut unresolved_calls,
     } = generation;
     let files = content.files.clone();
+    if files
+        .iter()
+        .any(|file| !file.artifacts.go_method_sets.is_empty())
+    {
+        unresolved_calls.extend(go_satisfaction(&files, &ModuleImportIndexV1::new(&files)).gaps);
+        unresolved_calls.sort();
+        unresolved_calls.dedup();
+    }
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
         hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
             let ignored_source_roster =

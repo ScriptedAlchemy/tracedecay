@@ -26,25 +26,25 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
     assert_protocol_refusal(
         &server,
         json!({"scope": "package"}),
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
+        "application surface request does not match its reviewed schema: `scope` package is not supported for diagnostics",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"scope": "file"}),
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `path` is required when `scope` is file",
+        "application surface request does not match its reviewed schema: `path` is required when `scope` is file",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"scope": "nope"}),
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `scope` `nope` is not one of workspace or file",
+        "application surface request does not match its reviewed schema: `scope` `nope` is not one of workspace or file",
     )
     .await;
     assert_protocol_refusal(
         &server,
         json!({"format": "yaml"}),
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `format` must be markdown or json",
+        "application surface request does not match its reviewed schema: `format` must be markdown or json",
     )
     .await;
 
@@ -235,18 +235,14 @@ async fn call_diagnostics(server: &McpServer, arguments: Value) -> Value {
     handle_real_server_tool_call(server, "tracedecay_diagnostics", arguments).await
 }
 
-async fn assert_protocol_refusal(server: &McpServer, arguments: Value, message: &str) {
+async fn assert_protocol_refusal(server: &McpServer, arguments: Value, detail: &str) {
     let response =
         handle_real_server_tool_call_raw(server, "tracedecay_diagnostics", arguments).await;
-    assert!(
-        response["result"].is_null(),
-        "a refused diagnostics argument must not return a tool result: {response}"
-    );
     assert_eq!(response["id"], json!(1));
-    assert_eq!(response["error"]["code"], json!(-32602));
-    assert_eq!(response["error"]["message"], message, "{response}");
-    assert_eq!(response["error"]["data"]["tool"], "tracedecay_diagnostics");
-    assert_eq!(response["error"]["data"]["kind"], "invalid_request");
+    assert_eq!(
+        crate::support::route_refusal(&response),
+        crate::support::application_surface_refusal_error(detail)
+    );
 }
 
 fn assert_unpublished_json(label: &str, result: &Value, message: &str) {

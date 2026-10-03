@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 
 use tracedecay_graph_db::{
     GraphGenerationRowSpill, GraphGenerationRows, GraphLabel, GraphTraversalDirection,
@@ -755,14 +756,20 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     let reader_snapshot = g1_commit.snapshot.clone();
     let reader_identity = identity.clone();
     let reader_stop = Arc::clone(&stop);
+    let (live_tx, live_rx) = mpsc::channel();
     let reader = thread::spawn(move || {
-        let mut reads = 0usize;
+        assert_snapshot_reads(&reader_snapshot, &reader_identity, "one");
+        live_tx.send(()).unwrap();
         while !reader_stop.load(Ordering::SeqCst) {
             assert_snapshot_reads(&reader_snapshot, &reader_identity, "one");
-            reads += 1;
         }
-        reads
     });
+    // A loaded scheduler can otherwise finish the second seal before the
+    // reader runs at all; a reader that panicked drops the sender instead.
+    if live_rx.recv().is_err() {
+        reader.join().unwrap();
+        unreachable!("the reader exited without reading");
+    }
 
     let g2 = rich_manifest(identity.clone(), "sealed-g2", "two");
     let g2_record = stage_manifest(
@@ -780,11 +787,7 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
         &g2_record.publication.key,
     );
     stop.store(true, Ordering::SeqCst);
-    let reads = reader.join().unwrap();
-    assert!(
-        reads > 0,
-        "the reader must have exercised the sealed store during the second seal"
-    );
+    reader.join().unwrap();
 
     assert!(g2_commit.snapshot.serves_from_sealed_store());
     assert_snapshot_reads(&g2_commit.snapshot, &identity, "two");

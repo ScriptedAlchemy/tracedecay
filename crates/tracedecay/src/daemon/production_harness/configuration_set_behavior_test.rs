@@ -532,17 +532,20 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         )
         .await
         .expect("malformed configuration set response");
-    let error = malformed
-        .error
-        .as_ref()
-        .expect("a set missing expected_revision must be a JSON-RPC error");
-    assert_eq!(error.code, -32602);
-    let data = error.data.as_ref().expect("typed MCP error data");
-    assert_eq!(data["tool"], "tracedecay_configuration_set");
-    assert_eq!(data["reason_code"], "application_surface_invalid_request");
-    assert_eq!(data["retryable"], false);
-    assert_eq!(data["kind"], "invalid_request");
-    assert_eq!(data["code"], "application_surface_invalid_request");
+    assert!(
+        malformed.error.is_none(),
+        "a set missing expected_revision is a typed tool refusal: {malformed:?}"
+    );
+    let refused = malformed.result.as_ref().expect("typed refusal result");
+    assert_eq!(refused["isError"], true);
+    let problem = &refused["structuredContent"]["problem"];
+    assert_eq!(problem["kind"], "invalid_request", "{problem}");
+    assert_eq!(problem["code"], "application_surface_invalid_request");
+    assert_eq!(
+        problem["diagnostic"]["code"],
+        "application_surface_invalid_request"
+    );
+    assert_eq!(problem["retryable"], false);
     assert_read_is(
         &read_setting(&harness, &project).await,
         false,

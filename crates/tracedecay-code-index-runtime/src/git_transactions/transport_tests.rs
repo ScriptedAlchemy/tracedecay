@@ -7,10 +7,9 @@ use tracedecay_domain::{GitIndexReceiptOutcomeV1, GitIndexTransactionOperationV1
 
 use super::test_support::{NativeMode, RecoveryMode, digest, test_port_from_preview};
 
-const EFFECTS: [GitIndexTransactionOperationV1; 3] = [
+const EFFECTS: [GitIndexTransactionOperationV1; 2] = [
     GitIndexTransactionOperationV1::StageHunks,
     GitIndexTransactionOperationV1::UnstageHunks,
-    GitIndexTransactionOperationV1::CommitIndex,
 ];
 
 #[test]

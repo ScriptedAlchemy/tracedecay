@@ -2907,9 +2907,8 @@ async fn lcm_status_over_mcp_counts_the_requested_session() {
     )
     .await;
     assert_eq!(
-        rejected["error"],
+        route_refusal(&rejected),
         application_invalid_request_error(
-            "tracedecay_lcm_status",
             "unknown parameter `hermes_home` for `tracedecay_lcm_status`"
         )
     );

@@ -32,6 +32,7 @@ use super::rebuild::{
     checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
     validate_candidate_frontier,
 };
+use super::relation_receipts::acknowledge_relation_receipt;
 use crate::handle::{
     SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
@@ -649,6 +650,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             &execution_control,
         )
         .await?;
+        acknowledge_relation_receipt(&transaction, &relation_projection).await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
         activate_bound_generation(&transaction, request.session_id(), &binding, terminal_at)
             .await?;

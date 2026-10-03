@@ -236,8 +236,13 @@ async fn implementations_returns_literal_bodies_for_trait_interface_and_method()
         ),
     ] {
         let refused = call_raw(&fixture, arguments).await;
+        let refusal = crate::support::route_refusal(&refused);
         assert_eq!(
-            refused["error"]["data"]["reason_code"], "application_surface_invalid_request",
+            (&refusal["kind"], &refusal["diagnostic"]["code"]),
+            (
+                &json!("invalid_request"),
+                &json!("application_surface_invalid_request")
+            ),
             "{context} must be a typed invalid request: {refused}"
         );
     }

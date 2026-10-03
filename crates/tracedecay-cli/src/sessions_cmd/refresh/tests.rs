@@ -599,10 +599,13 @@ async fn a_problem_envelope_is_reported_as_the_daemon_refusal() {
     .await
     .expect_err("a problem envelope is a refusal");
 
-    assert!(
-        error
-            .to_string()
-            .contains("tracedecay_session_refresh_begin refused"),
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "not_found_or_not_authorized",
+            false,
+            "The requested resource was not found or is not authorized"
+        )),
         "{error}"
     );
 }

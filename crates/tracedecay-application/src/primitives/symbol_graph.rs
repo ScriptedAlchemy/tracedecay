@@ -405,7 +405,7 @@ where
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
-                let records = match &request.selector {
+                let (records, gaps) = match &request.selector {
                     ImplementationSelector::Trait { name } => {
                         match trait_implementations(
                             &graph.reader,
@@ -413,7 +413,19 @@ where
                             name,
                             &request.scope,
                         ) {
-                            Ok(records) => records,
+                            Ok((records, undecided)) => (
+                                records,
+                                undecided
+                                    .then(|| PrimitiveSupportGap {
+                                        provider: Some("code_index".to_owned()),
+                                        language: None,
+                                        reason: "Implementors of an interface whose method set \
+                                                 is not fully indexed are undecided"
+                                            .to_owned(),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                            ),
                             Err(()) => {
                                 return failed(context, "trait implementation lookup failed");
                             }
@@ -453,7 +465,7 @@ where
                                 depth: None,
                             });
                         }
-                        records
+                        (records, Vec::new())
                     }
                 };
                 let outcome = complete_or_failed(
@@ -464,7 +476,7 @@ where
                     &claim,
                     &graph,
                     records,
-                    Vec::new(),
+                    gaps,
                     None,
                 )
                 .await;
@@ -931,7 +943,7 @@ pub(super) fn trait_implementations(
     cancellation: Arc<dyn GraphCancellation>,
     name: &str,
     scope: &SymbolGraphScope,
-) -> Result<Vec<SymbolRelationRecord>, ()> {
+) -> Result<(Vec<SymbolRelationRecord>, bool), ()> {
     let indexed = graph
         .resolve_simple_name(
             name.rsplit("::").next().unwrap_or(name),
@@ -963,6 +975,7 @@ pub(super) fn trait_implementations(
         exact_candidates
     };
     let mut records = Vec::new();
+    let mut interfaces = Vec::new();
     for trait_node in candidates.into_iter().filter(|node| {
         node.metadata.as_ref().is_some_and(|metadata| {
             matches!(
@@ -971,6 +984,7 @@ pub(super) fn trait_implementations(
             )
         })
     }) {
+        interfaces.push(trait_node.occurrence.clone());
         let edges = graph
             .callers(
                 std::slice::from_ref(&trait_node.occurrence),
@@ -1001,7 +1015,10 @@ pub(super) fn trait_implementations(
     });
     records.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
     records.truncate(MAX_IMPLEMENTATION_RESULTS);
-    Ok(records)
+    let undecided = graph
+        .has_undecided_implementors(&interfaces, cancellation)
+        .map_err(|_| ())?;
+    Ok((records, undecided))
 }
 
 fn is_trait_named(node: &CodeGraphSymbolSummaryV1, name: &str, qualified: bool) -> bool {

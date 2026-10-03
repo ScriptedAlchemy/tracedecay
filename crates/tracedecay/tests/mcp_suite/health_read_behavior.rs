@@ -48,36 +48,19 @@ async fn health_read_reports_ok_until_the_serving_database_is_gone() {
     );
 
     let unknown = call_health(&fixture, json!({"format": "json", "surprise": true})).await;
-    let unknown = unknown
-        .error
-        .as_ref()
-        .expect("an unknown argument must be a JSON-RPC error, not a status");
-    assert_eq!(unknown.code, -32602);
     assert_eq!(
-        unknown.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: unknown field `surprise`, there are no fields"
-    );
-    assert_eq!(
-        unknown.data,
-        Some(json!({
-            "tool": "tracedecay_health_read",
-            "reason_code": "application_surface_invalid_request",
-            "retryable": false,
-            "detail": "application surface request does not match its reviewed schema: unknown field `surprise`, there are no fields",
-            "kind": "invalid_request",
-            "code": "application_surface_invalid_request"
-        }))
+        super::support::route_refusal(&serde_json::to_value(&unknown).expect("response")),
+        super::support::application_invalid_request_error(
+            "unknown field `surprise`, there are no fields"
+        ),
+        "an unknown argument must be a typed refusal, not a status"
     );
 
     let bad_format = call_health(&fixture, json!({"format": "yaml"})).await;
-    let bad_format = bad_format
-        .error
-        .as_ref()
-        .expect("an unknown format must be a JSON-RPC error, not markdown");
-    assert_eq!(bad_format.code, -32602);
     assert_eq!(
-        bad_format.message,
-        "tool project route failed: reason_code=application_surface_invalid_request retryable=false: application surface request does not match its reviewed schema: `format` must be markdown or json"
+        super::support::route_refusal(&serde_json::to_value(&bad_format).expect("response")),
+        super::support::application_invalid_request_error("`format` must be markdown or json"),
+        "an unknown format must be a typed refusal, not markdown"
     );
 
     let database = serving_database_path(&fixture).await;

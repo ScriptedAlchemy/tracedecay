@@ -114,6 +114,15 @@ pub async fn initialize_test_database(
 pub async fn open_test_database(
     path: &Path,
 ) -> tracedecay_domain::errors::Result<(Database, bool)> {
+    // Test authority skips the live-daemon check runtime opens apply. A live
+    // daemon is its store's only writer and SQLite waits zero time on a held
+    // writer lock, so a fixture write racing it fails with `database is locked`.
+    #[cfg(unix)]
+    assert!(
+        !path.ancestors().any(daemon_authority_lock_held),
+        "a live daemon owns {}; stop it before a fixture opens its store",
+        path.display()
+    );
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await

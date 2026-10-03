@@ -369,11 +369,9 @@ async fn tracedecay_callers_reads_the_selected_registered_project() {
         json!({"node_id": settle_id, "project_selector": {"project_id": "project.not-registered"}}),
     )
     .await;
-    assert!(
-        unregistered["result"].is_null()
-            && unregistered["error"]["data"]["reason_code"]
-                .as_str()
-                .is_some_and(|code| code.starts_with("project_route")),
+    assert_eq!(
+        crate::support::route_refusal(&unregistered),
+        json!({"kind": "not_found_or_not_authorized", "retryable": false, "diagnostic": null}),
         "an unregistered selection is a typed route state: {unregistered}"
     );
 
