@@ -17,7 +17,8 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::retrieval::{
-    PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveSearchFreshnessV1,
+    CodeGraphReadFreshnessV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
+    PrimitiveSearchFreshnessV1, ServedCodeGraphGenerationV1,
 };
 
 use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
@@ -237,9 +238,30 @@ pub(super) fn search_freshness(
     }
 }
 
+/// The verdict for a graph read that served `served` whole: one generation
+/// across every lane, stale on every lane when the seat is.
+pub fn graph_read_freshness(
+    served: &ServedCodeGraphGenerationV1,
+    payload: Option<&CodeIndexFreshnessPayloadV1>,
+) -> PrimitiveSearchFreshnessV1 {
+    let coverage = match served.freshness {
+        CodeGraphReadFreshnessV1::Current => CodeIndexSearchCoverageV1::warm(),
+        CodeGraphReadFreshnessV1::LastCompleteStale { .. } => {
+            CodeIndexSearchCoverageV1::stale(&served.generation)
+        }
+    };
+    let worktree = worktree_freshness_from_payload(payload);
+    let coverage = lanes_under_scheduler_freshness(coverage, &served.generation, &worktree);
+    search_freshness(
+        ServedGenerationV1::Served(&served.generation),
+        &coverage,
+        &worktree,
+    )
+}
+
 /// The opening lines of a rendered response: the verdict, plus the indexing
 /// state when the verdict is `possibly_stale`.
-pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String {
+pub(crate) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String {
     let mut lines = format!("freshness: {}\n", freshness.state.as_str());
     if let Some(indexing) = &freshness.indexing {
         let _ = writeln!(lines, "indexing: {}", indexing.summary);

@@ -82,6 +82,7 @@ fn marker(kind: &str, file: &str, line: u32, text: &str, enclosing: Option<&str>
 
 fn scan(by_kind: Value, markers: Vec<Value>) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "match_count": markers.len(),
         "by_kind": by_kind,
         "markers": markers,
@@ -184,6 +185,7 @@ fn default_scan() -> Value {
 }
 
 const DEFAULT_MARKDOWN: &str = "\
+freshness: fresh
 **match_count:** 10
 
 ## by_kind

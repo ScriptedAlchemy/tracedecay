@@ -112,13 +112,13 @@ async fn derives_reports_exact_attached_macro_names() {
     assert_eq!(
         call_text(&fixture, json!({"node_id": named_id, "format": "markdown"})).await,
         format!(
-            "- **NamedValue**\n  **kind:** struct\n  **file:** src/lib.rs\n  **line:** 10\n  **derives:** CustomDerive; Eq; serde::Serialize\n  **node_id:** `{named_id}`\n  **qualified_name:** `src/lib.rs::NamedValue`\n"
+            "freshness: fresh\n- **NamedValue**\n  **kind:** struct\n  **file:** src/lib.rs\n  **line:** 10\n  **derives:** CustomDerive; Eq; serde::Serialize\n  **node_id:** `{named_id}`\n  **qualified_name:** `src/lib.rs::NamedValue`\n"
         )
     );
     assert_eq!(
         call_text(&fixture, json!({"node_id": named_id})).await,
         format!(
-            "- **NamedValue**\n  **kind:** struct\n  **file:** src/lib.rs\n  **line:** 10\n  **derives:** CustomDerive; Eq; serde::Serialize\n  **node_id:** `{named_id}`\n  **qualified_name:** `src/lib.rs::NamedValue`\n"
+            "freshness: fresh\n- **NamedValue**\n  **kind:** struct\n  **file:** src/lib.rs\n  **line:** 10\n  **derives:** CustomDerive; Eq; serde::Serialize\n  **node_id:** `{named_id}`\n  **qualified_name:** `src/lib.rs::NamedValue`\n"
         ),
         "omitted format is markdown, not JSON"
     );

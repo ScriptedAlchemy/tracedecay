@@ -139,6 +139,7 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     assert_eq!(
         untouched,
         json!({
+            "freshness": {"state": "fresh"},
             "node_count": 0,
             "complete": true,
             "unavailable_fields": ["edge_count"],
@@ -164,6 +165,7 @@ async fn impact_reports_callers_by_depth_and_refuses_invalid_requests() {
     assert_eq!(
         serde_json::from_str::<Value>(unknown_text).expect("not-found JSON"),
         json!({
+            "freshness": {"state": "fresh"},
             "status": "not_found",
             "reason_code": "node_not_found",
             "node_id": UNKNOWN_NODE_ID,

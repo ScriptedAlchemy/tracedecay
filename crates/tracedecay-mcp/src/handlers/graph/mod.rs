@@ -24,6 +24,8 @@ pub use navigation::{
 pub use rename_preview::compute_rename_preview;
 pub use search::compute_search;
 pub(crate) use search::render_search;
+pub(crate) use search_freshness::freshness_lines;
+pub use search_freshness::graph_read_freshness;
 pub use verified::{
     GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, cost_to_expand_verified, graph_occurrence_id,
     graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,

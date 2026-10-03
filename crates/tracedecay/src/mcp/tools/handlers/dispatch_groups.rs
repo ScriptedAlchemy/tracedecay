@@ -38,6 +38,7 @@ use super::ToolCallRegistryOptions;
 use super::{application_surface, dashboard, dispatch_controls, info};
 use crate::daemon::hook_v2_replay_consumer;
 use crate::mcp::project_route::mcp_analytics_session_id;
+use tracedecay_mcp::handlers::graph::graph_read_freshness;
 use tracedecay_mcp::handlers::{admin_cli, admin_project, edit, hook_runtime, workflow};
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
@@ -109,6 +110,7 @@ async fn admitted_graph_query_for_operation(
     options.served_code_graph.record(
         tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1 {
             generation: query.generation().as_str().to_owned(),
+            worktree: None,
             freshness: query.freshness(),
         },
     );
@@ -300,38 +302,47 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         }
         let project = admitted_project_authorities(cg, &options)?;
         let snapshots = AdmittedRequestSnapshotsV1::default();
-        let freshness = graph_freshness_reader(tool_name, &options);
-        let ctx = admitted_tool_context(&options, &project, &snapshots, freshness)?;
+        let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
         let open = verified_graph_open(&options);
         let computed = async {
-            if operation == ApplicationSurfaceOperation::Diagnose {
+            let mut completion = if operation == ApplicationSurfaceOperation::Diagnose {
                 let graph = admitted_graph_query(&options, "diagnostics_read").await?;
-                return workflow::compute_diagnose(
+                workflow::compute_diagnose(
                     cg,
                     &graph,
                     args,
                     options.code_index_publication_identity.as_deref(),
                 )
-                .await;
+                .await?
+            } else {
+                Box::pin(tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
+                    &ctx,
+                    &open,
+                    operation,
+                    args,
+                    scope_prefix,
+                    options.code_index_ignored_dependency_admission.as_deref(),
+                ))
+                .await?
+            };
+            if !completion.result.carries_freshness_verdict() {
+                completion.code_graph = match options.served_code_graph.served() {
+                    Some(mut served) => {
+                        served.worktree = Some(graph_read_freshness(
+                            &served,
+                            ctx.freshness().await.as_ref(),
+                        ));
+                        Some(served)
+                    }
+                    None => None,
+                };
             }
-            Box::pin(tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
-                &ctx,
-                &open,
-                operation,
-                args,
-                scope_prefix,
-                options.code_index_ignored_dependency_admission.as_deref(),
-            ))
-            .await
+            Ok(completion)
         };
-        let mut completion = match tokio::time::timeout(budget, computed).await {
-            Ok(result) => result?,
-            Err(_elapsed) => return Err(tool_dispatch_deadline_error(tool_name, budget)),
-        };
-        if !completion.result.carries_freshness_verdict() {
-            completion.code_graph = options.served_code_graph.served();
+        match tokio::time::timeout(budget, computed).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
         }
-        Ok(completion)
     })
 }
 
@@ -584,18 +595,6 @@ async fn status_readiness_wait(
             ),
         },
     })
-}
-
-fn graph_freshness_reader<'a>(
-    tool_name: &str,
-    options: &'a ToolCallRegistryOptions<'a>,
-) -> Option<&'a CodeIndexFreshnessReader> {
-    matches!(
-        tool_name,
-        "tracedecay_search" | "tracedecay_context" | "tracedecay_files"
-    )
-    .then_some(options.code_index_freshness_reader.as_ref())
-    .flatten()
 }
 
 /// Binds the admitted authorities a moved handler family reads.

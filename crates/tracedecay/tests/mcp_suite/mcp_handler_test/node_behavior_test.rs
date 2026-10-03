@@ -138,6 +138,7 @@ async fn tracedecay_node_reports_declared_symbols_and_typed_refusals() {
     assert_eq!(
         parse_json(&tool_text(&missing)),
         json!({
+            "freshness": {"state": "fresh"},
             "status": "not_found",
             "reason_code": "node_not_found",
             "node_id": MISSING_NODE,
@@ -326,6 +327,7 @@ fn details(
     body_cost: u64,
 ) -> Value {
     json!({
+        "freshness": {"state": "fresh"},
         "id": id,
         "name": name,
         "kind": kind,
@@ -357,6 +359,7 @@ fn details(
 fn fetch_markdown(id: &str) -> String {
     format!(
         "\
+freshness: fresh
 **branches:** 1
 **complexity_analysis:** complete
 **cyclomatic_complexity:** 2
@@ -392,6 +395,7 @@ derives: none
 fn cached_markdown(id: &str) -> String {
     format!(
         "\
+freshness: fresh
 **branches:** 0
 **complexity_analysis:** complete
 **cyclomatic_complexity:** 1
@@ -426,6 +430,7 @@ derives: none
 fn widget_markdown(id: &str) -> String {
     format!(
         "\
+freshness: fresh
 **branches:** 0
 **complexity_analysis:** complete
 **cyclomatic_complexity:** 1
